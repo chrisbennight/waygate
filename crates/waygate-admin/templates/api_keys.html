@@ -1,0 +1,113 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">API keys</h1>
+</header>
+
+{# OAuth sessions and API-key profiles each moved to their own page
+   (/sessions, /profiles) in the Identities revamp — this page is API
+   keys + mint only. Bind the api-keys flags as template locals for the
+   sections below. #}
+{% let enabled = self.enabled %}
+{% let is_admin = self.is_admin %}
+{% let csrf_token = self.chrome.csrf_token.clone() %}
+
+{% if enabled && !is_admin %}
+<div class="card">
+    <div class="empty">
+        You need <code>mcp:admin</code> to view or manage API keys.
+        <a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/identities") }}">Re-authorize
+        with the admin scope</a> (or ask an operator to mint one for you).
+    </div>
+</div>
+{% else if enabled %}
+<div class="keys-split">
+    <section aria-label="API keys">
+        <h2 class="card-title">API keys</h2>
+        <div id="keys-table">
+            {% include "api_keys_table.html" %}
+        </div>
+    </section>
+
+    <aside aria-label="Mint" style="position: sticky; top: 20px; align-self: start">
+        <div class="card">
+            <h2 class="card-title" style="margin-top: 0">Mint a new key</h2>
+            <form class="mint-form"
+                  method="post"
+                  action="{{ self.chrome.nav_url("/identities/api-keys/mint") }}">
+                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                <fieldset>
+                    <legend>Identity</legend>
+                    <label for="mint-name">Name</label>
+                    <input id="mint-name" name="name" type="text" required placeholder="alice-codex-laptop">
+                    <label for="mint-sub">Subject (sub)</label>
+                    <input id="mint-sub" name="sub" type="text" required placeholder="alice@example.com">
+                    <label for="mint-email">Email (optional)</label>
+                    <input id="mint-email" name="email" type="email" placeholder="alice@example.com">
+                    <label for="mint-groups">Groups (comma-separated)</label>
+                    <input id="mint-groups" name="groups" type="text" placeholder="mcp-users">
+                </fieldset>
+
+                <fieldset>
+                    <legend>Scopes</legend>
+                    <div class="scope-grid">
+                    {% for s in allowed_scopes %}
+                        <label>
+                            <input type="checkbox" name="scope_pick" value="{{ s }}">
+                            <code>{{ s }}</code>
+                        </label>
+                    {% endfor %}
+                    </div>
+                    <label for="mint-scopes" style="margin-top: 10px">Scopes (space-separated, edits override checkboxes)</label>
+                    <input id="mint-scopes" name="scopes" type="text" required placeholder="mcp:invoke mcp:read">
+                    <p class="hint">Catalog-only: every scope must already exist in the registry. Register new ones on the <a href="{{ self.chrome.nav_url("/scopes") }}">Scopes</a> page first; groups likewise resolve against the <a href="{{ self.chrome.nav_url("/groups") }}">Groups</a> catalog.</p>
+                </fieldset>
+
+                <fieldset>
+                    <legend>Expiry</legend>
+                    <label for="mint-ttl">TTL</label>
+                    <input id="mint-ttl" name="ttl" type="text" value="30d" placeholder="30d, 1y, never">
+                    <p class="hint"><code>m</code>/<code>h</code>/<code>d</code>/<code>w</code>/<code>y</code> units; <code>never</code> for unlimited.</p>
+                </fieldset>
+
+                <div class="form-actions">
+                    <button class="btn btn-primary" type="submit">Mint key</button>
+                </div>
+            </form>
+        </div>
+    </aside>
+</div>
+
+<script>
+// Sync checkbox picks into the scopes textarea on change. Editing the
+// textarea directly wins — we never overwrite manual input.
+(() => {
+    const picks = document.querySelectorAll('input[name="scope_pick"]');
+    const scopes = document.getElementById('mint-scopes');
+    let manual = false;
+    scopes.addEventListener('input', () => { manual = true; });
+    const sync = () => {
+        if (manual) return;
+        scopes.value = Array.from(picks)
+            .filter(p => p.checked)
+            .map(p => p.value)
+            .join(' ');
+    };
+    picks.forEach(p => p.addEventListener('change', sync));
+})();
+</script>
+
+{% else %}
+<div class="card">
+    <div class="empty">
+        API keys are disabled. Set <code>GATEWAY_API_KEYS_ENABLED=true</code>
+        (and ensure <code>GATEWAY_DATABASE_URL</code> is configured) to enable.
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/admin/static/js/htmx.min.js"></script>
+{% endblock %}

@@ -1,0 +1,10 @@
+# Test fixture — NOT a deployment manifest. A representative unauthenticated
+# HTTP upstream (no `auth:` block — must deserialize to auth: None). Pairs with
+# example-authed.yaml to cover both the auth-present and auth-absent manifest
+# shapes in the parse test.
+name: example-open
+transport: http
+url: http://example.test/mcp
+tools:
+  - name: ping
+    risk: low

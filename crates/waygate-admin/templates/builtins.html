@@ -1,0 +1,67 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Built-in surfaces</h1>
+    <span class="chip chip--info">local · not proxied</span>
+</header>
+
+{# The gateway's OWN MCP tool namespaces — answered locally by the gateway, not
+   proxied to an upstream, so they don't appear on Servers or Catalog. Static,
+   read-only; sourced from the same modules that serve the tools. #}
+
+<div class="card">
+    <p class="empty-state__body" style="padding: 12px">
+        These are the gateway's <strong>own</strong> MCP tool namespaces — answered locally,
+        not proxied to an upstream server, so they don't appear under
+        <a href="{{ self.chrome.nav_url("/servers") }}">Servers</a> or the Catalog. Each namespace is
+        gated by a scope (the enforced floor); a caller holding it sees the tools directly in
+        <code>tools/list</code> without a discovery round-trip.
+    </p>
+</div>
+
+{% if surfaces.is_empty() %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#cpu"/></svg>
+        <p class="empty-state__title">No built-in surfaces</p>
+        <p class="empty-state__body">None are registered on this gateway build.</p>
+    </div>
+</div>
+{% else %}
+{% for s in surfaces %}
+<section class="page-section" aria-label="{{ s.namespace }}">
+    <h2 class="section-heading">
+        <code>{{ s.namespace }}.*</code>
+        <span class="chip">{{ s.required_scope }}</span>
+        <span class="count">{{ s.tools.len() }}</span>
+    </h2>
+    <div class="card card--table">
+        <p class="empty-state__body" style="padding: 8px 12px 0">{{ s.summary }}</p>
+        <table class="data-table data-table--sm" role="table" aria-label="{{ s.namespace }} tools">
+            <thead>
+                <tr>
+                    <th>Tool</th>
+                    <th>Description</th>
+                    <th>Risk</th>
+                    <th>Side effects</th>
+                    <th>PII</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in s.tools %}
+                <tr>
+                    <td><code>{{ s.namespace }}.{{ t.name }}</code></td>
+                    <td>{{ t.description }}</td>
+                    <td><span class="chip">{{ t.risk }}</span></td>
+                    <td>{% if t.side_effects %}yes{% else %}&mdash;{% endif %}</td>
+                    <td>{% if t.pii %}yes{% else %}&mdash;{% endif %}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endfor %}
+{% endif %}
+{% endblock %}

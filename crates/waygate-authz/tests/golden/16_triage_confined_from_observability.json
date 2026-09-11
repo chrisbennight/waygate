@@ -1,0 +1,25 @@
+{
+  "name": "triage_confined_from_example-observability_low",
+  "description": "Confinement overrides explicit per-upstream grants AND the baseline: metrics.query is a read-only low tool opened to everyone by both 10-role-allow and the example-observability read permit (20-example-observability.cedar, `!side_effects`), but the triage confinement forbid (forbid always wins in Cedar) denies it — proving least-privilege holds even against broad open grants. (Tier shown as low after the medium retirement; the forbid is tier-independent.)",
+  "principal": {
+    "sub": "svc:incident-triage",
+    "auth_method": "api_key",
+    "groups": ["incident-triage"],
+    "scopes": ["mcp:invoke", "mcp:read"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-observability.metrics.query",
+    "risk": "low"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-observability",
+    "name": "metrics.query",
+    "risk": "low"
+  },
+  "expected": {
+    "decision": "Deny",
+    "reason_contains": ["confined to the example-search and example-fetch"]
+  }
+}

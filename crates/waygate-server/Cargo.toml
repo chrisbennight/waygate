@@ -1,0 +1,103 @@
+[package]
+name = "waygate-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "gateway-server"
+path = "src/main.rs"
+
+[dependencies]
+waygate-mcp.workspace = true
+waygate-invocation.workspace = true
+waygate-llm-credentials.workspace = true
+waygate-llm-dispatch.workspace = true
+waygate-llm-discovery.workspace = true
+waygate-llm-providers.workspace = true
+waygate-llm-translate.workspace = true
+waygate-upstream.workspace = true
+waygate-oidc.workspace = true
+futures.workspace = true
+waygate-authz.workspace = true
+waygate-admin.workspace = true
+waygate-as.workspace = true
+waygate-apikeys.workspace = true
+waygate-catalog.workspace = true
+waygate-policy.workspace = true
+waygate-core = { workspace = true, features = ["http"] }
+waygate-scim.workspace = true
+waygate-rbac.workspace = true
+waygate-tenants.workspace = true
+waygate-quota.workspace = true
+waygate-dashboard-stores.workspace = true
+waygate-codemode.workspace = true
+waygate-changeset.workspace = true
+waygate-manifest-store.workspace = true
+waygate-federation.workspace = true
+waygate-storage.workspace = true
+waygate-telemetry.workspace = true
+waygate-transfer.workspace = true
+waygate-skills.workspace = true
+
+tokio.workspace = true
+tokio-util.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+# Derives JSON Schema for built-in tool response types (output_schema via
+# Tool::with_output_schema); schemars is the single source of truth for those
+# schemas.
+schemars.workspace = true
+serde_yaml.workspace = true
+# Re-verifies a stored document's digest before its text becomes a proposed
+# change, so the provenance recorded on the propose audit entry describes the
+# bytes actually read rather than a value copied from the file's own record.
+sha2.workspace = true
+sha1.workspace = true
+sqlx.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+anyhow.workspace = true
+async-trait.workspace = true
+reqwest = { workspace = true }
+thiserror.workspace = true
+jsonschema.workspace = true
+time.workspace = true
+tracing.workspace = true
+rquickjs.workspace = true
+tempfile.workspace = true
+
+rmcp = { workspace = true, features = [
+    "server",
+    "server-side-http",
+    "transport-streamable-http-server",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+seccompiler.workspace = true
+
+[dev-dependencies]
+axum-server = { workspace = true, features = ["tls-rustls"] }
+waygate-test-support.workspace = true
+rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
+rustls.workspace = true
+# Test-only: drive the real streamable-HTTP gateway from the packaged binary.
+rmcp = { workspace = true, features = [
+    "client",
+    "reqwest",
+    "transport-streamable-http-client-reqwest",
+] }
+# Test-only: capture tracing output so tests can assert operator-facing WARN
+# diagnostics (e.g. the Codex empty-listing warning naming the client_version).
+tracing-subscriber.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

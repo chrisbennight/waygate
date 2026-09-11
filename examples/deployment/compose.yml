@@ -1,0 +1,64 @@
+# An authenticated single-host starting point. Supply operator-owned .env,
+# configuration directories, and a signing-key file before starting.
+services:
+  gateway:
+    image: ${GATEWAY_IMAGE:?Set an immutable published gateway image digest}
+    env_file: .env
+    environment:
+      GATEWAY_LISTEN_ADDR: 0.0.0.0:8080
+      GATEWAY_DEPLOYMENT_PROFILE: prod
+      GATEWAY_AUTH_MODE: enforce
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - type: bind
+        source: ./servers
+        target: /etc/mcp-gateway/servers
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./policies
+        target: /etc/mcp-gateway/policies
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GATEWAY_IDENTITY_SIGNING_KEY_FILE:?Set the host signing-key file path}
+        target: /run/secrets/gateway-identity.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - gateway_files:/var/lib/mcp-gateway/files
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/gateway-server", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 12
+  postgres:
+    image: ${POSTGRES_IMAGE:?Set the reviewed PostgreSQL image for this deployment}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_DB: gateway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Inject the database password}
+    volumes:
+      - gateway_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+volumes:
+  gateway_db:
+  gateway_files:

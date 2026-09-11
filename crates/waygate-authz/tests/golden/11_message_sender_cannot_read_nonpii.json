@@ -1,0 +1,24 @@
+{
+  "name": "example-messages_sender_cannot_read_nonpii",
+  "description": "The baseline (10-role-allow) permits every low-risk CallTool, so a message-sender could still read NON-PII low-risk example-messages tools (about/health/configuration/identities/qrcodelink) that the PII forbid never touches. The send-only forbid in 20-example-message-roles.cedar must deny these. Pins that a sender is denied health.read (low, non-PII).",
+  "principal": {
+    "sub": "example-operations-alerter",
+    "auth_method": "api_key",
+    "groups": ["message-sender"],
+    "scopes": ["mcp:invoke", "mcp:invoke:high"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-messages.health.read",
+    "risk": "low"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-messages",
+    "name": "health.read",
+    "risk": "low"
+  },
+  "expected": {
+    "decision": "Deny"
+  }
+}

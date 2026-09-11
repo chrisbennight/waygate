@@ -1,0 +1,15 @@
+-- Phase 5 PR5-1b: remember which provider actually served a cached completion.
+--
+-- A model may fail over across a credential pool / cross-provider target group
+-- (§7), so the route that served the original miss can differ from the model's
+-- current primary route. Recording the serving provider lets a later hit
+-- attribute to the provider that produced the cached content (in the durable
+-- usage row and the gen_ai.* metrics) rather than to whatever the current
+-- primary happens to be.
+--
+-- Nullable: a row written before this column existed simply replays with no
+-- stored provider, and the pipeline falls back to the model's current primary
+-- (best available). In practice the cache was inert until PR5-1b, so no such
+-- rows exist. Stored as the canonical provider identifier
+-- (`LlmProvider::as_str`), matching `llm_usage.provider`.
+ALTER TABLE llm_cache ADD COLUMN provider TEXT;

@@ -1,0 +1,14 @@
+{
+  "client_id": "https://clients.example.com/mcp-test-client.json",
+  "client_name": "Waygate test client",
+  "software_id": "mcp-test-client",
+  "software_version": "0.1.0",
+  "redirect_uris": [
+    "http://127.0.0.1/callback",
+    "http://localhost/callback"
+  ],
+  "token_endpoint_auth_method": "none",
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "scope": "mcp:invoke mcp:read"
+}

@@ -1,0 +1,439 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Roles</h1>
+    {% if insufficient_scope %}
+        <span class="chip chip--warn">insufficient scope</span>
+    {% else if !store_configured %}
+        <span class="chip chip--warn">RBAC store not configured</span>
+    {% endif %}
+</header>
+
+{# Per-tenant RBAC config. Four sections: roles, direct
+   assignments, SCIM group→role mappings, plus the "Effective
+   permissions for subject" lookup. (The companion "Who has scope X?"
+   reverse lookup moved to the Scopes page in the Identities revamp.)
+   Roles, assignments, and group-mappings all have inline
+   create / delete here; the same operations remain available over REST
+   at /api/v1/admin/rbac/*. #}
+
+{% if insufficient_scope %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <p class="empty-state__title">Admin scope required</p>
+        <p class="empty-state__body">
+            This page requires the <code>mcp:admin</code> scope. Your current
+            dashboard session lacks it, so RBAC configuration is hidden.
+        </p>
+        <p class="empty-state__body" style="margin-top: 8px">
+            <a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/rbac") }}">Re-authorize with the admin scope</a> if your account is entitled to it.
+        </p>
+    </div>
+</div>
+{% else if !store_configured %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <p class="empty-state__title">RBAC store not configured</p>
+        <p class="empty-state__body">
+            Set <code>GATEWAY_DATABASE_URL</code> and restart to enable roles,
+            assignments, and group mappings.
+        </p>
+    </div>
+</div>
+{% else %}
+
+{% match rbac_error %}
+{% when Some with (msg) %}
+    <div class="form-error" role="alert" style="margin-bottom: 12px">{{ msg }}</div>
+{% when None %}
+{% endmatch %}
+
+<section class="page-section" aria-label="Roles">
+    <h2 class="section-heading">Roles <span class="count">{{ roles.len() }}</span></h2>
+    <p class="section-kicker">Named scope bundles per tenant (Configure)</p>
+    <div class="card card--table">
+        {% if roles_load_error %}
+            <div class="empty-state empty-state--danger">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <p class="empty-state__title">Couldn't load roles</p>
+                <p class="empty-state__body">See gateway logs. Other sections below may still be accurate.</p>
+            </div>
+        {% else if roles.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+                <p class="empty-state__title">No roles yet</p>
+                <p class="empty-state__body">
+                    A role is a named scope bundle you grant to subjects or SCIM
+                    groups. Create the first one with the form below.
+                </p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Roles">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Scopes</th>
+                        <th>Direct assignments</th>
+                        <th>Created</th>
+                        <th><span class="sr-only">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in roles %}
+                    <tr>
+                        <td>{{ r.name }}</td>
+                        <td class="mono">{% if r.scopes.is_empty() %}—{% else %}{{ r.scopes }}{% endif %}</td>
+                        <td class="mono">{% match r.assignment_count %}{% when Some with (n) %}{{ n }}{% when None %}—{% endmatch %}</td>
+                        <td class="mono">{{ r.created_at_abs }}</td>
+                        <td class="row-actions">
+                            <details class="disclosure disclosure--link">
+                                <summary>Edit</summary>
+                                <form class="form disclosure-pane" method="post"
+                                      action="{{ self.chrome.nav_url(r.update_rel.as_str()) }}">
+                                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                    <div class="form-field">
+                                        <label class="form-label">Name</label>
+                                        <input class="form-input" type="text" name="name" value="{{ r.name }}" required maxlength="256">
+                                    </div>
+                                    <div class="form-field">
+                                        <label class="form-label">Description</label>
+                                        <input class="form-input" type="text" name="description" value="{% match r.description %}{% when Some with (d) %}{{ d }}{% when None %}{% endmatch %}">
+                                    </div>
+                                    <div class="form-field">
+                                        <label class="form-label">Scopes</label>
+                                        <input class="form-input" type="text" name="scopes" value="{{ r.scopes }}">
+                                        <div class="form-hint">Space- or comma-separated.</div>
+                                    </div>
+                                    <div class="form-actions"><button type="submit" class="btn btn-primary">Save changes</button></div>
+                                </form>
+                            </details>
+                            <form method="post"
+                                  action="{{ self.chrome.nav_url(r.delete_rel.as_str()) }}"
+                                  onsubmit="return confirm('Delete this role? Its assignments and group-mappings are removed too (FK cascade). This cannot be undone.');">
+                                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                <button type="submit" class="btn btn-danger" aria-label="Delete role {{ r.name }}">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+
+    <div class="card" style="margin-top: 12px">
+        <details class="disclosure"{% if roles.is_empty() || rbac_error.is_some() %} open{% endif %}>
+            <summary>+ Create a role</summary>
+            <form class="form" method="post" action="{{ self.chrome.nav_url("/rbac/roles/create") }}">
+                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                <div class="form-field">
+                    <label class="form-label" for="rbac-name">Name <span class="form-label__req" aria-hidden="true">*</span></label>
+                    <input class="form-input" type="text" id="rbac-name" name="name" required maxlength="256" placeholder="e.g. ops-readonly">
+                </div>
+                <div class="form-field">
+                    <label class="form-label" for="rbac-desc">Description</label>
+                    <input class="form-input" type="text" id="rbac-desc" name="description" placeholder="optional">
+                </div>
+                <div class="form-field">
+                    <label class="form-label" for="rbac-scopes">Scopes</label>
+                    <input class="form-input" type="text" id="rbac-scopes" name="scopes" placeholder="mcp:read mcp:invoke">
+                    <div class="form-hint">Space- or comma-separated. The scope bundle this role grants.</div>
+                </div>
+                <div class="form-actions"><button type="submit" class="btn btn-primary">Create role</button></div>
+            </form>
+        </details>
+    </div>
+</section>
+
+<section class="page-section" aria-label="Assignments">
+    <h2 class="section-heading">Assignments <span class="count">{{ assignments.len() }}</span></h2>
+    <p class="section-kicker">Direct subject → role grants (Configure)</p>
+    <div class="card card--table">
+        {% if assignments_load_error %}
+            <div class="empty-state empty-state--danger">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <p class="empty-state__title">Couldn't load assignments</p>
+                <p class="empty-state__body">See gateway logs. Other sections may still be accurate.</p>
+            </div>
+        {% else if assignments.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#users"/></svg>
+                <p class="empty-state__title">No direct assignments</p>
+                <p class="empty-state__body">
+                    Most access flows through group mappings below. Use the form
+                    to grant a role directly to a subject.
+                </p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Assignments">
+                <thead>
+                    <tr>
+                        <th>Role</th>
+                        <th>Subject</th>
+                        <th>Created</th>
+                        <th><span class="sr-only">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for a in assignments %}
+                    <tr>
+                        <td>{{ a.role }}</td>
+                        <td class="mono">{{ a.subject }}</td>
+                        <td class="mono">{{ a.created_at_abs }}</td>
+                        <td class="row-actions">
+                            <form method="post"
+                                  action="{{ self.chrome.nav_url(a.delete_rel.as_str()) }}"
+                                  onsubmit="return confirm('Remove this role assignment? The subject loses the role immediately.');">
+                                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                <button type="submit" class="btn btn-danger" aria-label="Remove assignment">Remove</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+
+    {% if !roles.is_empty() %}
+    <div class="card" style="margin-top: 12px">
+        <details class="disclosure"{% if rbac_error.is_some() %} open{% endif %}>
+            <summary>+ Assign a role to a subject</summary>
+            <form class="form" method="post" action="{{ self.chrome.nav_url("/rbac/assignments/create") }}">
+                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                <div class="form-field">
+                    <label class="form-label" for="asg-role">Role <span class="form-label__req" aria-hidden="true">*</span></label>
+                    <select class="form-select" id="asg-role" name="role_id">
+                        {% for r in roles %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div class="form-field">
+                    <label class="form-label" for="asg-subject">Subject (principal sub) <span class="form-label__req" aria-hidden="true">*</span></label>
+                    <input class="form-input" type="text" id="asg-subject" name="subject_sub" required placeholder="the principal's JWT sub">
+                    <div class="form-hint">A direct grant, matched against the principal's JWT <code>sub</code>. For group-based access use the <strong>group-mapping</strong> form below — a <code>group:…</code> subject here would <em>not</em> grant the role to SCIM group members.</div>
+                </div>
+                <div class="form-actions"><button type="submit" class="btn btn-primary">Assign role</button></div>
+            </form>
+        </details>
+    </div>
+    {% endif %}
+</section>
+
+<section class="page-section" aria-label="Group mappings">
+    <h2 class="section-heading">Group mappings <span class="count">{{ mappings.len() }}</span></h2>
+    <p class="section-kicker">SCIM group → role — the common access path (Configure)</p>
+    <div class="card card--table">
+        {% if mappings_load_error %}
+            <div class="empty-state empty-state--danger">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <p class="empty-state__title">Couldn't load group mappings</p>
+                <p class="empty-state__body">See gateway logs. Other sections may still be accurate.</p>
+            </div>
+        {% else if mappings.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#users"/></svg>
+                <p class="empty-state__title">No group mappings yet</p>
+                <p class="empty-state__body">
+                    Map a SCIM group to a role so every member inherits it — the
+                    common access path. Use the form below. Group display names
+                    resolve on the SCIM page.
+                </p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Group mappings">
+                <thead>
+                    <tr>
+                        <th>Group ID</th>
+                        <th>Role</th>
+                        <th>Created</th>
+                        <th><span class="sr-only">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for m in mappings %}
+                    <tr>
+                        <td class="mono">{{ m.group_id }}</td>
+                        <td>{{ m.role }}</td>
+                        <td class="mono">{{ m.created_at_abs }}</td>
+                        <td class="row-actions">
+                            <form method="post"
+                                  action="{{ self.chrome.nav_url(m.delete_rel.as_str()) }}"
+                                  onsubmit="return confirm('Remove this group→role mapping? Members of the group lose the role immediately.');">
+                                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                <button type="submit" class="btn btn-danger" aria-label="Remove mapping">Remove</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+
+    {% if !roles.is_empty() %}
+    <div class="card" style="margin-top: 12px">
+        <details class="disclosure"{% if rbac_error.is_some() %} open{% endif %}>
+            <summary>+ Map a SCIM group to a role</summary>
+            <form class="form" method="post" action="{{ self.chrome.nav_url("/rbac/group-mappings/create") }}">
+                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                <div class="form-field">
+                    <label class="form-label" for="map-group">SCIM group ID <span class="form-label__req" aria-hidden="true">*</span></label>
+                    <input class="form-input" type="text" id="map-group" name="group_id" required placeholder="scim group UUID (see SCIM page)">
+                    <div class="form-hint">The group's UUID from the SCIM page (Groups section).</div>
+                </div>
+                <div class="form-field">
+                    <label class="form-label" for="map-role">Role <span class="form-label__req" aria-hidden="true">*</span></label>
+                    <select class="form-select" id="map-role" name="role_id">
+                        {% for r in roles %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div class="form-actions"><button type="submit" class="btn btn-primary">Create mapping</button></div>
+            </form>
+        </details>
+    </div>
+    {% endif %}
+</section>
+
+{# Effective permissions for subject — interactive lookup.
+   Plain GET form (matches the activity-page posture; bookmarkable;
+   no JS required). The handler runs this lookup from ?subject=. (The
+   companion ?scope= "Who has scope X?" lookup moved to the Scopes
+   page in the Identities revamp.) #}
+<section class="page-section" aria-label="Effective permissions for subject">
+    <h2 class="section-heading">Effective permissions for subject</h2>
+    <p class="section-kicker">
+        SCIM-resolve the subject + flatten roles/scopes the runtime
+        would grant (Inspect)
+    </p>
+    <form class="filter-bar" method="GET" action="{{ self.chrome.nav_url("/rbac") }}">
+        <label for="f-subject">Subject (sub, userName, or external id)</label>
+        <input id="f-subject" name="subject" type="search" placeholder="e.g. alice@example.com"
+               value="{% match subject_input %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+        <button type="submit" class="btn btn-secondary">Look up</button>
+    </form>
+
+    {% if !scim_resolver_configured %}
+        <div class="card">
+            <div class="empty">
+                SCIM resolver not configured — the lookup runs only
+                against direct <code>role_assignments</code>. Group-
+                derived grants won't show up here until SCIM is
+                wired (set <code>GATEWAY_DATABASE_URL</code> and
+                ensure SCIM is enabled).
+            </div>
+        </div>
+    {% endif %}
+
+    {% if effective.queried %}
+        <div class="result-grid">
+            {% if effective.is_ambiguous %}
+                <div class="card">
+                    <h3 class="rail-heading">Ambiguous — fail closed</h3>
+                    <p style="margin: 0 0 6px; font-size: 13px">
+                        Multiple <code>scim_users</code> rows in this tenant
+                        match
+                        {% match effective.subject %}{% when Some with (s) %}<code>{{ s }}</code>{% when None %}this subject{% endmatch %}
+                        via either <code>external_id</code> or
+                        <code>user_name</code>. The bearer middleware
+                        fails closed in this case; the dashboard
+                        mirrors that — reconcile the rows then retry.
+                    </p>
+                    <h3 class="rail-heading">Candidate row ids</h3>
+                    <ul class="mono">
+                        {% for id in effective.candidate_ids %}
+                        <li>{{ id }}</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            {% else if effective.is_error %}
+                <div class="card">
+                    <h3 class="rail-heading state-err">Lookup error</h3>
+                    <p class="mono state-err" style="margin: 0">
+                        {% match effective.error_message %}{% when Some with (m) %}{{ m }}{% when None %}unknown error{% endmatch %}
+                    </p>
+                </div>
+            {% else %}
+                {% match effective.scim %}
+                {% when Some with (scim) %}
+                <div class="card">
+                    <h3 class="rail-heading">SCIM identity</h3>
+                    <dl class="kv">
+                        <dt>userName</dt><dd>{{ scim.user_name }}</dd>
+                        <dt>external_id</dt>
+                        <dd>{% match scim.external_id %}{% when Some with (e) %}{{ e }}{% when None %}—{% endmatch %}</dd>
+                        <dt>active</dt>
+                        <dd>
+                            {% if scim.active %}
+                                <span class="chip chip--ok">active</span>
+                            {% else %}
+                                <span class="chip chip--bad">inactive</span>
+                            {% endif %}
+                        </dd>
+                        <dt>SCIM groups</dt>
+                        <dd>
+                            {% if scim.groups.is_empty() %}
+                                <span class="muted">— (no group memberships)</span>
+                            {% else %}
+                                <ul class="mono" style="padding-left: 0; list-style: none">
+                                    {% for g in scim.groups %}
+                                    <li>{{ g }}</li>
+                                    {% endfor %}
+                                </ul>
+                            {% endif %}
+                        </dd>
+                    </dl>
+                </div>
+                {% when None %}
+                {% if effective.is_subject_missing %}
+                <div class="card">
+                    <h3 class="rail-heading">SCIM identity</h3>
+                    <p class="muted" style="margin: 0; font-size: 13px">
+                        No SCIM row for
+                        {% match effective.subject %}{% when Some with (s) %}<code>{{ s }}</code>{% when None %}this subject{% endmatch %}.
+                        Any roles below come from direct
+                        <code>role_assignments</code>; group-derived
+                        grants won't appear because the subject has no
+                        SCIM groups to look up.
+                    </p>
+                </div>
+                {% endif %}
+                {% endmatch %}
+
+                <div class="card">
+                    <h3 class="rail-heading">Granted roles <span class="chip">{{ effective.roles.len() }}</span></h3>
+                    {% if effective.roles.is_empty() %}
+                        <p class="muted" style="margin: 0; font-size: 13px">
+                            No roles. The runtime grants only the scopes
+                            already on the bearer token / API key.
+                        </p>
+                    {% else %}
+                        <ul>
+                            {% for r in effective.roles %}
+                            <li>{{ r }}</li>
+                            {% endfor %}
+                        </ul>
+                    {% endif %}
+                </div>
+
+                <div class="card">
+                    <h3 class="rail-heading">Union of granted scopes <span class="chip">{{ effective.scopes.len() }}</span></h3>
+                    {% if effective.scopes.is_empty() %}
+                        <p class="muted" style="margin: 0; font-size: 13px">— (no RBAC-granted scopes)</p>
+                    {% else %}
+                        <ul class="mono" style="padding-left: 0; list-style: none">
+                            {% for s in effective.scopes %}
+                            <li>{{ s }}</li>
+                            {% endfor %}
+                        </ul>
+                    {% endif %}
+                </div>
+            {% endif %}
+        </div>
+    {% endif %}
+</section>
+
+{% endif %}
+{% endblock %}

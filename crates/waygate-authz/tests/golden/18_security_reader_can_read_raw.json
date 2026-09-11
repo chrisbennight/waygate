@@ -1,0 +1,26 @@
+{
+  "name": "example-security_reader_can_read_raw",
+  "description": "A security-log-readers OAuth principal may call the raw Example security service alert endpoint.",
+  "principal": {
+    "sub": "security-analyst",
+    "auth_method": "oauth",
+    "groups": ["security-log-readers"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-security.events.read_raw",
+    "risk": "high"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-security",
+    "name": "events.read_raw",
+    "risk": "high",
+    "side_effects": false,
+    "pii": true
+  },
+  "expected": {
+    "decision": "Allow",
+    "policy_id_contains": ["example-security-security-log-readers-raw"]
+  }
+}

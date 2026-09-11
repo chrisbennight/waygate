@@ -1,0 +1,140 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Tools</h1>
+</header>
+
+<p class="muted" style="margin: 0 0 16px; max-width: 70ch">
+    Every tool advertised by every connected upstream, with its manifest-declared
+    risk tier. The gateway serves one <code>searchTools</code> meta-tool per
+    server on the MCP surface — this catalog is what <code>searchTools</code>
+    is drawn from. <strong>Select any row</strong> to inspect a tool's input schema.
+</p>
+
+<form class="tools-filter" method="get" action="{{ self.chrome.nav_url("/tools") }}" role="search" aria-label="Filter tools">
+    <input type="search" name="q" value="{{ filters.q_value() }}" placeholder="Search name / description / server" aria-label="Search tools">
+    <select name="server" aria-label="Server">
+        <option value="">All servers</option>
+        {% for s in servers %}
+        <option value="{{ s.0 }}"{% if filters.is_server(s.0.as_str()) %} selected{% endif %}>{{ s.0 }} ({{ s.1 }})</option>
+        {% endfor %}
+    </select>
+    <select name="risk" aria-label="Risk tier">
+        <option value="">Any risk</option>
+        <option value="high"{% if filters.is_risk("high") %} selected{% endif %}>high risk</option>
+        <option value="medium"{% if filters.is_risk("medium") %} selected{% endif %}>medium risk</option>
+        <option value="low"{% if filters.is_risk("low") %} selected{% endif %}>low risk</option>
+    </select>
+    <select name="side_effects" aria-label="Side effects">
+        <option value="">Side effects: any</option>
+        <option value="yes"{% if filters.is_side_effects("yes") %} selected{% endif %}>has side effects</option>
+        <option value="no"{% if filters.is_side_effects("no") %} selected{% endif %}>no side effects</option>
+    </select>
+    <select name="pii" aria-label="PII">
+        <option value="">PII: any</option>
+        <option value="yes"{% if filters.is_pii("yes") %} selected{% endif %}>handles PII</option>
+        <option value="no"{% if filters.is_pii("no") %} selected{% endif %}>no PII</option>
+    </select>
+    <noscript><button type="submit" class="btn btn-secondary">Apply</button></noscript>
+</form>
+
+<p class="tools-count">
+    {% if truncated %}
+        Showing the first <strong>{{ tools.len() }}</strong> of <strong>{{ total }}</strong> matching tools — refine your filter to narrow.
+    {% else %}
+        <strong>{{ total }}</strong> tool{% if total != 1 %}s{% endif %}.
+    {% endif %}
+</p>
+
+<div class="card card--table">
+    <table class="data-table">
+        <caption class="sr-only">All upstream tools</caption>
+        <thead>
+            <tr><th>Server</th><th>Tool</th><th>Risk</th><th>Side effects</th><th>PII</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+        {% for t in tools %}
+            <tr class="tool-row" data-server="{{ t.server }}" data-tool="{{ t.name }}" tabindex="0" role="button" aria-label="Inspect {{ t.name }} on {{ t.server }}">
+                <td class="mono">{{ t.server }}</td>
+                <td class="mono">{{ t.name }}</td>
+                <td>
+                    {% if t.risk == "high" %}
+                        <span class="chip chip--bad">high</span>
+                    {% else if t.risk == "medium" %}
+                        <span class="chip chip--warn">medium</span>
+                    {% else %}
+                        <span class="chip">low</span>
+                    {% endif %}
+                </td>
+                <td class="mono">{% if t.side_effects %}yes{% else %}no{% endif %}</td>
+                <td class="mono">{% if t.pii %}<span class="chip chip--warn">PII</span>{% else %}no{% endif %}</td>
+                <td class="cell-desc">{% match t.description %}{% when Some with (d) %}{{ d }}{% when None %}–{% endmatch %}</td>
+            </tr>
+        {% endfor %}
+        {% if tools.is_empty() %}
+            <tr><td colspan="6" class="empty">No tools match. Clear the filter above, or no upstreams are connected yet.</td></tr>
+        {% endif %}
+        </tbody>
+    </table>
+</div>
+
+<aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" data-open="false" hidden
+       data-drawer-url-base="{{ self.chrome.nav_url("/tools/drawer") }}"></aside>
+{% endblock %}
+
+{% block scripts %}
+<script src="/admin/static/js/htmx.min.js"></script>
+<script>
+// Row click / Enter / Space opens the tool drawer; Esc / close button closes.
+// Read-only GET into the drawer (no CSRF) — mirrors the Activity drawer.
+(function () {
+    const drawer = document.getElementById("drawer");
+    if (!drawer) return;
+    const base = drawer.dataset.drawerUrlBase || "/admin/tools/drawer";
+    function open(server, tool) {
+        drawer.hidden = false;
+        drawer.setAttribute("data-open", "true");
+        const url = base + "?server=" + encodeURIComponent(server) + "&tool=" + encodeURIComponent(tool);
+        htmx.ajax("GET", url, drawer);
+    }
+    function close() {
+        drawer.setAttribute("data-open", "false");
+        setTimeout(function () { drawer.hidden = true; drawer.innerHTML = ""; }, 200);
+    }
+    document.addEventListener("click", function (e) {
+        const row = e.target.closest("tr[data-tool]");
+        if (row) { open(row.dataset.server, row.dataset.tool); return; }
+        if (e.target.closest("[data-drawer-close]")) close();
+    });
+    document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") { close(); return; }
+        const el = document.activeElement;
+        if ((e.key === "Enter" || e.key === " ") && el && el.matches("tr[data-tool]")) {
+            e.preventDefault();
+            open(el.dataset.server, el.dataset.tool);
+        }
+    });
+})();
+
+// Progressive enhancement: auto-submit the filter form on select change and
+// on debounced search input. A plain full-page GET keeps the URL, server
+// facet counts, selected state, and rows consistent (the Activity-page
+// pattern); the <noscript> Apply button covers the no-JS path.
+(function () {
+    const form = document.querySelector("form.tools-filter");
+    if (!form) return;
+    form.querySelectorAll("select").forEach(function (s) {
+        s.addEventListener("change", function () { form.submit(); });
+    });
+    const q = form.querySelector("input[name=q]");
+    if (q) {
+        let t;
+        q.addEventListener("input", function () {
+            clearTimeout(t);
+            t = setTimeout(function () { form.submit(); }, 350);
+        });
+    }
+})();
+</script>
+{% endblock %}

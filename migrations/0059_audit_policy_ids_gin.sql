@@ -1,0 +1,13 @@
+-- policy-UX PR5: index audit_log.policy_ids for the "decisions that matched
+-- this policy" reverse lookup.
+--
+-- PR1 made fired-policy ids STABLE (the @id annotation), and every audit_log
+-- row records the policies that determined the decision in `policy_ids TEXT[]`.
+-- The Decision Log query (`AuditReader::query_events` with `policy_id` set)
+-- filters with `policy_ids @> ARRAY[$id]` — a containment test the GIN index
+-- below serves, instead of a sequential scan over a monotonically-growing
+-- audit table.
+--
+-- `gin__int_ops` isn't needed (the array is TEXT[]); the default `array_ops`
+-- GIN opclass indexes `@>`/`<@`/`&&`/`=`. `IF NOT EXISTS` keeps re-apply safe.
+CREATE INDEX IF NOT EXISTS audit_log_policy_ids_gin ON audit_log USING GIN (policy_ids);

@@ -1,0 +1,205 @@
+{# API-key profiles section — the body of the
+   /admin/t/{tenant}/profiles page (split off the API-keys page in the
+   Identities revamp). Lists the per-tenant profiles and hosts the
+   admin-gated, CSRF-protected inline create form and per-row
+   delete form, posting to the (unchanged) endpoints
+   /identities/api-key-profiles/{create,{id}/delete}. Edit is
+   intentionally absent — profiles are immutable post-create (see the
+   module docs); rotation is delete + recreate. #}
+<section class="page-section" aria-label="API-key profiles">
+    <h2 class="section-heading">API-key profiles</h2>
+    {# Precompute before the table's `{% for %}` consumes `profiles` (a
+       `Vec<&ProfileRow>` in the include context that the loop moves) — the
+       create form, now in its own card below the table-card, still needs to
+       know whether the tenant has any profiles to decide its default open
+       state. Also open when a submission failed (`create_error`) so the alert
+       is visible — a duplicate-name failure has existing profiles, so keying
+       only off is_empty() would hide the error in a collapsed form. #}
+    {% let show_form_open = profiles.is_empty() || create_error.is_some() %}
+    <div class="card card--table">
+        {% if !enabled %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+                <p class="empty-state__title">API-key profiles store not configured</p>
+                <p class="empty-state__body">
+                    Set <code>GATEWAY_DATABASE_URL</code> and restart to enable.
+                    Without the store, the mint REST handler accepts
+                    <code>profile_id=null</code> only.
+                </p>
+            </div>
+        {% else if !is_admin %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+                <p class="empty-state__title">Admin scope required</p>
+                <p class="empty-state__body">
+                    You need <code>mcp:admin</code> to view API-key profiles —
+                    profile data can include operator-confidential allowlists.
+                </p>
+            </div>
+        {% else %}
+            {% match error %}
+            {% when Some with (msg) %}
+                <div class="empty-state empty-state--danger">
+                    <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                    <p class="empty-state__title">Couldn't load profiles</p>
+                    <p class="empty-state__body">{{ msg }}</p>
+                </div>
+            {% when None %}
+                {% if profiles.is_empty() %}
+                    <div class="empty-state">
+                        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+                        <p class="empty-state__title">No profiles yet</p>
+                        <p class="empty-state__body">
+                            Profiles cap what an API key can do (TTL, scopes, servers,
+                            tools). Create the first one with the form below.
+                        </p>
+                    </div>
+                {% else %}
+                    <table class="data-table data-table--sm" role="table" aria-label="API-key profiles">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Max TTL</th>
+                                <th>Allowed scopes</th>
+                                <th>Allowed servers</th>
+                                <th>Allowed tools</th>
+                                <th>Gates</th>
+                                <th>Updated</th>
+                                <th><span class="sr-only">Actions</span></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for p in profiles %}
+                            <tr id="akp-{{ p.id }}">
+                                <td>
+                                    {{ p.name }}
+                                    {% match p.description %}{% when Some with (d) %}<br><span class="fine-mono">{{ d }}</span>{% when None %}{% endmatch %}
+                                </td>
+                                <td class="mono">{{ p.max_ttl_label }}</td>
+                                <td>
+                                    <div class="chip-row">
+                                        {% for s in p.allowed_scopes %}<span class="chip">{{ s }}</span>{% endfor %}
+                                    </div>
+                                </td>
+                                <td>
+                                    {% match p.allowed_servers %}
+                                    {% when Some with (servers) %}
+                                        <div class="chip-row">
+                                            {% for s in servers %}<span class="chip">{{ s }}</span>{% endfor %}
+                                        </div>
+                                    {% when None %}
+                                        <span class="faint">any</span>
+                                    {% endmatch %}
+                                </td>
+                                <td>
+                                    {% match p.allowed_tools %}
+                                    {% when Some with (tools) %}
+                                        <div class="chip-row">
+                                            {% for t in tools %}<span class="chip">{{ t }}</span>{% endfor %}
+                                        </div>
+                                    {% when None %}
+                                        <span class="faint">any</span>
+                                    {% endmatch %}
+                                </td>
+                                <td>
+                                    <span class="fine-mono {% if p.requires_reason %}state-ok{% endif %}">reason{% if p.requires_reason %}✓{% else %}✗{% endif %}</span>
+                                    <br>
+                                    <span class="fine-mono {% if p.requires_owner %}state-ok{% endif %}">owner{% if p.requires_owner %}✓{% else %}✗{% endif %}</span>
+                                </td>
+                                <td class="mono" title="created {{ p.created_at_abs }}">{{ p.updated_at_abs }}</td>
+                                <td class="row-actions">
+                                    {# Per-row delete. Admin-gated + CSRF server-side; the
+                                       migration-0027 trigger blocks deleting a profile any live
+                                       api_keys row still references (surfaced as an akp_error). The
+                                       confirm() is progressive enhancement — no-JS still submits. #}
+                                    <form method="post"
+                                          action="{{ self.nav_url(p.delete_rel.as_str()) }}"
+                                          onsubmit="return confirm('Delete this API-key profile? If any live key still references it, deletion is refused — revoke those keys first. This cannot be undone.');">
+                                        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                                        <button type="submit" class="btn btn--sm btn-danger"
+                                                aria-label="Delete profile {{ p.name }}">Delete</button>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                {% endif %}
+            {% endmatch %}
+        {% endif %}
+    </div>
+
+    {# In-page create form. Admin-only. Lives in its OWN `.card`, not
+       the `.card--table` above: that variant zeroes the content gutter so a
+       table can sit flush, but a form nested in it would render flush to the
+       card edge (no left padding) — unlike every other management page, whose
+       create form is a separate padded `.card` (rbac / federation /
+       break-glass). Posts to /identities/api-key-profiles/create, which reuses
+       the REST path's create_profile_core (validate → store → AdminMutation
+       audit). Open by default when there are no profiles yet so a fresh tenant
+       lands on the composer. #}
+    {% if enabled && is_admin %}
+    <div class="card" style="margin-top: 12px">
+        <details class="disclosure"{% if show_form_open %} open{% endif %}>
+            <summary>+ Create an API-key profile</summary>
+                <p class="form-hint">
+                    Profiles are immutable once created — there's no edit. To
+                    change one, delete it (above) and create a replacement, so
+                    keys minted under the old template don't silently keep
+                    now-disallowed limits.
+                </p>
+                {% match create_error %}
+                {% when Some with (ce) %}
+                    <div class="form-error" role="alert">{{ ce }}</div>
+                {% when None %}
+                {% endmatch %}
+                <form class="form disclosure-form" method="post"
+                      action="{{ self.nav_url("/identities/api-key-profiles/create") }}">
+                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                    <div class="form-field">
+                        <label class="form-label" for="akp-name">Name <span class="form-label__req" aria-hidden="true">*</span></label>
+                        <input class="form-input" type="text" id="akp-name" name="name" required maxlength="128"
+                               placeholder="e.g. ci-readonly">
+                    </div>
+                    <div class="form-field">
+                        <label class="form-label" for="akp-desc">Description</label>
+                        <input class="form-input" type="text" id="akp-desc" name="description" maxlength="256"
+                               placeholder="optional">
+                    </div>
+                    <div class="form-field">
+                        <label class="form-label" for="akp-ttl">Max TTL (seconds) <span class="form-label__req" aria-hidden="true">*</span></label>
+                        <input class="form-input" type="number" id="akp-ttl" name="max_ttl_seconds" required min="1"
+                               placeholder="e.g. 86400">
+                    </div>
+                    <div class="form-field">
+                        <label class="form-label" for="akp-scopes">Allowed scopes <span class="form-label__req" aria-hidden="true">*</span></label>
+                        <input class="form-input" type="text" id="akp-scopes" name="allowed_scopes" required
+                               placeholder="mcp:invoke mcp:read">
+                        <div class="form-hint">Space- or comma-separated. Known:
+                            {% for s in known_scopes %}<code>{{ s }}</code>{% if !loop.last %}, {% endif %}{% endfor %}</div>
+                    </div>
+                    <div class="form-field">
+                        <label class="form-label" for="akp-servers">Allowed servers</label>
+                        <input class="form-input" type="text" id="akp-servers" name="allowed_servers"
+                               placeholder="leave blank for any">
+                        <div class="form-hint">Optional allowlist; blank = any.{% if !known_servers.is_empty() %} Configured:
+                            {% for s in known_servers %}<code>{{ s }}</code>{% if !loop.last %}, {% endif %}{% endfor %}{% endif %}</div>
+                    </div>
+                    <div class="form-field">
+                        <label class="form-label" for="akp-tools">Allowed tools</label>
+                        <textarea class="form-textarea" id="akp-tools" name="allowed_tools" rows="3"
+                                  placeholder="one server.tool per line; blank = any"></textarea>
+                        <div class="form-hint">Optional allowlist of qualified <code>server.tool</code> names; blank = any.</div>
+                    </div>
+                    <div class="form-checks">
+                        <label class="form-check"><input type="checkbox" name="requires_reason" value="on" checked> requires reason</label>
+                        <label class="form-check"><input type="checkbox" name="requires_owner" value="on" checked> requires owner</label>
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">Create profile</button>
+                    </div>
+                </form>
+            </details>
+    </div>
+    {% endif %}
+</section>

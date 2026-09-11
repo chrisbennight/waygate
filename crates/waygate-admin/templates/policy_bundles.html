@@ -1,0 +1,403 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Policy bundles</h1>
+    {% if insufficient_scope %}
+        <span class="chip chip--warn">insufficient scope</span>
+    {% else if !store_configured %}
+        <span class="chip chip--warn">policy store not configured</span>
+    {% endif %}
+</header>
+
+{# Prominent, never-silently-good banner when the on-disk
+   policy set is broken / a reload was refused and the gateway is serving a stale
+   Cedar set. Separate from the Servers page's manifest banner. #}
+{% if config_degraded %}
+<div role="alert" class="form-error forms-error">
+    <strong>⚠ Policy config STALE.</strong> {{ config_detail }} — the gateway is
+    serving the previously-loaded Cedar policy set. Fix
+    <code>policies/*.cedar</code> (or the source it was recovered from) and
+    reload / restart.
+</div>
+{% endif %}
+
+{# Cedar policy-bundle versions. The inline editor, Validate / Save Draft, and
+   per-row Publish / Rollback live here too. Preview against draft has a
+   backend endpoint (POST /api/v1/policy_bundles/preview_simulate) but its
+   dashboard UI is a deferred follow-up (see dashboard_policy_bundles.rs). #}
+
+{% if insufficient_scope %}
+<div class="card">
+    <div class="empty">
+        This page requires the <code>mcp:admin</code> scope.
+        Your current dashboard session lacks it, so policy
+        bundle history is not shown.
+        <br><a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/policy_bundles") }}">Re-authorize with the admin scope</a> if your account is entitled to it.
+    </div>
+</div>
+{% else if !store_configured %}
+<div class="card">
+    <div class="empty">
+        Policy bundle store not configured. Set
+        <code>GATEWAY_DATABASE_URL</code> and restart to enable.
+        Without the store, the gate loads policies from the
+        on-disk <code>policies/*.cedar</code> set at boot.
+    </div>
+</div>
+{% else %}
+
+{# Post-mutation flash from a PRG redirect. #}
+{% match flash_kind %}
+{% when Some with ("saved") %}
+    <div class="callout callout--ok">
+        Draft saved{% match flash_detail %}{% when Some with (d) %} — <code>{{ d }}</code>{% when None %}{% endmatch %}.
+    </div>
+{% when Some with ("published") %}
+    <div class="callout callout--ok">
+        Published to <code>policies/*.cedar</code>{% match flash_detail %}{% when Some with (d) %} — <code>{{ d }}</code>{% when None %}{% endmatch %}. Mirrored to disk (the source of truth); the gate applies it on the next boot/SIGHUP reload.
+    </div>
+{% when Some with ("rolled_back") %}
+    <div class="callout">
+        Rolled back to <code>policies/*.cedar</code>{% match flash_detail %}{% when Some with (d) %} — <code>{{ d }}</code>{% when None %}{% endmatch %}. Mirrored to disk; the gate applies it on the next boot/SIGHUP reload.
+    </div>
+{% when Some with ("save_error") %}
+    <div class="callout callout--err">
+        Save failed{% match flash_detail %}{% when Some with (d) %}: <code>{{ d }}</code>{% when None %}{% endmatch %}.
+    </div>
+{% when Some with ("publish_error") %}
+    <div class="callout callout--err">
+        Publish failed{% match flash_detail %}{% when Some with (d) %}: <code>{{ d }}</code>{% when None %}{% endmatch %}.
+    </div>
+{% when Some with ("rollback_error") %}
+    <div class="callout callout--err">
+        Rollback failed{% match flash_detail %}{% when Some with (d) %}: <code>{{ d }}</code>{% when None %}{% endmatch %}.
+    </div>
+{% when Some with (_) %}
+{% when None %}
+{% endmatch %}
+
+{# Blast-radius panel — populated only by a "Preview impact" POST. Replays
+   the tenant's recent RECORDED decisions against the chosen bundle and reports
+   what would change before publishing. Only recorded decisions that carry the
+   captured inputs are replayed — legacy/older decisions are NOT
+   included, so this is NOT the complete history (see the note below). #}
+{% match impact %}
+{% when Some with (im) %}
+<section class="page-section" aria-label="Policy impact preview">
+    <h2 class="section-heading">Preview impact — <code>v{{ im.version }}</code></h2>
+    <p class="section-kicker">Replaying recent recorded authorization decisions against this bundle to show the blast radius before publishing. Read-only — nothing is published or recorded.</p>
+    {% match im.error %}
+    {% when Some with (msg) %}
+        <div class="callout callout--err">
+            Could not replay against this draft: {{ msg }}
+        </div>
+    {% when None %}
+        <div class="card">
+            <p>
+                Replaying <strong>{{ im.replayed }}</strong> of <strong>{{ im.considered }}</strong> recent decision{% if im.considered != 1 %}s{% endif %} against this draft:
+                <span class="chip chip--ok">{{ im.unchanged }} unchanged</span>
+                <span class="chip chip--bad">{{ im.changed }} would change</span>
+                <span class="chip">{{ im.not_replayable }} not replayable</span>
+            </p>
+            {# Per-transition breakdown of the changed decisions. #}
+            {% if !im.deltas.is_empty() %}
+            <p class="section-kicker">Transitions among the changed decisions:</p>
+            <p class="chip-row">
+                {% for d in im.deltas %}
+                <span class="chip chip--warn"><code>{{ d.from }} → {{ d.to }}</code> · {{ d.count }}</span>
+                {% endfor %}
+            </p>
+            {% endif %}
+            {# Prominent provenance note: the replay sample is NOT the full history. #}
+            <p class="section-kicker">
+                <strong>Note:</strong> this replay covers only recorded decisions that carry the
+                captured policy inputs. Older decisions aren't included, and
+                <code>{{ im.not_replayable }}</code> recent row{% if im.not_replayable != 1 %}s{% endif %}
+                {% if im.not_replayable == 1 %}is{% else %}are{% endif %} not replayable
+                (legacy rows without the captured inputs, model/LLM decisions, or SCIM-enriched
+                decisions whose full SCIM facts weren't captured) — so this is
+                a sample of recent activity, not the complete decision history.
+            </p>
+        </div>
+
+        {# Bounded table of changed-decision examples. #}
+        {% if !im.samples.is_empty() %}
+        <div class="card card--table">
+            <table class="data-table data-table--sm" role="table" aria-label="Changed decisions under this draft">
+                <thead>
+                    <tr>
+                        <th>Recorded → candidate</th>
+                        <th>Principal</th>
+                        <th>Server.tool</th>
+                        <th>When</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for s in im.samples %}
+                    <tr>
+                        <td>
+                            {% if s.recorded == "allow" %}<span class="chip chip--ok">allow</span>
+                            {% else if s.recorded == "step_up" %}<span class="chip chip--warn">step-up</span>
+                            {% else %}<span class="chip chip--bad">{{ s.recorded }}</span>{% endif %}
+                            <span aria-hidden="true">→</span>
+                            {% if s.candidate == "allow" %}<span class="chip chip--ok">allow</span>
+                            {% else if s.candidate == "step_up" %}<span class="chip chip--warn">step-up</span>
+                            {% else %}<span class="chip chip--bad">{{ s.candidate }}</span>{% endif %}
+                        </td>
+                        <td><span class="truncate">{{ s.principal }}</span></td>
+                        <td class="mono">{{ s.server_tool }}</td>
+                        <td class="mono">{{ s.ts }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    {% endmatch %}
+</section>
+{% when None %}
+{% endmatch %}
+
+<section class="page-section" aria-label="Policy bundle editor">
+    <h2 class="section-heading">Editor</h2>
+    <p class="section-kicker">Compose a Cedar policy-set draft. Validate to parse-check without persisting; Save draft to stage; per-row Publish mirrors a draft onto <code>policies/*.cedar</code> (the source of truth), live on the next boot/SIGHUP reload.</p>
+    <div class="card">
+
+        {# Policy editing disabled for this deployment — render a read-only
+           banner and hide every mutation control below (Save draft, per-row
+           Publish / Rollback). The gate_policy_editing middleware 403s those
+           routes too, so the page and the endpoint agree. #}
+        {% match editing_off_reason %}
+        {% when Some with (reason) %}
+            <div class="callout callout--warn">
+                Policy editing is disabled — {{ reason }}. This page is read-only;
+                load and validate work, but staging or publishing a change is turned off.
+            </div>
+        {% when None %}
+        {% endmatch %}
+
+        {# Editor-level banners: Validate result + load-miss notice. #}
+        {% if editor_load_miss %}
+            <div class="callout callout--err">
+                Could not load the requested bundle — the id is
+                unknown, owned by another tenant, or the store
+                isn't configured. The editor renders empty so the
+                operator isn't silently editing the wrong source.
+            </div>
+        {% endif %}
+        {% match editor_validate_result %}
+        {% when Some with (Ok(_)) %}
+            <div class="callout callout--ok">Parses as a Cedar policy set.</div>
+        {% when Some with (Err(msg)) %}
+            <div class="callout callout--err">{{ msg }}</div>
+        {% when None %}
+        {% endmatch %}
+
+        <div class="editor">
+            <form method="post" action="{{ self.chrome.nav_url("/policy_bundles/validate") }}" class="editor">
+                <div class="editor-meta">
+                    {% match editor_loaded_version %}
+                    {% when Some with (v) %}
+                        <span>Loaded from <code>v{{ v }}</code></span>
+                    {% when None %}
+                        {% if editor_content.is_empty() %}
+                            <span>No draft loaded — paste Cedar source below or load a prior version.</span>
+                        {% else %}
+                            <span>Editing draft</span>
+                        {% endif %}
+                    {% endmatch %}
+                    {# The jump hint is filled by the scripts block to reflect
+                       the ACTUAL outcome — "jumped to" when the @id is found, or
+                       "not found in this bundle" when it isn't (a stale / hand-written
+                       ?focus=) — so it never claims a jump that didn't happen. #}
+                    {% match editor_focus %}
+                    {% when Some with (f) %}
+                        <span id="focus-hint"></span>
+                    {% when None %}{% endmatch %}
+                </div>
+                {# `data-focus` carries the @id from the Policies pane "Edit"
+                   deep-link; the scripts block below positions the cursor on that
+                   policy. `data-lint-url` + `data-csrf` configure CM6's
+                   as-you-type validator (the diagnostics endpoint). askama
+                   HTML-escapes every value — they reach data attributes the JS
+                   reads, never the script body. #}
+                <textarea id="policy-editor" name="content" rows="20" spellcheck="false" autocomplete="off"
+                          data-lint-url="{{ self.chrome.nav_url("/policy_bundles/diagnostics") }}"
+                          data-csrf="{{ chrome.csrf_token }}"{% match editor_focus %}{% when Some with (f) %} data-focus="{{ f }}"{% when None %}{% endmatch %} placeholder="permit(principal, action, resource);">{{ editor_content }}</textarea>
+                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                <div class="editor-actions">
+                    <button type="submit" class="btn btn-secondary">Validate</button>
+                    {# Save draft persists a new draft version — hidden when editing
+                       is disabled (Validate stays: it only parse-checks, no write). #}
+                    {% match editing_off_reason %}
+                    {% when None %}
+                    <button type="submit" class="btn btn-primary"
+                            formaction="{{ self.chrome.nav_url("/policy_bundles/save_draft") }}">
+                        Save draft
+                    </button>
+                    {% when Some with (_reason) %}
+                    {% endmatch %}
+                </div>
+            </form>
+        </div>
+    </div>
+</section>
+
+<section class="page-section" aria-label="Policy bundle versions">
+    <h2 class="section-heading">Versions <span class="count">{{ bundles.len() }}</span></h2>
+    <p class="section-kicker">Cedar bundle history, newest version first — the most recently published is current: it is mirrored to <code>policies/*.cedar</code> and loaded on the next boot/SIGHUP (Evidence)</p>
+    <div class="card card--table">
+        {% if bundles_load_error %}
+            <div class="empty state-err">
+                Failed to load policy bundles — see gateway logs
+                for details.
+            </div>
+        {% else if bundles.is_empty() %}
+            <div class="empty">
+                No policy bundles for this tenant. Use the editor
+                above to stage and publish a first draft, or
+                import existing <code>policies/*.cedar</code>
+                via <code>gateway-server --import-policies</code>.
+                Until one is published, the gate uses the on-disk
+                set at boot.
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Policy bundle versions">
+                <thead>
+                    <tr>
+                        <th>Version</th>
+                        <th>Status</th>
+                        <th>Content hash</th>
+                        <th>Author</th>
+                        <th>Created</th>
+                        <th>Published</th>
+                        <th>Published by</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for b in bundles %}
+                    <tr id="bundle-{{ b.id }}">
+                        <td class="mono">
+                            v{{ b.version }}
+                            {% if b.is_current %}
+                                <span class="chip chip--ok">current</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if b.status == "published" %}
+                                <span class="chip chip--ok">published</span>
+                            {% else if b.status == "draft" %}
+                                <span class="chip">draft</span>
+                            {% else if b.status == "rolled_back" %}
+                                <span class="chip chip--warn">rolled_back</span>
+                            {% else %}
+                                <span class="chip">{{ b.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="cell-hash" title="{{ b.content_hash }}">{{ b.content_hash_short }}</td>
+                        <td class="mono">{% match b.author %}{% when Some with (a) %}{{ a }}{% when None %}—{% endmatch %}</td>
+                        <td class="mono">{{ b.created_at_abs }}</td>
+                        <td class="mono">{% match b.published_at_abs %}{% when Some with (p) %}{{ p }}{% when None %}—{% endmatch %}</td>
+                        <td class="mono">{% match b.published_by %}{% when Some with (p) %}{{ p }}{% when None %}—{% endmatch %}</td>
+                        <td class="row-actions">
+                            {# Load this version's source into the editor (active bundle only — see editor_load doc comment). #}
+                            <a href="{{ self.chrome.nav_url("/policy_bundles") }}?load={{ b.id_qs }}#editor"
+                               class="btn btn-secondary btn--sm">Load</a>
+                            {# Replay recent recorded decisions against this version's content
+                               and show the blast radius. Read-only — no publish, no audit. #}
+                            <form method="post" action="{{ self.chrome.nav_url("/policy_bundles/") }}{{ b.id_qs }}/preview_impact">
+                                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                <button type="submit" class="btn btn-secondary btn--sm">Preview impact</button>
+                            </form>
+                            {# Per-row Publish / Rollback are mutations — also gated on
+                               editing being enabled, matching the gate_policy_editing
+                               middleware. With editing off the row shows only Load +
+                               Preview impact (both read-only). #}
+                            {% if b.can_publish && editing_off_reason.is_none() %}
+                                <form method="post" action="{{ self.chrome.nav_url("/policy_bundles/") }}{{ b.id_qs }}/publish" onsubmit="return confirm('Publish v{{ b.version }} as the active bundle?');">
+                                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                    <button type="submit" class="btn btn-primary btn--sm">Publish</button>
+                                </form>
+                            {% endif %}
+                            {% if b.can_rollback && editing_off_reason.is_none() %}
+                                <form method="post" action="{{ self.chrome.nav_url("/policy_bundles/") }}{{ b.version }}/rollback" onsubmit="return confirm('Roll back to v{{ b.version }} (re-publish its content as a new active bundle)?');">
+                                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                    <button type="submit" class="btn btn-danger btn--sm">Rollback</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+</section>
+
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{# Vendored CodeMirror 6 (Cedar syntax + line numbers). Progressive
+   enhancement — the bundle mounts over the textarea below; if it fails to load
+   or JS is off, the plain textarea (and its textarea-jump fallback) still work. #}
+<script src="/admin/static/js/codemirror.bundle.js" defer></script>
+<script>
+// Mount CM6 over the editor textarea and honor the Policies pane's
+// ?focus=<@id> deep-link. The id is read from the textarea's
+// server-escaped data-focus attribute — never from an interpolated script
+// string. The focus-hint text reflects the ACTUAL outcome (jumped vs not
+// found), and a plain-textarea fallback covers the no-CM6 case.
+(function () {
+  var ta = document.getElementById('policy-editor');
+  if (!ta) return;
+  var focus = ta.getAttribute('data-focus') || '';
+  var lintUrl = ta.getAttribute('data-lint-url') || '';
+  var csrf = ta.getAttribute('data-csrf') || '';
+  var hint = document.getElementById('focus-hint');
+  // textContent (never innerHTML) — `focus` is operator-authored, so build the
+  // hint as text, not markup.
+  var setHint = function (msg) { if (hint) hint.textContent = msg; };
+
+  // No-CM6 path: the plain textarea still works; jump by substring search.
+  function fallbackJump() {
+    if (!focus) return;
+    var idx = ta.value.indexOf('@id("' + focus + '")');
+    if (idx < 0) { setHint('· policy ' + focus + ' not found in this bundle'); return; }
+    ta.focus();
+    var lineStart = ta.value.lastIndexOf('\n', idx) + 1;
+    var lineEnd = ta.value.indexOf('\n', idx);
+    if (lineEnd < 0) lineEnd = ta.value.length;
+    try { ta.setSelectionRange(lineStart, lineEnd); } catch (e) {}
+    var line = (ta.value.slice(0, idx).match(/\n/g) || []).length;
+    var lh = parseFloat(getComputedStyle(ta).lineHeight) || 18;
+    ta.scrollTop = Math.max(0, (line - 2) * lh);
+    setHint('· jumped to policy ' + focus);
+  }
+
+  function mount() {
+    if (window.CedarEditor && typeof CedarEditor.init === 'function') {
+      var opts = {};
+      if (focus) opts.focus = focus;
+      if (lintUrl) { opts.lintUrl = lintUrl; opts.csrf = csrf; }
+      var res = CedarEditor.init(ta, opts);
+      if (res) {
+        if (focus) {
+          setHint(res.focusedLine != null
+            ? '· jumped to policy ' + focus
+            : '· policy ' + focus + ' not found in this bundle');
+        }
+        return;
+      }
+    }
+    fallbackJump();
+  }
+
+  // The bundle is deferred; mount once it's available.
+  if (window.CedarEditor) { mount(); }
+  else { window.addEventListener('DOMContentLoaded', mount); }
+})();
+</script>
+{% endblock %}

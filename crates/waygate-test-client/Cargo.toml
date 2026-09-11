@@ -1,0 +1,49 @@
+[package]
+name = "waygate-test-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "CLI test client for OAuth-protected MCP gateways (CIMD login, SEP #1888 discovery, conformance suite)"
+
+[[bin]]
+name = "mcp-test-client"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+axum = { workspace = true, features = ["multipart"] }
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+reqwest = { workspace = true, features = ["form", "multipart"] }
+futures.workspace = true
+bytes.workspace = true
+base64.workspace = true
+sha2.workspace = true
+rand.workspace = true
+time.workspace = true
+clap.workspace = true
+dialoguer.workspace = true
+open.workspace = true
+dirs.workspace = true
+rustix.workspace = true
+
+rmcp = { workspace = true, features = [
+    "client",
+    "reqwest",
+    "transport-streamable-http-client-reqwest",
+] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+axum-server = { workspace = true, features = ["tls-rustls"] }
+rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
+rustls = { workspace = true, features = ["aws_lc_rs"] }
+tempfile.workspace = true
+rmcp = { workspace = true, features = ["server"] }

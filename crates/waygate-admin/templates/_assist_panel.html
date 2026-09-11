@@ -1,0 +1,65 @@
+{# Docked Contextual Assistant panel. Rendered once in layout.html for
+   any authenticated dashboard user, on EVERY page. The chat block starts
+   UN-hydrated (no data-stream-url), so assist_chat.js's auto-init skips it;
+   assist_panel.js hydrates it on first open from GET /agent_chat/bootstrap
+   (agents + session CSRF + tenant-correct stream URL) and then calls
+   initAssistChat(). Open/closed state and the active conversation survive
+   full-page navigation via sessionStorage. See static/js/assist_panel.js. #}
+{# Starts `inert` (and aria-hidden): closed, the drawer's controls must not be
+   keyboard-focusable or in the a11y tree on any page. assist_panel.js clears
+   both on open and restores them on close. #}
+<aside class="drawer assist-panel" id="gw-assist-panel" data-open="false"
+       aria-hidden="true" inert aria-label="Assistant">
+    <header>
+        <h2>Assistant</h2>
+        <button type="button" class="close" data-assist-close aria-label="Close assistant">
+            <svg width="18" height="18" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+        </button>
+    </header>
+
+    <div class="card chat assist-panel__chat" data-agent-chat data-login-url="/admin/login">
+        <div class="chat-toolbar">
+            <label class="chat-model-label" for="gw-assist-agent">Agent</label>
+            <select id="gw-assist-agent" class="chat-model" data-agent-select></select>
+            {# Egress indicator: the selected agent's model. An LLM turn leaves
+               the gateway for this model's provider (governed + audited). #}
+            <span class="chip" data-agent-model
+                  title="Model this agent runs on; calls egress to its provider, governed + audited"></span>
+            {# Un-hidden by assist_panel.js only when a conversation store is wired. #}
+            <button type="button" class="btn btn--sm" data-history-toggle hidden>Recent</button>
+            <button type="button" class="btn btn--sm" data-chat-clear>New</button>
+        </div>
+
+        <div class="chat-history" data-history-panel hidden>
+            <div class="chat-history__list" data-history-list></div>
+        </div>
+
+        {# Per-page suggested-action chips. Populated by assist_panel.js
+           from GET /assist/context?page=…; hidden until populated. A review chip
+           runs the governed driver and renders structured findings into the
+           transcript; any other chip seeds the composer. #}
+        <div class="assist-chips" data-assist-chips hidden aria-label="Suggested actions"></div>
+
+        <div class="chat-log" data-chat-log aria-live="polite">
+            <div class="empty-state" data-chat-empty>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#message-square"/></svg>
+                <p class="empty-state__title" data-assist-empty-title>Ask the assistant</p>
+                <p class="empty-state__body" data-assist-empty-body>
+                    Pick an agent and send a message. It runs as you — governed and
+                    audited — and pauses for your approval before any side-effecting
+                    tool runs.
+                </p>
+            </div>
+        </div>
+
+        {# Composer ships DISABLED: assist_chat.js installs the submit handler
+           only after assist_panel.js hydrates this block (async bootstrap), so
+           a pre-hydration Enter/Send must not fall through to a native form
+           submit/reload. assist_panel.js enables it once init completes. #}
+        <form class="chat-composer" data-chat-form>
+            <textarea class="chat-input" data-chat-input rows="2" disabled
+                      placeholder="Message… (Enter to send, Shift+Enter for newline)"></textarea>
+            <button type="submit" class="btn btn-primary" data-chat-send disabled>Send</button>
+        </form>
+    </div>
+</aside>

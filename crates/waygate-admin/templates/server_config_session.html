@@ -1,0 +1,83 @@
+<div class="cfg-panel">
+    <nav class="cfg-tabs" role="tablist" aria-label="Server configuration">
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=overview" hx-target="closest .cfg-panel" hx-swap="outerHTML">Overview</button>
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=classifications" hx-target="closest .cfg-panel" hx-swap="outerHTML">Classifications</button>
+        <button type="button" class="cfg-tab is-active" role="tab" aria-selected="true"
+                hx-get="{{ config_url }}&tab=session" hx-target="closest .cfg-panel" hx-swap="outerHTML">Session</button>
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=identity" hx-target="closest .cfg-panel" hx-swap="outerHTML">Identity &amp; auth</button>
+    </nav>
+
+    <p class="muted" style="margin: 0 0 10px; max-width: 70ch">
+        How the gateway pools, reuses, and safely recovers upstream sessions.
+        <code>isolation</code> and
+        <code>scope</code> are <strong>re-dialed live</strong> by Reload
+        manifests; a <code>concurrency</code> change resizes the slot pool and is
+        <strong>rebuilt live</strong> by Reload — a restart is needed only if
+        every new-shape dial fails. Setup recovery is request-path policy and
+        applies on Reload without replacing healthy sessions.
+    </p>
+
+    {% if editable %}
+    <form hx-post="{{ self.nav_url("/servers/config/session") }}"
+          hx-target="find .class-result" hx-swap="innerHTML">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="server" value="{{ name }}">
+        <input type="hidden" name="base_hash" value="{{ base_hash }}">
+        <dl class="cfg-dl">
+            <dt><label for="sess-concurrency">Concurrency</label></dt>
+            <dd>
+                <input id="sess-concurrency" type="number" name="concurrency" min="1"
+                       value="{{ concurrency }}" placeholder="default" style="width: 8em">
+                <span class="muted">blank = inherit GATEWAY_UPSTREAM_POOL_SIZE</span>
+            </dd>
+            <dt><label for="sess-isolation">Isolation</label></dt>
+            <dd>
+                <select id="sess-isolation" name="isolation">
+                    <option value=""{% if isolation == "" %} selected{% endif %}>default (per_call)</option>
+                    <option value="per_call"{% if isolation == "per_call" %} selected{% endif %}>per_call</option>
+                    <option value="reuse"{% if isolation == "reuse" %} selected{% endif %}>reuse</option>
+                </select>
+                <span class="muted">reuse needs scope = shared on HTTP/SSE</span>
+            </dd>
+            <dt><label for="sess-scope">Scope</label></dt>
+            <dd>
+                <select id="sess-scope" name="scope">
+                    <option value=""{% if scope == "" %} selected{% endif %}>default (per_principal)</option>
+                    <option value="per_principal"{% if scope == "per_principal" %} selected{% endif %}>per_principal</option>
+                    <option value="shared"{% if scope == "shared" %} selected{% endif %}>shared</option>
+                </select>
+            </dd>
+            <dt><label for="sess-setup-recovery">Setup recovery</label></dt>
+            <dd>
+                {% if setup_recovery_supported %}
+                <select id="sess-setup-recovery" name="retry_on_setup_failure">
+                    <option value=""{% if retry_on_setup_failure == "" %} selected{% endif %}>default (one safe retry)</option>
+                    <option value="enabled"{% if retry_on_setup_failure == "enabled" %} selected{% endif %}>enabled (one safe retry)</option>
+                    <option value="disabled"{% if retry_on_setup_failure == "disabled" %} selected{% endif %}>disabled (single attempt)</option>
+                </select>
+                <span class="muted">applies only before dispatch to admitted read-only HTTP calls</span>
+                {% else %}
+                <span class="muted">not available for this transport; automatic setup recovery is streamable-HTTP only</span>
+                {% endif %}
+            </dd>
+        </dl>
+        <div class="cfg-actions" style="margin-top: 12px; align-items: center">
+            <button type="submit" class="btn btn--sm btn-secondary">Save &amp; publish</button>
+            <span class="muted">Publishes a new version; setup recovery applies on <strong>Reload manifests</strong> without a re-dial. Isolation/scope re-dial live, and <code>concurrency</code> rebuilds the pool (restart only if every new-shape dial fails).</span>
+        </div>
+        <div class="class-result" aria-live="polite" style="margin-top: 10px"></div>
+    </form>
+    {% else %}
+    <p class="muted" style="margin: 0 0 10px">{{ readonly_note }}</p>
+    {% if admin_required %}<p class="muted" style="margin: 0 0 10px"><a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.nav_url("/servers") }}">Re-authorize with the admin scope</a> if your account is entitled to it.</p>{% endif %}
+    <dl class="cfg-dl">
+        <dt>Concurrency</dt><dd class="mono">{% if concurrency.is_empty() %}<span class="muted">default</span>{% else %}{{ concurrency }}{% endif %}</dd>
+        <dt>Isolation</dt><dd class="mono">{% if isolation.is_empty() %}<span class="muted">default</span>{% else %}{{ isolation }}{% endif %}</dd>
+        <dt>Scope</dt><dd class="mono">{% if scope.is_empty() %}<span class="muted">default</span>{% else %}{{ scope }}{% endif %}</dd>
+        <dt>Setup recovery</dt><dd class="mono">{% if retry_on_setup_failure.is_empty() %}<span class="muted">default (one safe retry)</span>{% else %}{{ retry_on_setup_failure }}{% endif %}</dd>
+    </dl>
+    {% endif %}
+</div>

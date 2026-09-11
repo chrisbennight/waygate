@@ -1,0 +1,15 @@
+# The boot smoke's legacy upstream. Baked into the smoke-only image rather
+# than bind-mounted: on this runner a `docker run -v` source resolves on the
+# daemon's filesystem, not the job's, so a staged directory arrives empty.
+#
+# `protocol:` is deliberately absent — the default `auto` is the setting the
+# fleet runs and the one whose regression this smoke exists to catch. Pinning
+# it here would test a path no upstream actually uses.
+name: legacy-smoke
+transport: http
+url: http://gw-smoke-upstream:9000/mcp/
+tools:
+  - name: ping
+    risk: low
+    side_effects: false
+    pii: false

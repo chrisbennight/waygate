@@ -1,0 +1,98 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Embeddings</h1>
+    {% if !invocation_ready %}
+        <span class="chip chip--warn">inference not configured</span>
+    {% endif %}
+</header>
+
+{# Tester for a configured EMBEDDINGS model. Runs as the logged-in session
+   principal through the same pipeline as /v1/embeddings (Cedar authorizes the
+   model, budget, audit). Inputs are not stored by this page; the call's
+   data-retention is identical to a /v1/embeddings call. Embeddings are unary,
+   so the form posts (htmx) and swaps in a server-rendered result fragment
+   (dimensions, vector preview, token usage, latency, pairwise cosine
+   similarity). See src/dashboard_embeddings.rs. #}
+
+{% if !invocation_ready %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+        <p class="empty-state__title">Inference is not configured</p>
+        <p class="empty-state__body">
+            This gateway has no LLM invocation service wired (no model catalog /
+            database in this environment), so there is nothing to embed.
+        </p>
+    </div>
+</div>
+{% else %}
+<section class="page-section">
+    <div class="card">
+        <form class="form"
+              hx-post="{{ self.chrome.nav_url("/embeddings/run") }}"
+              hx-target="#embed-result"
+              hx-swap="outerHTML"
+              hx-indicator="#embed-spinner">
+            <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+
+            <div class="form-field">
+                <label class="form-label" for="embed-model">Model</label>
+                {% if models.is_empty() %}
+                    <input class="form-input" id="embed-model" name="model" type="text"
+                           placeholder="embeddings model id (e.g. openrouter:openai/text-embedding-3-small)"
+                           autocomplete="off">
+                {% else %}
+                    <select class="form-select" id="embed-model" name="model">
+                        {% for m in models %}
+                        <option value="{{ m }}">{{ m }}</option>
+                        {% endfor %}
+                    </select>
+                {% endif %}
+            </div>
+
+            <div class="form-field">
+                <label class="form-label" for="embed-inputs">Inputs</label>
+                <textarea class="form-textarea" id="embed-inputs" name="inputs" rows="5"
+                          placeholder="cat&#10;kitten&#10;airplane"></textarea>
+                <span class="form-hint">One input per line. Enter 2+ lines to get a pairwise cosine-similarity matrix.</span>
+            </div>
+
+            <div class="form-field">
+                <label class="form-label" for="embed-dims">Dimensions</label>
+                <input class="form-input" id="embed-dims" name="dimensions" type="number" min="1"
+                       inputmode="numeric" placeholder="model default" style="max-width: 14rem">
+                <span class="form-hint">Optional output dimensionality — Matryoshka models only (e.g. text-embedding-3-*).</span>
+            </div>
+
+            <div class="form-field">
+                <label class="form-label" for="embed-input-type">Input type</label>
+                <select class="form-select" id="embed-input-type" name="input_type" style="max-width: 18rem">
+                    <option value="">— none —</option>
+                    <option value="search_query">search_query</option>
+                    <option value="search_document">search_document</option>
+                    <option value="classification">classification</option>
+                    <option value="clustering">clustering</option>
+                </select>
+                <span class="form-hint">Optional retrieval hint (Voyage / Cohere / OpenRouter / Jina); forwarded as-is — a provider that doesn't support it may reject the request.</span>
+            </div>
+
+            <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Embed</button>
+                <span id="embed-spinner" class="htmx-indicator cell-sub">embedding…</span>
+            </div>
+        </form>
+    </div>
+
+    <div id="embed-result" aria-live="polite"></div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{# Embeddings posts the form and swaps the result fragment via htmx, which the
+   dashboard loads per-page (not globally in layout.html). Without this the form
+   would fall back to a native submit and never embed. #}
+<script src="/admin/static/js/htmx.min.js"></script>
+{% endblock %}

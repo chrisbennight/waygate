@@ -1,0 +1,185 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Rate limits</h1>
+    {% if insufficient_scope %}
+        <span class="chip chip--warn">insufficient scope</span>
+    {% else if !store_configured %}
+        <span class="chip chip--warn">rate-limit store not configured</span>
+    {% endif %}
+</header>
+
+{# Per-tenant rate_limit_policies.
+   Each policy is a (scope, scope_value, action) tuple with a
+   token-bucket (capacity, refill_per_second). The hot-path
+   QuotaService consumes tokens against this registry; the
+   admin surface here is read-only — mint / patch / delete via
+   POST/PATCH/DELETE /api/v1/admin/rate_limit_policies/*. #}
+
+{% if insufficient_scope %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <p class="empty-state__title">Admin scope required</p>
+        <p class="empty-state__body">
+            This page requires the <code>mcp:admin</code> scope. Your current
+            dashboard session lacks it, so rate-limit policy data is hidden.
+        </p>
+        <p class="empty-state__body" style="margin-top: 8px">
+            <a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/rate_limits") }}">Re-authorize with the admin scope</a> if your account is entitled to it.
+        </p>
+    </div>
+</div>
+{% else if !store_configured %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <p class="empty-state__title">Rate-limit store not configured</p>
+        <p class="empty-state__body">
+            Set <code>GATEWAY_DATABASE_URL</code> and restart to enable. Without
+            the store, the QuotaService runs best-effort and no rate-limit gates
+            fire.
+        </p>
+    </div>
+</div>
+{% else %}
+
+{% match rl_error %}
+{% when Some with (msg) %}
+    <div class="form-error" role="alert" style="margin-bottom: 12px">{{ msg }}</div>
+{% when None %}
+{% endmatch %}
+
+{% match error %}
+{% when Some with (msg) %}
+    <div class="card">
+        <div class="empty-state empty-state--danger">
+            <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+            <p class="empty-state__title">Couldn't load rate-limit policies</p>
+            <p class="empty-state__body">{{ msg }}</p>
+        </div>
+    </div>
+{% when None %}
+
+<div class="card" style="margin-bottom: 16px">
+    <details class="disclosure composer"{% if policies.is_empty() %} open{% endif %}>
+        <summary>New rate-limit policy</summary>
+        <form method="post" action="{{ self.chrome.nav_url("/rate_limits/create") }}">
+            <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+            <div class="inline-fields">
+                <label>Name
+                    <input name="name" type="text" required maxlength="128" placeholder="per-tenant calls">
+                </label>
+                <label>Scope
+                    <select name="scope">
+                        <option value="tenant">tenant</option>
+                        <option value="principal">principal</option>
+                        <option value="client">client</option>
+                        <option value="server">server</option>
+                        <option value="tool">tool</option>
+                    </select>
+                </label>
+                <label>Scope value
+                    <input name="scope_value" type="text" placeholder="(required unless scope=tenant)">
+                </label>
+                <label>Action
+                    <select name="action">
+                        <option value="call">call</option>
+                        <option value="high_risk_call">high_risk_call</option>
+                        <option value="cost_bearing">cost_bearing</option>
+                        <option value="discovery">discovery</option>
+                    </select>
+                </label>
+                <label>Capacity
+                    <input name="bucket_capacity" type="number" min="1" step="1" required value="100">
+                </label>
+                <label>Refill / sec
+                    <input name="refill_per_second" type="number" min="0" step="any" required value="10">
+                </label>
+                <button class="btn btn-primary btn--sm" type="submit">Create</button>
+            </div>
+        </form>
+        <p class="hint" style="margin: 10px 0 0">
+            <code>scope_value</code> is required for every scope except
+            <code>tenant</code>; the <code>(scope, scope_value, action)</code>
+            tuple is unique per tenant.
+        </p>
+    </details>
+</div>
+
+<section aria-label="Rate-limit policies">
+    <div class="card card--table">
+        {% if policies.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#server"/></svg>
+                <p class="empty-state__title">No rate-limit policies</p>
+                <p class="empty-state__body">
+                    Nothing throttled for this tenant yet. Use the
+                    <strong>New rate-limit policy</strong> form above to add one.
+                </p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Rate-limit policies">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Scope</th>
+                        <th>Scope value</th>
+                        <th>Action</th>
+                        <th>Capacity</th>
+                        <th>Refill</th>
+                        <th>Updated</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for p in policies %}
+                    <tr id="rl-{{ p.id }}">
+                        <td>{{ p.name }}</td>
+                        <td><span class="chip">{{ p.scope }}</span></td>
+                        <td class="mono">{% match p.scope_value %}{% when Some with (v) %}{{ v }}{% when None %}—{% endmatch %}</td>
+                        <td><span class="chip chip--ok">{{ p.action }}</span></td>
+                        <td class="tabular">{{ p.bucket_capacity }}</td>
+                        <td class="mono tabular">{{ p.refill_label }}</td>
+                        <td class="mono" title="created {{ p.created_at_abs }}">{{ p.updated_at_abs }}</td>
+                        <td class="row-actions">
+                            <details class="disclosure disclosure--link">
+                                <summary>Edit</summary>
+                                <form method="post" action="{{ self.chrome.nav_url(p.update_rel.as_str()) }}">
+                                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                    <div class="inline-fields">
+                                        <label>Capacity
+                                            <input name="bucket_capacity" type="number" min="1" step="1" value="{{ p.bucket_capacity }}" aria-label="Capacity for {{ p.name }}">
+                                        </label>
+                                        <label>Refill / sec
+                                            <input name="refill_per_second" type="number" min="0" step="any" value="{{ p.refill_value }}" aria-label="Refill for {{ p.name }}">
+                                        </label>
+                                        <button class="btn btn-primary btn--sm" type="submit">Save</button>
+                                    </div>
+                                </form>
+                            </details>
+                            {# Static confirm string — never interpolate `p.name`
+                               into inline JS. Askama HTML-escapes, but the browser
+                               HTML-decodes the attribute before the JS parser runs,
+                               so an escaped quote still breaks out of the confirm
+                               string. The row identifies which
+                               policy this is; the aria-label (plain HTML-attribute
+                               context, escaping suffices) carries the name. #}
+                            <form method="post" action="{{ self.chrome.nav_url(p.delete_rel.as_str()) }}"
+                                  onsubmit="return confirm('Delete this rate-limit policy? Calls in its (scope, scope_value, action) bucket will no longer be throttled by this policy.');">
+                                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                <button class="btn btn-danger btn--sm" type="submit" aria-label="Delete policy {{ p.name }}">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+</section>
+
+{% endmatch %}
+{% endif %}
+{% endblock %}

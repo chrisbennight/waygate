@@ -1,0 +1,38 @@
+[package]
+name = "waygate-authz"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+waygate-core.workspace = true
+waygate-oidc.workspace = true
+waygate-mcp.workspace = true
+waygate-telemetry.workspace = true
+cedar-policy.workspace = true
+miette.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tracing.workspace = true
+utoipa.workspace = true
+# The break-glass override store wires Postgres directly
+# (same pattern as waygate-quota's PgRateLimitStore).
+sqlx.workspace = true
+uuid = { workspace = true }
+# Extracts policy-referenced scope literals
+# (`.scopes.contains(...)`) for the scope-registry reconcile.
+regex.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+rmcp = { workspace = true, features = ["server"] }
+serde_json.workspace = true
+# per_upstream_policies.rs reads servers/*.yaml to drive the
+# "no side-effecting tool is reachable by a groupless principal"
+# invariant against the real manifest set.
+serde_yaml.workspace = true

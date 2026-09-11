@@ -1,0 +1,8 @@
+{% if ok %}
+<div class="callout callout--ok" role="status">
+    <strong>Published v{{ version }}.</strong>
+    <span class="muted">{{ apply_hint }}</span>
+</div>
+{% else %}
+<div class="callout callout--err" role="alert">{{ message }}</div>
+{% endif %}

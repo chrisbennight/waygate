@@ -1,0 +1,62 @@
+{% for d in rows %}
+<tr>
+    <td class="mono" title="{{ d.ts_abs }}">{{ d.ts_rel }}</td>
+    <td><span class="truncate">{{ d.principal }}</span></td>
+    <td class="mono">
+        {# A tool call reads `server.tool`; a native resource decision names no
+           tool, so its subject is the URI the read acted on. A row with
+           neither (a read nothing visible served) still shows the URI. #}
+        {% match d.tool %}{% when Some with (t) %}{% match d.server %}{% when Some with (s) %}{{ s }}{% when None %}–{% endmatch %}.{{ t }}{% when None %}{% match d.target %}{% when Some with (g) %}<span class="truncate" title="{{ g }}">{{ g }}</span>{% when None %}{% match d.server %}{% when Some with (s) %}{{ s }}{% when None %}–{% endmatch %}{% endmatch %}{% endmatch %}{% match d.operation %}{% when Some with (o) %} <span class="mono" title="Operation this call selected">{{ o }}</span>{% when None %}{% endmatch %}
+    </td>
+    <td>
+        {# Outcome strings come from `AuditOutcome::as_str()` (success / denied /
+           step_up_required / execution_error). Decision chips: green = allowed,
+           red = denied / error, ochre = step-up. #}
+        {% if d.outcome == "success" %}<span class="chip chip--ok">allowed</span>
+        {% else if d.outcome == "step_up_required" %}<span class="chip chip--warn">step-up</span>
+        {% else if d.outcome == "execution_error" %}<span class="chip chip--bad">error</span>
+        {% else if d.outcome == "denied" %}<span class="chip chip--bad">denied</span>
+        {% else %}<span class="chip">{{ d.outcome }}</span>{% endif %}
+    </td>
+    <td>
+        {% match d.risk %}
+        {% when Some with (r) %}
+            {% if r == "high" %}<span class="chip chip--bad">high</span>
+            {% else if r == "medium" %}<span class="chip chip--warn">medium</span>
+            {% else %}<span class="chip">low</span>{% endif %}
+        {% when None %}
+            <span class="faint">–</span>
+        {% endmatch %}
+    </td>
+    <td>
+        {# Each fired policy id links to the Policies pane anchored at that
+           policy (`#policy-<id>`, matching policies.html's id="policy-{{ p.id }}").
+           The chip carries the mono/code font from `.chip`  so
+           policy ids read as identifiers. #}
+        {% if d.policies.is_empty() %}<span class="faint">–</span>{% endif %}
+        <span class="chip-row">
+        {% for pid in d.policies %}
+            <a class="chip chip--accent chip--xs" href="{{ self.nav_url("/policies") }}#policy-{{ pid }}"
+               title="View policy {{ pid }} in the Policies pane">{{ pid }}</a>
+        {% endfor %}
+        </span>
+    </td>
+</tr>
+{% endfor %}
+{% if rows.is_empty() %}
+<tr><td colspan="6" class="empty">No decisions match these filters.</td></tr>
+{% endif %}
+{% match next_after_id %}
+{% when Some with (id) %}
+<tr class="load-more-row">
+    <td colspan="6">
+        <button class="btn btn-secondary" type="button"
+                hx-get="{{ self.nav_url("/decisions-log/rows") }}?after_id={{ id }}{{ filter_qs|safe }}"
+                hx-target="closest tr"
+                hx-swap="outerHTML">
+            Load 50 more
+        </button>
+    </td>
+</tr>
+{% when None %}
+{% endmatch %}

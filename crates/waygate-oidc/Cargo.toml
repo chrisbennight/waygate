@@ -1,0 +1,46 @@
+[package]
+name = "waygate-oidc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+waygate-core = { workspace = true, features = ["http"] }
+waygate-telemetry.workspace = true
+async-trait.workspace = true
+url.workspace = true
+time.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+jsonwebtoken.workspace = true
+axum.workspace = true
+http = "1"
+ed25519-dalek.workspace = true
+base64.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
+sha2.workspace = true
+moka.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# The over-cap fetch tests serve their oversized bodies as a chunked stream, so
+# the response carries no Content-Length and the streaming counter — not the
+# pre-check — is what refuses it.
+futures = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
+tower = { workspace = true, features = ["util"] }
+# Used only by `tests/suite/jwks_over_https.rs` to stand up an HTTPS loopback
+# server so reqwest's rustls TLS handshake path runs unmocked.
+axum-server = { workspace = true, features = ["tls-rustls"] }
+rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
+# Direct dep so `tests/suite/jwks_over_https.rs` can call `install_default()`. The
+# `aws-lc-rs` feature must match what `axum-server/tls-rustls` already pulls
+# in, otherwise install_default would race the wrong provider.
+rustls = { workspace = true, features = ["aws_lc_rs"] }

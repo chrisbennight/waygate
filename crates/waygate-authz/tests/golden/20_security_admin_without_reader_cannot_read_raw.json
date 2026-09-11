@@ -1,0 +1,27 @@
+{
+  "name": "example-security_admin_without_reader_cannot_read_raw",
+  "description": "The Example security service raw-log forbid overrides the broad mcp-admins permit unless the administrator also has security-log-readers.",
+  "principal": {
+    "sub": "gateway-admin",
+    "auth_method": "oauth",
+    "groups": ["mcp-admins"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-security.events.read_raw",
+    "risk": "high"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-security",
+    "name": "events.read_raw",
+    "risk": "high",
+    "side_effects": false,
+    "pii": true
+  },
+  "expected": {
+    "decision": "Deny",
+    "reason_contains": ["requires security-log-readers membership"],
+    "policy_id_contains": ["example-security-security-log-readers-required"]
+  }
+}

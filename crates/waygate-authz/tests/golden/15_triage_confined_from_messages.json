@@ -1,0 +1,25 @@
+{
+  "name": "triage_confined_from_example-messages_low",
+  "description": "Confinement: the 10-role-allow baseline permits every principal low-risk CallTool, but 20-example-triage.cedar forbids the triage role any upstream other than example-search/example-fetch. A low-risk example-messages tool any other key could call is denied for the triage role, and the @reason on the confinement forbid surfaces.",
+  "principal": {
+    "sub": "svc:incident-triage",
+    "auth_method": "api_key",
+    "groups": ["incident-triage"],
+    "scopes": ["mcp:invoke", "mcp:read"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-messages.about.read",
+    "risk": "low"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-messages",
+    "name": "about.read",
+    "risk": "low"
+  },
+  "expected": {
+    "decision": "Deny",
+    "reason_contains": ["confined to the example-search and example-fetch"]
+  }
+}

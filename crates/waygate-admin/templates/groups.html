@@ -1,0 +1,131 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Groups</h1>
+    {% if insufficient_scope %}
+        <span class="chip chip--warn">insufficient scope</span>
+    {% else if !store_configured %}
+        <span class="chip chip--warn">group store not configured</span>
+    {% endif %}
+</header>
+
+{# Unified group catalog (Identities revamp). One section listing
+   every group known to this tenant: IdP-provisioned SCIM groups
+   (source='scim') and operator/api-key local groups (source='local',
+   backfilled from api-key labels by migration 0066), each with SCIM-user
+   and api-key member counts. Minting is catalog-only: an api key can
+   only carry groups that exist here. #}
+
+{% if insufficient_scope %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <p class="empty-state__title">Admin scope required</p>
+        <p class="empty-state__body">
+            This page requires the <code>mcp:admin</code> scope. Your current
+            dashboard session lacks it, so the group catalog is hidden.
+        </p>
+        <p class="empty-state__body" style="margin-top: 8px">
+            <a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/groups") }}">Re-authorize with the admin scope</a> if your account is entitled to it.
+        </p>
+    </div>
+</div>
+{% else if !store_configured %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <p class="empty-state__title">Group store not configured</p>
+        <p class="empty-state__body">
+            Set <code>GATEWAY_DATABASE_URL</code> and restart to enable the
+            group catalog.
+        </p>
+    </div>
+</div>
+{% else %}
+
+{% match error %}
+{% when Some with (msg) %}
+    <div class="form-error" role="alert" style="margin-bottom: 12px">{{ msg }}</div>
+{% when None %}
+{% endmatch %}
+
+<section class="page-section" aria-label="Groups">
+    <h2 class="section-heading">Groups <span class="count">{{ groups.len() }}</span></h2>
+    <p class="section-kicker">
+        Groups known to this tenant. <code>scim</code> groups are
+        IdP-provisioned; <code>local</code> groups are operator-defined or
+        backfilled from api-key labels. Members are SCIM users and live
+        api-keys.
+    </p>
+    <div class="card card--table">
+        {% if load_error %}
+            <div class="empty-state empty-state--danger">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <p class="empty-state__title">Couldn't load groups</p>
+                <p class="empty-state__body">See gateway logs.</p>
+            </div>
+        {% else if groups.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#users"/></svg>
+                <p class="empty-state__title">No groups</p>
+                <p class="empty-state__body">
+                    No SCIM-provisioned or local groups in this tenant yet. Local
+                    groups are backfilled from existing api-key labels; SCIM groups
+                    arrive via IdP provisioning.
+                </p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Groups">
+                <thead>
+                    <tr>
+                        <th>Group</th>
+                        <th>Source</th>
+                        <th>External ID</th>
+                        <th>Members</th>
+                        <th>Created</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for g in groups %}
+                    <tr>
+                        <td>{{ g.display_name }}</td>
+                        <td>
+                            {% if g.source == "scim" %}
+                                <span class="chip chip--ok">scim</span>
+                            {% else %}
+                                <span class="chip">{{ g.source }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="mono">{% match g.external_id %}{% when Some with (e) %}{{ e }}{% when None %}—{% endmatch %}</td>
+                        <td class="cell-sub">{{ g.user_member_count }} users · {{ g.key_member_count }} keys</td>
+                        <td class="mono">{{ g.created_at_abs }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+</section>
+
+<section class="page-section" aria-label="Add a group">
+    <h2 class="section-heading">Add a group</h2>
+    <p class="section-kicker">
+        Register a tenant-local group. SCIM-provisioned groups arrive from your
+        IdP; this is for operator-defined groups (and previously free-text
+        api-key labels).
+    </p>
+    <div class="card">
+        <form class="form" method="post" action="{{ self.chrome.nav_url("/groups/create") }}">
+            <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+            <div class="form-field">
+                <label class="form-label" for="group-name">Name <span class="form-label__req" aria-hidden="true">*</span></label>
+                <input class="form-input" type="text" id="group-name" name="name" required maxlength="256" placeholder="e.g. mcp-users">
+            </div>
+            <div class="form-actions"><button type="submit" class="btn btn-primary">Add group</button></div>
+        </form>
+    </div>
+</section>
+
+{% endif %}
+{% endblock %}

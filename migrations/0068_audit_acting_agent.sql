@@ -1,0 +1,48 @@
+-- Gateway-Agents foundation PR 0.2: agent-as-actor audit attribution.
+--
+-- Add `acting_agent` to audit_log so an action taken by an in-app LLM agent
+-- ON BEHALF OF a human can be attributed to the agent as the ACTOR while the
+-- human stays the `principal_*` (the on-behalf-of party). Today every audit
+-- row attributes solely to the human principal; once the chat agent runs
+-- (Phase 1.2) we need to answer "did the human click this, or did the human's
+-- agent do it after confirming?" — that distinction is this column.
+--
+-- ## Semantics
+--
+-- - `acting_agent` is the identifier of the agent that performed the action
+--   (e.g. `agent:ops-chat`), NULL when a human acted directly. The human is
+--   always the `principal_*`; the agent is a delegate acting under the human's
+--   identity and scopes, so attribution is additive, not a replacement.
+-- - NULLABLE so:
+--   1. Every pre-migration row reads back NULL (no backfill). NULL is the
+--      "absent" signal the hash-chain extension keys off (see below).
+--   2. Direct human actions (the overwhelming majority) leave it NULL.
+--
+-- ## What writes it
+--
+-- This slice (PR 0.2) ships the column + the `AuditEvent.acting_agent` field +
+-- the hash-chain coverage + the `InvocationRequest::acting_agent()` carrier
+-- API. The invocation pipeline does not yet stamp it from a request — that
+-- lands with the chat agent in Phase 1.2, which sets the well-known
+-- `acting_agent` request-metadata key the pipeline will read. Until then the
+-- column is NULL on every row (and the storage/chain plumbing is exercised by
+-- the PR 0.2 tests that set `AuditEvent.acting_agent` directly).
+--
+-- ## Hash-chain compatibility
+--
+-- `canonical_audit_bytes_with_ext3` appends `acting_agent` as a NEW tail
+-- extension AFTER the PR8a decision-inputs block (migration 0062), led by
+-- sentinel byte `b'A'`. When absent (NULL) the extension contributes ZERO
+-- bytes, so every legacy row hashes byte-identically under the extended
+-- function and the PR7-5 verifier keeps accepting them — the same technique
+-- migrations 0022 (SCIM, `b'X'`), 0046 (`target`, `b'T'`), and 0062 (decision
+-- inputs, `b'D'`) used. THIS IS LOAD-BEARING: if the extension ever stops being
+-- zero-bytes-when-absent, every existing audit_log row fails verification.
+
+ALTER TABLE audit_log
+    ADD COLUMN IF NOT EXISTS acting_agent TEXT;
+
+-- No index. `acting_agent` is chain-covered attribution evidence, not a search
+-- facet (no Decision Log / Activity filter pivots on it today). NULL on every
+-- legacy row, so a future partial index is cheap to add if an access pattern
+-- (e.g. "show all agent-initiated actions") emerges.

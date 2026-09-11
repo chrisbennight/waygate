@@ -1,0 +1,10 @@
+{
+  "fail_on_severities": [
+    "critical",
+    "high"
+  ],
+  "fail_on_kev": true,
+  "ignored_vulnerabilities": [],
+  "blocked_images": [],
+  "warn_only_images": []
+}

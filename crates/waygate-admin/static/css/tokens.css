@@ -1,0 +1,123 @@
+/* Color, typography, and geometry tokens. Only this file and fonts.css may
+   contain color or font-family literals; style_tokens.rs enforces this rule.
+
+   Theme selection:
+   `:root` = Day ledger (light, default); `[data-theme="dark"]` on <html> =
+   Night ledger; `prefers-color-scheme` applies Night when the user hasn't
+   toggled. theme.js persists the toggle to localStorage + a cookie so the
+   server renders the right attribute on first paint. */
+
+:root {
+    color-scheme: light;
+
+    /* -- Day ledger: warm paper + ink -------------------------------- */
+    --paper-0: #f7f5f0;   /* app background */
+    --paper-1: #ffffff;   /* reading surfaces: tables, forms, wells */
+    --paper-2: #efece4;   /* hover, selected, input fill */
+    --rule: #e0dcd2;          /* hairlines */
+    --rule-strong: #b8b2a4;   /* table header rule, input borders */
+
+    --ink: #23201b;
+    --ink-muted: #5f594e;
+    --ink-faint: #8a8375;
+
+    --green: #1e5f46;          /* accent: links, primary buttons, active nav */
+    --green-strong: #174a37;   /* hover/pressed accent */
+    --on-green: #ffffff;
+
+    /* Decision contract: allow / deny / step_up / error.
+       Always paired with icon + word — never color alone. */
+    --ok: #2e7d52;
+    --deny: #9e3325;
+    --flag: #9a6b0f;
+    --err: #c42b1c;
+    --on-err: #ffffff;   /* text on --err fills (dark text in Night theme) */
+
+    --focus-ring: rgb(30 95 70 / 45%);
+    --scrim: rgb(35 32 27 / 45%);
+    --shadow-overlay: 0 8px 24px rgb(35 32 27 / 18%);
+
+    /* -- Typography. The full fallback stack lives in the
+          token so a missing webfont degrades to Georgia / system faces —
+          never to the browser serif default. ---------------------------- */
+    --font-display: "Source Serif 4", Georgia, "Times New Roman", serif;
+    --font-ui: "Source Sans 3", system-ui, -apple-system, "Segoe UI", Roboto,
+        sans-serif;
+    --font-mono: "Source Code Pro", ui-monospace, "SF Mono", Menlo, Consolas,
+        monospace;
+
+    /* -- Geometry: rules and containers are square; only
+          interactive elements (inputs, buttons, chips) round to 4px. ---- */
+    --radius-interactive: 4px;
+    --radius-container: 0;
+
+    /* -- Cedar syntax highlighting (policy editor, shared token discipline).
+          Aliases to the palette above via var() — NOT new literals — so the
+          CodeMirror editor follows the Day/Night ledger automatically: the
+          referenced tokens are redefined per theme and var() resolves at use,
+          so these only need to be declared once here in:root. ------------- */
+    --syntax-comment: var(--ink-faint);
+    --syntax-keyword: var(--green-strong);
+    --syntax-annotation: var(--flag);
+    --syntax-string: var(--ok);
+    --syntax-number: var(--deny);
+    --syntax-type: var(--green);
+    --syntax-operator: var(--ink-muted);
+    --syntax-var: var(--ink);
+
+}
+
+[data-theme="dark"] {
+    color-scheme: dark;
+
+    /* -- Night ledger: the same book under a desk lamp — warm dark,
+          never blue-navy. ---------------------------------------------- */
+    --paper-0: #16130f;
+    --paper-1: #1e1a15;
+    --paper-2: #28231c;
+    --rule: #332e25;
+    --rule-strong: #4a4338;
+
+    --ink: #ece6da;
+    --ink-muted: #a89f8e;
+    --ink-faint: #776f60;
+
+    --green: #5bbf8f;
+    --green-strong: #7acfa5;
+    --on-green: #10271c;
+
+    --ok: #58b583;
+    --deny: #d9806f;
+    --flag: #d2a249;
+    --err: #f2655a;
+    --on-err: #1c0907;
+
+    --focus-ring: rgb(91 191 143 / 50%);
+    --scrim: rgb(0 0 0 / 55%);
+    --shadow-overlay: 0 8px 24px rgb(0 0 0 / 45%);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        color-scheme: dark;
+        --paper-0: #16130f;
+        --paper-1: #1e1a15;
+        --paper-2: #28231c;
+        --rule: #332e25;
+        --rule-strong: #4a4338;
+        --ink: #ece6da;
+        --ink-muted: #a89f8e;
+        --ink-faint: #776f60;
+        --green: #5bbf8f;
+        --green-strong: #7acfa5;
+        --on-green: #10271c;
+        --ok: #58b583;
+        --deny: #d9806f;
+        --flag: #d2a249;
+        --err: #f2655a;
+        --on-err: #1c0907;
+        --focus-ring: rgb(91 191 143 / 50%);
+        --scrim: rgb(0 0 0 / 55%);
+        --shadow-overlay: 0 8px 24px rgb(0 0 0 / 45%);
+    }
+}

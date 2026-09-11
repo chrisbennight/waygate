@@ -1,0 +1,129 @@
+{# Manifest-change EFFECT preview card (server-review parity). Rendered wherever
+   a pending change can be approved (the /changes queue and the /decisions inbox),
+   so no approval surface shows a manifest.publish/rollback with only raw params —
+   a tool's risk/pii/side_effects reclassification or server approval-mode
+   change can silently alter live authz. Expects `pv` (a
+   `ManifestChangePreviewView`) bound by the caller's
+   `{% match … %}`. Read-only. #}
+<div class="card">
+    <p class="manifest-preview__title">
+        <strong>{{ pv.kind_label }}</strong>
+        {% match pv.blocked %}{% when Some with (b) %}<span class="chip chip--bad">approval blocked</span>{% when None %}{% endmatch %}
+    </p>
+
+    {# A required part of the current effect could not be computed, or the
+       executor would refuse the captured change. #}
+    {% match pv.blocked %}
+    {% when Some with (b) %}
+        <div class="callout callout--err"><strong>Approval unavailable:</strong> {{ b }}</div>
+    {% when None %}{% endmatch %}
+
+    {% match pv.effective %}
+    {% when Some with (effect) %}
+        <section class="manifest-impact" aria-label="Expected service impact">
+            <p class="section-kicker">Expected service impact</p>
+            <h3 class="manifest-impact__outcome manifest-impact__outcome--{{ effect.outcome_tone }}">{{ effect.outcome }}</h3>
+            <p class="manifest-impact__delta mono">{{ effect.tool_delta }}</p>
+            <p class="manifest-impact__delta mono">{{ effect.resource_delta }}</p>
+            {% match effect.added_tool_posture %}
+            {% when Some with (posture) %}<p class="manifest-impact__posture">{{ posture }}</p>
+            {% when None %}{% endmatch %}
+            {% match effect.approval_posture %}
+            {% when Some with (posture) %}<div class="callout callout--warn"><strong>Approval posture:</strong> {{ posture }}</div>
+            {% when None %}{% endmatch %}
+
+            {% if !effect.servers.is_empty() %}
+            <ul class="manifest-impact__servers" aria-label="Changed server outcomes">
+                {% for server in effect.servers %}
+                <li>
+                    <strong class="mono">{{ server.server }}</strong>
+                    <span>{{ server.outcome }}</span>
+                    {% for barrier in server.barriers %}<span class="manifest-impact__barrier">{{ barrier }}</span>{% endfor %}
+                </li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+
+            {% if !effect.follow_ups.is_empty() %}
+            <div class="manifest-impact__follow-ups">
+                <p class="section-kicker">What remains after publication</p>
+                <ul>{% for action in effect.follow_ups %}<li>{{ action }}</li>{% endfor %}</ul>
+            </div>
+            {% endif %}
+
+            {% match effect.fleet_note %}
+            {% when Some with (note) %}<p class="manifest-impact__fleet-note">{{ note }}</p>
+            {% when None %}{% endmatch %}
+        </section>
+    {% when None %}{% endmatch %}
+
+    {% match pv.note %}
+    {% when Some with (n) %}
+        <p class="section-kicker">{{ n }}</p>
+    {% when None %}{% endmatch %}
+
+    {% match pv.impact %}
+    {% when Some with (im) %}
+        {% match im.error %}
+        {% when Some with (e) %}
+            <div class="callout callout--err">Manifest set does not parse — approving would publish an invalid set: {{ e }}</div>
+        {% when None %}
+        {% endmatch %}
+    {% when None %}{% endmatch %}
+
+    {% match pv.prospective_summary %}
+    {% when Some with (summary) %}
+        <section class="manifest-prospective" aria-label="Prospective authorization sample">
+            <p class="section-kicker">Prospective authorization sample</p>
+            <p class="manifest-replay__summary">{{ summary }}</p>
+            {% if pv.show_prospective_details %}
+                {% match pv.impact %}
+                {% when Some with (im) %}
+                    <ul class="manifest-prospective__tools" aria-label="Prospective Cedar verdicts by access target">
+                        {% for target in im.prospective_access.targets %}
+                        <li>
+                            <strong class="mono">
+                                {{ target.server }}.{{ target.tool }}
+                                {% match target.operation %}{% when Some with (operation) %} / {{ operation }}{% when None %} / tool fallback{% endmatch %}
+                            </strong>
+                            <span>
+                                {{ target.allow }} allow · {{ target.deny }} deny · {{ target.step_up }} step-up · {{ target.approval_required }} approval-required{% if target.indeterminate > 0 %} · {{ target.indeterminate }} indeterminate{% endif %}
+                                {% match target.applicability %}
+                                {% when crate::manifest_impact::ManifestProspectiveTargetApplicability::RuntimeAnnotationFactsUnavailable %} — runtime side-effect and sensitivity facts derive from reviewed MCP annotations and are not encoded in this manifest draft
+                                {% when crate::manifest_impact::ManifestProspectiveTargetApplicability::UndeclaredOperationValueUnbounded %} — undeclared operation values retain tool-level facts but can produce different Cedar verdicts, so this fallback category cannot be reduced to one verdict
+                                {% when crate::manifest_impact::ManifestProspectiveTargetApplicability::Evaluated %}{% endmatch %}
+                            </span>
+                        </li>
+                        {% endfor %}
+                        {% for target in im.prospective_access.resource_targets %}
+                        <li>
+                            <strong class="mono">{{ target.server }}.resources/read / {{ target.uri }}</strong>
+                            <span>
+                                {{ target.allow }} allow · {{ target.deny }} deny · {{ target.step_up }} step-up · {{ target.approval_required }} approval-required{% if target.indeterminate > 0 %} · {{ target.indeterminate }} indeterminate{% endif %}
+                            </span>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                    <p class="manifest-prospective__note">
+                        Bounded sample of recent caller contexts, not a complete user or access inventory.
+                        {% if im.prospective_access.caller_contexts_omitted > 0 %}{{ im.prospective_access.caller_contexts_omitted }} additional caller contexts were omitted.{% endif %}
+                        {% if im.prospective_access.targets_omitted > 0 %}{{ im.prospective_access.targets_omitted }} additional candidate access targets were omitted.{% endif %}
+                    </p>
+                {% when None %}{% endmatch %}
+            {% endif %}
+        </section>
+    {% when None %}{% endmatch %}
+
+    {% match pv.replay_summary %}
+    {% when Some with (summary) %}
+        <section class="manifest-replay" aria-label="Recent authorization evidence">
+            <p class="section-kicker">Recent authorization evidence</p>
+            <p class="manifest-replay__summary">{{ summary }}</p>
+            {% if pv.show_replay_details %}
+                {% match pv.impact %}
+                {% when Some with (im) %}{% include "_manifest_impact_stats.html" %}
+                {% when None %}{% endmatch %}
+            {% endif %}
+        </section>
+    {% when None %}{% endmatch %}
+</div>

@@ -1,0 +1,69 @@
+[package]
+name = "waygate-upstream"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+arc-swap.workspace = true
+waygate-catalog.workspace = true
+waygate-core = { workspace = true, features = ["http"] }
+waygate-manifest-types.workspace = true
+# Peer JWKS cache lookup for the `tier_c_peer` audience-override
+# resolution. waygate-federation does NOT depend on
+# waygate-upstream, so this direction is cycle-free.
+waygate-federation.workspace = true
+waygate-mcp.workspace = true
+waygate-oidc.workspace = true
+waygate-telemetry.workspace = true
+time.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+url.workspace = true
+futures.workspace = true
+bytes.workspace = true
+blake3.workspace = true
+zeroize.workspace = true
+http.workspace = true
+reqwest.workspace = true
+rand.workspace = true
+sse-stream = "0.2"
+tokio-stream = "0.1"
+tokio-util.workspace = true
+uuid.workspace = true
+
+rmcp = { workspace = true, features = [
+    "client",
+    "reqwest",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+] }
+
+[[bin]]
+name = "classify"
+path = "src/bin/classify.rs"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
+jsonwebtoken.workspace = true
+axum.workspace = true
+uuid.workspace = true
+# The session-isolation e2e test stands up a real streamable-HTTP MCP
+# upstream, which needs rmcp's server-side transport features. They are
+# additive to the client features in [dependencies] (Cargo unifies the two
+# for test builds). Declared here explicitly so a package-local
+# `cargo test -p waygate-upstream` doesn't rely on another crate's features
+# leaking in via workspace unification.
+rmcp = { workspace = true, features = [
+    "server",
+    "server-side-http",
+    "transport-streamable-http-server",
+] }

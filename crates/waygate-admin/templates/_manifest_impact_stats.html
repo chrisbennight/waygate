@@ -1,0 +1,41 @@
+{# Manifest blast-radius replay stats (the parse-OK branch). Shared by the
+   approval-queue card (`_manifest_preview_card.html`) and the editor preview
+   panel (`server_manifests.html`), so the replay accounting renders identically
+   wherever a manifest impact is shown. Expects `im` (a `ManifestImpactReport`
+   whose `error` is `None`) bound by the caller. #}
+<p class="section-kicker">
+    Reclassifying <strong>{{ im.tools_changed }}</strong> tool{% if im.tools_changed != 1 %}s{% endif %} and <strong>{{ im.resources_changed }}</strong> resource prefix{% if im.resources_changed != 1 %}es{% endif %} (tools: {{ im.tools_added }} added, {{ im.tools_removed }} removed; resources: {{ im.resources_added }} added, {{ im.resources_removed }} removed). Replaying <strong>{{ im.affected }}</strong> of <strong>{{ im.considered }}</strong> recent access decision{% if im.considered != 1 %}s{% endif %} that used a reclassified target against the live policy:
+    <span class="chip chip--ok">{{ im.unchanged }} unchanged</span>
+    <span class="chip chip--bad">{{ im.changed }} would change</span>
+    <span class="chip">{{ im.not_replayable }} not replayable</span>
+</p>
+{% if !im.approval_mode_changes.is_empty() %}
+<div class="callout callout--warn">
+    <strong>Ordinary approval posture changes:</strong>
+    <ul>
+        {% for change in im.approval_mode_changes %}
+        <li><code>{{ change.server }}</code>: <code>{{ change.from }}</code> → <code>{{ change.to }}</code> for {{ change.tools_affected }} manifest-declared tool{% if change.tools_affected != 1 %}s{% endif %}. {% if change.relaxes_ordinary_approval %}Annotation and catalog approval requirements will be suppressed; Cedar policy remains authoritative.{% else %}Annotation and catalog approval requirements will be restored; Cedar policy remains authoritative.{% endif %}</li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
+{% if !im.deltas.is_empty() %}
+<p class="chip-row">
+    {% for d in im.deltas %}<span class="chip chip--warn"><code>{{ d.from }} → {{ d.to }}</code> · {{ d.count }}</span>{% endfor %}
+</p>
+{% endif %}
+{% if !im.samples.is_empty() %}
+<table class="data-table data-table--sm" aria-label="Recorded decisions this manifest change would flip">
+        <thead><tr><th>Baseline → candidate</th><th>Principal</th><th>Access target</th></tr></thead>
+    <tbody>
+        {% for s in im.samples %}
+        <tr>
+            <td class="mono">{{ s.recorded }} → {{ s.candidate }}</td>
+            <td><span class="truncate">{{ s.principal }}</span></td>
+            <td class="mono">{{ s.server_tool }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+<p class="section-kicker">Replay covers only decisions carrying the captured inputs — a sample of recent activity, not the complete history.</p>

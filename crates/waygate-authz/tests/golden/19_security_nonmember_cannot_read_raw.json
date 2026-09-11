@@ -1,0 +1,26 @@
+{
+  "name": "example-security_nonmember_cannot_read_raw",
+  "description": "An OAuth principal without security-log-readers cannot call the raw Example security service alert endpoint.",
+  "principal": {
+    "sub": "ordinary-user",
+    "auth_method": "oauth"
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-security.events.read_raw",
+    "risk": "high"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-security",
+    "name": "events.read_raw",
+    "risk": "high",
+    "side_effects": false,
+    "pii": true
+  },
+  "expected": {
+    "decision": "Deny",
+    "reason_contains": ["requires security-log-readers membership"],
+    "policy_id_contains": ["example-security-security-log-readers-required"]
+  }
+}

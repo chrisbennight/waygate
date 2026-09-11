@@ -1,0 +1,26 @@
+{
+  "name": "example-messages_sender_cannot_read",
+  "description": "The baseline permits any low-risk tool, so the message-sender PII exemption must be scoped to the send tools only — otherwise a sender could read low-risk PII-tagged example-messages reads. Pins that a sender is denied messages.history (low, pii), upholding the send-only contract.",
+  "principal": {
+    "sub": "example-operations-alerter",
+    "auth_method": "api_key",
+    "groups": ["message-sender"],
+    "scopes": ["mcp:invoke", "mcp:invoke:high"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-messages.messages.history",
+    "risk": "low"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-messages",
+    "name": "messages.history",
+    "risk": "low",
+    "pii": true
+  },
+  "expected": {
+    "decision": "Deny",
+    "reason_contains": ["PII tool calls require"]
+  }
+}

@@ -1,0 +1,30 @@
+{% if ok %}
+<div class="callout callout--ok" role="status">
+    <strong>Catalog {{ outcome }}.</strong>
+    <code>{{ server }}</code> now publishes {{ after_tool_count }} tools
+    (previously {{ before_tool_count }}); the MCP session was{% if !session_replaced %} not{% endif %} replaced.
+    {% if !added.is_empty() %}<div>Added: {% for tool in added %}<code>{{ tool }}</code>{% if !loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
+    {% if !removed.is_empty() %}<div>Removed: {% for tool in removed %}<code>{{ tool }}</code>{% if !loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
+    {% if !schema_changed.is_empty() %}<div>Behavior contract changed: {% for tool in schema_changed %}<code>{{ tool }}</code>{% if !loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
+</div>
+{% else if failed %}
+<div class="callout callout--warn" role="status">
+    <strong>Catalog refresh failed.</strong>
+    <code>{{ server }}</code> still publishes {{ after_tool_count }} tools
+    (previously {{ before_tool_count }}). No replacement session was installed;
+    the previously published inventory remains unchanged.
+</div>
+{% else if superseded %}
+<div class="callout callout--warn" role="status">
+    <strong>Catalog refresh superseded.</strong>
+    A newer server configuration won while the replacement for
+    <code>{{ server }}</code> was being prepared. No attempted session or
+    inventory was committed. Reload this overview for current status.
+</div>
+{% else %}
+<div class="callout callout--warn" role="status">
+    <strong>Server removed during catalog refresh.</strong>
+    <code>{{ server }}</code> may no longer be configured. No attempted session
+    or inventory was committed. Reload this overview for current status.
+</div>
+{% endif %}

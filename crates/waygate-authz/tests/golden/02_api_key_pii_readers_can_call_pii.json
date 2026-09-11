@@ -1,0 +1,25 @@
+{
+  "name": "api_key_pii_readers_can_call_pii",
+  "description": "policies/15-pii-default.cedar carries an `unless principal.groups.contains(\"pii-readers\")` escape hatch — operators who explicitly opted a service-account key into reading PII keep working. Pin that the unless clause still grants access.",
+  "principal": {
+    "sub": "service-bot-2",
+    "auth_method": "api_key",
+    "groups": ["mcp-users", "pii-readers"],
+    "scopes": ["mcp:invoke", "mcp:read"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-messages.messages.read",
+    "risk": "low"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-messages",
+    "name": "messages.read",
+    "risk": "low",
+    "pii": true
+  },
+  "expected": {
+    "decision": "Allow"
+  }
+}

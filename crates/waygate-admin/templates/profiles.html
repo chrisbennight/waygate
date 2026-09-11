@@ -1,0 +1,24 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Profiles</h1>
+</header>
+
+{# API-key profile registry + create/delete forms, split out of the
+   API-keys page into its own page so minting a
+   key and minting a key profile are separate. The included partial reads
+   the locals `enabled`, `is_admin`, `error`, `profiles`, `create_error`,
+   `known_scopes`, `known_servers` — rebind them from `profiles_section`
+   so the partial resolves them against this page's struct (askama include
+   scoping). `self.nav_url` resolves here too. #}
+{% let enabled = profiles_section.enabled %}
+{% let is_admin = profiles_section.is_admin %}
+{% let error = profiles_section.error.clone() %}
+{% let profiles = profiles_section.profiles.iter().collect::<Vec<_>>() %}
+{% let create_error = profiles_section.create_error.clone() %}
+{% let csrf_token = profiles_section.csrf_token.clone() %}
+{% let known_scopes = profiles_section.known_scopes.iter().collect::<Vec<_>>() %}
+{% let known_servers = profiles_section.known_servers.iter().collect::<Vec<_>>() %}
+{% include "api_key_profiles_section.html" %}
+{% endblock %}

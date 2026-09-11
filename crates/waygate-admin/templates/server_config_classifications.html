@@ -1,0 +1,88 @@
+<div class="cfg-panel">
+    <nav class="cfg-tabs" role="tablist" aria-label="Server configuration">
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=overview" hx-target="closest .cfg-panel" hx-swap="outerHTML">Overview</button>
+        <button type="button" class="cfg-tab is-active" role="tab" aria-selected="true"
+                hx-get="{{ config_url }}&tab=classifications" hx-target="closest .cfg-panel" hx-swap="outerHTML">Classifications</button>
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=session" hx-target="closest .cfg-panel" hx-swap="outerHTML">Session</button>
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=identity" hx-target="closest .cfg-panel" hx-swap="outerHTML">Identity &amp; auth</button>
+    </nav>
+
+    {% if editable %}
+    <form hx-post="{{ self.nav_url("/servers/config/classifications") }}"
+          hx-target="find .class-result" hx-swap="innerHTML">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="server" value="{{ name }}">
+        <input type="hidden" name="base_hash" value="{{ base_hash }}">
+        <input type="hidden" name="n" value="{{ rows.len() }}">
+        <table class="data-table cfg-class-table">
+            <thead><tr><th>Tool</th><th>Risk</th><th>Side effects</th><th>PII</th></tr></thead>
+            <tbody>
+            {% for r in rows %}
+                {# id anchors a classification finding's `server.tool` back to its
+                   row (Contextual Assistant "Show on page"). Dotted
+                   `server.tool` form matches the finding's policy_id verbatim so
+                   dotted server names stay unambiguous. #}
+                <tr id="tool-{{ name }}.{{ r.name }}">
+                    <td class="mono">{{ r.name }}</td>
+                    <td>
+                        <input type="hidden" name="name_{{ loop.index0 }}" value="{{ r.name }}">
+                        <select name="risk_{{ loop.index0 }}" aria-label="Risk for {{ r.name }}">
+                            <option value="low"{% if r.risk == "low" %} selected{% endif %}>low</option>
+                            <option value="medium"{% if r.risk == "medium" %} selected{% endif %}>medium</option>
+                            <option value="high"{% if r.risk == "high" %} selected{% endif %}>high</option>
+                        </select>
+                    </td>
+                    {% if annotation_mode %}
+                    {# Annotation mode: the legacy flags are required-false in
+                       the manifest while the runtime conservatively enforces
+                       BOTH facts true until claim enforcement lands — show the
+                       enforced posture; a save writes the required-false
+                       values because no checkbox is submitted. #}
+                    <td>yes <span class="muted">(annotation mode: conservative)</span></td>
+                    <td>yes <span class="muted">(annotation mode: conservative)</span></td>
+                    {% else %}
+                    <td><input type="checkbox" name="se_{{ loop.index0 }}" aria-label="Side effects for {{ r.name }}"{% if r.side_effects %} checked{% endif %}></td>
+                    <td><input type="checkbox" name="pii_{{ loop.index0 }}" aria-label="PII for {{ r.name }}"{% if r.pii %} checked{% endif %}></td>
+                    {% endif %}
+                </tr>
+            {% endfor %}
+            {% if rows.is_empty() %}
+                <tr><td colspan="4" class="muted">No classified tools in the current <code>servers/*.yaml</code> set for this server.</td></tr>
+            {% endif %}
+            </tbody>
+        </table>
+        <div class="cfg-actions" style="margin-top: 12px; align-items: center">
+            <button type="submit" class="btn btn--sm btn-secondary">Save &amp; publish</button>
+            <span class="muted">Publishes a new version to <code>servers/*.yaml</code>; click <strong>Reload manifests</strong> (top of page) to apply it to the live gateway.</span>
+        </div>
+        <div class="class-result" aria-live="polite" style="margin-top: 10px"></div>
+    </form>
+    {% else %}
+    <p class="muted" style="margin: 0 0 10px">{{ readonly_note }}</p>
+    {% if admin_required %}<p class="muted" style="margin: 0 0 10px"><a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.nav_url("/servers") }}">Re-authorize with the admin scope</a> if your account is entitled to it.</p>{% endif %}
+    <table class="data-table cfg-class-table">
+        <thead><tr><th>Tool</th><th>Risk</th><th>Side effects</th><th>PII</th></tr></thead>
+        <tbody>
+        {% for r in rows %}
+            <tr id="tool-{{ name }}.{{ r.name }}">
+                <td class="mono">{{ r.name }}</td>
+                <td class="mono">{{ r.risk }}</td>
+                {% if annotation_mode %}
+                <td>yes <span class="muted">(annotation mode: conservative)</span></td>
+                <td>yes <span class="muted">(annotation mode: conservative)</span></td>
+                {% else %}
+                <td>{% if r.side_effects %}yes{% else %}<span class="muted">–</span>{% endif %}</td>
+                <td>{% if r.pii %}yes{% else %}<span class="muted">–</span>{% endif %}</td>
+                {% endif %}
+            </tr>
+        {% endfor %}
+        {% if rows.is_empty() %}
+            <tr><td colspan="4" class="muted">No classified tools for this server.</td></tr>
+        {% endif %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>

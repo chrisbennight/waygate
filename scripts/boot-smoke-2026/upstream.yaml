@@ -1,0 +1,21 @@
+# The stateless-generation fixture's manifest, baked alongside the legacy
+# one so a single gateway boot fronts both generations at once — the shape
+# the fleet actually runs, and cheaper than a second boot.
+#
+# NOTE the path: this SDK generation serves at `/mcp`, where the legacy
+# fixture serves at `/mcp/`. Each redirects to the other's form, and a 307 on
+# the dial is not something the gateway follows, so the trailing slash is
+# load-bearing per fixture rather than cosmetic.
+#
+# `protocol:` is absent on purpose. The default `auto` is what the fleet runs,
+# and the property under test is that `auto` reaches this peer on the NEW
+# generation — pinning `2026-07-28` here would assert the pin works, not the
+# negotiation.
+name: modern-smoke
+transport: http
+url: http://gw-smoke-upstream-2026:9000/mcp
+tools:
+  - name: ping
+    risk: low
+    side_effects: false
+    pii: false

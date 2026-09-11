@@ -1,0 +1,25 @@
+{
+  "name": "triage_example-fetch_browser.execute_script_denied",
+  "description": "example-fetch browser.execute_script is high-risk (JS execution = RCE surface on the crawl sandbox). The triage permit grants only example-fetch side-effecting tools BELOW high (`side_effects && risk != \"high\"`), so browser.execute_script falls outside it; the role holds no mcp:invoke:high scope and is not an admin — so browser.execute_script stays denied (no permit; the step-up re-eval still finds no underlying permit, so it is a flat Deny, not StepUpRequired).",
+  "principal": {
+    "sub": "svc:incident-triage",
+    "auth_method": "api_key",
+    "groups": ["incident-triage"],
+    "scopes": ["mcp:invoke", "mcp:read"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-fetch.browser.execute_script",
+    "risk": "high"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-fetch",
+    "name": "browser.execute_script",
+    "risk": "high",
+    "side_effects": true
+  },
+  "expected": {
+    "decision": "Deny"
+  }
+}

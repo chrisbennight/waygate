@@ -1,0 +1,25 @@
+{
+  "name": "high_risk_not_step_up_gated",
+  "description": "Decouple proof (counterpart to golden 04): step-up is keyed on the tool NAME (delete_dataset), not the risk tier. A high-risk tool that is NOT delete_dataset (example-operations.admin.rotate_credentials) carries no step-up forbid, so an mcp-admins caller WITHOUT mcp:invoke:high is allowed straight through on the role-allow path — `high` no longer implies a step-up prompt.",
+  "principal": {
+    "sub": "alice",
+    "auth_method": "oauth",
+    "groups": ["mcp-admins"],
+    "scopes": ["mcp:invoke", "mcp:read"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-operations.admin.rotate_credentials",
+    "risk": "high"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-operations",
+    "name": "admin.rotate_credentials",
+    "risk": "high",
+    "side_effects": true
+  },
+  "expected": {
+    "decision": "Allow"
+  }
+}

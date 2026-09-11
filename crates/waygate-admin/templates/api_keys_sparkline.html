@@ -1,0 +1,11 @@
+{% if total == 0 %}
+<svg class="sparkline" width="{{ width }}" height="{{ height }}" viewBox="0 0 {{ width }} {{ height }}" aria-label="No usage in the last 7 days">
+    <path d="{{ points }}" class="empty"/>
+</svg>
+<span class="usage-total">0</span>
+{% else %}
+<svg class="sparkline" width="{{ width }}" height="{{ height }}" viewBox="0 0 {{ width }} {{ height }}" aria-label="Usage sparkline">
+    <path d="{{ points|safe }}"/>
+</svg>
+<span class="usage-total">{{ total }}</span>
+{% endif %}

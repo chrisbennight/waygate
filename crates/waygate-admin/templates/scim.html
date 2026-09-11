@@ -1,0 +1,204 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Users</h1>
+    {% if insufficient_scope %}
+        <span class="chip chip--warn">insufficient scope</span>
+    {% else if !store_configured %}
+        <span class="chip chip--warn">SCIM store not configured</span>
+    {% endif %}
+</header>
+
+{# SCIM-provisioned identity directory. Read-only Users
+   section plus the provisioning-log timeline below; groups
+   now live on the unified /groups page (Identities revamp), so this
+   page only carries a pointer card to them. Mutations are IdP-driven
+   via the SCIM endpoints (/scim/v2/*). The per-row drawer (attributes
+   + membership) is deferred to a future slice. #}
+
+{% if insufficient_scope %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <p class="empty-state__title">Admin scope required</p>
+        <p class="empty-state__body">
+            This page requires the <code>mcp:admin</code> scope. Your current
+            dashboard session lacks it, so SCIM directory data is hidden.
+        </p>
+        <p class="empty-state__body" style="margin-top: 8px">
+            <a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/scim") }}">Re-authorize with the admin scope</a> if your account is entitled to it.
+        </p>
+    </div>
+</div>
+{% else if !store_configured %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <p class="empty-state__title">SCIM store not configured</p>
+        <p class="empty-state__body">
+            Set <code>GATEWAY_DATABASE_URL</code> and restart to enable the
+            <code>/scim/v2/*</code> provisioning endpoints.
+        </p>
+    </div>
+</div>
+{% else %}
+
+<section class="page-section" aria-label="SCIM users">
+    <h2 class="section-heading">Users <span class="count">{{ users.len() }}</span></h2>
+    <p class="section-kicker">IdP-provisioned users for this tenant (Configure-by-IdP)</p>
+    <div class="card card--table">
+        {% if users_load_error %}
+            <div class="empty-state empty-state--danger">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <p class="empty-state__title">Couldn't load users</p>
+                <p class="empty-state__body">See gateway logs for details. The provisioning-log section below may still be accurate.</p>
+            </div>
+        {% else if users.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#users"/></svg>
+                <p class="empty-state__title">No SCIM users yet</p>
+                <p class="empty-state__body">
+                    Users are provisioned by your IdP via <code>POST /scim/v2/Users</code> —
+                    the gateway is a replica, not the source of truth.
+                </p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="SCIM users">
+                <thead>
+                    <tr>
+                        <th>User name</th>
+                        <th>External ID</th>
+                        <th>Active</th>
+                        <th>Created</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for u in users %}
+                    <tr>
+                        <td>{{ u.user_name }}</td>
+                        <td class="mono">{% match u.external_id %}{% when Some with (e) %}{{ e }}{% when None %}—{% endmatch %}</td>
+                        <td>
+                            {% if u.active %}
+                                <span class="chip chip--ok">active</span>
+                            {% else %}
+                                <span class="chip">inactive</span>
+                            {% endif %}
+                        </td>
+                        <td class="mono">{{ u.created_at_abs }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% if users_truncated %}
+            <p class="table-hint">
+                Showing first {{ users.len() }}. Page the rest via
+                <code>GET /scim/v2/Users?startIndex=&amp;count=</code>.
+            </p>
+            {% endif %}
+        {% endif %}
+    </div>
+</section>
+
+<section class="page-section" aria-label="Groups moved">
+    <h2 class="section-heading">Groups</h2>
+    <div class="card">
+        <p class="form-hint">
+            SCIM-provisioned groups now live on the unified
+            <a href="{{ self.chrome.nav_url("/groups") }}">Groups</a> page (alongside
+            operator-defined local groups), each with its SCIM-user and api-key
+            member counts. SCIM group provisioning continues at
+            <code>POST /scim/v2/Groups</code>.
+        </p>
+    </div>
+</section>
+
+{% endif %}
+
+{# SCIM provisioning-log timeline. Independent of the
+   user/group store gate above — same Postgres pool wires all
+   three in production, but each is its own optional
+   AdminState field. Structured per-event entries complement
+   the audit_log entries the same mutation writes; this view
+   indexes by `(tenant, target)` for the "what did Okta push
+   for alice on Friday?" question. Rendered for any
+   sufficient-scope principal regardless of whether the
+   user/group store happens to be wired. #}
+{% if !insufficient_scope && provisioning_log_configured %}
+<section class="page-section" aria-label="SCIM provisioning log">
+    <h2 class="section-heading">Provisioning log <span class="count">{{ provisioning_log.len() }}</span></h2>
+    <p class="section-kicker">Latest SCIM mutations (writer hook on every POST/PUT/DELETE)</p>
+    <div class="card card--table">
+        {% if provisioning_log_load_error %}
+            <div class="empty-state empty-state--danger">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <p class="empty-state__title">Couldn't load the provisioning log</p>
+                <p class="empty-state__body">
+                    See gateway logs. The audit_log still records every SCIM
+                    mutation; only the structured timeline failed to render.
+                </p>
+            </div>
+        {% else if provisioning_log.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+                <p class="empty-state__title">No provisioning events yet</p>
+                <p class="empty-state__body">
+                    The writer hook fires on every successful SCIM
+                    <code>create</code> / <code>replace</code> / <code>delete</code>
+                    against <code>/scim/v2/Users</code> and <code>/scim/v2/Groups</code>.
+                </p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="SCIM provisioning log">
+                <thead>
+                    <tr>
+                        <th>When</th>
+                        <th>Target</th>
+                        <th>Action</th>
+                        <th>Outcome</th>
+                        <th>Actor</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for e in provisioning_log %}
+                    <tr>
+                        <td class="mono">{{ e.ts_abs }}</td>
+                        <td>
+                            <span class="chip">{{ e.target_kind }}</span>
+                            <span class="mono">{{ e.target_display }}</span>
+                        </td>
+                        <td class="mono">{{ e.action }}</td>
+                        <td>
+                            {% if e.outcome == "success" %}
+                                <span class="chip chip--ok">success</span>
+                            {% else %}
+                                <span class="chip chip--bad">error</span>
+                            {% endif %}
+                        </td>
+                        <td class="mono">{{ e.actor }}</td>
+                    </tr>
+                    {% match e.error_message %}
+                    {% when Some with (msg) %}
+                    <tr>
+                        <td colspan="5" class="mono state-err" style="padding-left: 24px; font-size: 11px">↳ {{ msg }}</td>
+                    </tr>
+                    {% when None %}
+                    {% endmatch %}
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% if provisioning_log_truncated %}
+            <p class="table-hint">
+                Showing latest {{ provisioning_log.len() }}.
+                Older entries are still in
+                <code>scim_provisioning_log</code> + the
+                <a href="{{ self.chrome.nav_url("/activity") }}?category=admin_mutation">Activity page</a>
+                (audit_log facet).
+            </p>
+            {% endif %}
+        {% endif %}
+    </div>
+</section>
+{% endif %}
+
+{% endblock %}

@@ -1,0 +1,11 @@
+# The stateless-generation fixture's dependency closure, locked. The pin is
+# the point: this fixture must speak 2026-07-28, so it tracks an SDK release
+# that does. Its sibling under scripts/boot-smoke pins the opposite property.
+[project]
+name = "boot-smoke-modern-upstream"
+version = "0"
+requires-python = ">=3.13"
+dependencies = ["mcp==2.0.0"]
+
+[tool.uv]
+package = false

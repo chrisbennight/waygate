@@ -1,0 +1,193 @@
+name: image
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  PG_IMAGE: postgres:17-alpine@sha256:979c4379dd698aba0b890599a6104e082035f98ef31d9b9291ec22f2b13059ca
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Avoid generating and caching incremental state for disposable CI builds.
+      CARGO_INCREMENTAL: '0'
+      # Keep the workspace's test binaries within hosted-runner storage limits.
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      AUDIT_DATABASE_URL: postgres://gateway:test@127.0.0.1:5432/gateway
+      GATEWAY_AS_DATABASE_URL: postgres://gateway:test@127.0.0.1:5432/gateway
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run repository source guards
+        run: |
+          set -euo pipefail
+          bash scripts/check-migrations.sh
+          bash scripts/check-migrations-immutable.sh --self-test
+          bash scripts/check-migrations-immutable.sh
+          bash scripts/check-docker-volume-cleanup.sh --self-test
+          bash scripts/check-docker-volume-cleanup.sh
+          bash scripts/check-policy-annotations.sh
+          bash scripts/check-synthetic-policy-fixtures.sh
+          bash scripts/check-no-local-escapers.sh
+          bash scripts/check-single-aead.sh
+          bash scripts/check-single-ip-policy.sh
+          bash scripts/check-no-local-ts-formatters.sh
+          bash scripts/check-shared-pagination-limits.sh
+          bash scripts/check-shared-http-client.sh
+          bash scripts/check-architecture-doc.sh
+          bash scripts/check-invocation-stages-doc.sh
+          bash scripts/check-dependency-direction.sh
+          bash scripts/check-doc-anchors.sh
+          bash scripts/check-shared-store-error.sh
+          bash scripts/check-godfile-ratchet.sh
+          bash scripts/check-capability-guards.sh
+          bash scripts/check-page-chrome.sh
+          bash scripts/check-admin-boilerplate.sh
+          bash scripts/check-env-parsing.sh
+          bash scripts/check-unused-deps.sh
+          bash scripts/check-no-plan-citations.sh
+          bash scripts/check-licenses.sh
+          node --test scripts/report-tool-context.test.mjs
+          python3 -m unittest discover -s scripts -p 'test_release_*.py'
+
+      - name: Install repository Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Install pinned cargo-nextest
+        run: bash scripts/ensure-nextest.sh
+
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Compile workspace tests
+        # Use the same Cargo graph for compilation and execution below.
+        run: cargo nextest run --workspace --locked --profile ci --no-run
+      - name: Check tool-definition size limits
+        # The workspace test build already compiles this example with the
+        # workspace's dependency features. Run it without another Cargo build.
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${CARGO_TARGET_DIR:-target}/debug/examples/tool_context_projection" |
+            node scripts/report-tool-context.mjs --budget scripts/fixtures/tool-context/standard-budget.json -
+
+      - name: Start test database
+        run: |
+          set -euo pipefail
+          name="gateway-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "PG_CONTAINER=$name" >> "$GITHUB_ENV"
+          sudo docker run -d --name "$name" -p 127.0.0.1:5432:5432 \
+            -e POSTGRES_USER=gateway \
+            -e POSTGRES_PASSWORD=test \
+            -e POSTGRES_DB=gateway \
+            "$PG_IMAGE" -c max_connections=200 >/dev/null
+          for _ in $(seq 1 60); do
+            if sudo docker exec "$name" pg_isready -h 127.0.0.1 -U gateway -d gateway >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          sudo docker logs "$name" >&2
+          exit 1
+
+      - name: Test workspace
+        run: cargo nextest run --workspace --locked --profile ci
+      - name: Test workspace documentation
+        run: cargo test --doc --workspace --locked
+
+      - name: Check workspace
+        run: cargo check --workspace
+
+      - name: Stop test database
+        if: always()
+        run: sudo docker rm -f -v "${PG_CONTAINER:-}" >/dev/null 2>&1 || true
+
+      - name: Report runner resources
+        if: always()
+        run: |
+          df -h .
+          free -h
+
+  verify-image:
+    if: github.event_name != 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate image event and release identity
+        run: python3 scripts/release_policy.py
+
+      - name: Resolve GHCR image destination
+        run: |
+          echo "GATEWAY_IMAGE_REPOSITORY=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Build image
+        run: ./build-docker.sh
+
+      - name: Smoke image
+        run: ./scripts/smoke-gateway-image.sh
+
+  publish-image:
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    concurrency:
+      group: gateway-image-publication
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate image event and release identity
+        run: python3 scripts/release_policy.py
+
+      - name: Resolve GHCR image destination
+        run: |
+          echo "GATEWAY_IMAGE_REPOSITORY=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Build image
+        run: ./build-docker.sh
+
+      - name: Smoke image
+        run: ./scripts/smoke-gateway-image.sh
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish verified image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 scripts/publish-gateway-image.py

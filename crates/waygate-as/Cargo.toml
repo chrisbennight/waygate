@@ -1,0 +1,54 @@
+[package]
+name = "waygate-as"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+waygate-core = { workspace = true, features = ["http"] }
+waygate-evidence.workspace = true
+waygate-oidc.workspace = true
+# EMA (Tier-C): the redeem path resolves a peer-minted ID-JAG's signing
+# keys via the federation peer JWKS cache. waygate-federation depends only on
+# waygate-core/waygate-oidc, so this introduces no dependency cycle.
+waygate-federation.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+
+tokio.workspace = true
+axum.workspace = true
+tower-http = { workspace = true, features = ["cors"] }
+reqwest.workspace = true
+url.workspace = true
+time.workspace = true
+
+sqlx.workspace = true
+moka = { workspace = true }
+uuid = { workspace = true }
+
+# AES-GCM sealing goes through waygate_oidc::aead (the one shared envelope);
+# this crate deliberately has no direct aes-gcm/rand dependency.
+base64.workspace = true
+sha2.workspace = true
+# EMA ID-JAG redeem: confidential-client authentication — argon2id for
+# client_secret verification, jsonwebtoken for private_key_jwt (client_assertion)
+# verification against a client's registered JWKS.
+argon2.workspace = true
+jsonwebtoken.workspace = true
+
+[dev-dependencies]
+# The oversize CIMD fetch test streams its body so the response is chunked with
+# no Content-Length, exercising the streaming counter rather than the pre-check.
+futures = { workspace = true }
+waygate-test-support.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
+tower = { workspace = true, features = ["util"] }
+waygate-storage = { path = "../waygate-storage" }

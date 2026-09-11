@@ -1,0 +1,14 @@
+# The fixture's dependency closure, locked. `mcp` is pinned to a release that
+# predates the stateless generation; uv.lock pins everything under it, so the
+# handshake the publish gate reads is reproducible from this commit rather
+# than from whatever the index resolved on the day of the build.
+[project]
+name = "boot-smoke-legacy-upstream"
+version = "0"
+requires-python = ">=3.13"
+dependencies = ["mcp==1.9.4"]
+
+[tool.uv]
+# Nothing here is installed as a package; this project exists only to own the
+# lock file for the fixture's dependencies.
+package = false

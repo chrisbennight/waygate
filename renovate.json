@@ -1,0 +1,155 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "enabledManagers": [
+    "cargo",
+    "dockerfile",
+    "github-actions"
+  ],
+  "github-actions": {
+    "fileMatch": [
+      "(^|/)\\.github/workflows/[^/]+\\.ya?ml$"
+    ]
+  },
+  "separateMajorMinor": true,
+  "separateMinorPatch": true,
+  "prConcurrentLimit": 5,
+  "branchConcurrentLimit": 5,
+  "labels": [
+    "dependencies"
+  ],
+  "ignorePaths": [
+    "target/**"
+  ],
+  "lockFileMaintenance": {
+    "enabled": false
+  },
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "enabled": true
+  },
+  "packageRules": [
+    {
+      "description": "Routine library feature updates are disabled; vulnerability alerts remain enabled. Container and workflow dependencies retain update checks. Coherent dependency groups describe compatibility constraints for deliberate upgrades.",
+      "matchManagers": [
+        "cargo",
+        "pep621",
+        "pip_requirements",
+        "gomod"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Require dashboard approval for major Rust crate updates",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Delay Rust crate updates",
+      "matchManagers": [
+        "cargo"
+      ],
+      "minimumReleaseAge": "7 days",
+      "addLabels": [
+        "rust-deps",
+        "age:7d"
+      ]
+    },
+    {
+      "description": "Override repo-wide separateMinorPatch=true for cargo so the grouping rule below produces one PR rather than two. Renovate does not allow combining matchUpdateTypes and separateMinorPatch in a single rule, so the override lives here in its own manager-scoped rule.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "separateMinorPatch": false
+    },
+    {
+      "description": "Batch cargo minor+patch into one weekly PR to throttle library churn. Major updates remain individual (gated by dashboard approval rule above).",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "cargo non-major",
+      "schedule": [
+        "before 5am on monday"
+      ]
+    },
+    {
+      "description": "Review OpenTelemetry and tracing integration upgrades together so all crates agree on the same trait versions. Grouping alone does not enforce compatibility; require dashboard approval for deliberate upgrades.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "opentelemetry",
+        "opentelemetry_sdk",
+        "opentelemetry-otlp",
+        "opentelemetry-proto",
+        "tracing-opentelemetry"
+      ],
+      "groupName": "opentelemetry coherent set",
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Review argon2 and password-hash upgrades together so password traits have a compatible version. Grouping alone does not enforce compatibility; require dashboard approval for deliberate upgrades.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "argon2",
+        "password-hash"
+      ],
+      "groupName": "argon2 / password-hash coherent set",
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Require dashboard approval for major Docker base image updates",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Delay Dockerfile base image updates",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "minimumReleaseAge": "7 days",
+      "addLabels": [
+        "first-party-build-input",
+        "age:7d"
+      ]
+    },
+    {
+      "description": "Delay repository Actions workflow updates",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchFileNames": [
+        ".github/workflows/**"
+      ],
+      "minimumReleaseAge": "7 days",
+      "addLabels": [
+        "ci-deps",
+        "age:7d"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{% extends "layout.html" %}
+{% block main %}
+<header class="page-header"><h1 class="page-title">Skills</h1><span class="chip">{{ source_health }}</span></header>
+<p class="section-kicker">Find reusable workflows and review what clients may receive. Changed content stays out of distribution until approved.</p>
+{% match error %}{% when Some with (message) %}<div class="callout callout--err" role="alert">{{ message }}</div>{% when None %}{% endmatch %}
+<p class="mono skills-source">{{ source }}</p>
+<form method="get" action="{{ self.chrome.nav_url("/skills") }}" class="form-field">
+    <label class="form-label" for="skill-search">Search skills</label><input class="form-input" id="skill-search" type="search" name="q" value="{{ query }}" placeholder="Name, description, or URI"><button class="btn" type="submit">Search</button>
+</form>
+{% if rows.is_empty() && error.is_none() %}<div class="empty-state"><p class="empty-state__title">No matching skills</p><p class="empty-state__body">Skills appear after their configured Git source has been verified.</p></div>{% endif %}
+<div class="card card--table"><table class="data-table" aria-label="Skills"><thead><tr><th>Skill</th><th>Candidate</th><th>Client delivery</th></tr></thead><tbody>
+{% for row in rows %}<tr><td><a href="{{ self.chrome.nav_url(row.url) }}">{{ row.name }}</a><p>{{ row.description }}</p></td><td><span class="chip">{{ row.status }}</span></td><td>{{ row.delivery }}</td></tr>{% endfor %}
+</tbody></table></div>
+{% match next %}{% when Some with (url) %}<a class="btn" href="{{ self.chrome.nav_url(url) }}">Next skills</a>{% when None %}{% endmatch %}
+{% endblock %}

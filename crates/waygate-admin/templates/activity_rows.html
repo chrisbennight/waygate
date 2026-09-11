@@ -1,0 +1,114 @@
+{% for e in events %}
+<tr data-audit-id="{{ e.id }}" tabindex="0" role="button" class="{% match e.group_band %}{% when Some with (b) %}trace-grouped trace-band-{{ b }}{% when None %}{% endmatch %}{% if highlight_new %} activity-row--new{% endif %}" aria-label="Event {{ e.action_label }} at {{ e.ts_abs }}">
+    <td class="mono" title="{{ e.ts_abs }}">{{ e.ts_rel }}</td>
+    <td>
+        <span class="truncate">{{ e.principal }}</span>
+        {% match e.fan_out_count %}{% when Some with (n) %} <span class="chip trace-fanout" title="Agent action fan-out: {{ n }} calls share this trace_id">⋔ {{ n }}</span>{% when None %}{% endmatch %}
+        {% match e.category %}
+        {% when Some with (c) %}
+            {% if c != "invocation" %} <span class="chip" title="Event category: {{ c }}">{{ c }}</span>{% endif %}
+        {% when None %}
+        {% endmatch %}
+        {# Migration 0046: the structured subject of the event (e.g. the API
+           key's sub for an ApiKeyMinted row). Rendered next to the acting
+           principal so lifecycle rows read "<operator> … <subject>" rather
+           than burying "what was acted on" in the drawer's reason field. #}
+        {% match e.target %}{% when Some with (t) %} <span class="mono faint" title="Subject of this event">{{ t }}</span>{% when None %}{% endmatch %}
+    </td>
+    <td class="mono">{% match e.server %}{% when Some with (s) %}{{ s }}{% when None %}–{% endmatch %}</td>
+    <td class="mono">
+        {% match e.tool %}{% when Some with (t) %}{{ t }}{% when None %}–{% endmatch %}{% match e.operation %}{% when Some with (o) %} <span class="mono" title="Operation this call selected">{{ o }}</span>{% when None %}{% endmatch %}
+        {% match e.pii %}{% when Some with (p) %}{% if p %} <span class="chip chip--warn" title="Tool returns or accepts PII">PII</span>{% endif %}{% when None %}{% endmatch %}
+    </td>
+    <td>
+        {# Outcome strings come from `AuditOutcome::as_str()` in
+           waygate-mcp::audit (success / denied / step_up_required /
+           execution_error). For invocation rows we use the operator-
+           friendly verb ALLOW; for non-invocation categories (policy
+           reload etc) we use OK so "successful policy reload" doesn't
+           read as a permission decision. Fail-closed pre-call rows are
+           also outcome=success + category=invocation but carry
+           reason="pre_call" — those render as a neutral INTENT chip so
+           an operator scanning the feed sees the new row class
+           distinctly from a dispatched-and-succeeded call. #}
+        {% if e.outcome == "success" %}
+            {% match e.reason %}
+            {% when Some with (r) %}
+                {% if r == "pre_call" %}<span class="chip" title="fail_closed: durable intent recorded before side-effecting dispatch">INTENT</span>
+                {% else %}
+                    {% match e.category %}
+                    {% when Some with (c) %}
+                        {% if c == "invocation" %}<span class="chip chip--ok">ALLOW</span>
+                        {% else %}<span class="chip chip--ok">OK</span>{% endif %}
+                    {% when None %}<span class="chip chip--ok">ALLOW</span>
+                    {% endmatch %}
+                {% endif %}
+            {% when None %}
+                {% match e.category %}
+                {% when Some with (c) %}
+                    {% if c == "invocation" %}<span class="chip chip--ok">ALLOW</span>
+                    {% else %}<span class="chip chip--ok">OK</span>{% endif %}
+                {% when None %}<span class="chip chip--ok">ALLOW</span>
+                {% endmatch %}
+            {% endmatch %}
+        {% else if e.outcome == "step_up_required" %}<span class="chip chip--warn">STEP_UP</span>
+        {% else if e.outcome == "execution_error" %}<span class="chip chip--bad">ERROR</span>
+        {% else if e.outcome == "denied" %}<span class="chip chip--bad">DENY</span>
+        {% else %}<span class="chip">{{ e.outcome }}</span>{% endif %}
+    </td>
+    <td>
+        {% match e.risk %}
+        {% when Some with (r) %}
+            {% if r == "high" %}<span class="chip chip--bad">high</span>
+            {% else if r == "medium" %}<span class="chip chip--warn">medium</span>
+            {% else %}<span class="chip">low</span>{% endif %}
+        {% when None %}
+        {% endmatch %}
+    </td>
+    {# Compare actions column. In normal mode, each
+       row renders a "Pick" link that pins this row's id via
+       `?compare=<id>`. In compare-picking mode (parent page's
+       `compare_pinned_id` is Some), the pinned row marks
+       itself + every other row renders a "Compare with pinned"
+       link → /activity/compare?a=<pinned>&b=<this>. The
+       parent struct (ActivityPage / ActivityRows) exposes the
+       same fields so the fragment renders identically whether
+       called as the full page or as an htmx swap. #}
+    <td class="compare-actions" onclick="event.stopPropagation()">
+        {% match self.compare_pinned_id %}
+        {% when Some with (pinned_id) %}
+            {% if e.id == *pinned_id %}
+                <span class="compare-pinned-marker" title="Pinned for compare">pinned</span>
+            {% else %}
+                {% match self.compare_link_base %}
+                {% when Some with (base) %}
+                    <a class="compare-link" href="{{ base }}{{ e.id }}">Compare with pinned</a>
+                {% when None %}
+                {% endmatch %}
+            {% endif %}
+        {% when None %}
+            <a class="compare-link" href="{{ self.compare_pick_base }}{{ e.id }}">Pick</a>
+        {% endmatch %}
+    </td>
+</tr>
+{% endfor %}
+{# Suppress the empty-state row for a live-tail prepend delta — an
+   empty delta (no new rows since the last poll) must not prepend a
+   "No events" row to a feed that already has rows. #}
+{% if events.is_empty() && !highlight_new %}
+<tr><td colspan="7" class="empty">No events match these filters.</td></tr>
+{% endif %}
+{% match next_after_id %}
+{% when Some with (id) %}
+<tr class="load-more-row">
+    <td colspan="7">
+        <button class="btn btn-secondary" type="button"
+                hx-get="{{ self.nav_url("/activity/rows") }}?after_id={{ id }}{{ filter_qs|safe }}"
+                hx-target="closest tr"
+                hx-swap="outerHTML">
+            Load 50 more
+        </button>
+    </td>
+</tr>
+{% when None %}
+{% endmatch %}

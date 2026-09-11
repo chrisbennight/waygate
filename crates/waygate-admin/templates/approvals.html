@@ -1,0 +1,250 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Approvals</h1>
+    {% if insufficient_scope %}
+        <span class="chip chip--warn">insufficient scope</span>
+    {% else if !store_configured %}
+        <span class="chip chip--warn">catalog store not configured</span>
+    {% endif %}
+</header>
+
+{# HITL approval grants. An admin pre-mints a grant
+   keyed on (tenant, principal_sub, tool_id, argument_hash); the
+   user's matching invocation consumes it; otherwise the call errors
+   with ApprovalRequired. This page is the operator-visible
+   projection of the `approval_grants` table. Active grants carry an
+   inline Revoke; minting still goes through
+   `/api/v1/admin/approval_grants/*` (the composer is a follow-up);
+   live WebSocket subscription for in-progress blocked invocations
+   is also a follow-up. #}
+
+{% if insufficient_scope %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <p class="empty-state__title">Admin scope required</p>
+        <p class="empty-state__body">
+            This page requires the <code>mcp:admin</code> scope. Your current
+            dashboard session lacks it, so approval-grant data is hidden. Ask
+            an operator to grant your account <code>mcp:admin</code> (or sign
+            in with a session that already has it).
+        </p>
+        <p class="empty-state__body" style="margin-top: 8px">
+            <a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/approvals") }}">Re-authorize with the admin scope</a> if your account is entitled to it.
+        </p>
+    </div>
+</div>
+{% else if !store_configured %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <p class="empty-state__title">Catalog store not configured</p>
+        <p class="empty-state__body">
+            Set <code>GATEWAY_DATABASE_URL</code> and restart to enable. The
+            HITL approval-required Cedar rule still gates calls, but operators
+            can't mint or revoke grants until the store is wired.
+        </p>
+    </div>
+</div>
+{% else %}
+
+{% match appr_error %}
+{% when Some with (msg) %}
+    <div class="form-error" role="alert" style="margin-bottom: 12px">{{ msg }}</div>
+{% when None %}
+{% endmatch %}
+
+{% match error %}
+{% when Some with (msg) %}
+    <div class="card">
+        <div class="empty-state empty-state--danger">
+            <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+            <p class="empty-state__title">Couldn't load approval grants</p>
+            <p class="empty-state__body">{{ msg }}</p>
+        </div>
+    </div>
+{% when None %}
+
+<section class="page-section" aria-label="Active grants">
+    <h2 class="section-heading">Active <span class="count">{{ active.len() }}</span></h2>
+    <div class="card card--table">
+        {% if active.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#check-circle"/></svg>
+                <p class="empty-state__title">No active grants</p>
+                <p class="empty-state__body">
+                    Nothing is currently pre-authorized for a waiting caller. A
+                    grant is minted from the REST surface
+                    (<code>/api/v1/admin/approval_grants</code>) bound to the
+                    exact call shape the operator vetted; an in-page composer is
+                    a follow-up.
+                </p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Active approval grants">
+                <thead>
+                    <tr>
+                        <th>Principal</th>
+                        <th>Server</th>
+                        <th>Tool</th>
+                        <th title="Behavior-and-argument binding digest (approval_binding_hash)">Binding hash</th>
+                        <th>Approver</th>
+                        <th>Reason</th>
+                        <th>Granted</th>
+                        <th>Expires</th>
+                        <th></th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for g in active %}
+                    <tr id="grant-{{ g.id }}">
+                        <td>
+                            {{ g.principal_sub }}
+                            {% match g.client_id %}{% when Some with (c) %}<br><span class="hint mono">{{ c }}</span>{% when None %}{% endmatch %}
+                        </td>
+                        <td class="mono">{{ g.server_id }}</td>
+                        <td class="mono">{{ g.tool_id }}</td>
+                        <td class="cell-hash" title="{{ g.argument_hash }}">{{ g.argument_hash }}</td>
+                        <td>{{ g.approver }}</td>
+                        <td>{% match g.reason %}{% when Some with (r) %}{{ r }}{% when None %}—{% endmatch %}</td>
+                        <td class="mono">{{ g.created_at_abs }}</td>
+                        <td class="mono">{{ g.expires_at_abs }}</td>
+                        <td><span class="chip chip--ok">active</span></td>
+                        <td class="row-actions">
+                            <form method="post"
+                                  action="{{ self.chrome.nav_url(g.revoke_rel.as_str()) }}"
+                                  onsubmit="return confirm('Revoke this active grant? The caller will get ApprovalRequired on their next matching invocation.');">
+                                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                <button type="submit" class="btn btn-danger" aria-label="Revoke active grant for {{ g.principal_sub }}">Revoke</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+</section>
+
+<section class="page-section" aria-label="Expired grants">
+    <h2 class="section-heading">Expired (unused) <span class="count">{{ expired.len() }}</span></h2>
+    <div class="card card--table">
+        {% if expired_load_error %}
+            <div class="empty-state empty-state--danger">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <p class="empty-state__title">Couldn't load expired grants</p>
+                <p class="empty-state__body">See gateway logs. The Active and closed sections may still be accurate.</p>
+            </div>
+        {% else if expired.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#circle"/></svg>
+                <p class="empty-state__title">No expired grants</p>
+                <p class="empty-state__body">No grants timed out without being used — a sign TTLs are sized for how fast callers claim them.</p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Expired unused grants">
+                <thead>
+                    <tr>
+                        <th>Principal</th>
+                        <th>Server</th>
+                        <th>Tool</th>
+                        <th title="Behavior-and-argument binding digest (approval_binding_hash)">Binding hash</th>
+                        <th>Approver</th>
+                        <th>Granted</th>
+                        <th>Expired at</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for g in expired %}
+                    <tr id="grant-{{ g.id }}">
+                        <td>{{ g.principal_sub }}</td>
+                        <td class="mono">{{ g.server_id }}</td>
+                        <td class="mono">{{ g.tool_id }}</td>
+                        <td class="cell-hash" title="{{ g.argument_hash }}">{{ g.argument_hash }}</td>
+                        <td>{{ g.approver }}</td>
+                        <td class="mono">{{ g.created_at_abs }}</td>
+                        <td class="mono">{{ g.expires_at_abs }}</td>
+                        <td><span class="chip chip--warn">expired</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+</section>
+
+<section class="page-section" aria-label="Recently closed grants">
+    <h2 class="section-heading">Recently closed <span class="count">{{ history.len() }}</span></h2>
+    <div class="card card--table">
+        {# A "closed" row is one where the catalog has set
+           consumed_at — either because the caller's matching
+           invocation consumed the grant, OR because an operator
+           revoked it via DELETE /api/v1/admin/approval_grants/{id}
+           (the store reuses consumed_at = now() for both). Until
+           the schema gains a distinct revoked-at column we can't
+           tell the two cases apart on the row, so the section
+           heading + chip use "closed" rather than implying every
+           row was caller-used. #}
+        {% if history_load_error %}
+            <div class="empty-state empty-state--danger">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <p class="empty-state__title">Couldn't load closed grants</p>
+                <p class="empty-state__body">See gateway logs. The Active and expired sections may still be accurate.</p>
+            </div>
+        {% else if history.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+                <p class="empty-state__title">No closed grants on record</p>
+                <p class="empty-state__body">Consumed and revoked grants show up here once any have closed.</p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Recently closed approval grants">
+                <thead>
+                    <tr>
+                        <th>Principal</th>
+                        <th>Server</th>
+                        <th>Tool</th>
+                        <th title="Behavior-and-argument binding digest (approval_binding_hash)">Binding hash</th>
+                        <th>Approver</th>
+                        <th>Closed at</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for g in history %}
+                    <tr id="grant-{{ g.id }}">
+                        <td>{{ g.principal_sub }}</td>
+                        <td class="mono">{{ g.server_id }}</td>
+                        <td class="mono">{{ g.tool_id }}</td>
+                        <td class="cell-hash" title="{{ g.argument_hash }}">{{ g.argument_hash }}</td>
+                        <td>{{ g.approver }}</td>
+                        <td class="mono">{% match g.consumed_at_abs %}{% when Some with (t) %}{{ t }}{% when None %}—{% endmatch %}</td>
+                        <td><span class="chip">closed</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% if history_truncated %}
+            <p class="table-hint">
+                Showing first {{ history.len() }}; older closed
+                grants live in the catalog. Pull the full history
+                via
+                <code>GET /api/v1/admin/approval_grants?include_consumed=true</code>
+                (returns up to 200 rows ordered by created_at DESC
+                — paginate by narrowing <code>principal_sub</code>
+                or <code>tool</code>). Approval-grant lifecycle
+                events are not yet routed to the Activity audit
+                stream, so Activity will not show them.
+            </p>
+            {% endif %}
+        {% endif %}
+    </div>
+</section>
+
+{% endmatch %}
+{% endif %}
+{% endblock %}

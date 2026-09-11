@@ -1,0 +1,23 @@
+[package]
+name = "waygate-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Canonical LLM request/response shapes the loop drives (messages, content
+# parts, tool defs). The crate is deliberately decoupled from the dispatcher
+# and the invocation pipeline behind the trait seams in `lib.rs`; the real
+# impls (over LlmDispatcher + SharedInvocation + built-ins) live in
+# waygate-agent-runtime.
+waygate-llm-translate.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Test-only: build `CanonicalTool.parameters` JSON-schema fixtures via `json!`.
+serde_json.workspace = true

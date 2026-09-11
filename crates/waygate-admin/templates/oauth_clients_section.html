@@ -1,0 +1,29 @@
+{# OAuth-sessions section. Three states:                                          #}
+{#  * !enabled            — GATEWAY_AS_ENABLED off; hide entirely.               #}
+{#  * enabled && !is_admin — caller lacks mcp:admin; show "no access" card.       #}
+{#  * enabled && is_admin  — render the live-sessions table.                     #}
+{# This section lives only on the /sessions page (split off from the            #}
+{# API-keys page), so the step-up "Re-authorize" link returns to /sessions — the #}
+{# page the non-admin was actually trying to view, not the old /identities.      #}
+{% if enabled && !is_admin %}
+<section aria-label="OAuth sessions">
+    <h2 class="card-title">OAuth sessions</h2>
+    <div class="card">
+        <div class="empty">
+            You need <code>mcp:admin</code> to view OAuth sessions.
+            <a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.nav_url("/sessions") }}">Re-authorize
+            with the admin scope</a>.
+        </div>
+    </div>
+</section>
+{% else if enabled %}
+<section aria-label="OAuth sessions">
+    <h2 class="card-title">OAuth sessions</h2>
+    <div id="oauth-sessions-section">
+        {# Inner partial owns the error/empty/list match — same template   #}
+        {# the post-revoke htmx swap renders, so the two paths agree on   #}
+        {# what an errored DB state looks like.                           #}
+        {% include "oauth_clients_table.html" %}
+    </div>
+</section>
+{% endif %}

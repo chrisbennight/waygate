@@ -1,0 +1,71 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Chat</h1>
+    {% if !invocation_ready %}
+        <span class="chip chip--warn">inference not configured</span>
+    {% endif %}
+</header>
+
+{# Minimal streaming chatbot to TEST a configured model. Runs as the logged-in
+   session principal (Cedar authorizes the model resource, budget, audit) through the same
+   invocation pipeline as /v1/chat/completions. The conversation transcript is
+   held client-side (never stored by this page); the call's data-retention is
+   identical to a /v1 call (usage/audit rows, and the completion cache for a
+   cache-enabled model). See src/dashboard_chat.rs. #}
+
+{% if !invocation_ready %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#message-square"/></svg>
+        <p class="empty-state__title">Inference is not configured</p>
+        <p class="empty-state__body">
+            This gateway has no LLM invocation service wired (no model catalog /
+            database in this environment), so there is nothing to chat with.
+        </p>
+    </div>
+</div>
+{% else %}
+<section class="page-section">
+    <div class="card chat"
+         data-chat
+         data-stream-url="{{ self.chrome.nav_url("/chat/stream") }}"
+         data-csrf="{{ chrome.csrf_token }}"
+         data-login-url="/admin/login">
+        <div class="chat-toolbar">
+            <label class="chat-model-label" for="chat-model">Model</label>
+            {% if models.is_empty() %}
+                <input id="chat-model" class="chat-model" type="text"
+                       placeholder="model id (e.g. claude-opus-4-8)" autocomplete="off">
+            {% else %}
+                <select id="chat-model" class="chat-model">
+                    {% for m in models %}
+                    <option value="{{ m }}">{{ m }}</option>
+                    {% endfor %}
+                </select>
+            {% endif %}
+            <button type="button" class="btn btn--sm" data-chat-clear>Clear</button>
+        </div>
+
+        <div class="chat-log" data-chat-log aria-live="polite">
+            <div class="empty-state" data-chat-empty>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#message-square"/></svg>
+                <p class="empty-state__title">No messages yet</p>
+                <p class="empty-state__body">Pick a model and send a message to test it. Replies stream in token by token.</p>
+            </div>
+        </div>
+
+        <form class="chat-composer" data-chat-form>
+            <textarea class="chat-input" data-chat-input rows="2"
+                      placeholder="Message… (Enter to send, Shift+Enter for newline)"></textarea>
+            <button type="submit" class="btn btn-primary" data-chat-send>Send</button>
+        </form>
+    </div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/admin/static/js/chat.js" defer></script>
+{% endblock %}

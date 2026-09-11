@@ -1,0 +1,280 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/waygate-server",
+    "crates/waygate-mcp",
+    "crates/waygate-evidence",
+    "crates/waygate-upstream",
+    "crates/waygate-oidc",
+    "crates/waygate-authz",
+    "crates/waygate-admin",
+    "crates/waygate-storage",
+    "crates/waygate-telemetry",
+    "crates/waygate-as",
+    "crates/waygate-apikeys",
+    "crates/waygate-catalog",
+    "crates/waygate-policy",
+    "crates/waygate-core",
+    "crates/waygate-invocation",
+    "crates/waygate-llm-credentials",
+    "crates/waygate-llm-dispatch",
+    "crates/waygate-llm-discovery",
+    "crates/waygate-llm-providers",
+    "crates/waygate-llm-translate",
+    "crates/waygate-scim",
+    "crates/waygate-rbac",
+    "crates/waygate-tenants",
+    "crates/waygate-quota",
+    "crates/waygate-dashboard-stores",
+    "crates/waygate-codemode",
+    "crates/waygate-changeset",
+    "crates/waygate-agent",
+    "crates/waygate-agent-runtime",
+    "crates/waygate-manifest-store",
+    "crates/waygate-manifest-types",
+    "crates/waygate-test-support",
+    "crates/waygate-federation",
+    "crates/waygate-transfer",
+    "crates/waygate-skills",
+    "crates/waygate-test-client",
+    "crates/waygate-files-helper",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# Async runtime & HTTP
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "io-util", "time", "sync", "fs", "process"] }
+axum = { version = "0.8", features = ["macros", "json", "tokio", "multipart"] }
+axum-server = "0.8"
+tower = { version = "0.5", features = ["util", "make"] }
+tower-http = { version = "0.6", features = ["trace", "timeout", "cors", "compression-gzip", "set-header", "fs", "normalize-path"] }
+rustls = { version = "0.23", default-features = false }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+rcgen = { version = "0.14", default-features = false }
+
+# Errors / tracing
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+
+# OpenTelemetry — pinned to a coherent 0.32 set (tracing-opentelemetry 0.33
+# targets opentelemetry 0.32; opentelemetry-otlp/-proto 0.32 still build on
+# tonic 0.14, so the waygate-telemetry dev-dep tonic pin is unchanged).
+# Renovate handles future bumps under the standard 7-day delay — bump the four
+# opentelemetry* crates and tracing-opentelemetry together (a single-crate bump
+# splits the graph across two opentelemetry versions and fails to compile).
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "trace"] }
+tracing-opentelemetry = "0.33"
+prometheus = { version = "0.14", default-features = false }
+
+# Misc
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
+time = { version = "0.3", features = ["serde", "macros", "formatting", "parsing"] }
+# Exact decimal for LLM cost math (matches the NUMERIC cost columns; sqlx
+# decodes NUMERIC↔Decimal via its `rust_decimal` feature above).
+rust_decimal = { version = "1", default-features = false, features = ["std"] }
+async-trait = "0.1"
+futures = "0.3"
+# Lock-free atomic swap of the upstream pool's `entries` map so hot
+# add/remove of upstreams publishes a new map without blocking the
+# dispatch hot path (read via `load`, swapped under a reload mutex).
+arc-swap = "1"
+url = { version = "2", features = ["serde"] }
+bytes = "1"
+zeroize = "1"
+subtle = "2"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "multipart"] }
+tempfile = "3"
+tokio-util = { version = "0.7", features = ["rt"] }
+schemars = "1"
+# jsonwebtoken 10 made the crypto backend selection explicit: exactly one of
+# `rust_crypto` / `aws_lc_rs` must be enabled. We pick `rust_crypto` (pure Rust:
+# ed25519-dalek for EdDSA, the `rsa`/`p256`/`p384`/`sha2` RustCrypto crates for
+# RSA/ECDSA verification).
+#
+# History — prod outage 2026-06-10, bisected to PR #289: that PR bumped
+# jsonwebtoken 9 -> 10 and selected `aws_lc_rs`, which made *jsonwebtoken itself*
+# perform JWT crypto through the native aws-lc-rs library. The first JWT operation
+# during the AS/identity boot phase then wedged the process before it bound :8080
+# (every thread parked on futex, no log, no audit rows) under the hardened
+# distroless runtime (read_only rootfs, cap_drop ALL, no-new-privileges). The
+# prior build (273fc5a, jsonwebtoken 9) booted and served for ~6 h; #289's only
+# code delta was this bump.
+#
+# NOTE: aws-lc-rs is still LINKED into the binary — `rustls` carries both `ring`
+# and `aws_lc_rs` features (via reqwest/hyper-rustls/sqlx/axum-server) and that
+# was already true in the known-good 273fc5a build, where it was harmless because
+# those callers pass an explicit provider and jsonwebtoken 9 used `ring` directly.
+# So the fix is NOT "remove aws-lc-rs from the tree" (we can't, cheaply) — it is
+# "stop jsonwebtoken from exercising aws-lc-rs", which `rust_crypto` does, exactly
+# matching the working pre-#289 topology. No `CryptoProvider::install_default()` is
+# added: 273fc5a proves the rustls stack is fine without one, so adding it would be
+# an unvalidated deviation from the known-good baseline.
+#
+# RSA here is verify-only (IdP/peer public keys), so the unpatched RustCrypto `rsa`
+# Marvin timing flaw (RUSTSEC-2023-0071, a private-key recovery attack) does not
+# apply; the only real cost is a duplicate `rand 0.8` in the tree. The
+# per-algorithm sign/verify round-trip tests in
+# `crates/waygate-oidc/tests/suite/crypto_backend_algorithms.rs` pin that the chosen
+# backend can actually run every algorithm the gateway uses, so a future backend
+# change that drops one cannot silently re-break boot.
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "rust_crypto"] }
+cedar-policy = "4"
+# Cedar parse errors implement `miette::Diagnostic`; we read their source spans
+# (LabeledSpan offsets) to surface line/col parse diagnostics for the policy
+# editor's lint gutter (policy-edit PR D). Core trait only — no fancy reporter.
+miette = { version = "7", default-features = false }
+http = "1"
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+base64 = "0.22"
+# Dashboard auth: session cookie encryption (AES-256-GCM) and CSPRNG for
+# PKCE verifiers + session keys.
+aes-gcm = "0.10"
+rand = "0.10"
+# Existing Git repositories may use SHA-1 object IDs. This verifies the
+# repository's standard object framing; SHA-256 remains the content digest for
+# gateway authorization and audit evidence.
+sha1 = "0.11"
+sha2 = "0.11"
+# Phase 5: BLAKE3 keys the per-principal exact-match completion cache.
+blake3 = "1"
+sqlx = { version = "0.9", default-features = false, features = [
+    # sqlx 0.9 split the old combined `runtime-tokio-rustls` feature into a
+    # runtime feature + a separate TLS feature. `tls-rustls-ring` is the
+    # ring-backed crypto provider that matches the old default.
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "postgres",
+    "uuid",
+    "time",
+    "migrate",
+    "macros",
+    # Phase 3.3a-iii: decode the NUMERIC cost columns (llm_models / llm_usage)
+    # as exact `rust_decimal::Decimal`. Money math must not carry binary-
+    # fraction error — see the cost-column comments in 0047/0048.
+    "rust_decimal",
+] }
+# In-memory cache with HTTP-cache semantics for the CIMD document fetcher.
+moka = { version = "0.12", features = ["future"] }
+
+# API-key secret storage. Argon2id (OWASP-recommended). `password-hash` is the
+# RustCrypto string-serialization layer argon2 uses for the `$argon2id$…` format.
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
+password-hash = { version = "0.5", default-features = false, features = ["alloc", "rand_core"] }
+
+# MCP SDK
+rmcp = { version = "3.0", default-features = false }
+
+# Dashboard (server-rendered). askama 0.14 compiles templates into Rust
+# structs at build time — any missing field or typo is a cargo-check error.
+askama = "0.16"
+
+# OpenAPI generation for /api/v1. `utoipa` derives JSON Schema from our DTOs
+# and path macros; the spec is returned as JSON from a dedicated route. Pinned
+# to the 5.x line.
+utoipa = { version = "5", features = ["axum_extras", "uuid", "time"] }
+
+# Full-text search — BM25 ranking for SEP #1888 `searchTools`. In-memory RAM
+# directory is populated from the upstream tool catalog at boot and on reload.
+tantivy = "0.26"
+
+# Phase 9 PR9-c1: JSON-schema validator for the
+# InvocationService `validate_output` stage. Validates tool
+# response payloads against `mcp_tool_versions.output_schema`
+# (the schema the upstream advertised + an operator approved).
+# Pinned to the 0.46 line; supports JSON Schema Draft 7 + 2020-12.
+jsonschema = { version = "0.46", default-features = false }
+
+# Phase 9 PR9-c2: response-inspector pattern matching.
+# `regex` is RE2-derivative — no backtracking, so the worst-
+# case match time is O(n) regardless of input. Critical for an
+# inspector that runs on every upstream response.
+regex = "1"
+# Embedded ES2020 runtime for the fresh-process Code Mode executor. No loader
+# or web/system compatibility features are enabled, so JavaScript receives
+# only the connector RPC function installed by the runner.
+rquickjs = { version = "0.12.1", default-features = false }
+# Linux syscall allowlist for the external Code Mode process. Maintained by
+# rust-vmm and linked only into the Linux gateway target.
+seccompiler = { version = "0.5.0", default-features = false }
+libc = "0.2"
+rustix = { version = "1", features = ["fs"] }
+
+# CLI tooling — only the test client consumes these, but they live here so
+# version bumps touch one file.
+clap = { version = "4", features = ["derive", "env"] }
+dialoguer = "0.12"
+open = "5"
+dirs = "5"
+
+# Win32 access-control calls, for the `mcp-files` helper's owner-only signing
+# key. Windows has no mode bits, so the guarantee the Unix path gets from
+# `0600` has to be spelled as an access-control list. Already in the tree
+# transitively; naming it here makes the direct use explicit.
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+] }
+
+# Internal crates
+waygate-mcp = { path = "crates/waygate-mcp" }
+waygate-evidence = { path = "crates/waygate-evidence" }
+waygate-upstream = { path = "crates/waygate-upstream" }
+waygate-oidc = { path = "crates/waygate-oidc" }
+waygate-authz = { path = "crates/waygate-authz" }
+waygate-admin = { path = "crates/waygate-admin" }
+waygate-scim = { path = "crates/waygate-scim" }
+waygate-rbac = { path = "crates/waygate-rbac" }
+waygate-tenants = { path = "crates/waygate-tenants" }
+waygate-quota = { path = "crates/waygate-quota" }
+waygate-storage = { path = "crates/waygate-storage" }
+waygate-dashboard-stores = { path = "crates/waygate-dashboard-stores" }
+waygate-codemode = { path = "crates/waygate-codemode" }
+waygate-changeset = { path = "crates/waygate-changeset" }
+waygate-agent = { path = "crates/waygate-agent" }
+waygate-agent-runtime = { path = "crates/waygate-agent-runtime" }
+waygate-manifest-store = { path = "crates/waygate-manifest-store" }
+waygate-manifest-types = { path = "crates/waygate-manifest-types" }
+waygate-test-support = { path = "crates/waygate-test-support" }
+waygate-federation = { path = "crates/waygate-federation" }
+waygate-transfer = { path = "crates/waygate-transfer" }
+waygate-telemetry = { path = "crates/waygate-telemetry" }
+waygate-as = { path = "crates/waygate-as" }
+waygate-apikeys = { path = "crates/waygate-apikeys" }
+waygate-catalog = { path = "crates/waygate-catalog" }
+waygate-policy = { path = "crates/waygate-policy" }
+waygate-core = { path = "crates/waygate-core" }
+waygate-skills = { path = "crates/waygate-skills" }
+waygate-invocation = { path = "crates/waygate-invocation" }
+waygate-llm-credentials = { path = "crates/waygate-llm-credentials" }
+waygate-llm-dispatch = { path = "crates/waygate-llm-dispatch" }
+waygate-llm-discovery = { path = "crates/waygate-llm-discovery" }
+waygate-llm-providers = { path = "crates/waygate-llm-providers" }
+waygate-llm-translate = { path = "crates/waygate-llm-translate" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+opt-level = 3
+
+[profile.dev]
+opt-level = 0
+debug = 1

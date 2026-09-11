@@ -1,0 +1,243 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Overview</h1>
+    <div class="page-header__actions">
+        <a class="btn btn-secondary" href="{{ self.chrome.nav_url("/") }}" aria-label="Refresh">
+            <svg width="16" height="16" aria-hidden="true"><use href="/admin/static/lucide.svg#refresh"/></svg>
+            Refresh
+        </a>
+    </div>
+</header>
+
+{# the day's summary. Status sentence FIRST (the page
+   must lead with it): the operator's "is anything wrong?" answered in
+   prose, each clause a link. When break-glass is active its loud red
+   banner follows immediately below — the sentence's attention clause
+   already counts it (it's a critical attention item), so the sentence
+   still leads. The attention queue renders only when non-empty. #}
+<p class="status-sentence">
+    {% if upstreams_total == 0 %}
+        No upstreams configured yet.
+    {% else if upstreams_down == 0 && upstreams_degraded == 0 %}
+        All <a href="{{ self.chrome.nav_url("/servers") }}">{{ upstreams_total }} upstreams</a> healthy.
+    {% else %}
+        {% if upstreams_down > 0 %}<span class="state-err">{{ upstreams_down }} down</span>{% endif %}{% if upstreams_down > 0 && upstreams_degraded > 0 %} and {% endif %}{% if upstreams_degraded > 0 %}<span class="chip chip--warn">{{ upstreams_degraded }} degraded</span>{% endif %} of <a href="{{ self.chrome.nav_url("/servers") }}">{{ upstreams_total }} upstreams</a>.
+    {% endif %}
+    {% if attention_items.is_empty() %}
+        Nothing needs your attention.
+    {% else %}
+        <a href="#attention">{{ attention_items.len() }} item{% if attention_items.len() != 1 %}s{% endif %} need{% if attention_items.len() == 1 %}s{% endif %} attention.</a>
+    {% endif %}
+    {% if !audit_available %}
+        <span class="muted">Audit store not configured.</span>
+    {% endif %}
+</p>
+
+{# Red alarm banner for active break-glass tokens. Operator-only — the
+   handler skips the underlying fetch when the session lacks mcp:admin, so
+   this branch never fires for a non-admin SSO user. `saturated` flips the
+   copy to "N+" when the dashboard's per-tenant fetch limit was hit.
+   Rendered right after the status sentence so the page still leads with
+   the sentence while the alarm stays the first thing below it. #}
+{% match active_break_glass %}
+{% when Some with (n) %}
+<div class="bg-banner" role="status" aria-live="polite">
+    <svg width="18" height="18" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+    <div>
+        <strong>{% if active_break_glass_saturated %}{{ n }}+{% else %}{{ n }}{% endif %}</strong>
+        active break-glass token{% if *n != 1usize %}s{% endif %} in this tenant —
+        these bypass the policy gate.
+        <a href="{{ self.chrome.nav_url("/break_glass") }}">Review on the Break-glass page</a>.
+    </div>
+</div>
+{% when None %}
+{% endmatch %}
+
+{% if !attention_items.is_empty() %}
+<section class="page-section" aria-label="Attention queue" id="attention">
+    <h2 class="section-heading">Needs attention</h2>
+    <div class="card card--table">
+        <ul class="attn-list">
+            {% for item in attention_items %}
+            <li>
+                <span class="attn-chip attn-chip--{{ item.severity }}">{{ item.severity }}</span>
+                <div>
+                    <div class="attn-label">{{ item.label }}</div>
+                    {% if !item.hint.is_empty() %}<div class="attn-hint">{{ item.hint }}</div>{% endif %}
+                </div>
+                <a class="attn-link" href="{{ item.href }}">Review →</a>
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+</section>
+{% endif %}
+
+{# First-run checklist — renders only while setup is incomplete, and
+   below the status sentence so the page always leads with status
+  . #}
+{% match getting_started %}
+{% when Some with (gs) %}
+<section class="card card--elevated gs-card" aria-label="Getting started">
+    <h2>Getting started <span class="gs-count">({{ gs.done_count }}/{{ gs.total }})</span></h2>
+    <p class="gs-sub">A few steps to a working gateway — this card disappears once everything is wired.</p>
+    <ul class="gs-list">
+        {% for step in gs.steps %}
+        <li class="gs-item">
+            <span class="gs-check{% if step.done %} gs-check--done{% endif %}" aria-hidden="true">{% if step.done %}&check;{% else %}{{ loop.index }}{% endif %}</span>
+            <div class="gs-body">
+                <div class="gs-label{% if step.done %} gs-label--done{% endif %}">{{ step.label }}</div>
+                {% if !step.done %}<div class="gs-hint">{{ step.hint }}</div>{% endif %}
+            </div>
+            <a class="gs-link" href="{{ step.href }}">{% if step.done %}View{% else %}Set up →{% endif %}</a>
+        </li>
+        {% endfor %}
+    </ul>
+    <p class="gs-foot">
+        Want to see governance in action?
+        <a href="{{ gs.playground_href }}">Try a policy decision in the Playground →</a>
+    </p>
+</section>
+{% when None %}
+{% endmatch %}
+
+{# Figures with deltas — or one honest caption line, never dead tiles. #}
+{% match figures %}
+{% when Some with (f) %}
+<section class="figure-row" aria-label="Last 24 hours">
+    <div class="figure">
+        <h2 class="card-title">Calls · 24h</h2>
+        <div class="figure__value tabular">{{ f.calls_today }}</div>
+        <div class="figure__delta">{{ f.calls_delta }}</div>
+        <svg class="figure__spark" viewBox="0 0 120 28" preserveAspectRatio="none" role="img"
+             aria-label="Hourly call volume, last 24 hours, peak {{ f.calls_spark_peak }}">
+            <polyline points="{{ f.calls_spark_points }}"/>
+        </svg>
+        <div class="figure__note">peak {{ f.calls_spark_peak }}/h</div>
+    </div>
+    <div class="figure">
+        <h2 class="card-title">Deny rate · 24h</h2>
+        <div class="figure__value tabular">{{ f.deny_rate_pct }}%</div>
+        <div class="figure__delta">{{ f.deny_delta }}</div>
+        <svg class="figure__spark" viewBox="0 0 120 28" preserveAspectRatio="none" role="img"
+             aria-label="Hourly denied calls, last 24 hours, peak {{ f.deny_spark_peak }}">
+            <polyline points="{{ f.deny_spark_points }}"/>
+        </svg>
+        <div class="figure__note"><a href="{{ self.chrome.nav_url("/activity") }}?outcome=denied&since=24h">view denied calls →</a></div>
+    </div>
+    <div class="figure">
+        <h2 class="card-title">Errors · 24h</h2>
+        <div class="figure__value tabular{% if f.errors_today > 0 %} state-err{% endif %}">{{ f.errors_today }}</div>
+        <div class="figure__delta">{{ f.errors_delta }}</div>
+        <svg class="figure__spark" viewBox="0 0 120 28" preserveAspectRatio="none" role="img"
+             aria-label="Hourly errors, last 24 hours, peak {{ f.errors_spark_peak }}">
+            <polyline points="{{ f.errors_spark_points }}"/>
+        </svg>
+        <div class="figure__note"><a href="{{ self.chrome.nav_url("/activity") }}?outcome=execution_error&since=24h">view errors →</a></div>
+    </div>
+</section>
+{% when None %}
+{% if audit_available %}
+<p class="muted">Traffic figures unavailable — the audit aggregate failed; see logs.</p>
+{% else %}
+<p class="muted">Traffic figures appear once the audit store is wired (<code>GATEWAY_DATABASE_URL</code>).</p>
+{% endif %}
+{% endmatch %}
+
+{% if !changed.is_empty() %}
+<section class="page-section" aria-label="What changed">
+    <h2 class="section-heading">What changed</h2>
+    <div class="card card--table">
+        <ul class="changed-list">
+            {% for e in changed %}
+            <li>
+                <span class="chip">{{ e.kind }}</span>
+                <a href="{{ e.href }}" class="changed-summary">{{ e.summary }}</a>
+                <span class="mono faint" title="{{ e.ts_abs }}">{{ e.ts_rel }}</span>
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+</section>
+{% endif %}
+
+<section class="page-section">
+    <h2 class="section-heading">Upstreams</h2>
+    <div class="card card--table">
+        <table class="data-table">
+            <caption class="sr-only">Upstream MCP servers and their connection status</caption>
+            <thead>
+                <tr><th>Name</th><th>Transport</th><th>Status</th><th>Tools</th></tr>
+            </thead>
+            <tbody>
+            {% for u in upstreams %}
+                <tr>
+                    <td><a href="{{ self.chrome.nav_url("/servers") }}">{{ u.name }}</a></td>
+                    <td class="mono">{{ u.transport }}</td>
+                    <td>
+                        {% if u.runtime_status == "connected" %}
+                            <span class="status-dot status-dot--ok" aria-hidden="true"></span><span class="state-ok">ok</span>
+                        {% else if u.runtime_status == "degraded" %}
+                            <span class="status-dot status-dot--warn" aria-hidden="true"></span><span class="chip chip--warn">degraded</span>
+                        {% else %}
+                            <span class="status-dot status-dot--bad" aria-hidden="true"></span><span class="state-err">down</span>
+                        {% endif %}
+                    </td>
+                    <td class="mono">{{ u.tool_count }}</td>
+                </tr>
+            {% endfor %}
+            {% if upstreams.is_empty() %}
+                <tr><td colspan="4" class="empty">No upstreams configured. Drop a manifest into <code>servers/</code> and restart.</td></tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section>
+    <h2 class="section-heading">Recent notable events</h2>
+    <div class="card card--table">
+        <table class="data-table">
+            <caption class="sr-only">Recent denied or high-risk audit events</caption>
+            <thead>
+                <tr><th>Time</th><th>Principal</th><th>Action</th><th>Outcome</th></tr>
+            </thead>
+            <tbody>
+            {% for e in notable %}
+                <tr>
+                    <td class="mono" title="{{ e.ts_abs }}">{{ e.ts_rel }}</td>
+                    <td>{{ e.principal }}</td>
+                    <td class="mono">{{ e.action_label }}</td>
+                    <td>
+                        {# Outcome strings come from `AuditOutcome::as_str()`
+                           (success / denied / step_up_required /
+                           execution_error). This panel only shows non-
+                           success rows, so the success → green branch is
+                           defensive. #}
+                        {% if e.outcome == "denied" %}
+                            <span class="chip chip--bad">DENY</span>
+                        {% else if e.outcome == "step_up_required" %}
+                            <span class="chip chip--warn">STEP_UP</span>
+                        {% else if e.outcome == "execution_error" %}
+                            <span class="chip chip--bad">ERROR</span>
+                        {% else if e.outcome == "success" %}
+                            <span class="chip chip--ok">OK</span>
+                        {% else %}
+                            <span class="chip">{{ e.outcome }}</span>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            {% if notable.is_empty() %}
+                <tr><td colspan="4" class="empty">No recent denials or high-risk events.</td></tr>
+            {% endif %}
+            </tbody>
+        </table>
+        <div class="table-foot">
+            <a href="{{ self.chrome.nav_url("/activity") }}">See all activity →</a>
+        </div>
+    </div>
+</section>
+{% endblock %}

@@ -1,0 +1,24 @@
+{
+  "name": "triage_example-search_search_allow",
+  "description": "web.search is low-risk and permitted by the 10-role-allow baseline. This pins that the triage confinement forbid does NOT block example-search — one of the two upstreams the role is allowed to reach.",
+  "principal": {
+    "sub": "svc:incident-triage",
+    "auth_method": "api_key",
+    "groups": ["incident-triage"],
+    "scopes": ["mcp:invoke", "mcp:read"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-search.web.search",
+    "risk": "low"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-search",
+    "name": "web.search",
+    "risk": "low"
+  },
+  "expected": {
+    "decision": "Allow"
+  }
+}

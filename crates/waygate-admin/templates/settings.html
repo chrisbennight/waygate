@@ -1,0 +1,289 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Settings</h1>
+    {% if insufficient_scope %}
+        <span class="chip chip--warn">insufficient scope</span>
+    {% endif %}
+</header>
+
+{# Frozen-at-boot gateway configuration: deployment posture,
+   JWKS lifecycle, token-introspection summary, and a
+   capability-flag grid. Read-only — mutations require a
+   restart with updated env vars. #}
+
+{% if insufficient_scope %}
+<div class="card">
+    <div class="empty">
+        This page requires the <code>mcp:admin</code> scope.
+        Your current dashboard session lacks it, so gateway
+        configuration is not shown.
+        <br><a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/settings") }}">Re-authorize with the admin scope</a> if your account is entitled to it.
+    </div>
+</div>
+{% else %}
+
+<section class="page-section" aria-label="System">
+    <h2 class="section-heading">System</h2>
+    <p class="section-kicker">Boot posture (env-var-driven)</p>
+    <div class="card card--table">
+        <table class="kv-table" role="table" aria-label="System">
+            <tbody>
+                <tr>
+                    <th scope="row">Deployment profile</th>
+                    <td>
+                        {% if system.deployment_profile == "prod" %}
+                            <span class="chip chip--ok">prod</span>
+                        {% else if system.deployment_profile == "dev" %}
+                            <span class="chip chip--warn">dev</span>
+                        {% else %}
+                            <span class="chip">{{ system.deployment_profile }}</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">Auth mode</th>
+                    <td>
+                        {% if system.auth_mode == "enforce" %}
+                            <span class="chip chip--ok">enforce</span>
+                        {% else if system.auth_mode == "disabled" %}
+                            <span class="chip chip--warn">disabled (dev only)</span>
+                        {% else %}
+                            <span class="chip">{{ system.auth_mode }}</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">Public URL</th>
+                    <td>{{ public_url }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">Gateway version</th>
+                    <td>{{ system.gateway_version }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">MCP spec versions</th>
+                    <td>{% for version in system.mcp_spec_versions %}{% if !loop.first %}, {% endif %}{{ version }}{% endfor %}</td>
+                </tr>
+                <tr>
+                    <th scope="row">Built-in AS</th>
+                    <td>
+                        {% if system.as_enabled %}
+                            <span class="chip chip--ok">enabled</span>
+                        {% else %}
+                            <span class="chip">disabled</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">Accept upstream tokens</th>
+                    <td>
+                        {% if system.accept_upstream_tokens %}
+                            <span class="chip chip--warn">on (deprecated)</span>
+                        {% else %}
+                            <span class="chip">off</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">Two-approver catalog promotion</th>
+                    <td>
+                        {% if two_approver_mode %}
+                            <span class="chip chip--ok">on</span>
+                        {% else %}
+                            <span class="chip">off</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">API-key admin surface</th>
+                    <td>
+                        {% if api_keys_enabled %}
+                            <span class="chip chip--ok">enabled</span>
+                        {% else %}
+                            <span class="chip">disabled</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">Overview change-feed actions</th>
+                    <td>
+                        {% if overview_change_feed_actions.is_empty() %}
+                            <span class="chip">none</span>
+                        {% else %}
+                            {% for a in overview_change_feed_actions %}<span class="chip mono">{{ a }}</span> {% endfor %}
+                        {% endif %}
+                        <div class="form-hint">Change-request actions surfaced on the Overview “What changed” feed. Set via <code>GATEWAY_OVERVIEW_CHANGE_FEED_ACTIONS</code> (comma-separated).</div>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="page-section" aria-label="JWKS">
+    <h2 class="section-heading">JWKS</h2>
+    <p class="section-kicker">Gateway-minted identity token signing keys</p>
+    <div class="card card--table">
+        {% match self.jwks() %}
+        {% when Some with (j) %}
+            <table class="kv-table" role="table" aria-label="JWKS">
+                <tbody>
+                    <tr>
+                        <th scope="row">JWKS URL</th>
+                        <td><a href="{{ j.jwks_url }}" rel="noopener">{{ j.jwks_url }}</a></td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Active kid</th>
+                        <td><span class="chip chip--ok">{{ j.active_kid }}</span></td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Published kids</th>
+                        <td>
+                            {% for kid in j.all_kids %}
+                                {% if kid.as_str() == j.active_kid.as_str() %}
+                                    <span class="chip chip--ok">{{ kid }} (active)</span>
+                                {% else %}
+                                    <span class="chip">{{ kid }}</span>
+                                {% endif %}
+                            {% endfor %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Token TTL</th>
+                        <td>
+                            {% match self.identity_token_ttl_secs() %}
+                            {% when Some with (s) %}{{ s }}s
+                            {% when None %}—
+                            {% endmatch %}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+            <p class="table-hint">
+                Rotate by adding a new <code>kid:path</code> entry to
+                <code>GATEWAY_IDENTITY_JWT_KEYS</code>, flipping
+                <code>GATEWAY_IDENTITY_JWT_ACTIVE</code>, and restarting.
+                See <code>docs/agents/identity.md</code> for the
+                rollover playbook.
+            </p>
+        {% when None %}
+            <div class="empty">
+                No identity keyring configured — the gateway is not
+                minting upstream-facing identity tokens. Set
+                <code>GATEWAY_IDENTITY_SIGNING_KEY_PEM</code> (single-key)
+                or <code>GATEWAY_IDENTITY_JWT_KEYS</code> (rotation)
+                and restart to enable.
+            </div>
+        {% endmatch %}
+    </div>
+</section>
+
+<section class="page-section" aria-label="Token introspection">
+    <h2 class="section-heading">Token introspection</h2>
+    <p class="section-kicker">RFC 7662 opaque-token validator</p>
+    <div class="card card--table">
+        {% match self.introspection() %}
+        {% when Some with (i) %}
+            <table class="kv-table" role="table" aria-label="Token introspection">
+                <tbody>
+                    <tr>
+                        <th scope="row">Status</th>
+                        <td>
+                            {% if i.active %}
+                                <span class="chip chip--ok">active</span>
+                            {% else %}
+                                <span class="chip chip--warn">configured but inactive</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Endpoint</th>
+                        <td>{{ i.introspection_url }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Client ID</th>
+                        <td>{{ i.client_id }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Positive cache TTL ceiling</th>
+                        <td>{{ i.max_positive_ttl_secs }}s</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Negative cache TTL</th>
+                        <td>{{ i.negative_ttl_secs }}s</td>
+                    </tr>
+                </tbody>
+            </table>
+            {% if i.active %}
+                <p class="table-hint">
+                    Client secret is held in process memory only and is
+                    deliberately omitted from this page.
+                </p>
+            {% else %}
+                <p class="table-hint state-flag">
+                    Introspection env vars are set but the validator is
+                    NOT on the bearer chain — gateway is in AS mode
+                    (<code>GATEWAY_AS_ENABLED=true</code>) and
+                    <code>GATEWAY_ACCEPT_UPSTREAM_TOKENS</code> is unset,
+                    so the boot path skips wiring to avoid the OAuth
+                    token-passthrough anti-pattern. Set
+                    <code>GATEWAY_ACCEPT_UPSTREAM_TOKENS=true</code>
+                    (deprecated, prod refuses) to opt in explicitly, or
+                    unset <code>GATEWAY_INTROSPECTION_URL</code> to
+                    clear the inconsistency.
+                </p>
+            {% endif %}
+        {% when None %}
+            <div class="empty">
+                Token introspection not configured. Set
+                <code>GATEWAY_INTROSPECTION_URL</code>,
+                <code>GATEWAY_INTROSPECTION_CLIENT_ID</code>, and
+                <code>GATEWAY_INTROSPECTION_CLIENT_SECRET</code>
+                together to enable RFC 7662 validation alongside the
+                JWT validator.
+            </div>
+        {% endmatch %}
+    </div>
+</section>
+
+<section class="page-section" aria-label="Capabilities">
+    <h2 class="section-heading">Capabilities <span class="count">{{ capabilities.len() }}</span></h2>
+    <p class="section-kicker">Optional substrates wired at boot</p>
+    <div class="card card--table">
+        <table class="data-table data-table--sm" role="table" aria-label="Capabilities">
+            <thead>
+                <tr>
+                    <th>Capability</th>
+                    <th>Status</th>
+                    <th>Enable via</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for c in capabilities %}
+                <tr>
+                    <td>{{ c.name }}</td>
+                    <td>
+                        {% if c.enabled %}
+                            <span class="chip chip--ok">on</span>
+                        {% else %}
+                            <span class="chip">off</span>
+                        {% endif %}
+                    </td>
+                    <td class="mono">
+                        {% if c.enabled %}
+                            <span class="faint">—</span>
+                        {% else %}
+                            {{ c.env_hint }}
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+{% endif %}
+{% endblock %}

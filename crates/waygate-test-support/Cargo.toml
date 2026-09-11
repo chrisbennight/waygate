@@ -1,0 +1,23 @@
+[package]
+name = "waygate-test-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# DEV-DEPENDENCY ONLY. No production crate may list this in [dependencies];
+# it exists so the ~40 integration-test files stop hand-rolling the same
+# Postgres preamble, AdminState core, and trait mocks.
+[dependencies]
+waygate-admin.workspace = true
+waygate-apikeys.workspace = true
+waygate-core.workspace = true
+waygate-skills.workspace = true
+waygate-manifest-store.workspace = true
+waygate-manifest-types.workspace = true
+waygate-upstream.workspace = true
+async-trait.workspace = true
+sqlx.workspace = true
+time.workspace = true
+uuid.workspace = true

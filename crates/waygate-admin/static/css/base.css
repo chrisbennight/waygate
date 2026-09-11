@@ -1,0 +1,707 @@
+/* Shared layout and components. Colors and fonts use tokens.css variables;
+   style_tokens.rs enforces the token boundary. */
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+    margin: 0;
+    background: var(--paper-0);
+    color: var(--ink);
+    font-family: var(--font-ui);
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+}
+
+code, pre, .mono {
+    font-family: var(--font-mono);
+    font-variant-ligatures: none;
+}
+
+/* Links are green and really underlined — this is a document. */
+a { color: var(--green); text-decoration: underline; text-underline-offset: 2px; }
+a:hover { color: var(--green-strong); }
+a:focus-visible, button:focus-visible, [role="button"]:focus-visible,
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+    border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+    }
+}
+
+/* --- Skip link ---------------------------------------------------------- */
+.skip-link {
+    position: absolute;
+    top: -40px;
+    left: 8px;
+    padding: 8px 12px;
+    background: var(--green);
+    color: var(--on-green);
+    border-radius: var(--radius-interactive);
+    z-index: 1000;
+}
+.skip-link:focus { top: 8px; }
+
+/* --- Shell: one sheet of paper — topbar, sidebar, and main
+   all sit on --paper-0; reading surfaces (tables, forms, wells) sit on
+   --paper-1. Sections divide by hairline + whitespace, not floating boxes. */
+.shell {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    grid-template-rows: 48px 1fr;
+    grid-template-areas: "topbar topbar" "sidebar main";
+    min-height: 100dvh;
+}
+@media (max-width: 1023px) {
+    .shell { grid-template-columns: 64px 1fr; }
+    /* At the narrow breakpoint the sidebar collapses to a 64px icon
+       column — labels and the badge hide. The section-header collapse
+       lives next to the.sidebar__section base rule below, so it wins on
+       source order (same specificity); putting it here would lose to that
+       later rule and leave the labels visible. */
+    .sidebar-label { display: none; }
+    .nav-badge { display: none; }
+}
+
+.topbar {
+    grid-area: topbar;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 20px;
+    background: var(--paper-0);
+    border-bottom: 1px solid var(--rule);
+}
+/* The masthead — the one place chrome uses the display serif. */
+.topbar__brand { font-family: var(--font-display); font-weight: 600; font-size: 17px; }
+.topbar__spacer { flex: 1; }
+.topbar__env {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1;
+    padding: 4px 8px;
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius-interactive);
+    color: var(--ink-muted);
+}
+.topbar__user { font-size: 14px; color: var(--ink-muted); }
+.topbar__logout { margin: 0; }
+.topbar__logout-btn {
+    background: transparent;
+    border: 1px solid var(--rule-strong);
+    color: var(--ink-muted);
+    padding: 4px 10px;
+    border-radius: var(--radius-interactive);
+    font-family: var(--font-ui);
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.2;
+    cursor: pointer;
+}
+.topbar__logout-btn:hover { color: var(--ink); border-color: var(--rule-strong); }
+.topbar__logout-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+.sidebar {
+    grid-area: sidebar;
+    background: var(--paper-0);
+    border-right: 1px solid var(--rule);
+    padding: 16px 8px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+}
+.sidebar__nav { display: flex; flex-direction: column; gap: 2px; list-style: none; margin: 0; padding: 0; flex: 1; }
+/* Settings pins to the sidebar foot. */
+.sidebar__nav .sidebar__bottom { margin-top: auto; }
+.sidebar__link {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    border-radius: var(--radius-container);
+    color: var(--ink-muted);
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 500;
+    transition: background-color 140ms ease-out, color 140ms ease-out;
+    border-left: 2px solid transparent;
+}
+.sidebar__link:hover { background: var(--paper-2); color: var(--ink); text-decoration: none; }
+/* Active destination: green text + 2px green left rule, no filled pill
+  . */
+.sidebar__link[aria-current="page"] {
+    color: var(--green);
+    border-left-color: var(--green);
+    font-weight: 600;
+}
+.sidebar__icon { width: 20px; height: 20px; flex-shrink: 0; }
+
+/* Section header (Common / MCP Gateway / LLM Gateway): a muted, small-caps
+   label that groups the destinations beneath it. Whitespace + the label do
+   the dividing — no boxes. */
+.sidebar__section {
+    list-style: none;
+    margin: 12px 0 2px;
+    padding: 0 12px;
+    font-family: var(--font-ui);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    line-height: 1.4;
+}
+/* The first section header sits flush with the top of the nav. */
+.sidebar__nav > .sidebar__section:first-child { margin-top: 0; }
+
+/* Collapsed icon column (<=1023px): the header text can't fit in 64px, so
+   each section header becomes a hairline divider that keeps the three
+   groups visually separated. Declared AFTER the base.sidebar__section
+   rule above so it wins on source order at equal specificity — the shell
+   collapse block earlier in the file would lose to that base rule. */
+@media (max-width: 1023px) {
+    .sidebar__section {
+        font-size: 0;
+        letter-spacing: 0;
+        margin: 8px 6px;
+        padding: 0;
+        border-top: 1px solid var(--rule);
+    }
+    .sidebar__nav > .sidebar__section:first-child { border-top: 0; margin-top: 0; }
+}
+
+/* Tenant selector --------------------------------------------------------- */
+.sidebar__tenant {
+    padding: 8px 12px 12px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--rule);
+}
+.sidebar__tenant-label {
+    display: block;
+    font-size: 12px;
+    color: var(--ink-muted);
+    margin-bottom: 4px;
+    font-weight: 600;
+}
+.sidebar__tenant-chip {
+    padding: 6px 10px;
+    background: var(--paper-2);
+    border-radius: var(--radius-interactive);
+    font-size: 13px;
+    color: var(--ink);
+}
+.sidebar__tenant-form { margin: 0; }
+.sidebar__tenant-select {
+    width: 100%;
+    padding: 6px 8px;
+    background: var(--paper-1);
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius-interactive);
+    color: var(--ink);
+    font-size: 13px;
+    font-family: inherit;
+}
+.sidebar__tenant-select:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
+    border-color: var(--green);
+}
+.sidebar__tenant-hint {
+    margin: 6px 0 0;
+    font-size: 11px;
+    color: var(--ink-muted);
+    line-height: 1.4;
+}
+
+/* Cross-tenant banner: alarm-treatment strip
+   across the very top when the URL tenant differs from the principal's
+   home tenant. Sits OUTSIDE the.shell grid so it pushes the layout down
+   rather than overlapping. */
+.banner {
+    padding: 8px 16px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.banner--cross-tenant {
+    background: color-mix(in oklab, var(--err) 12%, var(--paper-1));
+    color: var(--ink);
+    border-bottom: 3px solid var(--err);
+}
+.banner--cross-tenant code {
+    background: var(--paper-2);
+    padding: 1px 6px;
+    border-radius: var(--radius-interactive);
+    font-family: var(--font-mono);
+}
+.banner__separator { opacity: 0.6; }
+.banner__back {
+    margin-left: auto;
+    color: inherit;
+    text-decoration: underline;
+    font-weight: 500;
+}
+.banner__back:hover { text-decoration: none; }
+
+.main {
+    grid-area: main;
+    padding: 24px 32px;
+    overflow-y: auto;
+}
+@media (max-width: 767px) {
+    .main { padding: 16px; }
+}
+
+/* --- Page header -------------------------------------------------------- */
+.page-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 20px;
+}
+/* Page title: display serif, one per page. */
+.page-title { font: 600 1.5rem/1.25 var(--font-display); margin: 0; }
+.page-header__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* Narrow-viewport polish: the page-title can be allowed to wrap
+   cleanly past the chip/status indicator the page-header puts on the
+   right. The flex-wrap above handles the chip dropping below; this
+   keeps the title from squeezing into a too-narrow column when both
+   are still on the same line on intermediate widths. */
+@media (max-width: 767px) {
+    .page-title { font-size: 1.25rem; }
+}
+
+/* --- Buttons  --------------------------------------------- */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 14px;
+    border-radius: var(--radius-interactive);
+    font-family: var(--font-ui);
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1;
+    border: 1px solid transparent;
+    transition: background-color 140ms ease-out, border-color 140ms ease-out;
+    cursor: pointer;
+    background: transparent;
+    color: inherit;
+    text-decoration: none;
+}
+.btn:hover { text-decoration: none; }
+.btn-primary { background: var(--green); color: var(--on-green); }
+.btn-primary:hover { background: var(--green-strong); color: var(--on-green); }
+.btn-secondary { background: var(--paper-1); color: var(--ink); border-color: var(--rule-strong); }
+.btn-secondary:hover { background: var(--paper-2); color: var(--ink); }
+.btn-danger { background: var(--err); color: var(--on-err); }
+.btn-danger:hover { color: var(--on-err); }
+.btn[aria-disabled="true"], .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* --- Cards: square containers on the sheet  ------------------ */
+.card {
+    background: var(--paper-1);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-container);
+    padding: 16px 20px;
+}
+.card--elevated { box-shadow: none; }
+/* Table-card variant: drops the inset padding so the table sits
+   flush against the card edges, and keeps overflow auto so wide tools /
+   catalog / activity tables get a horizontal scroll affordance on
+   narrow viewports instead of clipping columns. */
+.card--table {
+    padding: 0;
+    overflow: auto;
+}
+/* Card headings use a small display serif and sentence case. */
+.card-title {
+    font: 600 1.0625rem/1.4 var(--font-display);
+    color: var(--ink);
+    margin: 0 0 8px;
+}
+
+/* --- Chips: clerk's annotations  --------------------------- */
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: var(--radius-interactive);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.5;
+    background: var(--paper-2);
+    color: var(--ink-muted);
+}
+.chip--ok   { background: color-mix(in oklab, var(--ok)   12%, var(--paper-1)); color: var(--ok); }
+.chip--warn { background: color-mix(in oklab, var(--flag) 12%, var(--paper-1)); color: var(--flag); }
+.chip--bad  { background: color-mix(in oklab, var(--err)  12%, var(--paper-1)); color: var(--err); }
+
+/* --- Empty states  ----------------------------------------- */
+/* The single shared empty-state primitive. Every "nothing here yet" /
+   "store not configured" / "insufficient scope" card across the dashboard
+   renders this shape instead of a hand-rolled per-page `.foo-empty` div, so
+   padding, type scale, and the icon stay consistent. */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 8px;
+    padding: 32px 24px;
+    color: var(--ink-muted);
+}
+.empty-state__icon {
+    width: 28px;
+    height: 28px;
+    color: var(--ink-faint);
+    flex-shrink: 0;
+}
+.empty-state__title {
+    margin: 0;
+    font-family: var(--font-ui);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--ink);
+}
+.empty-state__body {
+    margin: 0;
+    max-width: 56ch;
+    font-size: 13px;
+    line-height: 1.5;
+}
+.empty-state__body code { font-size: 12px; }
+.empty-state__actions {
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+}
+/* Danger variant: a load failure or other error, not a benign empty list. */
+.empty-state--danger .empty-state__icon  { color: var(--err); }
+.empty-state--danger .empty-state__title { color: var(--err); }
+
+/* --- Forms  ------------------------------------------------ */
+/* Shared form vocabulary. Inputs are ~32px (7px padding + 13px type) so the
+   form scale tracks the table scale — this is a data-dense console. */
+.form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    max-width: 620px;
+}
+.form-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.form-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink-muted);
+}
+.form-label__req { color: var(--err); margin-left: 2px; }
+.form-input,
+.form-select,
+.form-textarea {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 7px 10px;
+    background: var(--paper-1);
+    color: var(--ink);
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius-interactive);
+    font-family: var(--font-ui);
+    font-size: 13px;
+    line-height: 1.4;
+    transition: border-color 140ms ease-out;
+}
+.form-input:hover,
+.form-select:hover,
+.form-textarea:hover { border-color: var(--ink-faint); }
+.form-textarea {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    resize: vertical;
+}
+.form-hint { font-size: 11px; color: var(--ink-faint); line-height: 1.4; }
+.form-hint code { font-size: 11px; }
+.form-error {
+    padding: 8px 12px;
+    border-radius: var(--radius-container);
+    border-left: 3px solid var(--err);
+    background: color-mix(in oklab, var(--err) 8%, var(--paper-1));
+    color: var(--ink);
+    font-size: 13px;
+}
+.form-checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    align-items: center;
+}
+.form-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--ink);
+}
+.form-check input { margin: 0; }
+.form-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+/* --- Theme toggle ------------------------------------------------------- */
+.theme-toggle {
+    background: transparent;
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius-interactive);
+    padding: 6px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    color: var(--ink-muted);
+    transition: color 140ms ease-out, background-color 140ms ease-out;
+}
+.theme-toggle:hover { color: var(--ink); background: var(--paper-2); }
+.theme-toggle svg { width: 18px; height: 18px; }
+[data-theme="dark"] .theme-toggle__sun,
+:root:not([data-theme="light"]) .theme-toggle__sun { display: none; }
+[data-theme="light"] .theme-toggle__moon { display: none; }
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) .theme-toggle__moon { display: none; }
+    :root:not([data-theme="dark"]) .theme-toggle__sun { display: inline; }
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* --- Utility ------------------------------------------------------------ */
+.tabular { font-variant-numeric: tabular-nums; }
+.muted   { color: var(--ink-muted); }
+.faint   { color: var(--ink-faint); }
+
+/* --- Cmd-K palette -------------------------------------------------------- */
+.topbar__palette {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    margin-right: 8px;
+    background: var(--paper-2);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-interactive);
+    color: var(--ink-muted);
+    font-size: 13px;
+    cursor: pointer;
+    transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+.topbar__palette:hover { background: var(--paper-1); color: var(--ink); }
+.topbar__palette:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+}
+.topbar__palette-hint {
+    font-size: 11px;
+    padding: 1px 5px;
+    border-radius: var(--radius-interactive);
+    background: var(--paper-0);
+    border: 1px solid var(--rule);
+    color: var(--ink-faint);
+}
+@media (max-width: 767px) { .topbar__palette-hint { display: none; } }
+
+.palette {
+    position: fixed;
+    inset: 0;
+    background: var(--scrim);
+    z-index: 1000;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 12vh;
+}
+.palette[hidden] { display: none; }
+.palette__card {
+    width: min(640px, calc(100% - 32px));
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--paper-1);
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius-container);
+    box-shadow: var(--shadow-overlay);
+    overflow: hidden;
+}
+.palette__input-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--rule);
+}
+.palette__input-row input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--ink);
+    font-family: var(--font-ui);
+    font-size: 16px;
+    line-height: 1.4;
+    outline: none;
+}
+.palette__esc-hint {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1;
+    color: var(--ink-faint);
+    background: var(--paper-2);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-interactive);
+    padding: 3px 6px;
+}
+.palette__results {
+    list-style: none;
+    margin: 0;
+    padding: 6px 0;
+    overflow-y: auto;
+}
+.palette__row {
+    display: grid;
+    grid-template-columns: 20px 1fr auto auto;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 18px;
+    cursor: pointer;
+    color: var(--ink);
+    font-size: 14px;
+    line-height: 1.4;
+}
+.palette__row--selected,
+.palette__row:hover {
+    background: var(--paper-2);
+}
+.palette__row .palette__icon {
+    width: 18px;
+    height: 18px;
+    color: var(--ink-muted);
+}
+.palette__label { font-weight: 500; }
+.palette__hint  { color: var(--ink-muted); font-size: 12px; }
+.palette__category {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1;
+    text-transform: lowercase;
+    color: var(--ink-faint);
+    background: var(--paper-0);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-interactive);
+    padding: 2px 6px;
+}
+.palette__empty,
+.palette__truncated {
+    margin: 0;
+    padding: 14px 18px;
+    color: var(--ink-muted);
+    font-size: 13px;
+    text-align: center;
+}
+.palette__truncated {
+    border-top: 1px solid var(--rule);
+    background: var(--paper-2);
+}
+
+/* Governed "Try this tool" form + result, rendered inside the
+   tool-detail drawer. Reuses the existing tokens /.btn /.mono /.chip
+   vocabulary; no new visual primitives. */
+.try-tool { border-top: 1px solid var(--rule); padding-top: 12px; }
+.try-arguments,
+.try-field textarea {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--paper-2);
+    color: var(--ink);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-interactive);
+    padding: 6px 8px;
+    font-size: 12px;
+}
+.try-inputs { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 10px; }
+.try-field { display: flex; flex-direction: column; gap: 3px; }
+.try-field__name { font-size: 12px; color: var(--ink-muted); font-weight: 600; }
+.try-field input[type="text"],
+.try-field input[type="number"],
+.try-field select {
+    background: var(--paper-1);
+    color: var(--ink);
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius-interactive);
+    padding: 5px 8px;
+    font-size: 13px;
+}
+.try-field input[type="checkbox"] { align-self: flex-start; }
+.try-confirm {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+    font-size: 13px;
+    color: var(--ink);
+}
+.try-actions { display: flex; align-items: center; gap: 12px; margin-top: 6px; }
+.try-error { color: var(--err); font-size: 12px; }
+.try-result { margin-top: 12px; }
+.try-result:empty { display: none; }
+.try-result--ok,
+.try-result--err {
+    border-radius: var(--radius-container);
+    padding: 10px 12px;
+    border: 1px solid var(--rule);
+}
+.try-result--ok { border-left: 3px solid var(--ok); background: var(--paper-2); }
+.try-result--err { border-left: 3px solid var(--err); background: var(--paper-2); }
+.try-result__heading { display: block; margin-bottom: 4px; }
+.try-result__msg { margin: 4px 0; color: var(--ink-muted); font-size: 13px; }
+.try-result__reasons { margin: 4px 0 0 18px; font-size: 12px; color: var(--ink-muted); }
+.try-result__body { margin-top: 8px; max-height: 320px; overflow: auto; }
+
+/* Skill review keeps immutable source text inert, readable, and contained. */
+.skills-source { overflow-wrap: anywhere; }
+.skills-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.skills-content { white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; max-height: 36rem; padding: 16px; background: var(--paper-1); border: 1px solid var(--rule); }
+.skills-content:focus-visible { outline: 2px solid var(--focus-ring); }
+.skills-inventory { overflow-x: auto; }
+.skills-inventory td { overflow-wrap: anywhere; max-width: 24rem; }
+@media (max-width: 767px) { .skills-comparison { grid-template-columns: minmax(0, 1fr); } }

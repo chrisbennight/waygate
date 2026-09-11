@@ -1,0 +1,26 @@
+{
+  "name": "api_key_blocked_from_pii_tool",
+  "description": "policies/15-pii-default.cedar forbids API-key principals from calling PII-tagged tools unless they are in mcp-admins or pii-readers. Pin both the verdict and the @reason annotation surfaced to the client.",
+  "principal": {
+    "sub": "service-bot-1",
+    "auth_method": "api_key",
+    "groups": ["mcp-users"],
+    "scopes": ["mcp:invoke", "mcp:read"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-messages.messages.read",
+    "risk": "low"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-messages",
+    "name": "messages.read",
+    "risk": "low",
+    "pii": true
+  },
+  "expected": {
+    "decision": "Deny",
+    "reason_contains": ["PII tool calls require"]
+  }
+}

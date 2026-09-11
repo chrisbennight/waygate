@@ -1,0 +1,34 @@
+name: Container update threat gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  threat-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify scanner contracts
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/gateway-threat-tests"
+          "$RUNNER_TEMP/gateway-threat-tests/bin/pip" install --require-hashes --only-binary=:all: -r scripts/threat-gate/requirements.txt
+          "$RUNNER_TEMP/gateway-threat-tests/bin/python" -m pytest scripts/threat-gate/tests -q
+          python3 -m unittest discover -s scripts -p 'test_release_*.py'
+      - name: Install Grype
+        env:
+          GRYPE_VERSION: "0.110.0"
+          GRYPE_CHECKSUM: aaa98d27d2d7efd9317c6a1ad6d9b15f3e65bab320e7d03bde41e251387bb71c
+        run: bash scripts/threat-gate/install-grype.sh
+      - name: Evaluate image changes
+        env:
+          THREAT_GATE_POLICY_PATH: policy/container-threat-policy.json
+        run: python3 -u scripts/threat-gate/scanner.py

@@ -1,0 +1,21 @@
+{% if ok %}
+  {% if superseded %}
+  <div class="callout callout--warn" role="status"><strong>Reload superseded.</strong> A concurrent reload won the live registry, or a kept upstream was removed mid-reload — the live set reflects the winning reload, not this on-disk set. It converges on the next reload tick.{% if version > 0 %} (ledger v{{ version }}){% endif %}</div>
+  {% else if noop %}
+  <div class="callout" role="status">Reloaded <code>servers/*.yaml</code> — no changes to apply.{% if version > 0 %} (ledger v{{ version }}){% endif %}</div>
+  {% else %}
+  <div class="callout callout--ok" role="status">
+    <strong>Applied <code>servers/*.yaml</code>.</strong>
+    {% if version > 0 %}<span class="chip">ledger v{{ version }}</span>{% endif %}
+    {% if updated > 0 %}<span class="chip">{{ updated }} classification update(s)</span>{% endif %}
+    {% if identity_updated > 0 %}<span class="chip">{{ identity_updated }} identity/tier update(s)</span>{% endif %}
+    {% if session_policy_updated > 0 %}<span class="chip">{{ session_policy_updated }} session policy update(s)</span>{% endif %}
+    {% if redialed > 0 %}<span class="chip">{{ redialed }} connection-shape change(s) — re-dialed/rebuilt live</span>{% endif %}
+    {% if redial_failed > 0 %}<span class="chip chip--warn">{{ redial_failed }} re-dial/rebuild failed — kept previous shape</span>{% endif %}
+    {% if added > 0 %}<span class="chip">{{ added }} added — dialed live</span>{% endif %}
+    {% if removed > 0 %}<span class="chip">{{ removed }} removed — dropped live</span>{% endif %}
+  </div>
+  {% endif %}
+{% else %}
+  <div class="callout callout--err" role="alert">{{ message }}</div>
+{% endif %}

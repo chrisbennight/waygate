@@ -1,0 +1,12 @@
+name: demo
+transport: http
+url: http://demo-upstream:9000/mcp
+tools:
+  - name: greet
+    risk: low
+    side_effects: false
+    pii: false
+  - name: restricted
+    risk: low
+    side_effects: false
+    pii: false

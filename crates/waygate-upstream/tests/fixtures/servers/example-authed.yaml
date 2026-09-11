@@ -1,0 +1,19 @@
+# Test fixture — NOT a deployment manifest. A representative authenticated HTTP
+# upstream that exercises the servers/*.yaml schema (transport / url /
+# auth.bearer_env and tool risk + side_effects) so waygate-upstream's manifest
+# loader and schema stay covered now that the gateway repo ships no real served
+# set. Deployments supply their own through the shared runtime volume.
+name: example-authed
+transport: http
+url: https://example.test/mcp
+auth:
+  bearer_env: EXAMPLE_BEARER
+tools:
+  - name: read_thing
+    risk: low
+  - name: write_thing
+    risk: low
+    side_effects: true
+  - name: dangerous_thing
+    risk: high
+    side_effects: true

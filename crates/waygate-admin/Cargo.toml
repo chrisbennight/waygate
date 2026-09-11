@@ -1,0 +1,110 @@
+[package]
+name = "waygate-admin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Schema-dump binary, decoupled from
+# a running server. Used by scripts/gen-clients.sh to
+# feed the openapi-generator without booting Postgres
+# or binding a port.
+[[bin]]
+name = "dump-openapi"
+path = "src/bin/dump_openapi.rs"
+
+[dependencies]
+waygate-apikeys.workspace = true
+waygate-as.workspace = true
+waygate-authz.workspace = true
+waygate-catalog.workspace = true
+waygate-changeset.workspace = true
+waygate-codemode.workspace = true
+waygate-skills.workspace = true
+waygate-policy.workspace = true
+waygate-manifest-store.workspace = true
+waygate-core.workspace = true
+waygate-invocation.workspace = true
+waygate-oidc.workspace = true
+waygate-scim.workspace = true
+waygate-rbac.workspace = true
+waygate-dashboard-stores.workspace = true
+# The agentic chat loop + its canonical LLM types. `agent_runtime.rs`
+# wires `waygate-agent`'s bounded loop to the governed invocation plane, building
+# requests / folding responses through `waygate-llm-translate`'s canonical model.
+waygate-agent.workspace = true
+waygate-agent-runtime.workspace = true
+waygate-llm-translate.workspace = true
+waygate-federation.workspace = true
+waygate-tenants.workspace = true
+waygate-quota.workspace = true
+waygate-llm-credentials.workspace = true
+waygate-storage.workspace = true
+waygate-upstream.workspace = true
+waygate-mcp.workspace = true
+waygate-llm-dispatch.workspace = true
+async-trait.workspace = true
+askama.workspace = true
+# Streaming combinators (StreamExt::map, stream::iter) for the /chat SSE
+# handler (dashboard_chat.rs). `std` pulls in alloc; `sink` is unneeded here.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# `ws` feature enables
+# `axum::extract::ws::WebSocketUpgrade` for the HITL
+# approval push channel. Other crates don't need it,
+# so the override stays per-crate.
+axum = { workspace = true, features = ["ws"] }
+serde.workspace = true
+serde_json.workspace = true
+# Derive JSON Schema for propose_change action params (the schemars
+# single-source-of-truth from docs/agents/mcp-tool-docs.md). `uuid1` enables the
+# JsonSchema impl for the Uuid params (policy_id, token_id, …).
+schemars = { workspace = true, features = ["uuid1"] }
+# Validate propose_change params against the action's schemars schema
+# before queuing the change, so malformed params are refused early with a
+# teaching error. Workspace pin is default-features off (no remote $ref fetch —
+# our schemas only carry internal $defs refs).
+jsonschema.workspace = true
+# Tenant lifecycle deletion spans the canonical registry and policy ledger in
+# one transaction, so the composition layer owns this cross-domain mutation.
+sqlx.workspace = true
+# Dashboard OIDC holds the bounded token-endpoint client that the server
+# composition root injects into callback handlers.
+reqwest.workspace = true
+time.workspace = true
+# `macros` for `tokio::join!` — the dashboard handlers run their
+# independent reader-pool queries concurrently instead of serially.
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
+tower-http.workspace = true
+tracing.workspace = true
+# URL-shape
+# validation on federated_peers issuer + jwks_url
+# fields so the admin CRUD rejects malformed values
+# (the runtime validator in waygate-federation additionally
+# enforces HTTPS scheme on jwks_url).
+url.workspace = true
+utoipa.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+waygate-test-support.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "net"] }
+tower = { workspace = true, features = ["util"] }
+http.workspace = true
+time.workspace = true
+# Auth-middleware redirect tests need to stand up a stub DashboardAuth
+# with local-only JWKS + OidcEndpoints primitives.
+waygate-oidc.workspace = true
+# Real WebSocket client for the HITL
+# end-to-end test. Pinned to 0.29 to match the version
+# axum 0.8 pulls in transitively — keeping these aligned
+# means the test binary doesn't bring a duplicate
+# tokio-tungstenite into the workspace lockfile.
+tokio-tungstenite = "0.29"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# The governed "Try this tool" tests stub an `InvocationService`,
+# whose `invoke` returns the rmcp `CallToolResult` wire type — so the test
+# binary needs to name it directly. Production `waygate-admin` deliberately
+# does NOT depend on rmcp (it serialises the result generically), so this
+# stays a dev-only dependency.
+rmcp = { workspace = true }

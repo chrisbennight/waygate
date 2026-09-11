@@ -1,0 +1,117 @@
+<header>
+    <h2 id="drawer-title" class="mono">{{ server }} · {{ name }}</h2>
+    <button class="close" data-drawer-close aria-label="Close">
+        <svg width="18" height="18" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+    </button>
+</header>
+
+<section style="margin-bottom: 14px">
+    <h3 class="card-title">Overview</h3>
+    <dl>
+        <dt>server</dt><dd>{{ server }}</dd>
+        <dt>tool</dt><dd>{{ name }}</dd>
+        <dt>risk</dt><dd>
+            {% if risk == "high" %}<span class="chip chip--bad">high</span>
+            {% else if risk == "medium" %}<span class="chip chip--warn">medium</span>
+            {% else %}<span class="chip">{{ risk }}</span>{% endif %}
+        </dd>
+        <dt>side effects</dt><dd>{% if side_effects %}yes{% else %}no{% endif %}</dd>
+        <dt>pii</dt><dd>{% if pii %}<span class="chip chip--warn">PII</span>{% else %}no{% endif %}</dd>
+        {% match description %}{% when Some with (d) %}<dt>description</dt><dd class="prose">{{ d }}</dd>{% when None %}{% endmatch %}
+    </dl>
+</section>
+
+{% if found %}
+<section style="margin-bottom: 14px">
+    <h3 class="card-title">Parameters</h3>
+    {% if params.is_empty() %}
+        <p class="drawer-note">No input parameters{% if !has_schema %} (the tool advertises no input schema){% endif %}.</p>
+    {% else %}
+        <table class="drawer-params">
+            <thead><tr><th>name</th><th>type</th><th>req</th><th>description</th></tr></thead>
+            <tbody>
+            {% for p in params %}
+                <tr>
+                    <td class="mono">{{ p.name }}</td>
+                    <td class="mono">{{ p.ty }}</td>
+                    <td>{% if p.required %}<span class="chip chip--warn">yes</span>{% else %}—{% endif %}</td>
+                    <td class="drawer-pdesc">
+                        {% match p.description %}{% when Some with (d) %}{{ d }}{% when None %}–{% endmatch %}
+                        {% match p.enum_vals %}{% when Some with (e) %}<div class="drawer-enum">one of: <span class="mono">{{ e }}</span></div>{% when None %}{% endmatch %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    {% endif %}
+</section>
+
+{% if has_schema %}
+<section>
+    <h3 class="card-title">Raw input schema</h3>
+    <pre class="schema-pre">{{ schema_json }}</pre>
+</section>
+{% endif %}
+{% else %}
+<p class="drawer-note">
+    The live schema is unavailable — the upstream may be down or the tool was
+    retired. The risk tier above comes from the manifest classification.
+</p>
+{% endif %}
+
+{# Governed "Try this tool" form. Shown only to admins, only when an
+   invocation pipeline is wired (`try_enabled`). The call routes through the
+   SAME authorize → step-up → quota → audit pipeline a real MCP client hits
+   (AdminState::try_invocation) — it is not a bypass. try_tool.js builds the
+   typed inputs from the embedded schema and assembles the JSON `arguments`
+   on submit; with JS off, the raw-JSON textarea is the fallback. #}
+{% if try_enabled %}
+<section class="try-tool" style="margin-top: 16px">
+    <h3 class="card-title">Try this tool</h3>
+    <p class="drawer-note">
+        Runs a real, governed call through the gateway pipeline
+        (authorize → step-up → quota → audit) — exactly what an MCP client
+        would hit. Every call is recorded in the audit log.
+        {% if requires_confirm %}
+        <strong>This tool is high-risk or has side effects</strong>, so you
+        must tick the confirmation box before it will run.
+        {% endif %}
+    </p>
+    {# `| safe` because <script> content is raw text: Askama's HTML escaping
+       would turn `"` into `&quot;` and break JSON.parse. `schema_json_js`
+       has every `<` pre-escaped to `<` (see json_for_script_tag) so a
+       literal `</script>` can never be emitted — the JSON parses identically. #}
+    <script type="application/json" id="try-schema">{{ schema_json_js | safe }}</script>
+    <form id="try-form" data-try-tool
+          method="post"
+          action="{{ self.nav_url("/tools/try") }}"
+          hx-post="{{ self.nav_url("/tools/try") }}"
+          hx-target="#try-result"
+          hx-swap="outerHTML">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="server" value="{{ server }}">
+        <input type="hidden" name="tool" value="{{ name }}">
+        {# try_tool.js writes the assembled JSON object here on submit. With
+           JS off the operator edits this textarea directly (the <noscript>
+           hint unhides it). #}
+        <textarea name="arguments" id="try-arguments" class="try-arguments mono"
+                  rows="4" spellcheck="false"
+                  placeholder='{ "key": "value" }'></textarea>
+        <div id="try-inputs" class="try-inputs" hidden></div>
+        <noscript>
+            <p class="drawer-note">Enter the tool arguments as a JSON object above.</p>
+        </noscript>
+        {% if requires_confirm %}
+        <label class="try-confirm">
+            <input type="checkbox" name="confirm" value="on">
+            I understand this performs a real, governed action.
+        </label>
+        {% endif %}
+        <div class="try-actions">
+            <button type="submit" class="btn btn-primary">Run tool</button>
+            <span id="try-error" class="try-error" role="alert"></span>
+        </div>
+    </form>
+    <div id="try-result"></div>
+</section>
+{% endif %}

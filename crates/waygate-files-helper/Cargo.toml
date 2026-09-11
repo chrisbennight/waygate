@@ -1,0 +1,46 @@
+[package]
+name = "waygate-files-helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "CLI helper that redeems a gateway file-transfer grant and streams the bytes out of band"
+
+[[bin]]
+name = "mcp-files"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+time.workspace = true
+uuid.workspace = true
+rand.workspace = true
+base64.workspace = true
+sha2.workspace = true
+dirs.workspace = true
+jsonwebtoken.workspace = true
+ed25519-dalek.workspace = true
+# Blocking, because this is a one-shot CLI with nothing to overlap: an async
+# runtime would buy it nothing.
+#
+# TLS trust is the host's, via the platform verifier reqwest's rustls feature
+# selects. That is deliberate rather than inherited. A gateway on a private
+# network is commonly fronted by an internal CA, and an operator who installs
+# that CA for their browsers and package clients expects it to work here too.
+# Compiling in a fixed public root set would ignore that trust and refuse the
+# deployments this helper exists to serve, so the roots stay the machine's.
+reqwest = { workspace = true, features = ["blocking"] }
+
+# The signing key's owner-only guarantee is spelled in mode bits on Unix, which
+# std already exposes, and in an access-control list on Windows, which it does
+# not. This is that gap and nothing more.
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

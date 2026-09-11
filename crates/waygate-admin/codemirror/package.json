@@ -1,0 +1,21 @@
+{
+  "name": "waygate-cedar-editor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Build tooling for the vendored CodeMirror 6 Cedar editor bundle. NOT shipped in the image — only the built artifact (../static/js/codemirror.bundle.js) is. See README.md.",
+  "type": "module",
+  "scripts": {
+    "build": "./build.sh"
+  },
+  "dependencies": {
+    "@codemirror/commands": "6.10.3",
+    "@codemirror/language": "6.12.3",
+    "@codemirror/lint": "6.9.7",
+    "@codemirror/state": "6.6.0",
+    "@codemirror/view": "6.43.1",
+    "@lezer/highlight": "1.2.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.5"
+  }
+}

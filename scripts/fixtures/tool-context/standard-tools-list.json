@@ -1,0 +1,89 @@
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "result": {
+    "tools": [
+      {
+        "name": "demo-m.send_message",
+        "title": "Send message",
+        "description": "Send a message to a recipient.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "recipient": {
+              "type": "string",
+              "description": "Recipient identifier."
+            },
+            "message": {
+              "type": "string",
+              "description": "Message body to send."
+            }
+          },
+          "required": ["recipient", "message"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "messageId": { "type": "string" }
+          },
+          "required": ["messageId"]
+        },
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        }
+      },
+      {
+        "name": "demo-m.list_contacts",
+        "title": "List contacts",
+        "description": "List messaging contacts visible to the caller.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": "string",
+              "description": "Opaque continuation cursor."
+            }
+          }
+        },
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        }
+      },
+      {
+        "name": "demo-o.query_range",
+        "title": "Query time range",
+        "description": "Run a read-only metrics query over a bounded time range.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Metrics query expression."
+            },
+            "start": {
+              "type": "string",
+              "description": "Inclusive RFC 3339 start time."
+            },
+            "end": {
+              "type": "string",
+              "description": "Exclusive RFC 3339 end time."
+            }
+          },
+          "required": ["query", "start", "end"]
+        },
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": true
+        }
+      }
+    ]
+  }
+}

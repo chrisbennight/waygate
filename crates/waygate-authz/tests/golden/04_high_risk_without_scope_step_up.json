@@ -1,0 +1,25 @@
+{
+  "name": "delete_dataset_without_scope_step_up",
+  "description": "policies/30-step-up.cedar forbids the delete_dataset tool (the lone step-up canary) without mcp:invoke:high. The engine re-evaluates with the scope added; if the augmented principal would be allowed, the verdict converts to StepUpRequired (not Deny). An mcp-admins caller missing the scope hits exactly that path. Step-up is keyed on the tool NAME, not the risk tier (see golden 17 for a high-risk tool that is NOT step-up-gated).",
+  "principal": {
+    "sub": "alice",
+    "auth_method": "oauth",
+    "groups": ["mcp-admins"],
+    "scopes": ["mcp:invoke", "mcp:read"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-memory-assistant.delete_dataset",
+    "risk": "high"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-memory-assistant",
+    "name": "delete_dataset",
+    "risk": "high",
+    "side_effects": true
+  },
+  "expected": {
+    "decision": "StepUpRequired"
+  }
+}

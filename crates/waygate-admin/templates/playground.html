@@ -1,0 +1,228 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Playground</h1>
+    {% if !cedar_configured %}
+    <span class="chip chip--warn">cedar engine not configured</span>
+    {% endif %}
+    {% if cedar_configured && !scenarios_configured %}
+    <span class="chip chip--warn">scenarios store not configured</span>
+    {% endif %}
+</header>
+
+{# Standalone interactive Cedar policy tester + saved
+   scenarios sidebar. Reuses the existing
+   /policies/simulate endpoint verbatim — same field names, same
+   CSRF token, same #sim-result fragment swap. The Save / Load /
+   Delete affordances live in this page's own handler. #}
+
+{% if !cedar_configured %}
+<div class="card">
+    <p class="sim-note" style="padding: 12px 14px">
+        The Cedar engine is not configured (dev-mode auth-disabled),
+        so policy simulation is unavailable. Set
+        <code>GATEWAY_POLICIES_DIR</code> (or publish a policy bundle)
+        and restart to enable the playground.
+    </p>
+</div>
+{% else %}
+<div class="pg-shell">
+
+    {# Saved scenarios sidebar. Hidden when the store isn't
+       wired (the page falls back to the stateless shape). #}
+    {% if scenarios_configured %}
+    <aside class="saved-views" aria-label="Saved scenarios">
+        <h3 class="rail-heading">Saved scenarios <span class="count">{{ scenarios.len() }}</span></h3>
+        {% if scenarios.is_empty() %}
+            <p class="empty">
+                None yet. Fill the form on the right, then Save it
+                under a name to re-run it after each policy edit.
+            </p>
+        {% else %}
+            <ul>
+                {% for s in scenarios %}
+                <li>
+                    <a class="name" href="{{ self.chrome.nav_url("/playground") }}?load={{ s.name_qs|safe }}" title="Created by {{ s.created_by_display }} · updated {{ s.updated_at_abs }}">
+                        {{ s.name }}
+                    </a>
+                    <form method="POST" action="{{ self.chrome.nav_url("/playground/scenarios") }}/{{ s.name_qs|safe }}/delete" style="margin: 0">
+                        <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                        <button class="del" type="submit"
+                                title="Delete `{{ s.name }}`"
+                                onclick="return confirm('Delete scenario {{ s.name }}?')">×</button>
+                    </form>
+                </li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        {# Save form. Captures whatever's in the simulator form via
+           a `form="pg-save-mirror"` association — every field
+           below in the simulator form is also referenced from this
+           one's submit. Simpler approach: server-side, the Save
+           handler reads the same field names as the simulator
+           form, and the operator fills the simulator first, then
+           types a name and clicks Save. The Name input lives in
+           a separate <form> that POSTs to /playground/scenarios
+           and carries its OWN copies of every simulator value via
+           hidden inputs we keep in sync via the small inline
+           script at the bottom. #}
+        <form method="POST" action="{{ self.chrome.nav_url("/playground/scenarios") }}" class="save-form" id="pg-save-form">
+            <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+            {# Mirror inputs — kept in sync with the simulator form
+               via the bottom-of-page script so the Save POST
+               carries whatever the operator just filled in. The
+               value attribute pre-fills from the active form state
+               so the first Save without any edits captures the
+               currently-loaded scenario verbatim. #}
+            <input type="hidden" name="sub" value="{{ form.sub }}">
+            <input type="hidden" name="groups" value="{{ form.groups }}">
+            <input type="hidden" name="scopes" value="{{ form.scopes }}">
+            <input type="hidden" name="auth_method" value="{{ form.auth_method }}">
+            <input type="hidden" name="action" value="{{ form.action }}">
+            <input type="hidden" name="risk" value="{{ form.risk }}">
+            <input type="hidden" name="resource_type" value="{{ form.resource_type }}">
+            <input type="hidden" name="server" value="{{ form.server }}">
+            <input type="hidden" name="tool" value="{{ form.tool }}">
+            <input type="hidden" name="tool_name" value="{{ form.tool_name }}">
+            {% if form.pii %}<input type="hidden" name="pii" value="on">{% endif %}
+            <input type="text" name="name" placeholder="scenario name"
+                   value="{% match loaded_name %}{% when Some with (n) %}{{ n }}{% when None %}{% endmatch %}"
+                   pattern="[A-Za-z0-9 _\-]+" maxlength="64" required>
+            <button type="submit">Save</button>
+        </form>
+    </aside>
+    {% endif %}
+
+    <section class="card" aria-labelledby="pg-h">
+        <div class="card-head"><h2 id="pg-h" class="card-title">Policy simulator</h2></div>
+        <div class="card-body">
+            {% if load_miss %}
+            <p class="pg-load-miss">
+                Scenario not found — the form below renders with
+                canonical defaults. Save a scenario with the same
+                name to make this bookmark restore.
+            </p>
+            {% endif %}
+            <p class="sim-note">
+                Dry-run an authorization decision against the live policy set:
+                describe a hypothetical principal, action, and resource, and see
+                the Cedar verdict (<code>allow</code> / <code>deny</code> /
+                <code>step_up</code>), the human-readable reason each policy fired,
+                and the matched policy IDs. Nothing is logged; this never touches
+                the request path.
+            </p>
+            <form class="sim-form" id="pg-sim-form"
+                  hx-post="{{ self.chrome.nav_url("/policies/simulate") }}"
+                  hx-target="#sim-result"
+                  hx-swap="outerHTML"
+                  hx-disabled-elt="find button[type=submit]">
+                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                <fieldset>
+                    <legend>Principal</legend>
+                    <label for="pg-sub">Subject</label>
+                    <input id="pg-sub" name="sub" type="text" value="{{ form.sub }}" required>
+                    <label for="pg-groups">Groups (comma-separated)</label>
+                    <input id="pg-groups" name="groups" type="text" value="{{ form.groups }}">
+                    <label for="pg-scopes">Scopes (comma-separated)</label>
+                    <input id="pg-scopes" name="scopes" type="text" value="{{ form.scopes }}">
+                    <label for="pg-auth">Auth method</label>
+                    <select id="pg-auth" name="auth_method">
+                        <option value="oauth"{% if form.auth_method == "oauth" %} selected{% endif %}>oauth</option>
+                        <option value="api_key"{% if form.auth_method == "api_key" %} selected{% endif %}>api_key</option>
+                    </select>
+                </fieldset>
+                <fieldset>
+                    <legend>Action</legend>
+                    <label for="pg-action">Action type</label>
+                    <select id="pg-action" name="action">
+                        <option value="call_tool"{% if form.action == "call_tool" %} selected{% endif %}>call_tool</option>
+                        <option value="search_tools"{% if form.action == "search_tools" %} selected{% endif %}>search_tools</option>
+                        <option value="list_tools"{% if form.action == "list_tools" %} selected{% endif %}>list_tools</option>
+                        <option value="admin_manage_policies"{% if form.action == "admin_manage_policies" %} selected{% endif %}>admin_manage_policies</option>
+                        <option value="admin_manage_servers"{% if form.action == "admin_manage_servers" %} selected{% endif %}>admin_manage_servers</option>
+                        <option value="admin_view_telemetry"{% if form.action == "admin_view_telemetry" %} selected{% endif %}>admin_view_telemetry</option>
+                    </select>
+                    <label for="pg-risk">Risk (call_tool)</label>
+                    <select id="pg-risk" name="risk">
+                        <option value="low"{% if form.risk == "low" %} selected{% endif %}>low</option>
+                        <option value="medium"{% if form.risk == "medium" %} selected{% endif %}>medium</option>
+                        <option value="high"{% if form.risk == "high" %} selected{% endif %}>high</option>
+                    </select>
+                </fieldset>
+                <fieldset>
+                    <legend>Resource</legend>
+                    <label for="pg-rtype">Resource type</label>
+                    <select id="pg-rtype" name="resource_type">
+                        <option value="tool"{% if form.resource_type == "tool" %} selected{% endif %}>tool</option>
+                        <option value="server"{% if form.resource_type == "server" %} selected{% endif %}>server</option>
+                    </select>
+                    <label for="pg-server">Server</label>
+                    <input id="pg-server" name="server" type="text" value="{{ form.server }}">
+                    <label for="pg-tool">Tool</label>
+                    <input id="pg-tool" name="tool" type="text" value="{{ form.tool }}">
+                    <label for="pg-tool-name">Tool name (call_tool action)</label>
+                    <input id="pg-tool-name" name="tool_name" type="text" value="{{ form.tool_name }}">
+                    <label for="pg-pii">PII</label>
+                    <input id="pg-pii" name="pii" type="checkbox"{% if form.pii %} checked{% endif %}>
+                </fieldset>
+                <div class="row-actions">
+                    <button type="submit" class="btn btn-primary">Simulate</button>
+                </div>
+                <div id="sim-result" aria-live="polite">
+                    <p class="sim-note">Run a simulation to see the decision, the
+                      matched policy IDs, and the reason each policy fired.</p>
+                </div>
+            </form>
+        </div>
+    </section>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/admin/static/js/htmx.min.js"></script>
+{% if cedar_configured && scenarios_configured %}
+<script>
+// Mirror the simulator form's current values into the
+// Save form's hidden inputs on each change, so a Save click
+// captures whatever the operator just typed. Defensive: the
+// save-form's hidden inputs are pre-stamped with the
+// last-rendered values, so this is purely a Save-after-edit
+// improvement; a Save without any edits still works.
+(function () {
+    const sim = document.getElementById("pg-sim-form");
+    const save = document.getElementById("pg-save-form");
+    if (!sim || !save) return;
+    const keys = ["sub", "groups", "scopes", "auth_method", "action",
+                  "risk", "resource_type", "server", "tool", "tool_name"];
+    function sync() {
+        for (const k of keys) {
+            const src = sim.querySelector(`[name="${k}"]`);
+            const dst = save.querySelector(`input[type=hidden][name="${k}"]`);
+            if (src && dst) dst.value = src.value;
+        }
+        // PII checkbox: present-and-"on" vs absent. The Save
+        // form carries an "on"-valued hidden when checked, OR
+        // removes the input entirely when unchecked, so the
+        // serde-side `Option<String>` matches the form-POST
+        // shape.
+        const pii = sim.querySelector('input[name="pii"]');
+        let dst = save.querySelector('input[type=hidden][name="pii"]');
+        if (pii && pii.checked) {
+            if (!dst) {
+                dst = document.createElement("input");
+                dst.type = "hidden"; dst.name = "pii"; dst.value = "on";
+                save.appendChild(dst);
+            }
+        } else if (dst) {
+            dst.remove();
+        }
+    }
+    sim.addEventListener("input", sync);
+    sim.addEventListener("change", sync);
+})();
+</script>
+{% endif %}
+{% endblock %}

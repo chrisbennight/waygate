@@ -1,0 +1,31 @@
+{
+  "name": "scim_deactivated_principal_blocked",
+  "description": "policies/16-scim-active.cedar enforces SCIM soft-deletes: any principal that came in through SCIM with active=false is forbidden from every action. Pin the verdict and the operator-facing @reason text that tells the admin where to look.",
+  "principal": {
+    "sub": "alice",
+    "auth_method": "oauth",
+    "groups": ["mcp-admins"],
+    "scopes": ["mcp:invoke", "mcp:read", "mcp:admin"],
+    "scim": {
+      "user_id": "scim-uuid-alice",
+      "user_name": "alice",
+      "external_id": "alice@example.test",
+      "active": false
+    }
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-messages.contacts.list",
+    "risk": "low"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-messages",
+    "name": "contacts.list",
+    "risk": "low"
+  },
+  "expected": {
+    "decision": "Deny",
+    "reason_contains": ["reactivate at the IdP"]
+  }
+}

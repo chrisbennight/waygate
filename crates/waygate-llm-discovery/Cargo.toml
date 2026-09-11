@@ -1,0 +1,21 @@
+[package]
+name = "waygate-llm-discovery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Exact decimal for the per-Mtok pricing conversion (OpenRouter publishes
+# USD-per-token strings); matches the waygate-storage cost columns.
+rust_decimal.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

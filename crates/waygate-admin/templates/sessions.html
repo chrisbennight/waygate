@@ -1,0 +1,44 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Sessions</h1>
+</header>
+
+{# Live OAuth-session inventory, split out of the API-keys page into its
+   own page. The included partial reads the
+   locals `enabled`, `is_admin`, `csrf_token`, `sessions`, `error` — rebind
+   them from `oauth_section` so the partial resolves them against this
+   page's struct (askama include scoping). `self.nav_url` and the htmx
+   revoke target (`#oauth-sessions-section`) come from the section/table
+   templates and resolve here. #}
+{% let enabled = oauth_section.enabled %}
+{% let is_admin = oauth_section.is_admin %}
+{% let csrf_token = oauth_section.csrf_token.clone() %}
+{% let sessions = oauth_section.sessions.clone() %}
+{% let error = oauth_section.error.clone() %}
+{% include "oauth_clients_section.html" %}
+
+{# The section renders nothing when the built-in Authorization Server is
+   off (`enabled == false`). On the old combined page the API-keys block
+   filled the page in that case; as a standalone page we'd otherwise show
+   just a bare title, so render an explicit disabled-state card. #}
+{% if !enabled %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <p class="empty-state__title">OAuth sessions unavailable</p>
+        <p class="empty-state__body">
+            The built-in Authorization Server is disabled
+            (<code>GATEWAY_AS_ENABLED</code> is off), so there are no OAuth
+            sessions to manage. Static API keys live on the
+            <a href="{{ self.chrome.nav_url("/identities") }}">API Keys</a> page.
+        </p>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/admin/static/js/htmx.min.js"></script>
+{% endblock %}

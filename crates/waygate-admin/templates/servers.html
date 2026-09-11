@@ -1,0 +1,116 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Servers</h1>
+</header>
+
+{# Prominent, never-silently-good banner when the on-disk config is
+   broken / a reload was refused and the gateway is serving a stale set. #}
+{% if config_degraded %}
+<div role="alert" class="form-error forms-error">
+    <strong>⚠ Config STALE.</strong> {{ config_detail }} — the gateway is serving
+    the previously-loaded upstream set. Fix <code>servers/*.yaml</code> (or
+    the source it was recovered from) and reload / restart.
+</div>
+{% endif %}
+
+<p class="muted" style="margin: 0 0 12px; max-width: 72ch">
+    Configured upstream MCP servers. Per-server manifests are edited on the
+    Server Manifests page (or <code>servers/*.yaml</code>); use
+    <strong>Reload manifests</strong> to apply the on-disk
+    <code>servers/*.yaml</code> set's hot-reloadable changes (tool
+    classifications, <code>exchange</code>, tier) in place. Connection-shape
+    changes (url / command / auth / mtls / <code>protocol</code> /
+    <code>session</code> isolation) are
+    <strong>re-dialed live</strong> by Reload when the slot count is unchanged;
+    a transport flip (stdio↔network) or a <code>session.concurrency</code>
+    change resizes the slot pool and is <strong>rebuilt live</strong> by Reload —
+    a restart is needed only if every new-shape dial fails. Operators can also
+    <strong>recover</strong> a server in place — re-dial a down upstream or
+    clear a drift quarantine — or <strong>refresh its catalog</strong> to replace
+    a healthy session after the upstream adds tools. Expand a row (▸) to see its
+    resolved connection, identity tier, and tool-risk summary; select a server
+    name to browse its tools.
+</p>
+{% if is_admin %}{% if reload_available %}
+<div class="reload-row">
+    <form hx-post="{{ self.chrome.nav_url("/servers/reload") }}" hx-target="#reload-result" hx-swap="innerHTML">
+        <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+        <button type="submit" class="btn btn--sm btn-secondary">Reload manifests</button>
+    </form>
+    <div id="reload-result" aria-live="polite"></div>
+</div>
+{% endif %}{% endif %}
+
+<div class="card card--table">
+    <table class="data-table">
+        <caption class="sr-only">Configured upstream MCP servers</caption>
+        <thead>
+            <tr><th class="exp-col"><span class="sr-only">Expand</span></th><th>Name</th><th>Transport</th><th>Protocol</th><th>Status</th><th>Lanes</th><th>Recovery</th><th>Published / classified</th><th>Quarantine</th><th>Output schemas</th><th>URL</th></tr>
+        </thead>
+        <tbody>
+        {% for s in servers %}
+            <tr>
+                <td class="exp-col">
+                    <button type="button" class="srv-expand" data-accordion
+                            aria-expanded="false" aria-controls="cfg-row-{{ loop.index }}"
+                            hx-get="{{ s.config_url }}&tab=overview"
+                            hx-target="#cfg-body-{{ loop.index }}" hx-swap="innerHTML"
+                            hx-trigger="click once">
+                        <span class="chevron" aria-hidden="true">▸</span><span class="sr-only">Show config for {{ s.name }}</span>
+                    </button>
+                </td>
+                <td><a href="{{ s.tools_url }}">{{ s.name }}</a></td>
+                <td class="mono">{{ s.transport }}</td>
+                {# Negotiated MCP generation, per connected lanes. Two joined
+                   values mean a partial heal is straddling the upstream's own
+                   migration — expected transiently, worth a glance if it
+                   persists. #}
+                <td>{% if s.protocol.is_empty() %}<span class="muted">–</span>{% else if s.protocol.contains("+") %}<span class="chip chip--warn" title="Lanes disagree: a partial heal is straddling this upstream's protocol migration.">{{ s.protocol }}</span>{% else %}<span class="mono">{{ s.protocol }}</span>{% endif %}</td>
+                <td>
+                    {% if s.runtime_status == "connected" %}
+                        <span class="status-dot status-dot--ok" aria-hidden="true"></span><span class="state-ok">ok</span>
+                    {% else if s.runtime_status == "degraded" %}
+                        <span class="status-dot status-dot--warn" aria-hidden="true"></span><span class="chip chip--warn">degraded</span>
+                    {% else %}
+                        <span class="status-dot status-dot--bad" aria-hidden="true"></span><span class="state-err">down</span>
+                    {% endif %}
+                    <span class="muted mono">({{ s.breaker }})</span>
+                </td>
+                <td class="mono">{{ s.connected_lanes }} / {{ s.total_lanes }}</td>
+                <td><span class="mono">{{ s.last_error_class }}</span><br><span class="muted" title="Last success: {{ s.last_success_at }}">next: {{ s.next_retry_at }}</span></td>
+                <td class="mono">{{ s.published_tool_count }} / {{ s.classified_tool_count }}</td>
+                <td>{% if s.quarantined > 0 %}<span class="chip chip--warn">{{ s.quarantined }} quarantined</span>{% else %}<span class="muted">–</span>{% endif %}</td>
+                {# A tool whose advertised output schema had a non-object root
+                   is published without an output contract. Flagged on the row
+                   because a strict MCP client rejects an ENTIRE tools/list
+                   response over one such tool — the upstream needs fixing even
+                   though the gateway keeps serving its tools. #}
+                <td>{% if s.rejected_output_schemas > 0 %}<span class="chip chip--bad" title="Tools published without the output schema this upstream advertised: the root was not type: &quot;object&quot;, so it cannot describe a structuredContent object. The tools stay callable; fix the upstream definitions.">{{ s.rejected_output_schemas }} rejected</span>{% else %}<span class="muted">–</span>{% endif %}</td>
+                <td class="mono muted">{% match s.url %}{% when Some with (url) %}{{ url }}{% when None %}–{% endmatch %}</td>
+            </tr>
+            <tr class="cfg-row" id="cfg-row-{{ loop.index }}" hidden>
+                <td colspan="11"><div id="cfg-body-{{ loop.index }}" class="cfg-body"></div></td>
+            </tr>
+        {% endfor %}
+        {% if servers.is_empty() %}
+            <tr><td colspan="11" class="empty">
+                No upstreams configured yet. Add one on the Server Manifests page or
+                under <code>servers/</code>, then reload manifests; see
+                <code>docs/agents/upstreams.md</code>.
+            </td></tr>
+        {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{# htmx loaded per-page (same pattern as policies.html / activity.html), not
+   globally in layout.html: the "Reload manifests" button hx-posts, and each
+   row's expander hx-gets its config panel. servers_accordion.js handles the
+   row show/hide toggle; htmx owns the panel content load. #}
+<script src="/admin/static/js/htmx.min.js"></script>
+<script src="/admin/static/js/servers_accordion.js" defer></script>
+{% endblock %}

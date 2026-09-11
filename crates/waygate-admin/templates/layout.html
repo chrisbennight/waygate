@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en"{% match chrome.theme %}{% when Some with (t) %} data-theme="{{ t }}"{% when None %}{% endmatch %}>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ chrome.title }} · Waygate</title>
+<link rel="stylesheet" href="/admin/static/css/fonts.css">
+<link rel="stylesheet" href="/admin/static/css/tokens.css">
+<link rel="stylesheet" href="/admin/static/css/base.css">
+<link rel="stylesheet" href="/admin/static/css/components.css">
+{% block head %}{% endblock %}
+</head>
+<body{% match chrome.tenant_ctx %}{% when Some with (ctx) %} data-tenant-slug="{{ ctx.slug }}"{% when None %}{% endmatch %}>
+<a class="skip-link" href="#main">Skip to main content</a>
+
+{# Cross-tenant banner: visible only when the URL tenant differs from
+   the principal's home tenant. Red strip across the top of every page so
+   gateway-admin operators acting on another tenant's data can't lose
+   track of the active scope. #}
+{% match chrome.tenant_ctx %}
+{% when Some with (ctx) %}
+{% if ctx.is_cross_tenant %}
+<div class="banner banner--cross-tenant" role="status" aria-live="polite">
+    <strong>Viewing tenant:</strong>
+    <code>{{ ctx.slug }}</code>
+    {% match ctx.display_name %}{% when Some with (name) %}<span>({{ name }})</span>{% when None %}{% endmatch %}
+    <span class="banner__separator">·</span>
+    <span>signed in to <code>{{ ctx.principal_tenant }}</code></span>
+    <a class="banner__back" href="/admin/t/{{ ctx.principal_tenant }}/">Back to my tenant</a>
+</div>
+{% endif %}
+{% when None %}{% endmatch %}
+
+<div class="shell">
+    <header class="topbar" role="banner">
+        <div class="topbar__brand">Waygate</div>
+        <span class="topbar__env mono" aria-label="environment">{{ chrome.env }}</span>
+        <div class="topbar__spacer"></div>
+        {# Cmd-K palette opener. Always visible in the topbar
+           so the keyboard shortcut is discoverable. The click handler
+           dispatches the same `keydown(Ctrl-K)` event the global
+           handler in palette.js listens for, so there's a single
+           open/close code path. #}
+        <button class="topbar__palette" type="button"
+                onclick="document.dispatchEvent(new KeyboardEvent('keydown', {key: 'k', ctrlKey: true, bubbles: true}));"
+                aria-label="Open command palette (Ctrl-K)">
+            <svg width="16" height="16" aria-hidden="true"><use href="/admin/static/lucide.svg#search"/></svg>
+            <span class="topbar__palette-hint mono">Ctrl K</span>
+        </button>
+        {% match chrome.user %}{% when Some with (_u) %}
+        {# Contextual Assistant toggle. Opens the docked panel; the
+           Ctrl/Cmd-J handler in assist_panel.js shares this open/close path. #}
+        <button class="topbar__palette" type="button" data-assist-toggle
+                aria-label="Toggle assistant (Ctrl-J)" aria-expanded="false">
+            <svg width="16" height="16" aria-hidden="true"><use href="/admin/static/lucide.svg#message-square"/></svg>
+            <span class="topbar__palette-hint mono">Ctrl J</span>
+        </button>
+        {% when None %}{% endmatch %}
+        <button class="theme-toggle" data-theme-toggle type="button" aria-label="Toggle theme">
+            <svg class="theme-toggle__sun"  aria-hidden="true"><use href="/admin/static/lucide.svg#sun"/></svg>
+            <svg class="theme-toggle__moon" aria-hidden="true"><use href="/admin/static/lucide.svg#moon"/></svg>
+        </button>
+        <div class="topbar__user">{% match chrome.user %}{% when Some with (u) %}{{ u }}{% when None %}anonymous{% endmatch %}</div>
+        {% match chrome.user %}{% when Some with (_u) %}
+        <form method="post" action="/admin/logout" class="topbar__logout">
+            <button type="submit" class="topbar__logout-btn" aria-label="Sign out">Sign out</button>
+        </form>
+        {% when None %}{% endmatch %}
+    </header>
+
+    <nav class="sidebar" role="navigation" aria-label="Primary">
+        {# Tenant selector: rendered only on tenant-scoped URLs (i.e.
+           when `tenant_ctx` is Some). A plain GET form does the navigation
+           — no JS required. The selector lists every tenant the principal
+           can see from `state.identity.tenants.list()`; on legacy URLs the section
+           is hidden entirely so existing pages render unchanged. #}
+        {% match chrome.tenant_ctx %}
+        {% when Some with (ctx) %}
+        <div class="sidebar__tenant">
+            <label class="sidebar__tenant-label" for="tenant-selector">Tenant</label>
+            {% if ctx.available_tenants.is_empty() %}
+            <div class="sidebar__tenant-chip" title="No tenant registry configured">
+                <code>{{ ctx.slug }}</code>
+            </div>
+            {% else %}
+            {# The form posts to `/admin/tenant-switch` which validates
+               the slug server-side and 303s to `/admin/t/<slug>/`.
+               JS users get a no-click-needed switch via `onchange`;
+               no-JS users click the `<noscript>` Switch button. Both
+               shapes hit the same server route. #}
+            <form class="sidebar__tenant-form"
+                  method="get"
+                  action="/admin/tenant-switch">
+                <select id="tenant-selector"
+                        name="tenant_slug"
+                        class="sidebar__tenant-select"
+                        onchange="this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit();">
+                    {% for t in ctx.available_tenants %}
+                    <option value="{{ t.slug }}"{% if t.active %} selected{% endif %}>{{ t.display_name }}</option>
+                    {% endfor %}
+                </select>
+                <noscript>
+                    <button type="submit" class="btn btn-secondary">Switch</button>
+                </noscript>
+            </form>
+            {% if ctx.more_tenants_available %}
+            <p class="sidebar__tenant-hint">Showing first 50 tenants. Search for others via the Ctrl-K palette.</p>
+            {% endif %}
+            {% endif %}
+        </div>
+        {% when None %}{% endmatch %}
+
+        {# Destinations grouped into three sections:
+           Common / MCP Gateway / LLM Gateway. A muted header row renders
+           above the first destination of each section (group.section_header
+           is Some only there). Second-level pages still render as an
+           in-page tab bar (below), so the sidebar stays short and
+           scannable. Settings is pinned to the foot and never re-prints a
+           header. The Decisions entry carries the one badge in the nav:
+           static/js/badge.js fetches the pending count from the
+           server-side cached endpoint and leaves the chip hidden at
+           zero / on error / with JS off. #}
+        <ul class="sidebar__nav">
+            {% for group in chrome.nav %}
+            {% match group.section_header %}
+            {% when Some with (s) %}<li class="sidebar__section" role="heading" aria-level="2">{{ s }}</li>
+            {% when None %}{% endmatch %}
+            <li{% if group.label == "Settings" %} class="sidebar__bottom"{% endif %}>
+                <a class="sidebar__link" href="{{ group.href }}"{% if group.active %} aria-current="page"{% endif %}>
+                    <svg class="sidebar__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#{{ group.icon }}"/></svg>
+                    <span class="sidebar-label">{{ group.label }}</span>
+                    {% match group.badge_href %}
+                    {% when Some with (b) %}<span class="nav-badge" data-badge-src="{{ b }}" hidden></span>
+                    {% when None %}{% endmatch %}
+                </a>
+            </li>
+            {% endfor %}
+        </ul>
+    </nav>
+
+    <main class="main" id="main" tabindex="-1">
+        {# Tab bar for the active destination's second-level pages.
+           Tabs are real links (deep-linkable, JS-off safe) and the
+           active tab carries aria-current="page". #}
+        {% for group in chrome.nav %}
+        {% if group.active && group.items.len() > 1 %}
+        <nav class="tab-bar" aria-label="{{ group.label }} pages">
+            {% for t in group.items %}
+            <a class="tab{% if t.active %} tab--active{% endif %}" href="{{ t.href }}"{% if t.active %} aria-current="page"{% endif %}>{{ t.label }}</a>
+            {% endfor %}
+        </nav>
+        {% endif %}
+        {% endfor %}
+        {% block main %}{% endblock %}
+    </main>
+</div>
+
+{# Cmd-K palette overlay. Hidden by default; palette.js opens it
+   on Ctrl/Cmd-K and renders results fetched from the server-side
+   `/admin[/t/<tenant>]/search` endpoint. The DOM lives outside `.shell`
+   so the overlay can z-index above every page chrome (sidebar / topbar
+   / cross-tenant banner). #}
+<div id="palette-overlay" class="palette" role="dialog"
+     aria-label="Command palette" aria-modal="true" hidden data-open="false">
+    <div class="palette__card">
+        <div class="palette__input-row">
+            <svg class="palette__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#search"/></svg>
+            <input data-palette-input type="text" autocomplete="off" spellcheck="false"
+                   placeholder="Search pages, tenants, and actions…"
+                   aria-label="Search query" />
+            <kbd class="palette__esc-hint">Esc</kbd>
+        </div>
+        <ul data-palette-results class="palette__results" role="listbox"
+            aria-label="Search results"></ul>
+        <p data-palette-empty class="palette__empty" hidden>Type to search pages and tenants.</p>
+        <p data-palette-truncated class="palette__truncated" hidden>Showing first results. Type more to narrow.</p>
+    </div>
+</div>
+
+{# Docked Contextual Assistant: one drawer for any authenticated
+   dashboard user, on every page. Lives outside `.shell` so it layers above the
+   sidebar/topbar. Inert until opened (assist_panel.js). #}
+{% match chrome.user %}{% when Some with (_u) %}
+{% include "_assist_panel.html" %}
+{% when None %}{% endmatch %}
+
+<script src="/admin/static/js/theme.js"></script>
+<script src="/admin/static/js/badge.js" defer></script>
+<script src="/admin/static/js/palette.js" defer></script>
+{# Enhances the drawer's governed "Try this tool" form. Loaded once;
+   re-initialises on htmx:afterSwap so it wires the form each time the tool
+   drawer is swapped in. #}
+<script src="/admin/static/js/try_tool.js" defer></script>
+{# Contextual Assistant: the shared chat client auto-inits any
+   server-hydrated [data-agent-chat] block (the immersive page); the panel shell
+   hydrates + toggles the docked drawer present on every page. #}
+<script src="/admin/static/js/assist_chat.js" defer></script>
+<script src="/admin/static/js/assist_panel.js" defer></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

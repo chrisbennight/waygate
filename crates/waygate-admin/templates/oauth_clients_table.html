@@ -1,0 +1,58 @@
+{# Inner contents of `#oauth-sessions-section`. Kept as a standalone        #}
+{# partial so the revoke handler can htmx-swap just this fragment without   #}
+{# nesting a duplicate `<section>` + heading inside the wrapper div.        #}
+{# Owns all three sub-states the section can be in (error / empty / list)   #}
+{# so the page-load path and the post-mutation swap render identically —    #}
+{# without this, the revoke handler used to render "No live OAuth sessions" #}
+{# even when the post-revoke `list_active_sessions` itself had errored.     #}
+{% match error %}
+{% when Some with (msg) %}
+    <div class="card"><div class="empty state-err">{{ msg }}</div></div>
+{% when None %}
+{% if sessions.is_empty() %}
+    <div class="card"><div class="empty">No live OAuth sessions.</div></div>
+{% else %}
+<table class="data-table data-table--sm" role="table" aria-label="OAuth sessions">
+    <thead>
+        <tr>
+            <th>Client</th>
+            <th>Subject</th>
+            <th>Scopes</th>
+            <th>Chains</th>
+            <th>First issued</th>
+            <th>Latest issued</th>
+            <th>Usage (7d)</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for s in sessions %}
+        <tr>
+            <td class="mono" title="{{ s.client_id }}">{{ s.client_label }}</td>
+            <td>
+                {{ s.sub }}
+                {% if !s.email.is_empty() %}<br><span class="hint">{{ s.email }}</span>{% endif %}
+                {% if !s.groups.is_empty() %}<br><span class="hint mono">{{ s.groups }}</span>{% endif %}
+            </td>
+            <td class="mono">{{ s.scopes }}</td>
+            <td>{{ s.chain_count }}</td>
+            <td title="{{ s.oldest_issued_abs }}">{{ s.oldest_issued_rel }}</td>
+            <td title="{{ s.newest_issued_abs }}">{{ s.newest_issued_rel }}</td>
+            <td class="mono">{{ s.usage_count }}</td>
+            <td class="row-actions">
+                <form hx-post="{{ self.nav_url("/identities/oauth-sessions/revoke") }}"
+                      hx-target="#oauth-sessions-section"
+                      hx-swap="innerHTML"
+                      hx-confirm="Revoke this OAuth session? The user will need to log in again on the next request.">
+                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                    <input type="hidden" name="client_id" value="{{ s.client_id }}">
+                    <input type="hidden" name="sub" value="{{ s.sub }}">
+                    <button type="submit" class="linklike">revoke</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endmatch %}

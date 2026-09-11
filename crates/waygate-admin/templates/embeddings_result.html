@@ -1,0 +1,69 @@
+{# htmx fragment: the result of one embeddings test. Replaces #embed-result.
+   Carries the same id so subsequent submits keep targeting it. #}
+<div id="embed-result" aria-live="polite">
+{% if let Some(err) = error %}
+    <div class="card" style="margin-top: 16px">
+        <div class="empty-state empty-state--danger">
+            <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+            <p class="empty-state__title">Couldn't embed</p>
+            <p class="empty-state__body">{{ err }}</p>
+            {% if let Some(scope) = step_up_scope %}
+            <p class="empty-state__body" style="margin-top: 8px">
+                Needs the <code>{{ scope }}</code> scope —
+                <a href="/admin/login?step_up_scope={{ scope }}">re-authorize</a> and retry.
+            </p>
+            {% endif %}
+        </div>
+    </div>
+{% else %}
+    <section class="page-section">
+        <div class="card">
+            <div class="embed-summary" style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
+                <span class="chip chip--ok">{{ dimensions }} dims</span>
+                <span class="chip">{{ input_count }} input{% if input_count != 1 %}s{% endif %}</span>
+                {% match prompt_tokens %}{% when Some with (pt) %}<span class="chip">{{ pt }} tokens</span>{% when None %}{% endmatch %}
+                <span class="chip">{{ latency_ms }} ms</span>
+                <span class="cell-sub mono">{{ model }}</span>
+            </div>
+
+            <table class="data-table data-table--sm" role="table" aria-label="Embeddings" style="margin-top: 12px">
+                <thead>
+                    <tr><th>#</th><th>Input</th><th>Vector <span class="cell-sub">(first 8 dims — click to expand the full value)</span></th></tr>
+                </thead>
+                <tbody>
+                    {% for it in items %}
+                    <tr>
+                        <td>{{ it.index }}</td>
+                        <td class="cell-sub">{{ it.text }}</td>
+                        <td>
+                            <details class="mono">
+                                <summary style="cursor: pointer">{{ it.preview }}</summary>
+                                <div style="margin-top: 6px; max-width: 64ch; max-height: 14em; overflow: auto; word-break: break-all; white-space: normal; color: var(--ink-muted); user-select: all">{{ it.full }}</div>
+                            </details>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            {% if !sim_rows.is_empty() %}
+            <h3 class="section-heading" style="margin-top: 16px">Cosine similarity</h3>
+            <p class="cell-sub">Higher = semantically closer. The diagonal is 1.000 (each input with itself).</p>
+            <table class="data-table data-table--sm" role="table" aria-label="Cosine similarity matrix">
+                <thead>
+                    <tr><th></th>{% for it in items %}<th>{{ it.index }}</th>{% endfor %}</tr>
+                </thead>
+                <tbody>
+                    {% for row in sim_rows %}
+                    <tr>
+                        <th scope="row">{{ row.index }}</th>
+                        {% for c in row.cells %}<td class="mono">{{ c }}</td>{% endfor %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+        </div>
+    </section>
+{% endif %}
+</div>

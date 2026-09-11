@@ -1,0 +1,109 @@
+---
+# Local dev compose. A deployment overlay owns reverse-proxy wiring, private
+# networks, secrets, and its selected published image. Here we only stand up
+# a disposable gateway, database, upstream, and test issuer in isolation.
+
+services:
+  gateway:
+    image: ${GATEWAY_IMAGE:-mcp-gateway:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Development builds keep the first compilation reasonably short.
+        CARGO_PROFILE: dev
+        # BINARY_SUBDIR is a PATH SUFFIX only (debug here matches
+        # CARGO_PROFILE=dev's target/debug/ output). Previously named
+        # CARGO_TARGET_DIR — that collided with cargo's actual
+        # CARGO_TARGET_DIR env var, since buildkit propagates ARGs
+        # into the build's environment; cargo then wrote the binary
+        # to /app/debug/debug/ instead of the default /app/target/debug/.
+        # See Dockerfile top-of-file comment.
+        BINARY_SUBDIR: debug
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    environment:
+      GATEWAY_LISTEN_ADDR: 0.0.0.0:8080
+      GATEWAY_PUBLIC_URL: http://localhost:8080
+      GATEWAY_LOG_LEVEL: info
+      GATEWAY_AUTH_MODE: enforce
+      GATEWAY_DEPLOYMENT_PROFILE: dev
+      GATEWAY_AUDIENCE: gateway-demo
+      # The disposable issuer grants a fixed identity to anyone. This is
+      # signature validation and policy evaluation, not production login.
+      AUTHENTIK_ISSUER: http://demo-issuer:9000
+      GATEWAY_DATABASE_URL: postgres://gateway:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/gateway
+      GATEWAY_SERVERS_DIR: /etc/mcp-gateway/servers
+      GATEWAY_POLICIES_DIR: /etc/mcp-gateway/policies
+    volumes:
+      # The first tutorial is read-only. A real deployment supplies its own
+      # writable configuration volumes for dashboard publication.
+      - ./examples/quickstart/servers:/etc/mcp-gateway/servers:ro
+      - ./examples/quickstart/policies:/etc/mcp-gateway/policies:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      demo-upstream:
+        condition: service_healthy
+      demo-issuer:
+        condition: service_healthy
+    networks:
+      - mcp_gateway_internal
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/gateway-server", "--healthcheck"]
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 30
+
+  demo-upstream:
+    # Reuse the locked public Python SDK environment tested by image smoke.
+    build: ./scripts/boot-smoke-2026
+    command: ["/app/.venv/bin/python", "/app/demo.py"]
+    volumes:
+      - ./examples/quickstart/upstream.py:/app/demo.py:ro
+    networks:
+      - mcp_gateway_internal
+
+  demo-issuer:
+    build: ./scripts/boot-smoke-2026
+    command: ["/app/.venv/bin/python", "/app/issuer.py"]
+    volumes:
+      - ./examples/quickstart/issuer.py:/app/issuer.py:ro
+    ports:
+      - "127.0.0.1:9090:9000"
+    networks:
+      - mcp_gateway_internal
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+      POSTGRES_DB: gateway
+    volumes:
+      - gateway_db:/var/lib/postgresql/data
+    networks:
+      - mcp_gateway_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  mcp_gateway_internal:
+    driver: bridge
+
+volumes:
+  gateway_db:

@@ -1,0 +1,56 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Compare events</h1>
+    <a class="compare-back" href="{{ back_url }}">← back to activity</a>
+</header>
+
+{% if !audit_available %}
+<div class="card">
+    <div class="compare-empty">
+        Audit store not configured — set <code>GATEWAY_DATABASE_URL</code>
+        and restart to fetch events.
+    </div>
+</div>
+{% else if !both_resolved %}
+<div class="card">
+    <div class="compare-empty">
+        One or both events couldn't be loaded from this tenant's
+        audit chain. The ids may be from a different tenant, may
+        have been pruned by retention, or may simply be wrong.
+        <br><br>
+        <a class="compare-back" href="{{ back_url }}">Back to activity</a>
+    </div>
+</div>
+{% else %}
+
+<div class="compare-shell">
+    <div class="card card--table">
+        <table class="compare-table" role="table" aria-label="Side-by-side event compare">
+            <thead>
+                <tr>
+                    <th></th>
+                    <th>A — {{ a_summary }}</th>
+                    <th>B — {{ b_summary }}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for f in fields %}
+                <tr{% if f.differs %} class="diff"{% endif %}>
+                    <th scope="row">{{ f.label }}</th>
+                    <td class="mono">{{ f.a_val }}</td>
+                    <td class="mono">{{ f.b_val }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <p class="footnote">
+        Differing fields are highlighted. Deeper diff of the
+        per-event details JSON is deferred to a future slice.
+    </p>
+</div>
+
+{% endif %}
+{% endblock %}

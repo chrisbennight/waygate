@@ -1,0 +1,24 @@
+[package]
+name = "waygate-llm-dispatch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+waygate-llm-credentials.workspace = true
+waygate-llm-providers.workspace = true
+waygate-llm-translate.workspace = true
+waygate-telemetry.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -1,0 +1,164 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Decisions</h1>
+    {% if insufficient_scope %}
+        <span class="chip chip--warn">insufficient scope</span>
+    {% else if stores_unconfigured %}
+        <span class="chip chip--warn">decision stores not configured</span>
+    {% endif %}
+</header>
+
+{# The merged decisions queue: control surfaces that need an
+   operator decision — pending skill reviews, change requests, and active break-glass
+   (review/revoke) — in one inbox. Matches the sidebar Decisions badge's
+   sources. Actions are inline and POST to queue-owned routes that reuse
+   the same mutation cores as the per-surface pages, then PRG back here. #}
+
+{% match flash_ok %}{% when Some with (m) %}
+<div class="callout callout--ok" role="status">{{ m }}</div>
+{% when None %}{% endmatch %}
+{% match flash_err %}{% when Some with (m) %}
+<div class="callout callout--err" role="alert">{{ m }}</div>
+{% when None %}{% endmatch %}
+
+{# A configured store's read FAILED. Surface it loudly: an empty queue
+   below may be empty only because the read errored, not because there's
+   nothing to decide. Never let a load error read as "all clear". #}
+{% if load_error && !insufficient_scope %}
+<div class="callout callout--err" role="alert">
+    Couldn't load part of the decision queue — a store read failed. The list
+    below may be incomplete. Check the server logs and refresh.
+</div>
+{% endif %}
+
+{% if insufficient_scope %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <p class="empty-state__title">Admin scope required</p>
+        <p class="empty-state__body">
+            The decisions queue requires the <code>mcp:admin</code> scope (the
+            checker role). Your current dashboard session lacks it, so pending
+            decisions are hidden.
+        </p>
+        <p class="empty-state__body" style="margin-top: 8px">
+            <a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/decisions") }}">Re-authorize with the admin scope</a> if your account is entitled to it.
+        </p>
+    </div>
+</div>
+{% else if items.is_empty() && !load_error %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#inbox"/></svg>
+        <p class="empty-state__title">Nothing awaiting a decision</p>
+        <p class="empty-state__body">
+            {% if stores_unconfigured %}
+                The change-request and break-glass stores aren't configured
+                (set <code>GATEWAY_DATABASE_URL</code>). Pending change
+                requests and active break-glass tokens would appear here.
+            {% else %}
+                No pending change requests, skill reviews, or active break-glass tokens.
+                New items appear here and on the Decisions badge in the
+                sidebar.
+            {% endif %}
+        </p>
+    </div>
+</div>
+{% else if !items.is_empty() %}
+<section class="page-section" aria-label="Pending decisions">
+    <div class="card card--table">
+        <ul class="attn-list">
+            {% for i in items %}
+            <li{% if i.params_pretty.is_some() %} class="attn-item--stacked"{% endif %}>
+                <span class="attn-chip attn-chip--{{ i.severity }}">{{ i.kind }}</span>
+                <div class="attn-item__main">
+                    <div class="attn-label mono">{{ i.summary }}</div>
+                    <div class="attn-hint">
+                        <code>{{ i.handle }}</code> ·
+                        <span title="{{ i.age_abs }}">{{ i.age_rel }}</span>
+                    </div>
+                </div>
+                {# EFFECT preview for a pending policy / manifest change — the
+                   blast-radius the approver reviews BEFORE approving, so this
+                   inbox is not a blind approval path for a change the /changes
+                   queue would preview (the server-review gate must hold on EVERY
+                   approval surface). At most one is Some; both None for
+                   break-glass and non-previewable actions. Read-only. #}
+                {% match i.policy_preview %}
+                {% when Some with (pv) %}{% include "_policy_preview_card.html" %}
+                {% when None %}{% endmatch %}
+                {% match i.manifest_preview %}
+                {% when Some with (pv) %}{% include "_manifest_preview_card.html" %}
+                {% when None %}{% endmatch %}
+                {# Captured params — the maker's exact proposed intent, full-width
+                   and ABOVE the action controls so the approver
+                   reads what they authorize BEFORE acting. Change requests only;
+                   break-glass rows have no proposed params. #}
+                {% match i.params_pretty %}{% when Some with (p) %}
+                <pre class="mono params-review__pre" aria-label="Captured parameters for {{ i.handle }}">{{ p }}</pre>
+                {% when None %}{% endmatch %}
+                {% match i.approval_requirement %}{% when Some with (requirement) %}
+                <div class="params-review" aria-label="Approval requirement for {{ i.handle }}">
+                    <span class="params-review__label">Approval requirement:</span>
+                    <p class="mono">{{ requirement.summary }}</p>
+                    {% match requirement.cooldown_until_abs %}
+                    {% when Some with (not_before) %}
+                    <p class="muted">Approval is available at {{ not_before }}. Denial remains available now.</p>
+                    {% when None %}{% endmatch %}
+                    {% if requirement.step_up_required %}
+                    <p><a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/decisions") }}">Re-authenticate with the required assurance</a> before approving.</p>
+                    {% endif %}
+                </div>
+                {% when None %}{% endmatch %}
+                <div class="row-actions">
+                    {# Change request: approve (confirm) + deny (reason). #}
+                    {% match i.skill_review_rel %}{% when Some with (url) %}<a class="btn btn--sm" href="{{ self.chrome.nav_url(url) }}">Review skill changes</a>{% when None %}{% endmatch %}
+                    {% match i.cr_approve_rel %}{% when Some with (approve_rel) %}
+                    {% if i.approval_blocked %}
+                    <button type="button" class="btn btn--sm btn-primary" disabled>Approval unavailable</button>
+                    {% else %}
+                    <form method="post" action="{{ self.chrome.nav_url(approve_rel.as_str()) }}"
+                          onsubmit="return confirm('Approve this change? It runs server-side once it has the required approvals — for a single-approver change that is immediately; a multi-approver change records your approval and runs only when enough distinct approvers have signed off.');">
+                        <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                        {% if i.effect_preview_acknowledgement_required %}
+                        <label class="effect-preview-ack">
+                            <input type="checkbox" name="effect_preview_acknowledged" value="true" required>
+                            I reviewed the effect preview
+                        </label>
+                        {% endif %}
+                        <button type="submit" class="btn btn--sm btn-primary" aria-label="Approve {{ i.handle }}">Approve</button>
+                    </form>
+                    {% endif %}
+                    {% when None %}{% endmatch %}
+                    {% match i.cr_deny_rel %}{% when Some with (deny_rel) %}
+                    <form method="post" action="{{ self.chrome.nav_url(deny_rel.as_str()) }}">
+                        <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                        <input type="text" name="reason" class="reason-input" placeholder="reason (required)" required maxlength="500" aria-label="Denial reason for {{ i.handle }}">
+                        <button type="submit" class="btn btn--sm btn-danger" aria-label="Deny {{ i.handle }}">Deny</button>
+                    </form>
+                    {% when None %}{% endmatch %}
+                    {# Break-glass: revoke (confirm). #}
+                    {% match i.bg_revoke_rel %}{% when Some with (revoke_rel) %}
+                    <form method="post" action="{{ self.chrome.nav_url(revoke_rel.as_str()) }}"
+                          onsubmit="return confirm('Revoke this break-glass token? In-flight callers lose the override.');">
+                        <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                        <button type="submit" class="btn btn--sm btn-danger" aria-label="Revoke {{ i.handle }}">Revoke</button>
+                    </form>
+                    {% when None %}{% endmatch %}
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+        {% if changes_saturated || break_glass_saturated %}
+        <p class="table-hint">
+            Showing the first items.
+            {% if changes_saturated %}More pending change requests on the <a href="{{ self.chrome.nav_url("/changes") }}">Change requests</a> tab.{% endif %}
+            {% if break_glass_saturated %}More active tokens on the <a href="{{ self.chrome.nav_url("/break_glass") }}">Break-glass</a> tab.{% endif %}
+        </p>
+        {% endif %}
+    </div>
+</section>
+{% endif %}
+{% endblock %}

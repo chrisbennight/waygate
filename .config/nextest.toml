@@ -1,0 +1,45 @@
+# cargo-nextest configuration. Image CI runs the suite with
+# `cargo nextest run --workspace --locked --profile ci`; the pinned
+# runner version lives in scripts/ensure-nextest.sh.
+#
+# nextest does not execute doctests; image CI runs a separate
+# `cargo test --doc --workspace --locked` step so any doctest runs
+# there instead of being silently skipped.
+
+[profile.ci]
+# One CI round-trip costs minutes: surface every failure in a single run
+# instead of stopping at the first.
+fail-fast = false
+# No automatic retries — a flaky test must fail loud, never be masked by
+# a silent second attempt.
+retries = 0
+# Report any test still running after 60s, and hard-fail it after five
+# periods (5 minutes): a wedged test (e.g. paused-clock time that can
+# never advance past pending real I/O) must fail the run loudly, not
+# hang the job until the runner's global timeout. No legitimate test in
+# this workspace approaches 5 minutes.
+slow-timeout = { period = "60s", terminate-after = 5 }
+# List slow and skipped tests in the final summary so the skip-when-unset
+# *_pg contract is auditable from the CI log alone.
+final-status-level = "slow"
+
+# The LLM-discovery pg tests reconcile provider-scoped rows in the shared
+# test database: one test's reconcile soft-disables another's discovered
+# rows if they overlap in time. Inside a single test binary they serialize
+# on waygate-server's DISCOVERY_PG_LOCK, but nextest runs each test in its
+# own PROCESS, where an in-process mutex serializes nothing — this group
+# is the cross-process equivalent. A new test that takes DISCOVERY_PG_LOCK
+# must also be added to this filter (the lock's doc comment points here).
+[test-groups]
+discovery-pg = { max-threads = 1 }
+# These fixtures invoke a database-wide grant sweeper and assert intermediate
+# states. A separate test's sweeper must not advance or delete those fixtures.
+transfer-sweep-pg = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(waygate-server) & (test(=llm_discovery::tests::refresh_target_upserts_prices_and_reconciles) | test(=llm_discovery::tests::refresh_target_discovers_embeddings_distinctly_and_reconcile_keeps_both) | test(=llm::tests::boot_load_makes_a_discovered_row_routable))'
+test-group = 'discovery-pg'
+
+[[profile.default.overrides]]
+filter = 'package(waygate-transfer) & (test(=upload_status_is_scoped_to_the_exact_owner_and_credential_profile) | test(=authority_transitions_are_atomic_and_sender_constrained))'
+test-group = 'transfer-sweep-pg'

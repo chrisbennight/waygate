@@ -1,0 +1,401 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Activity</h1>
+    {% if !audit_available %}
+        <span class="chip chip--warn">audit store not configured</span>
+    {% endif %}
+</header>
+
+{% if audit_available %}
+
+{# Facet explorer: left rail is per-dimension value counts
+   computed from the current fetched page; right side is the
+   filter form + active-filter chips + events table, plus saved
+   views, live tail, and event-compare (see the sections below). #}
+
+<div class="activity-shell">
+    <aside aria-label="Sidebar">
+        {# Saved-views section above the facets. Renders
+           only when the store is wired; an empty store still
+           shows the Save form so an operator can save their
+           first view. #}
+        {% if saved_views_configured %}
+        <div class="saved-views">
+            <h3 class="rail-heading">Saved views</h3>
+            {% if saved_views.is_empty() %}
+                <p class="empty">No saved views yet. Save the current filter combo to recall it later.</p>
+            {% else %}
+                <ul>
+                    {% for v in saved_views %}
+                    <li>
+                        <a class="name{% match loaded_view_name %}{% when Some with (n) %}{% if n.as_str() == v.name.as_str() %} active{% endif %}{% when None %}{% endmatch %}"
+                           href="{{ self.chrome.nav_url("/activity") }}?load_view={{ v.name_qs|safe }}"
+                           title="Saved by {{ v.created_by_display }} · updated {{ v.updated_at_abs }}">{{ v.name }}</a>
+                        <form class="delete-form" method="post"
+                              action="{{ self.chrome.nav_url("/activity/saved_views/") }}{{ v.name_qs|safe }}/delete"
+                              onsubmit="return confirm('Delete saved view {{ v.name }}?');">
+                            <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                            <button type="submit" class="danger" aria-label="Delete {{ v.name }}">×</button>
+                        </form>
+                    </li>
+                    {% endfor %}
+                </ul>
+            {% endif %}
+            {# Save form. Defaults the name input to the loaded
+               view (overwrite-in-place is the common operator
+               flow); empty otherwise. Posts the current URL's
+               filter values via hidden inputs so the save sees
+               exactly what the operator has applied. #}
+            <form class="save-form" method="post"
+                  action="{{ self.chrome.nav_url("/activity/saved_views") }}">
+                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                <input type="hidden" name="outcome" value="{% match outcome %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+                <input type="hidden" name="risk" value="{% match risk %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+                <input type="hidden" name="server" value="{% match server %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+                <input type="hidden" name="principal" value="{% match principal %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+                <input type="hidden" name="category" value="{% match category %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+                <input type="hidden" name="pii" value="{% match pii %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+                <input type="hidden" name="since" value="{% match since %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+                <input type="text" name="name" placeholder="View name"
+                       maxlength="64" pattern="[A-Za-z0-9 _-]{1,64}"
+                       value="{% match loaded_view_name %}{% when Some with (n) %}{{ n }}{% when None %}{% endmatch %}"
+                       required>
+                <button type="submit" class="primary">Save</button>
+            </form>
+        </div>
+        {% endif %}
+
+        <div class="facets" aria-label="Filter facets">
+        {% for g in facets %}
+            <h3 class="rail-heading">{{ g.label }}</h3>
+            <ul class="facet-list">
+                {% for v in g.values %}
+                <li>
+                    {% if v.is_active %}
+                        {# Active: link drops this single filter (empty value clears). #}
+                        <a href="{{ self.chrome.nav_url("/activity") }}?{{ g.param }}=" class="active">
+                            <span>{% match v.display %}{% when Some with (d) %}{{ d }}{% when None %}{{ v.value }}{% endmatch %}</span>
+                            <span class="count">{{ v.count }}</span>
+                        </a>
+                    {% else %}
+                        {# Inactive: link sets this single filter. The active-chip row
+                           lets the operator drop individual filters without rebuilding
+                           the whole URL. `v.value_qs` is the URL-encoded form so
+                           operator-authored server names with reserved chars don't
+                           break the link. #}
+                        <a href="{{ self.chrome.nav_url("/activity") }}?{{ g.param }}={{ v.value_qs|safe }}">
+                            <span>{% match v.display %}{% when Some with (d) %}{{ d }}{% when None %}{{ v.value }}{% endmatch %}</span>
+                            <span class="count">{{ v.count }}</span>
+                        </a>
+                    {% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+        {% endfor %}
+        {% if facets.is_empty() %}
+            <p class="facet-note">
+                No events on this page yet — facets appear once rows are
+                fetched.
+            </p>
+        {% endif %}
+        </div>
+    </aside>
+
+    <section aria-label="Activity events">
+        {# Loaded-view badge surfaces when ?load_view=
+           resolved against the saved-views store. Renders above
+           the filter bar so the operator's mental model is
+           "I'm in saved view X" before they scan the filter
+           selects. #}
+        {% match loaded_view_name %}
+        {% when Some with (n) %}
+            <p class="loaded-view-badge">Loaded view: <code>{{ n }}</code></p>
+        {% when None %}
+        {% endmatch %}
+        {# Cancel-compare banner. Renders when the
+           operator pinned an event via `?compare=<id>` and is
+           mid-pick for the second event. Cancel link drops
+           `compare=` while preserving every other active
+           filter + the live toggle. #}
+        {% match compare_pinned_id %}
+        {% when Some with (pinned) %}
+            <p class="compare-picking-banner">
+                Compare picker active — pinned: <code>{{ pinned }}</code>.
+                Click "Compare with pinned" on another row, or
+                <a href="{{ compare_cancel_url }}">cancel</a>.
+            </p>
+        {% when None %}
+        {% endmatch %}
+        {# The filter form does a plain GET
+           against the parent page (full-page reload) instead of
+           an htmx fragment swap targeted at #activity-tbody. The
+           facet sidebar + active-chip row render OUTSIDE that
+           fragment, so an htmx-only update left them stale until
+           a manual reload — operator saw a chip that disagreed
+           with the rows. Plain GET keeps facets / chips / form
+           `<option selected>` / rows / load-more cursor all
+           consistent with the URL. The load-more button's htmx
+           swap (`/activity/rows`) stays — that's
+           load-incrementally semantics where only the new rows
+           are new info. #}
+        <form class="filter-bar"
+              method="GET"
+              action="{{ self.chrome.nav_url("/activity") }}">
+            <label for="f-outcome">Outcome</label>
+            <select id="f-outcome" name="outcome">
+                <option value="">any</option>
+                <option value="success"{% match outcome %}{% when Some with (v) %}{% if v == "success" %} selected{% endif %}{% when None %}{% endmatch %}>allow / ok</option>
+                <option value="denied"{% match outcome %}{% when Some with (v) %}{% if v == "denied" %} selected{% endif %}{% when None %}{% endmatch %}>deny</option>
+                <option value="step_up_required"{% match outcome %}{% when Some with (v) %}{% if v == "step_up_required" %} selected{% endif %}{% when None %}{% endmatch %}>step_up</option>
+                <option value="execution_error"{% match outcome %}{% when Some with (v) %}{% if v == "execution_error" %} selected{% endif %}{% when None %}{% endmatch %}>error</option>
+            </select>
+            <label for="f-risk">Risk</label>
+            <select id="f-risk" name="risk">
+                <option value="">any</option>
+                <option value="low"{% match risk %}{% when Some with (v) %}{% if v == "low" %} selected{% endif %}{% when None %}{% endmatch %}>low</option>
+                <option value="medium"{% match risk %}{% when Some with (v) %}{% if v == "medium" %} selected{% endif %}{% when None %}{% endmatch %}>medium</option>
+                <option value="high"{% match risk %}{% when Some with (v) %}{% if v == "high" %} selected{% endif %}{% when None %}{% endmatch %}>high</option>
+            </select>
+            <label for="f-category">Category</label>
+            <select id="f-category" name="category">
+                <option value="">any</option>
+                <option value="invocation"{% match category %}{% when Some with (c) %}{% if c == "invocation" %} selected{% endif %}{% when None %}{% endmatch %}>invocation</option>
+                <option value="discovery"{% match category %}{% when Some with (c) %}{% if c == "discovery" %} selected{% endif %}{% when None %}{% endmatch %}>discovery</option>
+                <option value="admin_mutation"{% match category %}{% when Some with (c) %}{% if c == "admin_mutation" %} selected{% endif %}{% when None %}{% endmatch %}>admin_mutation</option>
+                <option value="auth_attempt"{% match category %}{% when Some with (c) %}{% if c == "auth_attempt" %} selected{% endif %}{% when None %}{% endmatch %}>auth_attempt</option>
+                <option value="policy_reload"{% match category %}{% when Some with (c) %}{% if c == "policy_reload" %} selected{% endif %}{% when None %}{% endmatch %}>policy_reload</option>
+                <option value="manifest_reload"{% match category %}{% when Some with (c) %}{% if c == "manifest_reload" %} selected{% endif %}{% when None %}{% endmatch %}>manifest_reload</option>
+                <option value="api_key_lifecycle"{% match category %}{% when Some with (c) %}{% if c == "api_key_lifecycle" %} selected{% endif %}{% when None %}{% endmatch %}>api_key_lifecycle</option>
+                <option value="oauth_event"{% match category %}{% when Some with (c) %}{% if c == "oauth_event" %} selected{% endif %}{% when None %}{% endmatch %}>oauth_event</option>
+                <option value="upstream_health"{% match category %}{% when Some with (c) %}{% if c == "upstream_health" %} selected{% endif %}{% when None %}{% endmatch %}>upstream_health</option>
+                <option value="approval_lifecycle"{% match category %}{% when Some with (c) %}{% if c == "approval_lifecycle" %} selected{% endif %}{% when None %}{% endmatch %}>approval_lifecycle</option>
+                <option value="catalog_drift"{% match category %}{% when Some with (c) %}{% if c == "catalog_drift" %} selected{% endif %}{% when None %}{% endmatch %}>catalog_drift</option>
+                <option value="data_inspection"{% match category %}{% when Some with (c) %}{% if c == "data_inspection" %} selected{% endif %}{% when None %}{% endmatch %}>data_inspection</option>
+                <option value="file_transfer"{% match category %}{% when Some with (c) %}{% if c == "file_transfer" %} selected{% endif %}{% when None %}{% endmatch %}>file_transfer</option>
+                <option value="retention_sweep"{% match category %}{% when Some with (c) %}{% if c == "retention_sweep" %} selected{% endif %}{% when None %}{% endmatch %}>retention_sweep</option>
+                <option value="llm_completion"{% match category %}{% when Some with (c) %}{% if c == "llm_completion" %} selected{% endif %}{% when None %}{% endmatch %}>llm_completion</option>
+            </select>
+            <label for="f-pii">PII</label>
+            <select id="f-pii" name="pii">
+                <option value="">any</option>
+                <option value="true"{% match pii %}{% when Some with (p) %}{% if p == "true" %} selected{% endif %}{% when None %}{% endmatch %}>present</option>
+                <option value="false"{% match pii %}{% when Some with (p) %}{% if p == "false" %} selected{% endif %}{% when None %}{% endmatch %}>absent</option>
+            </select>
+            <label for="f-since">Since</label>
+            <select id="f-since" name="since">
+                <option value="15m"{% match since %}{% when Some with (s) %}{% if s == "15m" %} selected{% endif %}{% when None %}{% endmatch %}>last 15m</option>
+                <option value="1h"{% match since %}{% when Some with (s) %}{% if s == "1h" %} selected{% endif %}{% when None %}{% endmatch %}>last 1h</option>
+                <option value="24h"{% match since %}{% when Some with (s) %}{% if s == "24h" %} selected{% endif %}{% when None %}{% endmatch %}>last 24h</option>
+                <option value="7d"{% match since %}{% when Some with (s) %}{% if s == "7d" %} selected{% endif %}{% when None %}{% endmatch %}>last 7d</option>
+                <option value="30d"{% match since %}{% when Some with (s) %}{% if s == "30d" %} selected{% endif %}{% when None %}{% endmatch %}>last 30d</option>
+                <option value="all"{% match since %}{% when Some with (s) %}{% if s == "all" %} selected{% endif %}{% when None %}{% endmatch %}>all time</option>
+            </select>
+            <label for="f-server">Server</label>
+            <input id="f-server" name="server" type="search" placeholder="any"
+                value="{% match server %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+            <label for="f-principal">Principal</label>
+            <input id="f-principal" name="principal" type="search" placeholder="any"
+                value="{% match principal %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+            {# Explicit submit button (replaces htmx auto-submit on
+               change). Visible so the no-JS path works the same as
+               the JS path — matches the tenant-switch pattern. #}
+            <button type="submit" class="btn btn-secondary">Filter</button>
+        </form>
+
+        {% if !active_filter_chips.is_empty() %}
+        <p class="active-chips" aria-label="Active filters">
+            {% for c in active_filter_chips %}
+            <a class="active-chip" href="{{ c.clear_url }}" title="Remove this filter">
+                {{ c.label }}
+                <span class="x" aria-hidden="true">×</span>
+            </a>
+            {% endfor %}
+        </p>
+        {% endif %}
+
+        {# Live-tail toggle + state indicator. URL-
+           driven (`?live=1`) so the state is bookmarkable +
+           shareable; no client-side preference. Toggle preserves
+           the active filter combo via `live_toggle_url`. #}
+        <div class="live-tail-bar">
+            <a href="{{ live_toggle_url }}" class="live-tail-toggle{% if live_tail %} on{% endif %}"
+               aria-pressed="{% if live_tail %}true{% else %}false{% endif %}"
+               title="Toggle live tail ({{ live_tail_interval_secs }}s poll). Active filters carry through.">
+                <span class="dot{% if live_tail %} pulse{% endif %}" aria-hidden="true"></span>
+                Live tail: {% if live_tail %}on{% else %}off{% endif %}
+            </a>
+            {% if live_tail %}
+            <span class="live-tail-hint">
+                Refreshes every {{ live_tail_interval_secs }}s. Click again to pause.
+            </span>
+            {% endif %}
+            {# Group-by-trace toggle. URL-driven (`?group=trace`); clusters
+               rows of one agent action's fan-out. Preserves the filter combo. #}
+            <a href="{{ group_toggle_url }}" class="live-tail-toggle group-toggle{% if group_by_trace %} on{% endif %}"
+               aria-pressed="{% if group_by_trace %}true{% else %}false{% endif %}"
+               title="Group rows sharing a trace_id (one agent action's fan-out) into banded clusters. Active filters carry through.">
+                <span class="dot" aria-hidden="true"></span>
+                Group by trace: {% if group_by_trace %}on{% else %}off{% endif %}
+            </a>
+        </div>
+
+        {% match histogram %}
+        {% when Some with (h) %}
+        <div class="card hist-card">
+            <div class="hist-head">
+                <h3>Activity volume — {{ h.window_label }}</h3>
+                <span class="hist-total">{{ h.total }} events</span>
+            </div>
+            {# A y-axis with the peak label so full
+               bar height has a number and a spike is readable, a baseline
+               rule at zero, and a <details> numeric table so the data is
+               legible without the chart (and to screen readers). #}
+            <div class="hist-plot">
+                <div class="hist-axis" aria-hidden="true">
+                    <span class="hist-axis__max">{{ h.peak }}</span>
+                    <span class="hist-axis__zero">0</span>
+                </div>
+                <div class="hist" role="img"
+                     aria-label="Activity volume over time, stacked by outcome ({{ h.total }} events, busiest bucket {{ h.peak }})">
+                    {% for bar in h.bars %}
+                    <div class="hist-bar" title="{{ bar.label }} · {{ bar.total }} events" data-total="{{ bar.total }}">
+                        {% for seg in bar.segments %}
+                        <span class="hist-seg {{ seg.class }}" style="height: {{ seg.height_pct }}%"
+                              title="{{ bar.label }} · {{ seg.outcome }}: {{ seg.count }}"
+                              data-outcome="{{ seg.outcome }}" data-count="{{ seg.count }}"></span>
+                        {% endfor %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="hist-legend">
+                <span class="hist-ok">success</span>
+                <span class="hist-deny">denied</span>
+                <span class="hist-stepup">step-up</span>
+                <span class="hist-err">error</span>
+            </div>
+            <details class="hist-table-toggle">
+                <summary>View as table</summary>
+                <table class="data-table data-table--sm">
+                    <caption class="sr-only">Activity volume per time bucket, {{ h.window_label }}</caption>
+                    <thead>
+                        <tr><th>Bucket</th><th>Total</th><th>By outcome</th></tr>
+                    </thead>
+                    <tbody>
+                    {% for bar in h.bars %}
+                        <tr>
+                            <td class="mono">{{ bar.label }}</td>
+                            <td class="mono">{{ bar.total }}</td>
+                            <td>
+                                {% for seg in bar.segments %}{% if seg.count > 0 %}<span class="chip chip--xs">{{ seg.outcome }} {{ seg.count }}</span> {% endif %}{% endfor %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </details>
+        </div>
+        {% when None %}
+        {% endmatch %}
+
+        {% if !tool_stats.is_empty() %}
+        <div class="card">
+            <h3 class="card-title">Top tools in this window</h3>
+            <p>Per-tool reliability for the active filters — call volume, failures,
+               denials, and p95 latency (a separate aggregate, not the paged rows).</p>
+            <table class="data-table">
+                <caption class="sr-only">Per-tool reliability for the active filters</caption>
+                <thead>
+                    <tr><th>Server</th><th>Tool</th><th>Calls</th><th>Errors</th><th>Err %</th><th>Denied</th><th>p95 ms</th></tr>
+                </thead>
+                <tbody>
+                {% for t in tool_stats %}
+                    <tr>
+                        <td>{{ t.server }}</td>
+                        <td>{{ t.tool }}</td>
+                        <td>{{ t.total }}</td>
+                        <td>{{ t.errors }}</td>
+                        <td>{{ t.error_rate_pct }}%</td>
+                        <td>{{ t.denied }}</td>
+                        <td>{% match t.p95_ms %}{% when Some with (ms) %}{{ ms }}{% when None %}–{% endmatch %}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+
+        <div class="card card--table">
+            <table class="data-table">
+                <caption class="sr-only">Recent audit events</caption>
+                <thead>
+                    <tr><th>Time</th><th>Principal</th><th>Server</th><th>Tool</th><th>Outcome</th><th>Risk</th><th>Compare</th></tr>
+                </thead>
+                {# Live tail prepends ONLY rows newer than the current
+                   top (sent as `since_id` via hx-vals, read from the first
+                   row's data-audit-id at request time). `afterbegin` inserts
+                   the highlighted delta above existing rows instead of the old
+                   `innerHTML` full re-render; `show:none` keeps htmx from
+                   scrolling, and browser scroll-anchoring preserves the
+                   operator's position when rows are added above the viewport. #}
+                <tbody id="activity-tbody"
+                    {% if live_tail %}
+                       hx-get="{{ live_tail_rows_url }}"
+                       hx-trigger="every {{ live_tail_interval_secs }}s"
+                       hx-swap="afterbegin show:none"
+                       hx-target="this"
+                       hx-vals='js:{since_id: document.querySelector("#activity-tbody tr[data-audit-id]")?.dataset.auditId || ""}'
+                    {% endif %}
+                >
+                    {% include "activity_rows.html" %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+
+<aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" data-open="false" hidden
+       data-drawer-url-base="{{ self.chrome.nav_url("/activity/") }}"></aside>
+
+{% else %}
+<div class="card"><div class="empty">Audit store not configured — set <code>GATEWAY_DATABASE_URL</code> and restart to persist and browse events.</div></div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/admin/static/js/htmx.min.js"></script>
+<script>
+// Row click / Enter / Space opens drawer; Esc closes. Scrim-click closes.
+(function () {
+    const drawer = document.getElementById("drawer");
+    if (!drawer) return;
+    // The drawer-url-base is rendered server-side via `nav_url` so the
+    // htmx fetch stays inside the active tenant prefix. Falls back to
+    // the legacy path when the dataset is absent.
+    const drawerBase = drawer.dataset.drawerUrlBase || "/admin/activity/";
+    function open(id) {
+        drawer.hidden = false;
+        drawer.setAttribute("data-open", "true");
+        htmx.ajax("GET", drawerBase + encodeURIComponent(id), drawer);
+    }
+    function close() {
+        drawer.setAttribute("data-open", "false");
+        setTimeout(() => { drawer.hidden = true; drawer.innerHTML = ""; }, 200);
+    }
+    document.addEventListener("click", e => {
+        const row = e.target.closest("tr[data-audit-id]");
+        if (row) { open(row.dataset.auditId); return; }
+        if (e.target.matches("[data-drawer-close]")) close();
+    });
+    document.addEventListener("keydown", e => {
+        if (e.key === "Escape") close();
+        if ((e.key === "Enter" || e.key === " ") && document.activeElement.matches("tr[data-audit-id]")) {
+            e.preventDefault();
+            open(document.activeElement.dataset.auditId);
+        }
+    });
+})();
+</script>
+{% endblock %}

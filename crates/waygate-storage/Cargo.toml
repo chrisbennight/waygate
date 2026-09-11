@@ -1,0 +1,48 @@
+[package]
+name = "waygate-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+waygate-evidence.workspace = true
+waygate-telemetry.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+reqwest = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+# audit_log hash-chain uses sha256 for the per-row hash.
+sha2.workspace = true
+# BLAKE3 keys the per-principal exact-match completion cache.
+blake3.workspace = true
+# Evidence bundle signing (Ed25519 + hex).
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
+hex = "0.4"
+thiserror.workspace = true
+# The evidence-outbox drain worker needs `tokio::time::interval` +
+# `tokio::select!` in non-test code.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }
+tracing.workspace = true
+uuid.workspace = true
+time.workspace = true
+sqlx.workspace = true
+waygate-core = { workspace = true, features = ["http"] }
+# Exact decimal for LLM cost columns + cost math.
+rust_decimal.workspace = true
+utoipa.workspace = true
+
+[dev-dependencies]
+waygate-test-support.workspace = true
+# Loopback HTTP harness for the WebhookExporter live-POST test
+# (tests/suite/webhook_export_over_http.rs). Mirrors the axum-on-127.0.0.1:0
+# pattern the waygate-oidc / waygate-upstream integration tests use.
+# tokio (macros + rt-multi-thread), serde_json, and uuid are already
+# non-dev dependencies above, so they're in scope for the integration
+# test without re-declaring them here; only axum needs adding.
+axum = { workspace = true }
+# pg_llm_catalog discovery tests pass exact Decimal costing to
+# upsert_discovered_llm_model and assert COALESCE fill/preserve.
+rust_decimal.workspace = true

@@ -1,0 +1,218 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Federation</h1>
+    {% if !store_configured %}
+        <span class="chip chip--warn">peers store not configured</span>
+    {% endif %}
+</header>
+
+{# This page is the operator-visible projection of the runtime federation
+   surface — federated_peers registry, JWKS fetcher + cache, peer-assertion
+   JWT validator on the bearer chain, and per-upstream `tier_c_peer`
+   outbound minting. Admins get inline create / edit / delete here; the
+   same operations remain available over REST at
+   `/api/v1/admin/federated_peers/*`. #}
+
+{% if !store_configured %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <p class="empty-state__title">Federated-peer store not configured</p>
+        <p class="empty-state__body">
+            Set <code>GATEWAY_DATABASE_URL</code> and restart to enable peer
+            registration. Then register the other gateway's issuer and public
+            signing-key URL in this tenant. Each gateway registers its peer independently.
+        </p>
+    </div>
+</div>
+{% else %}
+
+<section class="page-section" aria-label="Peers">
+    <h2 class="section-heading">Peers</h2>
+    {% if is_admin %}
+        {% match fed_error %}
+        {% when Some with (msg) %}
+            <div class="form-error forms-error" role="alert">{{ msg }}</div>
+        {% when None %}
+        {% endmatch %}
+    {% endif %}
+    <div class="card card--table">
+        {% match error %}
+        {% when Some with (msg) %}
+            <div class="empty-state empty-state--danger">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <p class="empty-state__title">Couldn't load peers</p>
+                <p class="empty-state__body">{{ msg }}</p>
+            </div>
+        {% when None %}
+            {% if peers.is_empty() %}
+                <div class="empty-state">
+                    <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#server"/></svg>
+                    <p class="empty-state__title">No federated peers yet</p>
+                    <p class="empty-state__body">
+                        Register a peer gateway to accept its peer-signed tokens on
+                        the bearer chain.{% if is_admin %} Use the form below to add one.{% else %} An admin can add one.{% endif %}
+                        Match the issuer exactly to the peer's token issuer and
+                        wait for its signing-key cache to become warm before testing calls.
+                    </p>
+                </div>
+            {% else %}
+                <table class="data-table data-table--sm" role="table" aria-label="Federated peers">
+                    <thead>
+                        <tr>
+                            <th>Peer</th>
+                            <th>Issuer</th>
+                            <th>JWKS URL</th>
+                            <th>Trust tier</th>
+                            <th>Cache</th>
+                            <th>Created</th>
+                            {% if is_admin %}<th><span class="sr-only">Actions</span></th>{% endif %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for p in peers %}
+                        <tr id="peer-{{ p.id }}">
+                            <td>{{ p.peer_name }}</td>
+                            <td class="mono cell-url">{{ p.issuer }}</td>
+                            <td class="mono cell-url">{{ p.jwks_url }}</td>
+                            <td>
+                                {% if p.trust_tier == "full" %}<span class="chip chip--ok">{{ p.trust_tier }}</span>
+                                {% else %}<span class="chip chip--warn">{{ p.trust_tier }}</span>{% endif %}
+                            </td>
+                            <td>
+                                {% if p.cache_state == "warm" %}
+                                    <span class="chip chip--ok" title="JWKS cached: {{ p.cache_key_count }} key(s)">warm · {{ p.cache_key_count }} key{% if p.cache_key_count != 1 %}s{% endif %}</span>
+                                {% else if p.cache_state == "cold" %}
+                                    <span class="chip chip--warn" title="No JWKS fetched yet for this peer">cold</span>
+                                {% else %}
+                                    <span class="chip" title="JWKS cache not wired (dev mode or test fixture)">no cache</span>
+                                {% endif %}
+                            </td>
+                            <td class="mono">{{ p.created_at_abs }}</td>
+                            {% if is_admin %}
+                            <td class="row-actions">
+                                {# Inline edit (peers ARE mutable — unlike api-key profiles).
+                                   All four fields submit, so each save re-asserts issuer /
+                                   jwks_url / trust_tier and re-confirms the JWKS cache. #}
+                                <details class="disclosure disclosure--link">
+                                    <summary>Edit</summary>
+                                    <form class="form disclosure-pane" method="post"
+                                          action="{{ self.chrome.nav_url(p.update_rel.as_str()) }}">
+                                        <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                        <div class="form-field">
+                                            <label class="form-label">Name</label>
+                                            <input class="form-input" type="text" name="peer_name" value="{{ p.peer_name }}" required maxlength="128">
+                                        </div>
+                                        <div class="form-field">
+                                            <label class="form-label">Issuer</label>
+                                            <input class="form-input" type="text" name="issuer" value="{{ p.issuer }}" required>
+                                        </div>
+                                        <div class="form-field">
+                                            <label class="form-label">JWKS URL</label>
+                                            <input class="form-input" type="text" name="jwks_url" value="{{ p.jwks_url }}" required>
+                                        </div>
+                                        <div class="form-field">
+                                            <label class="form-label">Trust tier</label>
+                                            <select class="form-select" name="trust_tier">
+                                                <option value="full"{% if p.trust_tier == "full" %} selected{% endif %}>full</option>
+                                                <option value="restricted"{% if p.trust_tier == "restricted" %} selected{% endif %}>restricted</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-actions"><button type="submit" class="btn btn-primary">Save changes</button></div>
+                                    </form>
+                                </details>
+                                <form method="post"
+                                      action="{{ self.chrome.nav_url(p.delete_rel.as_str()) }}"
+                                      onsubmit="return confirm('Delete this federated peer? Inbound tokens it signed will stop validating. This cannot be undone.');">
+                                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                    <button type="submit" class="btn btn-danger" aria-label="Delete peer {{ p.peer_name }}">Delete</button>
+                                </form>
+                            </td>
+                            {% endif %}
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% if truncated %}
+                <p class="hint" style="padding: 8px 14px">
+                    Showing first {{ peers.len() }} peers. Page via
+                    <code>/api/v1/admin/federated_peers?offset=…</code> for the rest.
+                </p>
+                {% endif %}
+            {% endif %}
+        {% endmatch %}
+    </div>
+
+    {% if is_admin %}
+    <div class="card" style="margin-top: 12px">
+        <details class="disclosure"{% if peers.is_empty() || fed_error.is_some() %} open{% endif %}>
+            <summary>+ Add a federated peer</summary>
+            <form class="form" method="post" action="{{ self.chrome.nav_url("/federation/peers/create") }}">
+                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                <div class="form-field">
+                    <label class="form-label" for="fed-name">Peer name <span class="form-label__req" aria-hidden="true">*</span></label>
+                    <input class="form-input" type="text" id="fed-name" name="peer_name" required maxlength="128" placeholder="e.g. acme-prod">
+                </div>
+                <div class="form-field">
+                    <label class="form-label" for="fed-issuer">Issuer <span class="form-label__req" aria-hidden="true">*</span></label>
+                    <input class="form-input" type="text" id="fed-issuer" name="issuer" required placeholder="https://peer.example">
+                    <div class="form-hint">The peer's OIDC <code>iss</code> claim — an absolute http(s) URL, no <code>user:pass@</code> userinfo. Stored byte-for-byte (matched against the peer's token <code>iss</code>).</div>
+                </div>
+                <div class="form-field">
+                    <label class="form-label" for="fed-jwks">JWKS URL <span class="form-label__req" aria-hidden="true">*</span></label>
+                    <input class="form-input" type="text" id="fed-jwks" name="jwks_url" required placeholder="https://peer.example/.well-known/jwks.json">
+                    <div class="form-hint">Where this gateway fetches the peer's signing keys.</div>
+                </div>
+                <div class="form-field">
+                    <label class="form-label" for="fed-tier">Trust tier <span class="form-label__req" aria-hidden="true">*</span></label>
+                    <select class="form-select" id="fed-tier" name="trust_tier">
+                        <option value="restricted">restricted</option>
+                        <option value="full">full</option>
+                    </select>
+                    <div class="form-hint">
+                        <strong>Advisory today.</strong> Both tiers currently accept the
+                        peer's asserted principal as-is (sub + issuer + tenant); the
+                        validator only records which tier accepted the call. Restricted-tier
+                        isolation (rewriting the peer's identity to <code>peer:&lt;id&gt;</code>
+                        and suppressing the original user) is not yet enforced — set this to
+                        record intent, not as a live isolation boundary.
+                    </div>
+                </div>
+                <div class="form-actions"><button type="submit" class="btn btn-primary">Add peer</button></div>
+            </form>
+        </details>
+    </div>
+    {% endif %}
+</section>
+
+<section class="page-section" aria-label="JWKS cache">
+    <h2 class="section-heading">JWKS cache</h2>
+    <div class="card">
+        {% if !cache_configured %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+                <p class="empty-state__title">JWKS cache not wired</p>
+                <p class="empty-state__body">
+                    The peer-assertion JWT validator can't verify inbound peer-signed
+                    tokens without it. Check <code>GATEWAY_DATABASE_URL</code> +
+                    federation-feature env vars at boot, then look for the
+                    <code>spawning peer JWKS refresher</code> log line emitted by the
+                    composition root (<code>waygate-server::main</code>).
+                </p>
+            </div>
+        {% else %}
+            <div class="muted" style="padding: 14px 16px; font-size: 13px">
+                In-memory JWKS cache is wired. Per-peer state (warm / cold) is shown in the
+                Peers table above. The refresher periodically re-fetches each peer's JWKS;
+                the per-fetch <code>RefreshSummary</code> (total / ok / failed) lives in
+                tracing + metrics today. A dedicated cache-refresh history table is a
+                follow-up PR.
+            </div>
+        {% endif %}
+    </div>
+</section>
+
+{% endif %}
+{% endblock %}

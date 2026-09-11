@@ -1,0 +1,209 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Catalog</h1>
+    {% if insufficient_scope %}
+        <span class="chip chip--warn">insufficient scope</span>
+    {% else if !store_configured %}
+        <span class="chip chip--warn">catalog store not configured</span>
+    {% endif %}
+</header>
+
+{# Governed catalog. Two sections: currently configured server registry rows
+   and recent drift events. Initial approve and immediate quarantine are
+   available in-page (admin-only, own-tenant rows); configured quarantined rows
+   queue a governed recovery change. Retained history, retire, the full drift
+   history, and the real-time SSE stream continue at /api/v1/catalog/*. #}
+
+{% if insufficient_scope %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <p class="empty-state__title">Admin scope required</p>
+        <p class="empty-state__body">
+            This page requires the <code>mcp:admin</code> scope. Your current
+            dashboard session lacks it, so catalog data is hidden.
+        </p>
+        <p class="empty-state__body" style="margin-top: 8px">
+            <a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/catalog") }}">Re-authorize with the admin scope</a> if your account is entitled to it.
+        </p>
+    </div>
+</div>
+{% else if !store_configured %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <p class="empty-state__title">Catalog store not configured</p>
+        <p class="empty-state__body">
+            Set <code>GATEWAY_DATABASE_URL</code> and restart to enable.
+            Without the store, discovery falls back to the in-memory manifest
+            set loaded at boot.
+        </p>
+    </div>
+</div>
+{% else %}
+
+<section class="page-section" aria-label="Catalog servers">
+    <h2 class="section-heading">Servers <span class="count">{{ servers.len() }}</span></h2>
+    <div class="card card--table">
+        {% if servers_load_error %}
+            <div class="empty-state empty-state--danger">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <p class="empty-state__title">Couldn't load servers</p>
+                <p class="empty-state__body">See gateway logs. The drift-events section below may still be accurate.</p>
+            </div>
+        {% else if servers.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#server"/></svg>
+                <p class="empty-state__title">No configured servers</p>
+                <p class="empty-state__body">
+                    No currently configured upstream has a catalog row visible
+                    to this tenant. Removed server history remains retained for
+                    audit and authorization safety.
+                </p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Catalog servers">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Transport</th>
+                        <th>Visibility</th>
+                        <th>Status</th>
+                        <th>Owner</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for s in servers %}
+                    <tr id="srv-{{ s.id }}">
+                        <td>{{ s.name }}</td>
+                        <td class="mono">{{ s.transport }}</td>
+                        <td><span class="chip">{{ s.visibility }}</span></td>
+                        <td>
+                            {% if s.status == "live" %}
+                                <span class="chip chip--ok">live</span>
+                            {% else if s.status == "quarantined" %}
+                                <span class="chip chip--bad">quarantined</span>
+                            {% else if s.status == "approved" %}
+                                <span class="chip chip--ok">approved</span>
+                            {% else %}
+                                <span class="chip">{{ s.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="cell-sub">{% match s.owner %}{% when Some with (o) %}{{ o }}{% when None %}—{% endmatch %}</td>
+                        <td>
+                            {% if s.mutable %}
+                            <div class="row-actions">
+                                {% if s.status != "live" && s.status != "quarantined" && s.status != "retired" %}
+                                <form method="post" action="{{ self.chrome.nav_url("/catalog/approve") }}">
+                                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                    <input type="hidden" name="id" value="{{ s.id }}">
+                                    <button type="submit" class="btn btn-primary">Approve</button>
+                                </form>
+                                {% endif %}
+                                {% if s.status == "live" || s.status == "approved" %}
+                                <form method="post" action="{{ self.chrome.nav_url("/catalog/quarantine") }}"
+                                      onsubmit="return confirm('Quarantine this server? Its tools immediately stop being dispatchable.');">
+                                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                    <input type="hidden" name="id" value="{{ s.id }}">
+                                    <button type="submit" class="btn btn-danger">Quarantine</button>
+                                </form>
+                                {% endif %}
+                                {% if s.status == "quarantined" %}
+                                <form method="post" action="{{ self.chrome.nav_url("/catalog/unquarantine/propose") }}">
+                                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                    <input type="hidden" name="id" value="{{ s.id }}">
+                                    <input type="hidden" name="expected_name" value="{{ s.name }}">
+                                    <input type="text" name="reason" class="reason-input"
+                                           placeholder="reason (required)" required maxlength="500"
+                                           aria-label="Reason to restore {{ s.name }}">
+                                    <button type="submit" class="btn btn-primary">Propose unquarantine</button>
+                                </form>
+                                {% endif %}
+                            </div>
+                            {% else %}
+                            <span class="cell-sub" title="owned by another tenant">—</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+</section>
+
+<section class="page-section" aria-label="Recent drift events">
+    <h2 class="section-heading">Recent drift events <span class="count">{{ drift_events.len() }}</span></h2>
+    <div class="card card--table">
+        {% if drift_load_error %}
+            <div class="empty-state empty-state--danger">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <p class="empty-state__title">Couldn't load drift events</p>
+                <p class="empty-state__body">See gateway logs. The servers section above may still be accurate.</p>
+            </div>
+        {% else if drift_events.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#check-circle"/></svg>
+                <p class="empty-state__title">No recent drift</p>
+                <p class="empty-state__body">
+                    No durable catalog drift events were recorded in the last
+                    30 days. Live observation drift is reported separately in
+                    gateway logs and metrics.
+                </p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Recent drift events">
+                <thead>
+                    <tr>
+                        <th>Observed at</th>
+                        <th>Tool</th>
+                        <th>Observed hash</th>
+                        <th>Approved hash</th>
+                        <th>Severity</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for d in drift_events %}
+                    <tr id="drift-{{ d.id }}">
+                        <td class="mono">{{ d.observed_at_abs }}</td>
+                        <td class="mono">{{ d.tool_id }}</td>
+                        <td class="cell-hash" title="{{ d.observed_hash }}">{{ d.observed_hash_short }}</td>
+                        <td class="cell-hash">
+                            {% match d.approved_hash %}
+                            {% when Some with (h) %}<span title="{{ h }}">{% match d.approved_hash_short %}{% when Some with (s) %}{{ s }}{% when None %}—{% endmatch %}</span>
+                            {% when None %}—
+                            {% endmatch %}
+                        </td>
+                        <td>
+                            {% if d.severity == "critical" %}
+                                <span class="chip chip--bad">critical</span>
+                            {% else if d.severity == "warn" %}
+                                <span class="chip chip--warn">warn</span>
+                            {% else if d.severity == "info" %}
+                                <span class="chip">info</span>
+                            {% else %}
+                                <span class="chip">{{ d.severity }}</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% if drift_truncated %}
+            <p class="table-hint">
+                Showing first {{ drift_events.len() }}; older
+                events live in the catalog. Pull the full
+                history via
+                <code>GET /api/v1/catalog/drift_events?since=...</code>.
+                Real-time streaming isn't implemented yet; poll this endpoint instead.
+            </p>
+            {% endif %}
+        {% endif %}
+    </div>
+</section>
+
+{% endif %}
+{% endblock %}

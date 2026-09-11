@@ -1,0 +1,85 @@
+<div class="cfg-panel">
+    <nav class="cfg-tabs" role="tablist" aria-label="Server configuration">
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=overview" hx-target="closest .cfg-panel" hx-swap="outerHTML">Overview</button>
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=classifications" hx-target="closest .cfg-panel" hx-swap="outerHTML">Classifications</button>
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=session" hx-target="closest .cfg-panel" hx-swap="outerHTML">Session</button>
+        <button type="button" class="cfg-tab is-active" role="tab" aria-selected="true"
+                hx-get="{{ config_url }}&tab=identity" hx-target="closest .cfg-panel" hx-swap="outerHTML">Identity &amp; auth</button>
+    </nav>
+
+    <p class="muted" style="margin: 0 0 10px; max-width: 72ch">
+        How the gateway authenticates to this upstream: identity-chaining tier
+        (Tier-A token exchange / Tier-C peer), the fail-closed
+        <code>tier_a_required</code> flag, a static bearer (by env var
+        <strong>name</strong>, never the secret), and mTLS client-cert
+        <strong>paths</strong>. A saved change publishes a new version to
+        <code>servers/*.yaml</code>;
+        <code>exchange</code> / <code>tier_a_required</code> /
+        <code>tier_c_peer</code> apply on <strong>Reload manifests</strong>,
+        and the static bearer and mTLS are connection-shape but are
+        <strong>re-dialed live</strong> on Reload too (no restart — the slot
+        count is unchanged). Only one Authorization writer may be set —
+        <code>exchange</code>, <code>bearer_env</code>, and
+        <code>tier_c_peer</code> are mutually exclusive.
+        <code>tier_a_required</code> needs <code>exchange</code>;
+        <code>bearer_env</code> is HTTP + SSE; mTLS is HTTP-only.
+    </p>
+
+    {% if editable %}
+    <form hx-post="{{ self.nav_url("/servers/config/identity") }}"
+          hx-target="find .class-result" hx-swap="innerHTML">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="server" value="{{ name }}">
+        <input type="hidden" name="base_hash" value="{{ base_hash }}">
+        <dl class="cfg-dl">
+            <dt>Tier-A exchange</dt>
+            <dd>
+                <label><input type="checkbox" name="exchange_enabled"{% if exchange_enabled %} checked{% endif %}> enable RFC 8693 token exchange</label>
+            </dd>
+            <dt><label for="id-aud">Exchange audience</label></dt>
+            <dd><input id="id-aud" type="text" name="exchange_audience" value="{{ exchange_audience }}" placeholder="https://idp/upstream" style="width: 26em"></dd>
+            <dt><label for="id-scope">Exchange scope</label></dt>
+            <dd><input id="id-scope" type="text" name="exchange_scope" value="{{ exchange_scope }}" placeholder="(optional)" style="width: 26em"></dd>
+            <dt>Tier-A required</dt>
+            <dd><label><input type="checkbox" name="tier_a_required"{% if tier_a_required %} checked{% endif %}> refuse to dispatch without an exchanged token</label></dd>
+            <dt><label for="id-peer">Tier-C peer</label></dt>
+            <dd><input id="id-peer" type="text" name="tier_c_peer" value="{{ tier_c_peer }}" placeholder="peer UUID (blank = none)" style="width: 26em"></dd>
+            {% if bearer_editable %}
+            {# auth.bearer_env is sent as Authorization: Bearer on HTTP and SSE. #}
+            <dt><label for="id-bearer">Bearer env var</label></dt>
+            <dd><input id="id-bearer" type="text" name="bearer_env" value="{{ bearer_env }}" placeholder="UPSTREAM_TOKEN_ENV (name only)" style="width: 26em"></dd>
+            {% endif %}
+            {% if mtls_editable %}
+            {# mTLS is HTTP-only — the SSE client has no per-upstream cert wiring. #}
+            <dt><label for="id-cert">mTLS cert path</label></dt>
+            <dd><input id="id-cert" type="text" name="mtls_cert" value="{{ mtls_cert }}" placeholder="/path/to/client.pem" style="width: 26em"></dd>
+            <dt><label for="id-key">mTLS key path</label></dt>
+            <dd><input id="id-key" type="text" name="mtls_key" value="{{ mtls_key }}" placeholder="/path/to/client.key" style="width: 26em"></dd>
+            <dt><label for="id-ca">mTLS CA path</label></dt>
+            <dd><input id="id-ca" type="text" name="mtls_ca" value="{{ mtls_ca }}" placeholder="(optional) /path/to/ca.pem" style="width: 26em"></dd>
+            {% else %}
+            <dt>mTLS</dt>
+            <dd class="muted">HTTP-only — not available on this transport.</dd>
+            {% endif %}
+        </dl>
+        <div class="cfg-actions" style="margin-top: 12px; align-items: center">
+            <button type="submit" class="btn btn--sm btn-secondary">Save &amp; publish</button>
+            <span class="muted">Publishes a new version to <code>servers/*.yaml</code>; exchange/tier and bearer/mTLS all apply on <strong>Reload manifests</strong> (bearer/mTLS via live re-dial, no restart).</span>
+        </div>
+        <div class="class-result" aria-live="polite" style="margin-top: 10px"></div>
+    </form>
+    {% else %}
+    <p class="muted" style="margin: 0 0 10px">{{ readonly_note }}</p>
+    {% if admin_required %}<p class="muted" style="margin: 0 0 10px"><a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.nav_url("/servers") }}">Re-authorize with the admin scope</a> if your account is entitled to it.</p>{% endif %}
+    <dl class="cfg-dl">
+        <dt>Tier-A exchange</dt><dd>{% if exchange_enabled %}<span class="mono">{{ exchange_audience }}</span>{% if !exchange_scope.is_empty() %} <span class="muted mono">scope={{ exchange_scope }}</span>{% endif %}{% else %}<span class="muted">off</span>{% endif %}</dd>
+        <dt>Tier-A required</dt><dd>{% if tier_a_required %}yes{% else %}<span class="muted">no</span>{% endif %}</dd>
+        <dt>Tier-C peer</dt><dd>{% if tier_c_peer.is_empty() %}<span class="muted">none</span>{% else %}<span class="mono">{{ tier_c_peer }}</span>{% endif %}</dd>
+        <dt>Bearer env var</dt><dd>{% if bearer_env.is_empty() %}<span class="muted">none</span>{% else %}<span class="mono">{{ bearer_env }}</span>{% endif %}</dd>
+        <dt>mTLS</dt><dd>{% if mtls_cert.is_empty() && mtls_key.is_empty() && mtls_ca.is_empty() %}<span class="muted">off</span>{% else %}<span class="mono">{{ mtls_cert }}</span>{% endif %}</dd>
+    </dl>
+    {% endif %}
+</div>

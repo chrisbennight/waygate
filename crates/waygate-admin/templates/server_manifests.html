@@ -1,0 +1,285 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Server manifests</h1>
+    {% if insufficient_scope %}
+        <span class="chip chip--warn">insufficient scope</span>
+    {% else if !store_configured %}
+        <span class="chip chip--warn">manifest store not configured</span>
+    {% endif %}
+</header>
+
+{# Version ledger for the on-disk `servers/*.yaml` set (see
+   docs/server-config-source-of-truth.md). Editor +
+   Validate / Save draft, per-row Publish / Rollback, and an Export-as-YAML
+   link. File-as-truth: boot/SIGHUP/"Reload manifests" load `servers/*.yaml`
+   directly — this page is its history / rollback ledger. Publish and
+   Rollback mirror the chosen version ONTO `servers/*.yaml` so the change
+   takes effect and survives a restart. #}
+
+{% if insufficient_scope %}
+<div class="card">
+    <div class="empty">
+        This page requires the <code>mcp:admin</code> scope.
+        Your current dashboard session lacks it, so server
+        manifest history is not shown.
+        <br><a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/server_manifests") }}">Re-authorize with the admin scope</a> if your account is entitled to it.
+    </div>
+</div>
+{% else if !store_configured %}
+<div class="card">
+    <div class="empty">
+        Manifest version ledger not configured. Set
+        <code>GATEWAY_DATABASE_URL</code> and restart to enable
+        version history and rollback. The gateway always loads
+        upstreams from the on-disk <code>servers/*.yaml</code> set
+        (the source of truth) — without the ledger you simply lose
+        the history / rollback UI, not the running config.
+    </div>
+</div>
+{% else %}
+
+{# Post-mutation flash from a PRG redirect. #}
+{% match flash_kind %}
+{% when Some with ("saved") %}
+    <div class="callout callout--ok">
+        Draft saved{% match flash_detail %}{% when Some with (d) %} — <code>{{ d }}</code>{% when None %}{% endmatch %}.
+    </div>
+{% when Some with ("published") %}
+    <div class="callout callout--ok">
+        Published to <code>servers/*.yaml</code>{% match flash_detail %}{% when Some with (d) %} — <code>{{ d }}</code>{% when None %}{% endmatch %}. Mirrored to disk; boot/SIGHUP/Reload load it.
+    </div>
+{% when Some with ("rolled_back") %}
+    <div class="callout">
+        Rolled back{% match flash_detail %}{% when Some with (d) %} — <code>{{ d }}</code>{% when None %}{% endmatch %}.
+    </div>
+{% when Some with ("save_error") %}
+    <div class="callout callout--err">
+        Save failed{% match flash_detail %}{% when Some with (d) %}: <code>{{ d }}</code>{% when None %}{% endmatch %}.
+    </div>
+{% when Some with ("publish_error") %}
+    <div class="callout callout--err">
+        Publish failed{% match flash_detail %}{% when Some with (d) %}: <code>{{ d }}</code>{% when None %}{% endmatch %}.
+    </div>
+{% when Some with ("rollback_error") %}
+    <div class="callout callout--err">
+        Rollback failed{% match flash_detail %}{% when Some with (d) %}: <code>{{ d }}</code>{% when None %}{% endmatch %}.
+    </div>
+{% when Some with (_) %}
+{% when None %}
+{% endmatch %}
+
+<section class="page-section" aria-label="Server manifest editor">
+    <h2 class="section-heading">Editor</h2>
+    <p class="section-kicker">Compose an upstream-manifest set (a YAML sequence of manifests). Validate to parse-check without persisting; Save draft to stage a version; per-row Publish writes a version onto the on-disk <code>servers/*.yaml</code> set.</p>
+    <div class="card">
+
+        {# Editor-level banners: Validate result + load-miss notice. #}
+        {% if editor_load_miss %}
+            <div class="callout callout--err">
+                Could not load the requested version — the id is
+                unknown, owned by another tenant, or the ledger
+                isn't configured. The editor renders empty so the
+                operator isn't silently editing the wrong source.
+            </div>
+        {% endif %}
+        {% match editor_validate_result %}
+        {% when Some with (Ok(n)) %}
+            <div class="callout callout--ok">Valid manifest set — {{ n }} upstream(s).</div>
+        {% when Some with (Err(msg)) %}
+            <div class="callout callout--err">{{ msg }}</div>
+        {% when None %}
+        {% endmatch %}
+
+        <div class="editor">
+            <form method="post" action="{{ self.chrome.nav_url("/server_manifests/validate") }}" class="editor">
+                <div class="editor-meta">
+                    {% match editor_loaded_version %}
+                    {% when Some with (v) %}
+                        <span>Loaded from <code>v{{ v }}</code></span>
+                    {% when None %}
+                        {% if editor_content.is_empty() %}
+                            <span>No draft loaded — paste a manifest set below or load a prior version.</span>
+                        {% else %}
+                            <span>Editing draft</span>
+                        {% endif %}
+                    {% endmatch %}
+                </div>
+                <textarea name="content" rows="20" spellcheck="false" autocomplete="off" placeholder="- name: example-messages&#10;  transport: http&#10;  url: http://example-messages/mcp">{{ editor_content }}</textarea>
+                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                <div class="editor-actions">
+                    <button type="submit" class="btn btn-secondary">Validate</button>
+                    {# Non-mutating blast-radius preview of the editor content vs
+                       the live on-disk set — the same replay the approval queue
+                       shows, so the operator sees which decisions a
+                       risk/pii/side_effects change would flip BEFORE proposing. #}
+                    <button type="submit" class="btn btn-secondary"
+                            formaction="{{ self.chrome.nav_url("/server_manifests/preview_impact") }}">
+                        Preview impact
+                    </button>
+                    <button type="submit" class="btn btn-primary"
+                            formaction="{{ self.chrome.nav_url("/server_manifests/save_draft") }}">
+                        Save draft
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        {# Blast-radius panel — populated only after a Preview-impact submit
+           (transient, like the validate banner). Read-only. #}
+        {% match impact %}
+        {% when Some with (im) %}
+        <div class="card">
+            <p><strong>Blast radius</strong> — editor content vs the live served set</p>
+            {% match im.error %}
+            {% when Some with (e) %}
+                <div class="callout callout--err">{{ e }}</div>
+            {% when None %}{% include "_manifest_impact_stats.html" %}
+            {% endmatch %}
+        </div>
+        {% when None %}{% endmatch %}
+    </div>
+</section>
+
+<section class="page-section" aria-label="Server manifest versions">
+    <div class="section-head">
+        <h2 class="section-heading">Versions <span class="count">{{ bundles.len() }}</span></h2>
+        {% if !bundles.is_empty() %}
+            {# Export the active (most-recently-published) set as servers.yaml. #}
+            <a href="{{ self.chrome.nav_url("/server_manifests/export") }}" class="btn btn-secondary btn--sm">Export active (YAML)</a>
+        {% endif %}
+    </div>
+    <p class="section-kicker">Manifest-set history, newest version first — the most recently published is current (Evidence)</p>
+    <div class="card card--table">
+        {% if bundles_load_error %}
+            <div class="empty state-err">
+                Failed to load server manifests — see gateway logs
+                for details.
+            </div>
+        {% else if bundles.is_empty() %}
+            <div class="empty">
+                No recorded versions for this tenant yet. The gateway
+                still loads upstreams from the on-disk
+                <code>servers/*.yaml</code> set — this ledger is empty
+                only because nothing has been published or seeded.
+                Use the editor above to stage and publish a first
+                version, or seed the existing on-disk set via
+                <code>gateway-server --import-server-bundle</code>.
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Server manifest versions">
+                <thead>
+                    <tr>
+                        <th>Version</th>
+                        <th>Status</th>
+                        <th>Content hash</th>
+                        <th>Author</th>
+                        <th>Created</th>
+                        <th>Published</th>
+                        <th>Published by</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for b in bundles %}
+                    <tr id="bundle-{{ b.id }}">
+                        <td class="mono">
+                            v{{ b.version }}
+                            {% if b.is_current %}
+                                <span class="chip chip--ok">current</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if b.status == "published" %}
+                                <span class="chip chip--ok">published</span>
+                            {% else if b.status == "draft" %}
+                                <span class="chip">draft</span>
+                            {% else if b.status == "rolled_back" %}
+                                <span class="chip chip--warn">rolled_back</span>
+                            {% else %}
+                                <span class="chip">{{ b.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="cell-hash" title="{{ b.content_hash }}">{{ b.content_hash_short }}</td>
+                        <td class="mono">{% match b.author %}{% when Some with (a) %}{{ a }}{% when None %}—{% endmatch %}</td>
+                        <td class="mono">{{ b.created_at_abs }}</td>
+                        <td class="mono">{% match b.published_at_abs %}{% when Some with (p) %}{{ p }}{% when None %}—{% endmatch %}</td>
+                        <td class="mono">{% match b.published_by %}{% when Some with (p) %}{{ p }}{% when None %}—{% endmatch %}</td>
+                        <td class="row-actions">
+                            {# Load this version's source into the editor. #}
+                            <a href="{{ self.chrome.nav_url("/server_manifests") }}?load={{ b.id_qs }}#editor"
+                               class="btn btn-secondary btn--sm">Load</a>
+                            {% if b.can_publish %}
+                                {# Static confirm — interpolating only the integer version is XSS-safe. #}
+                                <form method="post" action="{{ self.chrome.nav_url("/server_manifests/") }}{{ b.id_qs }}/publish" onsubmit="return confirm('Publish v{{ b.version }} as the active manifest set?');">
+                                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                    <button type="submit" class="btn btn-primary btn--sm">Publish</button>
+                                </form>
+                            {% endif %}
+                            {% if b.can_rollback %}
+                                <form method="post" action="{{ self.chrome.nav_url("/server_manifests/") }}{{ b.version }}/rollback" onsubmit="return confirm('Roll back to v{{ b.version }} (re-publish its content as a new active set)?');">
+                                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                    <button type="submit" class="btn btn-danger btn--sm">Rollback</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+</section>
+
+<section class="page-section" aria-label="Fleet replicas">
+    <div class="section-head">
+        <h2 class="section-heading">Fleet <span class="count">{{ fleet.len() }}</span></h2>
+    </div>
+    <p class="section-kicker">Per-replica heartbeat — which config each gateway replica has loaded, and when it last checked in</p>
+    <div class="card card--table">
+        {% if fleet_load_error %}
+            <div class="empty state-err">
+                Failed to load the fleet heartbeat — see gateway logs for details.
+            </div>
+        {% else if fleet.is_empty() %}
+            <div class="empty">
+                No replica heartbeats recorded yet. Each replica records one on
+                boot and on every reload tick once a database is wired
+                (<code>GATEWAY_DATABASE_URL</code>).
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Fleet replicas">
+                <thead>
+                    <tr>
+                        <th>Replica</th>
+                        <th>Version</th>
+                        <th>Content hash</th>
+                        <th>Last seen</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in fleet %}
+                    <tr>
+                        <td class="mono">{{ r.replica_id }}</td>
+                        <td class="mono">{{ r.version_label }}</td>
+                        <td class="cell-hash" title="{{ r.content_hash }}">{{ r.content_hash_short }}</td>
+                        <td class="mono">{{ r.last_seen_abs }}</td>
+                        <td>
+                            {% if r.is_stale %}
+                                <span class="chip" title="No heartbeat within the staleness window — the replica may be down or wedged">stale</span>
+                            {% else %}
+                                <span class="chip chip--ok">live</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+</section>
+
+{% endif %}
+{% endblock %}

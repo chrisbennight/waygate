@@ -1,0 +1,87 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header"><h1 class="page-title">Connect your MCP client</h1></header>
+
+<p class="muted" style="margin: 0 0 16px; max-width: 72ch">
+    Point any MCP client at this gateway and it discovers tools across every
+    upstream through one governed, audited surface — the per-server
+    <code>searchTools</code> meta-tool.
+</p>
+
+<div class="card card--narrow">
+    <h2 class="card-title">MCP endpoint</h2>
+    <p class="card-sub">Streamable HTTP — the URL your client connects to.</p>
+    <div class="copyline">
+        <div class="copyline__val" id="mcp-url">{{ mcp_url }}</div>
+        <button class="copy-btn" type="button" data-copy="mcp-url">copy</button>
+    </div>
+</div>
+
+<div class="card card--narrow">
+    <h2 class="card-title">Quick connect</h2>
+    <p class="card-sub">Claude Code one-liner:</p>
+    <pre class="snippet" id="mcp-add">{{ mcp_add_snippet }}</pre>
+    <button class="copy-btn" type="button" data-copy="mcp-add">copy</button>
+    <p class="card-sub" style="margin-top: 14px">Or a project <code>.mcp.json</code> block:</p>
+    <pre class="snippet" id="mcp-json">{{ mcp_json_snippet }}</pre>
+    <button class="copy-btn" type="button" data-copy="mcp-json">copy</button>
+</div>
+
+<div class="card card--narrow">
+    <h2 class="card-title">Authentication</h2>
+    {% if as_enabled %}
+    <p class="card-sub">
+        <span class="chip chip--ok">OAuth 2.1 enabled</span>
+        The gateway is its own Authorization Server. Clients self-register via a
+        <strong>Client ID Metadata Document (CIMD)</strong> — the client hosts a JSON
+        document at a stable HTTPS URL and uses that URL as its <code>client_id</code>;
+        the gateway fetches and validates it (no Dynamic Client Registration).
+        MCP-spec clients discover the endpoints below from the metadata URL automatically.
+    </p>
+    <div class="copyline">
+        <div class="copyline__label">AS metadata</div>
+        <div class="copyline__val" id="as-meta">{{ as_metadata_url }}</div>
+        <button class="copy-btn" type="button" data-copy="as-meta">copy</button>
+    </div>
+    <div class="copyline">
+        <div class="copyline__label">Authorize</div>
+        <div class="copyline__val">{{ authorize_url }}</div>
+    </div>
+    <div class="copyline">
+        <div class="copyline__label">Token</div>
+        <div class="copyline__val">{{ token_url }}</div>
+    </div>
+    <p class="note">
+        CIMD details + upstream token chaining: <code>docs/agents/identity.md</code>.
+        A sample client document lives at <code>cimd/mcp-test-client.json</code>.
+    </p>
+    {% else %}
+    <p class="card-sub">
+        <span class="chip">OAuth disabled</span>
+        The built-in Authorization Server is off
+        (<code>GATEWAY_AS_ENABLED=false</code>). Authenticate with a minted API key instead.
+    </p>
+    {% endif %}
+    <p class="note" style="margin-top: 12px">
+        Prefer a static credential? <a href="{{ self.chrome.nav_url("/identities") }}">Mint an API key</a>
+        — the key page ships a ready-to-paste client config.
+    </p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Copy-to-clipboard for any [data-copy] button (event delegation).
+document.addEventListener("click", function (e) {
+    const btn = e.target.closest("[data-copy]");
+    if (!btn) return;
+    const el = document.getElementById(btn.dataset.copy);
+    if (!el) return;
+    navigator.clipboard.writeText(el.textContent.trim());
+    const prev = btn.textContent;
+    btn.textContent = "copied";
+    setTimeout(function () { btn.textContent = prev; }, 1500);
+});
+</script>
+{% endblock %}

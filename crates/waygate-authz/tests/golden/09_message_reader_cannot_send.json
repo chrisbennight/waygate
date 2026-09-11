@@ -1,0 +1,26 @@
+{
+  "name": "example-messages_receiver_cannot_send",
+  "description": "The receiver role is strictly read-only: its permit guards on !resource.side_effects, so a receiver key is denied messages.send — low + side_effects: true, so the side_effects guard excludes it. Pins that receiving and sending are separate grants.",
+  "principal": {
+    "sub": "example-messages-reader-bot",
+    "auth_method": "api_key",
+    "groups": ["message-reader"],
+    "scopes": ["mcp:invoke", "mcp:invoke:high"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-messages.messages.send",
+    "risk": "low"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-messages",
+    "name": "messages.send",
+    "risk": "low",
+    "side_effects": true,
+    "pii": true
+  },
+  "expected": {
+    "decision": "Deny"
+  }
+}

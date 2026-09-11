@@ -1,0 +1,26 @@
+{
+  "name": "example-messages_sender_can_send",
+  "description": "policies/20-example-message-roles.cedar: a Group::\"message-sender\" API key may call the outbound messages.send tool. The role permit is name-keyed (messages.send / messages.send_legacy), so it allows messages.send — low + side_effects: true (the messaging surface is operational, not account-administrative) — regardless of tier. The example-messages-scoped PII exemption (15-pii-default.cedar) clears the pii forbid. This is the example-operations alerter's exact principal.",
+  "principal": {
+    "sub": "example-operations-alerter",
+    "auth_method": "api_key",
+    "groups": ["message-sender"],
+    "scopes": ["mcp:invoke", "mcp:invoke:high"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-messages.messages.send",
+    "risk": "low"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-messages",
+    "name": "messages.send",
+    "risk": "low",
+    "side_effects": true,
+    "pii": true
+  },
+  "expected": {
+    "decision": "Allow"
+  }
+}

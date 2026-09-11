@@ -1,0 +1,29 @@
+name: quickstart
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tutorial:
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_PASSWORD: dev
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Start the documented demonstration
+        run: docker compose up --build --wait
+      - name: Discover, call, and verify a policy refusal
+        run: python3 examples/quickstart/check.py
+      - name: Show demonstration logs on failure
+        if: failure()
+        run: docker compose logs gateway demo-upstream demo-issuer
+      - name: Remove the disposable demonstration
+        if: always()
+        run: docker compose down --volumes

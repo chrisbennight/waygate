@@ -1,0 +1,13 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Gitignored Rust build output outside the source snapshot"
+paths = ['''^target/''']
+
+[[allowlists]]
+description = "Hash-pinned public OIDC test-key fixtures"
+targetRules = ["private-key"]
+paths = [
+  '''^crates/waygate-oidc/tests/fixtures/(?:private|ec_p256_private)\.pem$''',
+]

@@ -1,0 +1,135 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">LLM Models</h1>
+    {% if insufficient_scope %}
+        <span class="chip chip--warn">insufficient scope</span>
+    {% else if !store_configured %}
+        <span class="chip chip--warn">model catalog not configured</span>
+    {% endif %}
+</header>
+
+{# Inference-plane model catalog. Read-only operator view of the
+   models configured for this tenant — alias, provider, the upstream model
+   the gateway dispatches to, the credential that authenticates the call,
+   the upstream API the gateway speaks, the Cedar risk tier, enabled /
+   approval flags, and
+   the per-million-token input / output pricing. #}
+
+{% if insufficient_scope %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <p class="empty-state__title">Admin scope required</p>
+        <p class="empty-state__body">
+            This page requires the <code>mcp:admin</code> scope. Your current
+            dashboard session lacks it, so model catalog data is hidden.
+        </p>
+        <p class="empty-state__body" style="margin-top: 8px">
+            <a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/llm_models") }}">Re-authorize with the admin scope</a> if your account is entitled to it.
+        </p>
+    </div>
+</div>
+{% else if !store_configured %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <p class="empty-state__title">Model catalog not configured</p>
+        <p class="empty-state__body">
+            Set <code>GATEWAY_DATABASE_URL</code> and restart to enable. Without
+            the store, the inference plane falls back to the models configured
+            in the environment at boot.
+        </p>
+    </div>
+</div>
+{% else %}
+
+<section class="page-section" aria-label="LLM models">
+    <h2 class="section-heading">Models <span class="count">{{ models.len() }}</span></h2>
+    <div class="card card--table">
+        {% if models_load_error %}
+            <div class="empty-state empty-state--danger">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <p class="empty-state__title">Couldn't load models</p>
+                <p class="empty-state__body">See gateway logs.</p>
+            </div>
+        {% else if models.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+                <p class="empty-state__title">No models configured</p>
+                <p class="empty-state__body">
+                    Models are registered by the boot seeder from the
+                    environment configuration, then surfaced here. None are
+                    visible to this tenant yet.
+                </p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="LLM models">
+                <thead>
+                    <tr>
+                        <th>Alias</th>
+                        <th>Provider</th>
+                        <th>Kind</th>
+                        <th>Upstream model</th>
+                        <th>Credential</th>
+                        <th>Upstream API</th>
+                        <th>Risk</th>
+                        <th>Enabled</th>
+                        <th>Approval</th>
+                        <th>Cost (in/out)</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for m in models %}
+                    <tr>
+                        <td>{{ m.alias }}</td>
+                        <td>{{ m.provider }}</td>
+                        <td>
+                            {% if m.is_images %}
+                                <span class="chip">images</span>
+                            {% else if m.is_embeddings %}
+                                <span class="chip chip--accent">embeddings</span>
+                            {% else %}
+                                <span class="chip">chat</span>
+                            {% endif %}
+                        </td>
+                        <td class="mono">{{ m.upstream_model }}</td>
+                        <td class="mono">{{ m.credential_label }}</td>
+                        <td class="mono">{{ m.upstream_api }}</td>
+                        <td>
+                            {% if m.risk == "high" %}
+                                <span class="chip chip--bad">high</span>
+                            {% else if m.risk == "medium" %}
+                                <span class="chip chip--warn">medium</span>
+                            {% else %}
+                                <span class="chip">{{ m.risk }}</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if m.enabled %}
+                                <span class="chip chip--ok">enabled</span>
+                            {% else %}
+                                <span class="chip">disabled</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if m.requires_approval %}
+                                <span class="chip chip--warn">required</span>
+                            {% else %}
+                                <span class="chip">no</span>
+                            {% endif %}
+                        </td>
+                        <td class="mono">{% match m.input_cost %}{% when Some with (c) %}{{ c }}{% when None %}—{% endmatch %} / {% match m.output_cost %}{% when Some with (c) %}{{ c }}{% when None %}—{% endmatch %}</td>
+                        <td class="cell-sub">{% match m.description %}{% when Some with (d) %}{{ d }}{% when None %}—{% endmatch %}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+</section>
+
+{% endif %}
+{% endblock %}

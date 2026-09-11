@@ -1,0 +1,47 @@
+<header>
+    <h2 id="drawer-title">{{ ts_abs }} · {{ outcome|upper }} · {% match action_label_opt %}{% when Some with (a) %}{{ a }}{% when None %}–{% endmatch %}</h2>
+    <button class="close" data-drawer-close aria-label="Close">
+        <svg width="18" height="18" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+    </button>
+</header>
+
+<section style="margin-bottom: 14px">
+    <h3 class="card-title">Principal</h3>
+    <dl>
+        <dt>sub</dt><dd>{{ principal_sub }}</dd>
+        {% match email %}{% when Some with (e) %}<dt>email</dt><dd>{{ e }}</dd>{% when None %}{% endmatch %}
+        {% match issuer %}{% when Some with (i) %}<dt>issuer</dt><dd>{{ i }}</dd>{% when None %}{% endmatch %}
+        {% if !groups.is_empty() %}<dt>groups</dt><dd>[{{ groups.join(", ") }}]</dd>{% endif %}
+    </dl>
+</section>
+
+<section style="margin-bottom: 14px">
+    <h3 class="card-title">Action</h3>
+    <dl>
+        <dt>action</dt><dd>{{ action }}</dd>
+        {% match target %}{% when Some with (t) %}<dt>target</dt><dd>{{ t }}</dd>{% when None %}{% endmatch %}
+        {% match category %}{% when Some with (c) %}<dt>category</dt><dd><span class="chip">{{ c }}</span></dd>{% when None %}{% endmatch %}
+        {% match server %}{% when Some with (s) %}<dt>server</dt><dd>{{ s }}</dd>{% when None %}{% endmatch %}
+        {% match tool %}{% when Some with (t) %}<dt>tool</dt><dd>{{ t }}</dd>{% when None %}{% endmatch %}
+        {% match operation %}{% when Some with (o) %}<dt>operation</dt><dd>{{ o }}</dd>{% when None %}{% endmatch %}
+        {% match risk %}{% when Some with (r) %}<dt>risk</dt><dd>{{ r }}</dd>{% when None %}{% endmatch %}
+        {% match pii %}{% when Some with (p) %}<dt>pii</dt><dd>{% if p %}<span class="chip chip--warn">PII</span>{% else %}no{% endif %}</dd>{% when None %}{% endmatch %}
+    </dl>
+</section>
+
+<section style="margin-bottom: 14px">
+    <h3 class="card-title">Decision</h3>
+    <dl>
+        <dt>outcome</dt><dd>{{ outcome }}</dd>
+        {% match reason %}{% when Some with (r) %}<dt>reason</dt><dd>{{ r }}</dd>{% when None %}{% endmatch %}
+        {% if !policy_ids.is_empty() %}<dt>policies</dt><dd>{{ policy_ids.join(", ") }}</dd>{% endif %}
+    </dl>
+</section>
+
+<section>
+    <h3 class="card-title">Trace</h3>
+    <dl>
+        {% match trace_id %}{% when Some with (t) %}<dt>trace-id</dt><dd>{{ t }}{% match trace_url %}{% when Some with (u) %} <a href="{{ u }}" target="_blank" rel="noopener noreferrer" class="chip">View trace ↗</a>{% when None %}{% endmatch %}</dd>{% when None %}{% endmatch %}
+        {% match latency_ms %}{% when Some with (l) %}<dt>latency</dt><dd>{{ l }}ms</dd>{% when None %}{% endmatch %}
+    </dl>
+</section>

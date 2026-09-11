@@ -1,0 +1,151 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">OAuth consent</h1>
+    {% if insufficient_scope %}
+        <span class="chip chip--warn">insufficient scope</span>
+    {% else if !store_configured %}
+        <span class="chip chip--warn">consent store not configured</span>
+    {% endif %}
+</header>
+
+{# Per-tenant OAuth consent grants.
+   Each grant is a (principal_sub, client_id) tuple with the
+   scopes the user approved at /authorize-time. The consent
+   gate consults this on every authorize redirect. Admins can
+   revoke an active grant inline; the equivalent
+   DELETE /api/v1/admin/oauth_consent/{sub}/{client} remains. #}
+
+{% if insufficient_scope %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <p class="empty-state__title">Admin scope required</p>
+        <p class="empty-state__body">
+            This page requires the <code>mcp:admin</code> scope. Your current
+            dashboard session lacks it, so OAuth consent data is hidden.
+        </p>
+        <p class="empty-state__body" style="margin-top: 8px">
+            <a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/oauth_consent") }}">Re-authorize with the admin scope</a> if your account is entitled to it.
+        </p>
+    </div>
+</div>
+{% else if !store_configured %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <p class="empty-state__title">OAuth consent store not configured</p>
+        <p class="empty-state__body">
+            Set <code>GATEWAY_DATABASE_URL</code> and restart to enable.
+            Without the store, the consent gate falls through to the
+            "first-time grant" branch on every authorize redirect.
+        </p>
+    </div>
+</div>
+{% else %}
+
+{% match error %}
+{% when Some with (msg) %}
+    <div class="card">
+        <div class="empty-state empty-state--danger">
+            <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+            <p class="empty-state__title">Couldn't load consent grants</p>
+            <p class="empty-state__body">{{ msg }}</p>
+        </div>
+    </div>
+{% when None %}
+
+{% match oc_error %}
+{% when Some with (msg) %}
+    <div class="form-error forms-error" role="alert">{{ msg }}</div>
+{% when None %}
+{% endmatch %}
+
+<section aria-label="OAuth consent grants">
+    <div class="card card--table">
+        {% if grants.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+                <p class="empty-state__title">No consent grants yet</p>
+                <p class="empty-state__body">
+                    A grant lands here when a user completes the
+                    <code>/oauth/authorize</code> consent screen. There's nothing
+                    to revoke yet.
+                </p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="OAuth consent grants">
+                <thead>
+                    <tr>
+                        <th>Principal</th>
+                        <th>Client</th>
+                        <th>Scopes</th>
+                        <th>Granted</th>
+                        <th>Expires</th>
+                        <th>Status</th>
+                        <th><span class="sr-only">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for g in grants %}
+                    <tr id="oc-{{ g.id }}">
+                        <td>{{ g.principal_sub }}</td>
+                        <td class="mono">{{ g.client_id }}</td>
+                        <td>
+                            <div class="chip-row">
+                                {% for s in g.scopes_label.split(" ") %}{% if !s.is_empty() %}<span class="chip">{{ s }}</span>{% endif %}{% endfor %}
+                            </div>
+                        </td>
+                        <td class="mono">{{ g.granted_at_abs }}</td>
+                        <td class="mono">{% match g.expires_at_abs %}{% when Some with (e) %}{{ e }}{% when None %}never{% endmatch %}</td>
+                        <td>
+                            {% if g.status == "active" %}
+                                <span class="chip chip--ok">active</span>
+                            {% else if g.status == "expired" %}
+                                <span class="chip chip--warn">expired</span>
+                            {% else if g.status == "revoked" %}
+                                <span class="chip" title="{% match g.revoked_at_abs %}{% when Some with (t) %}revoked {{ t }}{% when None %}revoked{% endmatch %}">revoked</span>
+                            {% else %}
+                                <span class="chip">{{ g.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="row-actions">
+                            {# Revoke only the active grants — revoking an already
+                               expired/revoked row is a no-op. client_id is a URL,
+                               so it rides as a hidden field, not a path segment. #}
+                            {% if g.status == "active" %}
+                            <form method="post"
+                                  action="{{ self.chrome.nav_url("/oauth_consent/revoke") }}"
+                                  onsubmit="return confirm('Revoke this consent grant? The user will be re-prompted on their next authorize.');">
+                                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                <input type="hidden" name="principal_sub" value="{{ g.principal_sub }}">
+                                <input type="hidden" name="client_id" value="{{ g.client_id }}">
+                                <button type="submit" class="btn btn-danger" aria-label="Revoke grant for {{ g.principal_sub }}">Revoke</button>
+                            </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% if truncated %}
+            <p class="table-hint">
+                Showing first {{ grants.len() }}; older grants
+                live in the catalog. Pull the full list via
+                <code>GET /api/v1/admin/oauth_consent?offset=...</code>.
+            </p>
+            {% endif %}
+        {% endif %}
+    </div>
+</section>
+
+<p class="table-hint" style="margin-top: 16px">
+    Use the per-row Revoke button to kill a single active grant (idempotent —
+    the user is simply re-prompted on their next authorize). Bulk
+    per-principal and per-client revoke are not yet implemented.
+</p>
+
+{% endmatch %}
+{% endif %}
+{% endblock %}

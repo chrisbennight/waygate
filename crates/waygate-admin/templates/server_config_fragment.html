@@ -1,0 +1,66 @@
+<div class="cfg-panel">
+    <nav class="cfg-tabs" role="tablist" aria-label="Server configuration">
+        <button type="button" class="cfg-tab{% if active_tab == "overview" %} is-active{% endif %}" role="tab"
+                aria-selected="{% if active_tab == "overview" %}true{% else %}false{% endif %}"
+                hx-get="{{ config_url }}&tab=overview" hx-target="closest .cfg-panel" hx-swap="outerHTML">Overview</button>
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=classifications" hx-target="closest .cfg-panel" hx-swap="outerHTML">Classifications</button>
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=session" hx-target="closest .cfg-panel" hx-swap="outerHTML">Session</button>
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=identity" hx-target="closest .cfg-panel" hx-swap="outerHTML">Identity &amp; auth</button>
+    </nav>
+
+    <dl class="cfg-dl">
+        <dt>Status</dt>
+        <dd>{% if runtime_status == "connected" %}<span class="state-ok">connected</span>{% else if runtime_status == "degraded" %}<span class="chip chip--warn">degraded</span>{% else %}<span class="state-err">disconnected</span>{% endif %} · breaker <span class="mono">{{ breaker }}</span></dd>
+
+        <dt>Lanes</dt><dd class="mono">{{ connected_lanes }} connected / {{ total_lanes }} configured</dd>
+        <dt>Last success</dt><dd class="mono">{{ last_success_at }}</dd>
+        <dt>Last error</dt><dd class="mono">{{ last_error_class }}</dd>
+        <dt>Next retry</dt><dd class="mono">{{ next_retry_at }}</dd>
+
+        <dt>Transport</dt><dd class="mono">{{ transport }}</dd>
+        <dt>Endpoint</dt><dd class="mono">{{ endpoint }}</dd>
+
+        <dt>Isolation</dt><dd class="mono">{{ isolation }} <span class="muted">({{ isolation_note }})</span></dd>
+        <dt>Scope</dt><dd class="mono">{{ scope }}</dd>
+        <dt>Concurrency</dt><dd class="mono">{{ concurrency }}</dd>
+
+        <dt>Identity</dt>
+        <dd>{{ identity_tier }}{% if tier_a_required %} <span class="chip chip--warn">required</span>{% endif %}{% match exchange_audience %}{% when Some with (aud) %} <span class="muted mono">aud={{ aud }}</span>{% when None %}{% endmatch %}</dd>
+
+        <dt>Dial auth</dt>
+        <dd>{% match auth_bearer_env %}{% when Some with (env) %}<span class="mono">bearer (env: {{ env }})</span>{% when None %}<span class="muted">none</span>{% endmatch %}{% if mtls_configured %} · <span class="mono">mTLS client cert</span>{% endif %}</dd>
+
+        <dt>Tools</dt>
+        <dd>{{ published_tool_count }} published / {{ tool_count }} classified — <span class="mono">{{ risk_high }} high / {{ risk_medium }} medium / {{ risk_low }} low</span>{% if quarantined > 0 %} · <span class="chip chip--warn">{{ quarantined }} quarantined</span>{% endif %}</dd>
+    </dl>
+
+    {% if is_admin %}
+    {# Recovery actions relocated here from the table. Plain POSTs that
+       redirect back to /servers — the same handlers the table used. #}
+    <div class="cfg-actions">
+        <form method="post" action="{{ self.nav_url("/servers/reconnect") }}">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="server" value="{{ name }}">
+            <button type="submit" class="btn btn--sm btn-secondary">Reconnect</button>
+        </form>
+        <form method="post" action="{{ self.nav_url("/servers/catalog/refresh") }}"
+              hx-post="{{ self.nav_url("/servers/catalog/refresh") }}"
+              hx-target="next .catalog-refresh-result" hx-swap="innerHTML">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="server" value="{{ name }}">
+            <button type="submit" class="btn btn--sm btn-secondary">Refresh catalog</button>
+        </form>
+        <div class="catalog-refresh-result" aria-live="polite"></div>
+        {% if quarantined > 0 %}
+        <form method="post" action="{{ self.nav_url("/servers/clear-quarantine") }}">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="server" value="{{ name }}">
+            <button type="submit" class="btn btn--sm btn-secondary btn--danger-outline">Clear quarantine</button>
+        </form>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>

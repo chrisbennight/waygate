@@ -1,0 +1,28 @@
+{% extends "layout.html" %}
+{% block main %}
+<header class="page-header"><h1 class="page-title">Skill review</h1><span class="chip">{{ state }}</span></header>
+<a href="{{ self.chrome.nav_url("/skills") }}">Back to Skills</a>
+<div class="form-field"><label class="form-label" for="skill-uri">Skill URI</label><input id="skill-uri" class="form-input mono" readonly value="{{ review.skill_uri }}"></div>
+{% match source_url %}{% when Some with (url) %}<p><a href="{{ url }}" rel="noreferrer">View candidate at its Git source</a></p>{% when None %}{% endmatch %}
+<p><strong>Runtime compatibility:</strong> {{ compatibility }}</p>
+<p><strong>Code Mode compatibility:</strong> optional publisher-reported test information. It never grants or blocks execution; scripts use the caller’s ordinary Code Mode permissions.</p>
+{% match error %}{% when Some with (message) %}<div class="callout callout--err" role="alert">{{ message }}</div>{% when None %}{% endmatch %}
+<p class="section-kicker">Review the instructions and complete file inventory. Approval permits distribution only; Code Mode and tool calls use the client’s existing permissions.</p>
+<div class="skills-comparison">
+<section class="card"><h2 class="section-heading">Approved for clients</h2>{% match review.serving %}{% when Some with (serving) %}<p class="mono skills-source">{{ serving.content_digest() }}</p><p class="mono skills-source">{{ serving.source().resolved_digest }}</p>{% if review.quarantined %}<p>Delivery is blocked by quarantine.</p>{% else %}<p>Remains available while a replacement awaits review, when its exact source files can be retrieved.</p>{% endif %}{% when None %}<p>No version has been approved.</p>{% endmatch %}</section>
+<section class="card"><h2 class="section-heading">Candidate</h2><p class="mono skills-source">{{ review.candidate.content_digest() }}</p><p class="mono skills-source">{{ review.candidate.source().origin }}</p><p class="mono skills-source">{{ review.candidate.source().reference }} · {{ review.candidate.source().resolved_digest }}</p></section>
+</div>
+<section class="page-section"><h2 class="section-heading">File changes</h2><p class="section-kicker">Select each changed file to compare its exact contents. Object identities, sizes, and media types are part of the reviewed inventory.</p>
+<div class="card card--table skills-inventory"><table class="data-table" aria-label="Complete skill file inventory"><thead><tr><th>File</th><th>Change</th><th>Approved</th><th>Candidate</th><th>Candidate Code Mode compatibility</th></tr></thead><tbody>{% for file in files %}<tr><td><a href="{{ self.chrome.nav_url(file.url) }}">{{ file.path }}</a></td><td>{{ file.change }}</td><td class="mono">{{ file.before }}</td><td class="mono">{{ file.after }}</td><td>{{ file.execution }}</td></tr>{% endfor %}</tbody></table></div></section>
+<section class="page-section"><h2 class="section-heading">Content comparison</h2><p class="mono skills-source">{{ file }}</p><p class="section-kicker">Source content is displayed as plain text and never executed by this page.</p><div class="skills-comparison"><section><h3>Approved</h3><pre class="skills-content" tabindex="0">{{ before_text }}</pre></section><section><h3>Candidate</h3><pre class="skills-content" tabindex="0">{{ after_text }}</pre></section></div></section>
+<section class="page-section"><h2 class="section-heading">Decision</h2>
+<form method="post" action="{{ self.chrome.nav_url("/skills/decision") }}">
+<input type="hidden" name="csrf" value="{{ chrome.csrf_token }}"><input type="hidden" name="skill_uri" value="{{ review.skill_uri }}"><input type="hidden" name="generation" value="{{ review.generation }}"><input type="hidden" name="content_digest" value="{{ review.candidate.content_digest() }}">
+<div class="form-field"><label class="form-label" for="skill-reason">Reason</label><textarea class="form-textarea" id="skill-reason" name="reason" required maxlength="4096" rows="3"></textarea></div>
+{% if can_approve %}<button class="btn btn-primary" type="submit" name="action" value="approve">Approve this candidate</button>{% endif %}
+{% if can_reject %}<button class="btn" type="submit" name="action" value="reject">Reject this candidate</button>{% endif %}
+{% if !review.quarantined %}<button class="btn btn-danger" type="submit" name="action" value="quarantine">Quarantine all versions</button>{% endif %}
+<p class="section-kicker">Rejecting a candidate keeps the approved version available. Quarantine stops subsequent delivery of every version, including retained references. It cannot remove content already received by a client.</p>
+</form></section>
+<section class="page-section"><h2 class="section-heading">Recent decisions</h2><div class="card card--table"><table class="data-table" aria-label="Skill decision history"><thead><tr><th>Decision</th><th>Operator</th><th>Reason</th><th>Content</th><th>Time</th></tr></thead><tbody>{% for row in history %}<tr><td>{{ row.action }}</td><td>{{ row.actor }}</td><td>{{ row.reason }}</td><td class="mono skills-source">{{ row.digest }}</td><td>{{ row.at }}</td></tr>{% endfor %}</tbody></table></div></section>
+{% endblock %}

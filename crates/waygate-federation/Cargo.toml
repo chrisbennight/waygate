@@ -1,0 +1,77 @@
+[package]
+name = "waygate-federation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+# HeaderValidator trait + Principal / ValidationError types
+# live in waygate-oidc, so the peer JWT validator depends on
+# them. waygate-oidc does NOT depend on waygate-federation,
+# so this direction is cycle-free.
+waygate-core = { workspace = true, features = ["http"] }
+waygate-oidc.workspace = true
+# JWKS parsing for the peer cache. The peer JWT verifier
+# consumes the `jsonwebtoken::jwk::JwkSet` type directly, so
+# it is in the public surface of the `jwks` module — keep it
+# on the same major as the rest of the workspace pins.
+jsonwebtoken.workspace = true
+# Needed for the streaming body-cap enforcement in the JWKS
+# fetcher (`bytes_stream` + `StreamExt::next`). Buffering the
+# full response via `resp.bytes().await` before checking the
+# cap would defeat the DoS guard — the cap has to be enforced
+# incrementally as bytes arrive, not after the fact.
+futures.workspace = true
+# Base64 url-safe-no-pad decoding of the JWT payload chunk so
+# we can pre-peek the `iss` claim before signature
+# verification, indexing into the cache by issuer rather than
+# trying every cached key blind.
+base64.workspace = true
+# HTTP client for the JWKS fetcher. rustls + json + stream
+# features inherit from the workspace spec so we don't pull
+# in OpenSSL just for this crate.
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
+# The refresher's background loop only needs the timer +
+# sync surfaces; the actual `tokio::spawn` happens in
+# `waygate-server` so we don't pull in `rt-multi-thread` here.
+tokio = { workspace = true, features = ["rt", "time", "sync"] }
+tracing.workspace = true
+# URL parsing + loopback-host check for the fetcher's
+# HTTPS-or-local-loopback enforcement: the admin-side peer
+# registration validator only checks shape at write time and
+# does not enforce HTTPS-only at runtime, so this fetcher-side
+# check is the actual enforcement point.
+url.workspace = true
+utoipa.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# Real-HTTP fetcher tests stand up an axum loopback listener
+# so reqwest's full `Client → send → bytes → parse` chain
+# runs unmocked, mirroring `waygate-oidc/tests/suite/jwks_over_http.rs`.
+axum = { workspace = true }
+# tests/jwks_fetcher_http.rs needs the streaming response
+# shape (no Content-Length) to exercise the chunked-body cap
+# path — without it the fetcher takes the buffered-bytes path
+# instead and the streaming cap enforcement goes untested.
+# `tokio_util::bytes` re-export keeps the chunk type stable
+# across hyper versions; futures::stream is the same
+# workspace dep the lib already uses.
+tokio-util = { workspace = true }
+# Integration tests for the peer JWT validator sign + verify
+# with a real Ed25519 keypair so the `jsonwebtoken::decode`
+# path runs unmocked against a `JwkSet` containing the
+# public-key components we emit here. ed25519-dalek already
+# pinned at the workspace level.
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
+rand = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }

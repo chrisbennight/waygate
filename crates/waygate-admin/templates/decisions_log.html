@@ -1,0 +1,74 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Decision Log</h1>
+    {% if !audit_available %}
+        <span class="chip chip--warn">audit store not configured</span>
+    {% endif %}
+</header>
+
+{% if audit_available %}
+<p class="policy-list__intro">
+    Authorization decisions for this tenant — tool calls and model completions
+    that ran through the policy gate, newest first. Filter by policy to see
+    every decision a given Cedar policy matched.
+</p>
+
+{# Signature feature: the `?policy_id=` reverse lookup. When set, a prominent
+   banner names the policy whose fired-policy set we're filtering on, so the
+   "decisions that matched THIS policy" intent (linked from the Policies pane)
+   is unmistakable. #}
+{% match policy_id %}
+{% when Some with (pid) %}
+<p class="loaded-view-badge">
+    Decisions that matched policy <code>{{ pid }}</code>.
+    <a href="{{ self.chrome.nav_url("/decisions-log") }}">clear</a>
+</p>
+{% when None %}
+{% endmatch %}
+
+{# Plain GET filter bar (full-page reload), mirroring the Activity feed — keeps
+   the filter inputs, the banner, and the rows all consistent with the URL. The
+   load-more button's htmx swap is the only partial update. #}
+<form class="filter-bar" method="GET" action="{{ self.chrome.nav_url("/decisions-log") }}">
+    <label for="f-policy-id">Policy id</label>
+    <input id="f-policy-id" name="policy_id" type="search" placeholder="any"
+        value="{% match policy_id %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+    <label for="f-outcome">Outcome</label>
+    <select id="f-outcome" name="outcome">
+        <option value="">any</option>
+        <option value="success"{% match outcome %}{% when Some with (v) %}{% if v == "success" %} selected{% endif %}{% when None %}{% endmatch %}>allow / ok</option>
+        <option value="denied"{% match outcome %}{% when Some with (v) %}{% if v == "denied" %} selected{% endif %}{% when None %}{% endmatch %}>deny</option>
+        <option value="step_up_required"{% match outcome %}{% when Some with (v) %}{% if v == "step_up_required" %} selected{% endif %}{% when None %}{% endmatch %}>step_up</option>
+        <option value="execution_error"{% match outcome %}{% when Some with (v) %}{% if v == "execution_error" %} selected{% endif %}{% when None %}{% endmatch %}>error</option>
+    </select>
+    <label for="f-server">Server</label>
+    <input id="f-server" name="server" type="search" placeholder="any"
+        value="{% match server %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+    <label for="f-principal">Principal</label>
+    <input id="f-principal" name="principal" type="search" placeholder="any"
+        value="{% match principal %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+    <button type="submit" class="btn btn-secondary">Filter</button>
+</form>
+
+<div class="card card--table">
+    <table class="data-table">
+        <caption class="sr-only">Authorization decisions for this tenant</caption>
+        <thead>
+            <tr><th>Time</th><th>Principal</th><th>Subject</th><th>Outcome</th><th>Risk</th><th>Policies</th></tr>
+        </thead>
+        <tbody>
+            {% include "decisions_log_rows.html" %}
+        </tbody>
+    </table>
+    <div class="table-foot">as of {{ as_of }}</div>
+</div>
+{% else %}
+<div class="card"><div class="empty">Audit store not configured — set <code>GATEWAY_DATABASE_URL</code> and restart to persist and browse decisions.</div></div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/admin/static/js/htmx.min.js"></script>
+{% endblock %}

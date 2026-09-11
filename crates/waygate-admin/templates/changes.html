@@ -1,0 +1,296 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Change requests</h1>
+    {% if insufficient_scope %}
+        <span class="chip chip--warn">insufficient scope</span>
+    {% else if !store_configured %}
+        <span class="chip chip--warn">change-request store not configured</span>
+    {% endif %}
+</header>
+
+{# HITL control-plane review queue. An agent holding `mcp:propose` queues a
+   privileged control-plane change; this page is the operator's review
+   surface. Approve runs the captured intent server-side (execute-on-
+   approval); Deny returns a reason to the maker. Gated by mcp:admin + CSRF,
+   reusing the same cores as the REST decision endpoints. #}
+
+{% if insufficient_scope %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <p class="empty-state__title">Admin scope required</p>
+        <p class="empty-state__body">
+            This page requires the <code>mcp:admin</code> scope (the checker
+            role). Your current dashboard session lacks it, so proposed-change
+            detail is hidden.
+        </p>
+        <p class="empty-state__body" style="margin-top: 8px">
+            <a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/changes") }}">Re-authorize with the admin scope</a> if your account is entitled to it.
+        </p>
+    </div>
+</div>
+{% else if !store_configured %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <p class="empty-state__title">Change-request store not configured</p>
+        <p class="empty-state__body">
+            Set <code>GATEWAY_DATABASE_URL</code> and restart to enable the
+            HITL control-plane review queue.
+        </p>
+    </div>
+</div>
+{% else %}
+
+{% match ch_error %}
+{% when Some with (msg) %}
+    <div class="form-error" role="status" style="margin-bottom: 12px">{{ msg }}</div>
+{% when None %}
+{% endmatch %}
+
+{% match error %}
+{% when Some with (msg) %}
+    <div class="card">
+        <div class="empty-state empty-state--danger">
+            <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+            <p class="empty-state__title">Couldn't load change requests</p>
+            <p class="empty-state__body">{{ msg }}</p>
+        </div>
+    </div>
+{% when None %}
+
+<section class="page-section" aria-label="Pending change requests">
+    <h2 class="section-heading">Pending <span class="count">{{ pending.len() }}</span></h2>
+    <div class="card card--table">
+        {% if pending.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#check-circle"/></svg>
+                <p class="empty-state__title">Nothing waiting</p>
+                <p class="empty-state__body">
+                    No change requests need a decision. An agent can propose one
+                    via <code>POST /api/v1/admin/change_requests</code>
+                    (<code>mcp:propose</code>); it appears here for approval.
+                </p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Pending change requests">
+                <thead>
+                    <tr>
+                        <th>Action</th>
+                        <th>Requested by</th>
+                        <th>Justification</th>
+                        <th>Binding</th>
+                        <th>Proposed</th>
+                        <th>Expires</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for c in pending %}
+                    <tr id="change-{{ c.id }}">
+                        <td class="mono">{{ c.action_type }}</td>
+                        <td>{{ c.requested_by }}</td>
+                        <td class="cell-narrative">{{ c.justification }}</td>
+                        <td><span class="binding-chip">{{ c.binding_code }}</span></td>
+                        <td class="mono">{{ c.created_at_abs }}</td>
+                        <td class="mono">{{ c.expires_at_abs }}</td>
+                    </tr>
+                    {# The captured params are the maker's exact proposed intent —
+                       approval review is hollow without them, since a benign
+                       justification can hide a dangerous subject / scope / TTL.
+                       Render them ABOVE the Approve/Deny controls so the reviewer
+                       reads what they're authorizing BEFORE acting. #}
+                    <tr class="params-review-row">
+                        <td colspan="6">
+                            {# Policy-aware EFFECT preview for a pending publish,
+                               rollback, or fragment upsert — compile status,
+                               attached-test results, and the blast radius —
+                               so the approver reviews what the publish DOES, not
+                               just the raw bundle_id / version in the params well
+                               below (which always stays, in full). Read-only. #}
+                            {% match c.policy_preview %}
+                            {% when Some with (pv) %}{% include "_policy_preview_card.html" %}
+                            {% when None %}{% endmatch %}
+
+                            {# Server-review parity: the manifest analogue, for a
+                               pending manifest.publish / manifest.rollback. Mutually
+                               exclusive with the policy preview above. #}
+                            {% match c.manifest_preview %}
+                            {% when Some with (pv) %}{% include "_manifest_preview_card.html" %}
+                            {% when None %}{% endmatch %}
+
+                            <div class="params-review">
+                                <span class="params-review__label">Parameters being authorized:</span>
+                                <pre class="mono params-review__pre" aria-label="Captured parameters for {{ c.binding_code }}">{{ c.params_pretty }}</pre>
+                            </div>
+                            <div class="params-review" aria-label="Approval requirement for {{ c.binding_code }}">
+                                <span class="params-review__label">Approval requirement:</span>
+                                <p class="mono">{{ c.approval_requirement.summary }}</p>
+                                {% match c.approval_requirement.cooldown_until_abs %}
+                                {% when Some with (not_before) %}
+                                <p class="muted">Approval is available at {{ not_before }}. Denial remains available now.</p>
+                                {% when None %}{% endmatch %}
+                                {% if c.approval_requirement.step_up_required %}
+                                <p><a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/changes") }}">Re-authenticate with the required assurance</a> before approving.</p>
+                                {% endif %}
+                            </div>
+                            <div class="row-actions">
+                                {% if c.approval_blocked %}
+                                <button type="button" class="btn btn-primary" disabled>Approval unavailable</button>
+                                {% else %}
+                                <form method="post"
+                                      action="{{ self.chrome.nav_url(c.approve_rel.as_str()) }}"
+                                      onsubmit="return confirm('Approve this change? It runs server-side once it has the required approvals — for a single-approver change that is immediately; a multi-approver change records your approval and runs only when enough distinct approvers have signed off.');">
+                                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                    {% if c.effect_preview_acknowledgement_required %}
+                                    <label class="effect-preview-ack">
+                                        <input type="checkbox" name="effect_preview_acknowledged" value="true" required>
+                                        I reviewed the effect preview
+                                    </label>
+                                    {% endif %}
+                                    <button type="submit" class="btn btn-primary" aria-label="Approve change {{ c.binding_code }}">Approve</button>
+                                </form>
+                                {% endif %}
+                                <form method="post"
+                                      action="{{ self.chrome.nav_url(c.deny_rel.as_str()) }}">
+                                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                    <input type="text" name="reason" class="reason-input" placeholder="reason (required)" required maxlength="500" aria-label="Denial reason">
+                                    <button type="submit" class="btn btn-danger" aria-label="Deny change {{ c.binding_code }}">Deny</button>
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+    {% if pending_prev_rel.is_some() || pending_next_rel.is_some() %}
+    <nav class="row-actions" aria-label="Pending change-request pages" style="margin-top: 12px">
+        {% match pending_prev_rel %}
+        {% when Some with (rel) %}<a class="btn btn-secondary" href="{{ self.chrome.nav_url(rel.as_str()) }}">Previous pending</a>
+        {% when None %}{% endmatch %}
+        {% match pending_next_rel %}
+        {% when Some with (rel) %}<a class="btn btn-secondary" href="{{ self.chrome.nav_url(rel.as_str()) }}">Next pending</a>
+        {% when None %}{% endmatch %}
+    </nav>
+    {% endif %}
+</section>
+
+<section class="page-section" aria-label="Expired change requests">
+    <h2 class="section-heading">Expired (no decision) <span class="count">{{ expired.len() }}</span></h2>
+    <div class="card card--table">
+        {% if expired_load_error %}
+            <div class="empty-state empty-state--danger">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <p class="empty-state__title">Couldn't load expired changes</p>
+                <p class="empty-state__body">See gateway logs. The other sections may still be accurate.</p>
+            </div>
+        {% else if expired.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#circle"/></svg>
+                <p class="empty-state__title">No lapsed changes</p>
+                <p class="empty-state__body">Nothing expired before a human decided — TTLs are sized for how fast you review.</p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Expired change requests">
+                <thead>
+                    <tr>
+                        <th>Action</th>
+                        <th>Requested by</th>
+                        <th>Justification</th>
+                        <th>Proposed</th>
+                        <th>Expired at</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for c in expired %}
+                    <tr id="change-{{ c.id }}">
+                        <td class="mono">{{ c.action_type }}</td>
+                        <td>{{ c.requested_by }}</td>
+                        <td class="cell-narrative">{{ c.justification }}</td>
+                        <td class="mono">{{ c.created_at_abs }}</td>
+                        <td class="mono">{{ c.expires_at_abs }}</td>
+                        <td><span class="chip chip--warn">expired</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+</section>
+
+<section class="page-section" aria-label="Recently decided change requests">
+    <h2 class="section-heading">Recently decided <span class="count">{{ decided.len() }}</span></h2>
+    <div class="card card--table">
+        {% if decided_load_error %}
+            <div class="empty-state empty-state--danger">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <p class="empty-state__title">Couldn't load decided changes</p>
+                <p class="empty-state__body">See gateway logs. The other sections may still be accurate.</p>
+            </div>
+        {% else if decided.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+                <p class="empty-state__title">No decided changes yet</p>
+                <p class="empty-state__body">Approved, executed, failed, and denied changes show up here once any have closed.</p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Recently decided change requests">
+                <thead>
+                    <tr>
+                        <th>Action</th>
+                        <th>Requested by</th>
+                        <th>Approver</th>
+                        <th>Status</th>
+                        <th>Outcome</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for c in decided %}
+                    <tr id="change-{{ c.id }}">
+                        <td class="mono">{{ c.action_type }}</td>
+                        <td>{{ c.requested_by }}</td>
+                        <td>{% match c.approver %}{% when Some with (a) %}{{ a }}{% when None %}—{% endmatch %}</td>
+                        <td>
+                            {% if c.status == "executed" %}<span class="chip chip--ok">executed</span>
+                            {% else if c.status == "failed" %}<span class="chip chip--bad">failed</span>
+                            {% else if c.status == "denied" %}<span class="chip">denied</span>
+                            {% else %}<span class="chip">{{ c.status }}</span>{% endif %}
+                        </td>
+                        <td>
+                            {% match c.denied_reason %}{% when Some with (r) %}{{ r }}{% when None %}{% endmatch %}
+                            {% match c.manifest_execution %}
+                            {% when Some with (m) %}
+                                <div><strong>{{ m.publication }}</strong></div>
+                                <div class="table-hint">
+                                    {% if m.activation_tone == "ok" %}<span class="chip chip--ok">fleet {{ m.activation_label }}</span>
+                                    {% else if m.activation_tone == "warn" %}<span class="chip chip--warn">fleet {{ m.activation_label }}</span>
+                                    {% else %}<span class="chip">fleet {{ m.activation_label }}</span>{% endif %}
+                                    {{ m.activation }}
+                                    <a href="{{ self.chrome.nav_url("/server_manifests") }}">Open fleet status →</a>
+                                </div>
+                            {% when None %}
+                                <span class="cell-ellipsis">{% match c.outcome %}{% when Some with (o) %}{{ o }}{% when None %}{% endmatch %}</span>
+                            {% endmatch %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% if decided_truncated %}
+            <p class="table-hint">
+                Showing the most recent {{ decided.len() }}; pull the full
+                history via
+                <code>GET /api/v1/admin/change_requests?lifecycle=decided</code>.
+            </p>
+            {% endif %}
+        {% endif %}
+    </div>
+</section>
+
+{% endmatch %}
+{% endif %}
+{% endblock %}

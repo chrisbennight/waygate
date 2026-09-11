@@ -1,0 +1,38 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Edit grants</h1>
+    <p class="hint">{{ name }} · <span class="mono">{{ sub }}</span></p>
+</header>
+
+{% match error %}
+{% when Some with (err) %}
+<div class="card"><p class="empty state-err">{{ err }}</p></div>
+{% when None %}
+{% endmatch %}
+
+<div class="card" style="max-width: 640px">
+    <form method="post"
+          action="{{ self.chrome.nav_url("/identities/api-keys/") }}{{ id }}/grants">
+        <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+        <fieldset>
+            <legend>Scopes</legend>
+            <label for="grants-scopes">Scopes (space-separated)</label>
+            <input id="grants-scopes" name="scopes" type="text" required value="{{ scopes }}">
+            <p class="hint">Catalog-only: every scope must already exist in the registry. Register new ones on the <a href="{{ self.chrome.nav_url("/scopes") }}">Scopes</a> page first.</p>
+        </fieldset>
+        <fieldset>
+            <legend>Groups</legend>
+            <label for="grants-groups">Groups (comma-separated)</label>
+            <input id="grants-groups" name="groups" type="text" value="{{ groups }}" placeholder="mcp-users">
+            <p class="hint">Groups resolve against the <a href="{{ self.chrome.nav_url("/groups") }}">Groups</a> catalog. Leave empty to clear all group grants.</p>
+        </fieldset>
+        <p class="hint">Changes take effect within ~60s (validator cache TTL). The secret is unchanged — callers keep using the same key.</p>
+        <div class="form-actions">
+            <a class="btn" href="{{ self.chrome.nav_url("/identities") }}">Cancel</a>
+            <button class="btn btn-primary" type="submit">Save grants</button>
+        </div>
+    </form>
+</div>
+{% endblock %}

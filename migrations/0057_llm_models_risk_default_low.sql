@@ -1,0 +1,14 @@
+-- Default the `llm_models.risk` column to 'low' (was 'high' in 0047).
+--
+-- Deliberate operator posture for this gateway: an unclassified model is LOW
+-- risk, requiring NO `llm:invoke:high` step-up — any authenticated principal may
+-- invoke it. This reverses 0047's fail-closed default and pairs with the code
+-- default (`parse_risk` → Low).
+--
+-- Governs only the DISCOVERY insert path: `upsert_discovered_llm_model` omits
+-- `risk`, so a newly-discovered row takes this column default. Operator-pinned
+-- rows always carry an explicit risk from `GATEWAY_LLM_MODELS` (the boot seeder
+-- writes `risk = EXCLUDED.risk` on every redeploy), so they are unaffected by the
+-- default. No backfill: existing pins are re-seeded from config, and there are no
+-- discovered rows in the live catalog to migrate.
+ALTER TABLE llm_models ALTER COLUMN risk SET DEFAULT 'low';

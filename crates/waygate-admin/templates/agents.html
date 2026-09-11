@@ -1,0 +1,223 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Gateway Agents</h1>
+    {% if insufficient_scope %}
+        <span class="chip chip--warn">insufficient scope</span>
+    {% else if !store_configured %}
+        <span class="chip chip--warn">agent store not configured</span>
+    {% endif %}
+</header>
+
+{# Per-tenant in-app LLM agent definitions. Each agent
+   pins a model, a tool allowlist (empty by default → can call nothing), loop
+   caps, and an enabled flag (off by default → inert). These configs back
+   both the docked chat panel and the one-shot review drivers
+   (`agent_review.rs`) — this page manages the config CRUD; execution lives
+   in those other surfaces. Full CRUD inline, reusing the
+   `agent_configs::*_core` paths. #}
+
+{% if insufficient_scope %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <p class="empty-state__title">Admin scope required</p>
+        <p class="empty-state__body">
+            This page requires the <code>mcp:admin</code> scope. Your current
+            dashboard session lacks it, so agent configuration is hidden.
+        </p>
+        <p class="empty-state__body" style="margin-top: 8px">
+            <a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/agents") }}">Re-authorize with the admin scope</a> if your account is entitled to it.
+        </p>
+    </div>
+</div>
+{% else if !store_configured %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <p class="empty-state__title">Agent store not configured</p>
+        <p class="empty-state__body">
+            Set <code>GATEWAY_DATABASE_URL</code> and restart to enable. Until
+            then, agents can't be defined.
+        </p>
+    </div>
+</div>
+{% else %}
+
+{% match ag_error %}
+{% when Some with (msg) %}
+    <div class="form-error" role="alert" style="margin-bottom: 12px">{{ msg }}</div>
+{% when None %}
+{% endmatch %}
+
+{% match error %}
+{% when Some with (msg) %}
+    <div class="card">
+        <div class="empty-state empty-state--danger">
+            <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+            <p class="empty-state__title">Couldn't load agents</p>
+            <p class="empty-state__body">{{ msg }}</p>
+        </div>
+    </div>
+{% when None %}
+
+<datalist id="agent-models">
+    {% for m in available_models %}<option value="{{ m }}"></option>{% endfor %}
+</datalist>
+
+<div class="card" style="margin-bottom: 16px">
+    <details class="disclosure composer"{% if agents.is_empty() %} open{% endif %}>
+        <summary>New agent</summary>
+        <form method="post" action="{{ self.chrome.nav_url("/agents/create") }}">
+            <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+            <div class="inline-fields inline-fields--column">
+                <div class="inline-fields-row">
+                    <label>Name
+                        <input name="name" type="text" required maxlength="64" placeholder="ops-chat">
+                    </label>
+                    <label>Kind
+                        <select name="kind">
+                            <option value="chat" selected>chat</option>
+                            <option value="policy_review">policy_review</option>
+                            <option value="classification">classification</option>
+                        </select>
+                    </label>
+                    <label>Model
+                        <input name="model_alias" type="text" required maxlength="128" list="agent-models" placeholder="model alias">
+                    </label>
+                    <label class="check-row">
+                        <input name="enabled" type="checkbox"> enabled
+                    </label>
+                </div>
+                <label>Instructions (optional system-prompt addendum)
+                    <textarea name="instructions" placeholder="Extra guidance appended to this agent's system prompt."></textarea>
+                </label>
+                <label>Allowed tools (one fully-qualified tool id per line — empty = the agent can call nothing)
+                    <textarea name="allowed_tools" placeholder="gateway-observe.query_audit&#10;gateway-admin.propose_change"></textarea>
+                </label>
+                <div class="inline-fields-row">
+                    <label>Max steps
+                        <input name="max_steps" type="number" min="1" max="100" value="8" required>
+                    </label>
+                    <label>Max tool calls
+                        <input name="max_tool_calls" type="number" min="1" max="500" value="16" required>
+                    </label>
+                    <label>Token budget (optional)
+                        <input name="token_budget" type="number" min="1" placeholder="no cap">
+                    </label>
+                </div>
+                <div><button class="btn btn-primary btn--sm" type="submit">Create agent</button></div>
+            </div>
+        </form>
+    </details>
+</div>
+
+<section aria-label="Gateway agents">
+    <div class="card card--table">
+        {% if agents.is_empty() %}
+            <div class="empty-state">
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+                <p class="empty-state__title">No agents defined</p>
+                <p class="empty-state__body">
+                    Use the <strong>New agent</strong> form above to define an
+                    in-app LLM agent. A new agent starts <em>disabled</em> with an
+                    <em>empty</em> tool allowlist — it can do nothing until you
+                    enable it and opt tools in.
+                </p>
+            </div>
+        {% else %}
+            <table class="data-table data-table--sm" role="table" aria-label="Gateway agents">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Kind</th>
+                        <th>Model</th>
+                        <th>Enabled</th>
+                        <th>Tools</th>
+                        <th>Caps</th>
+                        <th>Created</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in agents %}
+                    <tr>
+                        <td>{{ r.name }}</td>
+                        <td><span class="chip">{{ r.kind }}</span></td>
+                        <td class="mono">{{ r.model_alias }}</td>
+                        <td>
+                            {% if r.enabled %}<span class="chip chip--ok">enabled</span>
+                            {% else %}<span class="chip">disabled</span>{% endif %}
+                        </td>
+                        <td>
+                            {% if r.allowed_tools_count == 0 %}<span class="chip chip--warn">none</span>
+                            {% else %}<span class="chip">{{ r.allowed_tools_count }}</span>{% endif %}
+                        </td>
+                        <td class="mono">{{ r.max_steps }}&nbsp;steps&nbsp;/&nbsp;{{ r.max_tool_calls }}&nbsp;calls{% if !r.token_budget_str.is_empty() %}&nbsp;/&nbsp;{{ r.token_budget_str }}&nbsp;tok{% endif %}</td>
+                        <td class="mono">{{ r.created_at_abs }}</td>
+                        <td class="row-actions">
+                            <details class="disclosure disclosure--link">
+                                <summary>Edit</summary>
+                                <form method="post" action="{{ self.chrome.nav_url(r.update_rel.as_str()) }}">
+                                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                    <div class="inline-fields inline-fields--column">
+                                        <div class="inline-fields-row">
+                                            <label>Name
+                                                <input name="name" type="text" required maxlength="64" value="{{ r.name }}" aria-label="Name for {{ r.name }}">
+                                            </label>
+                                            <label>Kind
+                                                <select name="kind">
+                                                    <option value="chat"{% if r.kind == "chat" %} selected{% endif %}>chat</option>
+                                                    <option value="policy_review"{% if r.kind == "policy_review" %} selected{% endif %}>policy_review</option>
+                                                    <option value="classification"{% if r.kind == "classification" %} selected{% endif %}>classification</option>
+                                                </select>
+                                            </label>
+                                            <label>Model
+                                                <input name="model_alias" type="text" required maxlength="128" list="agent-models" value="{{ r.model_alias }}">
+                                            </label>
+                                            <label class="check-row">
+                                                <input name="enabled" type="checkbox"{% if r.enabled %} checked{% endif %}> enabled
+                                            </label>
+                                        </div>
+                                        <label>Instructions
+                                            <textarea name="instructions">{{ r.instructions }}</textarea>
+                                        </label>
+                                        <label>Allowed tools (one per line; empty = can call nothing)
+                                            <textarea name="allowed_tools">{{ r.allowed_tools_text }}</textarea>
+                                        </label>
+                                        <div class="inline-fields-row">
+                                            <label>Max steps
+                                                <input name="max_steps" type="number" min="1" max="100" value="{{ r.max_steps }}" required>
+                                            </label>
+                                            <label>Max tool calls
+                                                <input name="max_tool_calls" type="number" min="1" max="500" value="{{ r.max_tool_calls }}" required>
+                                            </label>
+                                            <label>Token budget
+                                                <input name="token_budget" type="number" min="1" value="{{ r.token_budget_str }}" placeholder="no cap">
+                                            </label>
+                                        </div>
+                                        <div><button class="btn btn-primary btn--sm" type="submit">Save</button></div>
+                                    </div>
+                                </form>
+                            </details>
+                            {# Static confirm — never interpolate `r.name` into inline JS
+                               (askama HTML-escaping is decoded by the browser before the JS
+                               parser, so an escaped quote still breaks out). #}
+                            <form method="post" action="{{ self.chrome.nav_url(r.delete_rel.as_str()) }}"
+                                  onsubmit="return confirm('Delete this agent? Its configuration is removed immediately.');">
+                                <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                <button class="btn btn-danger btn--sm" type="submit" aria-label="Delete agent {{ r.name }}">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+</section>
+
+{% endmatch %}
+{% endif %}
+{% endblock %}

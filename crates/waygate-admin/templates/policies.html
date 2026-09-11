@@ -1,0 +1,334 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Policies</h1>
+</header>
+
+<div class="policies-split">
+    <section aria-label="Loaded policies">
+        <div class="policy-list__head">
+            <h2 class="card-title" style="margin: 0">Loaded policies</h2>
+            {% if !policy_groups.is_empty() %}
+                <input id="policy-search" class="policy-search" type="search"
+                       placeholder="Filter by id, tag, or text…"
+                       aria-label="Filter policies" autocomplete="off">
+            {% endif %}
+        </div>
+        {# When policy editing is disabled for this deployment (flag off, or
+           the policies dir isn't writable), tell admins WHY — so a page with no
+           edit affordances isn't a mystery. Shown only to would-be editors. #}
+        {% match policy_editing_off_reason %}
+        {% when Some with (reason) %}
+            <div class="card"><div class="empty">Policy editing is disabled — {{ reason }}. This page is read-only.</div></div>
+        {% when None %}
+        {% endmatch %}
+        {% if policy_groups.is_empty() %}
+            <div class="card"><div class="empty">No Cedar engine configured. Set <code>GATEWAY_POLICIES_DIR</code> and restart.</div></div>
+        {% else %}
+            <p class="policy-list__intro">
+                Policies evaluate as a stack: every request starts denied, baseline
+                permits open it up, and forbid overlays claw specific cases back
+                (a <code>forbid</code> always wins over a <code>permit</code>).
+                Grouped by layer below.
+            </p>
+            {% for group in policy_groups %}
+                <section class="policy-layer" data-layer="{{ group.layer_id }}">
+                    <header class="policy-layer__head">
+                        <h3 class="policy-layer__title">{{ group.title }}</h3>
+                        {% if group.effect == "permit" %}
+                            <span class="chip chip--ok chip--xs">permit</span>
+                        {% else if group.effect == "forbid" %}
+                            <span class="chip chip--bad chip--xs">forbid</span>
+                        {% else %}
+                            <span class="chip chip--xs">mixed</span>
+                        {% endif %}
+                        <span class="policy-layer__count">{{ group.policies.len() }}</span>
+                    </header>
+                    <p class="policy-layer__blurb">{{ group.blurb }}</p>
+                    {% for p in group.policies %}
+                        <article class="policy-item" id="policy-{{ p.id }}" data-search="{{ p.search }}">
+                            <header class="policy-item__head">
+                                {% if p.effect == "permit" %}
+                                    <span class="chip chip--ok">permit</span>
+                                {% else %}
+                                    <span class="chip chip--bad">forbid</span>
+                                {% endif %}
+                                <span class="policy-item__id">{{ p.id }}</span>
+                                {# Cross-link to the Decision Log filtered to
+                                   this policy id — "decisions that matched THIS policy". #}
+                                <a class="policy-item__decisions" href="{{ self.chrome.nav_url("/decisions-log") }}?policy_id={{ p.id_qs|safe }}"
+                                   title="View recent authorization decisions that matched this policy">View recent decisions →</a>
+                                {% if can_edit %}{% if p.editable_source.is_none() %}
+                                {# This policy isn't per-policy addressable (no @id, or the
+                                   active bundle isn't cleanly segmentable), so there's no inline
+                                   editor below — fall back to the whole-bundle editor. #}
+                                <a class="policy-item__decisions" href="{{ self.chrome.nav_url("/policy_bundles") }}?load=active&focus={{ p.id_qs|safe }}#editor"
+                                   title="Edit this policy in the bundle editor">Edit in bundle editor →</a>
+                                {% endif %}{% endif %}
+                            </header>
+                            {% if !p.description.is_empty() %}
+                                <p class="policy-item__desc">{{ p.description }}</p>
+                            {% endif %}
+                            {% if !p.tags.is_empty() %}
+                                <div class="chip-row policy-item__tags">
+                                    {% for t in p.tags %}<span class="chip chip--xs chip--accent">{{ t }}</span>{% endfor %}
+                                </div>
+                            {% endif %}
+                            {% if !p.reason.is_empty() %}
+                                <p class="policy-item__reason"><span class="policy-item__reason-label">denial reason</span> {{ p.reason }}</p>
+                            {% endif %}
+                            <details class="policy-item__cedar">
+                                <summary>Cedar source</summary>
+                                <pre class="policy-item__src">{{ p.highlighted|safe }}</pre>
+                            </details>
+                            {% if can_edit %}{% match p.editable_source %}{% when Some with (src) %}
+                            {# Inline per-policy editor, native <details> so it toggles without
+                               JS. On open, the scripts block mounts CodeMirror (+ as-you-type lint)
+                               over the textarea; the textarea stays the form field, so Save posts
+                               (and the plain textarea works) even with no JS. The value is this
+                               policy's EXACT (byte-faithful) source from the segmenter. Save → POST
+                               /policy_bundles/policy/edit → new draft → redirect into the
+                               bundle editor where Preview impact / Publish / Propose live. #}
+                            <details class="policy-inline-edit">
+                                <summary class="policy-inline-edit__summary">Edit this policy</summary>
+                                <form method="post" action="{{ self.chrome.nav_url("/policy_bundles/policy/edit") }}">
+                                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                                    <input type="hidden" name="base" value="active">
+                                    <input type="hidden" name="id" value="{{ p.id }}">
+                                    <textarea name="statement" class="policy-inline-editor"
+                                              data-lint-url="{{ self.chrome.nav_url("/policy_bundles/diagnostics") }}"
+                                              data-csrf="{{ chrome.csrf_token }}"
+                                              spellcheck="false" autocomplete="off" rows="8">{{ src }}</textarea>
+                                    <div class="policy-inline-edit__foot">
+                                        <span class="policy-inline-edit__hint">Save creates a new draft, then opens it in the bundle editor to preview impact &amp; publish.</span>
+                                        <button class="btn btn-primary" type="submit">Save as draft</button>
+                                    </div>
+                                </form>
+                            </details>
+                            {% when None %}{% endmatch %}{% endif %}
+                        </article>
+                    {% endfor %}
+                </section>
+            {% endfor %}
+            <p id="policy-no-matches" class="empty" hidden>No policies match your filter.</p>
+        {% endif %}
+    </section>
+
+    <aside aria-label="Simulator" style="position: sticky; top: 20px; align-self: start">
+        <div class="card">
+            <h2 class="card-title" style="margin-top: 0">Simulator</h2>
+
+            {% if cedar_configured %}
+                <form class="sim-form"
+                      hx-post="{{ self.chrome.nav_url("/policies/simulate") }}"
+                      hx-target="#sim-result"
+                      hx-swap="outerHTML"
+                      hx-indicator="#sim-spinner">
+                    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+                    <fieldset>
+                        <legend>Principal</legend>
+                        <label for="sim-sub">Subject</label>
+                        <input id="sim-sub" name="sub" type="text" value="alice@example.com" required>
+                        <label for="sim-groups">Groups (comma-separated)</label>
+                        <input id="sim-groups" name="groups" type="text" placeholder="mcp-users, eng">
+                        <label for="sim-scopes">Scopes (comma-separated)</label>
+                        <input id="sim-scopes" name="scopes" type="text" placeholder="mcp:read, mcp:invoke">
+                        <label for="sim-auth-method">Auth method</label>
+                        <select id="sim-auth-method" name="auth_method">
+                            <option value="oauth" selected>oauth</option>
+                            <option value="api_key">api_key</option>
+                        </select>
+                    </fieldset>
+
+                    <fieldset>
+                        <legend>Action</legend>
+                        <label for="sim-action">Type</label>
+                        <select id="sim-action" name="action">
+                            <option value="list_tools">list_tools</option>
+                            <option value="search_tools" selected>search_tools</option>
+                            <option value="call_tool">call_tool</option>
+                            <option value="admin_view_telemetry">admin_view_telemetry</option>
+                        </select>
+                        <label for="sim-tool-name">Tool (for call_tool)</label>
+                        <input id="sim-tool-name" name="tool_name" type="text" placeholder="send_msg">
+                        <label for="sim-risk">Risk (for call_tool)</label>
+                        <select id="sim-risk" name="risk">
+                            <option value="low" selected>low</option>
+                            <option value="medium">medium</option>
+                            <option value="high">high</option>
+                        </select>
+                        <label for="sim-channel">Channel (for call_tool)</label>
+                        <select id="sim-channel" name="channel">
+                            <option value="direct" selected>direct</option>
+                            <option value="codemode">codemode</option>
+                        </select>
+                    </fieldset>
+
+                    <fieldset>
+                        <legend>Resource</legend>
+                        <label for="sim-resource-type">Type</label>
+                        <select id="sim-resource-type" name="resource_type">
+                            <option value="server" selected>server</option>
+                            <option value="tool">tool</option>
+                        </select>
+                        <label for="sim-server">Server</label>
+                        <input id="sim-server" name="server" type="text" value="example-messages"
+                               list="sim-server-list" autocomplete="off" required>
+                        <datalist id="sim-server-list"></datalist>
+                        <label for="sim-tool">Tool name (resource.tool only)</label>
+                        <input id="sim-tool" name="tool" type="text" placeholder="send_msg"
+                               list="sim-tool-list" autocomplete="off">
+                        <datalist id="sim-tool-list"></datalist>
+                        <label for="sim-side-effects">
+                            <input id="sim-side-effects" name="side_effects" type="checkbox" value="on">
+                            Side effects (resource.tool only)
+                        </label>
+                        <label for="sim-pii">
+                            <input id="sim-pii" name="pii" type="checkbox" value="on">
+                            PII (resource.tool only)
+                        </label>
+                    </fieldset>
+                    {# Tool catalog for the server/tool typeahead + autofill. #}
+                    <script type="application/json" id="sim-tool-catalog">{{ tool_catalog_json|safe }}</script>
+
+                    <div class="row-actions">
+                        <button class="btn btn-primary" type="submit">
+                            <span id="sim-spinner" class="htmx-indicator" style="margin-right: 4px">…</span>
+                            Simulate
+                        </button>
+                    </div>
+                </form>
+
+                <div id="sim-result" aria-live="polite">
+                    <p class="sim-note">Run a simulation to see the decision, matching policies, and diagnostics.</p>
+                </div>
+            {% else %}
+                <div class="empty">
+                    Simulator requires a Cedar engine. Set <code>GATEWAY_POLICIES_DIR</code> and restart.
+                </div>
+            {% endif %}
+        </div>
+    </aside>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/admin/static/js/htmx.min.js"></script>
+{# The vendored CodeMirror 6 bundle (also used by the bundle editor) powers
+   the inline per-policy editors below. Progressive enhancement — the inline
+   <details> editors work as plain textareas without it. #}
+<script src="/admin/static/js/codemirror.bundle.js" defer></script>
+<script>
+// Client-side policy filter: matches the search box against each item's
+// pre-lowercased `data-search` blob (id + effect + tags + description +
+// reason + source), hides non-matching items, collapses layers with no
+// visible item, and toggles a "no matches" note. Progressive enhancement —
+// the full list renders without JS.
+(function () {
+    var box = document.getElementById('policy-search');
+    if (!box) return;
+    var items = Array.prototype.slice.call(document.querySelectorAll('.policy-item'));
+    var layers = Array.prototype.slice.call(document.querySelectorAll('.policy-layer'));
+    var noMatches = document.getElementById('policy-no-matches');
+    function apply() {
+        var q = box.value.trim().toLowerCase();
+        var anyVisible = false;
+        items.forEach(function (el) {
+            var hit = q === '' || (el.getAttribute('data-search') || '').indexOf(q) !== -1;
+            el.hidden = !hit;
+            if (hit) anyVisible = true;
+        });
+        layers.forEach(function (layer) {
+            var visible = layer.querySelectorAll('.policy-item:not([hidden])').length;
+            layer.hidden = visible === 0;
+        });
+        if (noMatches) noMatches.hidden = anyVisible || q === '';
+    }
+    box.addEventListener('input', apply);
+})();
+
+// Registry-driven simulator inputs: populate the server/tool typeahead
+// from the embedded tool catalog and autofill risk/side_effects/pii when a
+// known (server, tool) is picked. Progressive enhancement — the inputs stay
+// editable free text without JS.
+(function () {
+    var dataEl = document.getElementById('sim-tool-catalog');
+    if (!dataEl) return;
+    var catalog;
+    try { catalog = JSON.parse(dataEl.textContent || '[]'); } catch (e) { return; }
+    if (!Array.isArray(catalog) || catalog.length === 0) return;
+
+    var serverInput = document.getElementById('sim-server');
+    var toolInput = document.getElementById('sim-tool');
+    var serverList = document.getElementById('sim-server-list');
+    var toolList = document.getElementById('sim-tool-list');
+    var riskSel = document.getElementById('sim-risk');
+    var seBox = document.getElementById('sim-side-effects');
+    var piiBox = document.getElementById('sim-pii');
+    var toolNameInput = document.getElementById('sim-tool-name');
+
+    // Unique server datalist.
+    var seen = {};
+    (catalog || []).forEach(function (e) { seen[e.server] = true; });
+    if (serverList) {
+        Object.keys(seen).sort().forEach(function (s) {
+            var o = document.createElement('option'); o.value = s; serverList.appendChild(o);
+        });
+    }
+
+    function refreshToolList() {
+        if (!toolList) return;
+        toolList.innerHTML = '';
+        var server = serverInput ? serverInput.value.trim() : '';
+        catalog.forEach(function (e) {
+            if (server === '' || e.server === server) {
+                var o = document.createElement('option'); o.value = e.tool; toolList.appendChild(o);
+            }
+        });
+    }
+    function autofill() {
+        var server = serverInput ? serverInput.value.trim() : '';
+        var tool = toolInput ? toolInput.value.trim() : '';
+        var hit = null;
+        for (var i = 0; i < catalog.length; i++) {
+            if (catalog[i].server === server && catalog[i].tool === tool) { hit = catalog[i]; break; }
+        }
+        if (!hit) return;
+        if (riskSel) riskSel.value = hit.risk;
+        if (seBox) seBox.checked = !!hit.side_effects;
+        if (piiBox) piiBox.checked = !!hit.pii;
+        if (toolNameInput && toolNameInput.value.trim() === '') toolNameInput.value = tool;
+    }
+    if (serverInput) serverInput.addEventListener('input', function () { refreshToolList(); autofill(); });
+    if (toolInput) toolInput.addEventListener('input', autofill);
+    refreshToolList();
+})();
+
+// Inline per-policy editors. Each addressable policy card carries an
+// inline-edit details block with a textarea; on first open, mount CodeMirror
+// (+ as-you-type lint) over it. Progressive enhancement: the details block
+// toggles and the textarea posts without JS; if the CM6 bundle isn't available
+// we simply leave the plain textarea in place.
+(function () {
+    function wire() {
+        if (!(window.CedarEditor && typeof CedarEditor.init === 'function')) return;
+        var blocks = document.querySelectorAll('details.policy-inline-edit');
+        Array.prototype.forEach.call(blocks, function (d) {
+            d.addEventListener('toggle', function () {
+                if (!d.open) return;
+                var ta = d.querySelector('textarea.policy-inline-editor');
+                if (!ta || ta.dataset.cmMounted === '1') return;
+                CedarEditor.init(ta, {
+                    lintUrl: ta.getAttribute('data-lint-url') || '',
+                    csrf: ta.getAttribute('data-csrf') || ''
+                });
+            });
+        });
+    }
+    // The bundle is deferred; wire once it's available.
+    if (window.CedarEditor) { wire(); }
+    else { window.addEventListener('DOMContentLoaded', wire); }
+})();
+</script>
+{% endblock %}

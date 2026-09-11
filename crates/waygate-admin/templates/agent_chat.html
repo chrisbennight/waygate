@@ -1,0 +1,105 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Agent Chat</h1>
+    {% if !inference_ready %}
+        <span class="chip chip--warn">inference not configured</span>
+    {% endif %}
+</header>
+
+{# Interactive agentic chat. Runs a CONFIGURED agent's
+   bounded loop over its allowlisted tools, as the logged-in session principal
+   (Cedar authz / budget / audit per call), with each call stamped
+   acting_agent=agent:<name>. Side-effecting tools are refused until the in-chat
+   approval lands. The transcript is persisted server-side (owner-scoped)
+   when a conversation store is wired. See src/dashboard_agent_chat.rs. #}
+
+{% if !configured %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+        <p class="empty-state__title">Agent configuration is not available</p>
+        <p class="empty-state__body">
+            This gateway has no agent-config store wired (no database in this
+            environment), so there are no agents to chat with.
+        </p>
+    </div>
+</div>
+{% else if !inference_ready %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#message-square"/></svg>
+        <p class="empty-state__title">Inference is not configured</p>
+        <p class="empty-state__body">
+            This gateway has no LLM invocation service wired, so an agent has no
+            model to run on.
+        </p>
+    </div>
+</div>
+{% else if agents.is_empty() %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+        <p class="empty-state__title">No enabled chat agents</p>
+        <p class="empty-state__body">
+            Create and enable a <strong>chat</strong> agent on the
+            <a href="{{ self.chrome.nav_url("/agents") }}">Agents</a> tab, then come back
+            here to talk to it.
+        </p>
+    </div>
+</div>
+{% else %}
+<section class="page-section">
+    <div class="card chat"
+         data-agent-chat
+         data-stream-url="{{ self.chrome.nav_url("/agent_chat/stream") }}"
+         data-csrf="{{ chrome.csrf_token }}"
+         data-login-url="/admin/login">
+        <div class="chat-toolbar">
+            <label class="chat-model-label" for="agent-pick">Agent</label>
+            <select id="agent-pick" class="chat-model" data-agent-select>
+                {% for a in agents %}
+                <option value="{{ a.id }}" data-model="{{ a.model }}">{{ a.name }}</option>
+                {% endfor %}
+            </select>
+            {# Egress indicator: the selected agent's model. An LLM turn leaves
+               the gateway for this model's provider (governed + audited). #}
+            <span class="chip" data-agent-model title="Model this agent runs on; calls egress to its provider, governed + audited"></span>
+            {% if history_enabled %}
+            <button type="button" class="btn btn--sm" data-history-toggle>Recent</button>
+            {% endif %}
+            <button type="button" class="btn btn--sm" data-chat-clear>New conversation</button>
+        </div>
+
+        {% if history_enabled %}
+        {# Recent conversations (resume). Populated by assist_chat.js from
+           GET /agent_chat/conversations; hidden until toggled. #}
+        <div class="chat-history" data-history-panel hidden>
+            <div class="chat-history__list" data-history-list></div>
+        </div>
+        {% endif %}
+
+        <div class="chat-log" data-chat-log aria-live="polite">
+            <div class="empty-state" data-chat-empty>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#message-square"/></svg>
+                <p class="empty-state__title">No messages yet</p>
+                <p class="empty-state__body">
+                    Pick an agent and send a message. The agent can call its
+                    allowlisted tools; tool calls and results stream in as it works.
+                </p>
+            </div>
+        </div>
+
+        <form class="chat-composer" data-chat-form>
+            <textarea class="chat-input" data-chat-input rows="2"
+                      placeholder="Message… (Enter to send, Shift+Enter for newline)"></textarea>
+            <button type="submit" class="btn btn-primary" data-chat-send>Send</button>
+        </form>
+    </div>
+</section>
+{% endif %}
+{% endblock %}
+
+{# assist_chat.js is loaded globally in layout.html and auto-inits this
+   page's server-hydrated [data-agent-chat] block — no per-page script needed. #}

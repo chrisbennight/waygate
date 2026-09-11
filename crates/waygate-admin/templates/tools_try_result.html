@@ -1,0 +1,22 @@
+{# Result fragment for a governed "Try this tool" call. Swapped
+   into `#try-result` by the drawer form (hx-swap=outerHTML). One template
+   renders every outcome; `ok` only drives the success/error styling.
+   askama auto-escapes every `{{ }}`, so the upstream `body_json`, policy
+   reasons, and error messages are HTML-safe inside their containers. #}
+<div id="try-result"
+     class="try-result {% if ok %}try-result--ok{% else %}try-result--err{% endif %}"
+     role="status" aria-live="polite">
+  <strong class="try-result__heading">{{ heading }}</strong>
+  {% if !message.is_empty() %}<p class="try-result__msg">{{ message }}</p>{% endif %}
+  {% match required_scope %}{% when Some with (s) %}
+  <p class="try-result__msg">Required scope: <span class="mono">{{ s }}</span></p>
+  {% when None %}{% endmatch %}
+  {% if !policy_reasons.is_empty() %}
+  <ul class="try-result__reasons">
+    {% for r in policy_reasons %}<li>{{ r }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% match body_json %}{% when Some with (b) %}
+  <pre class="schema-pre try-result__body">{{ b }}</pre>
+  {% when None %}{% endmatch %}
+</div>

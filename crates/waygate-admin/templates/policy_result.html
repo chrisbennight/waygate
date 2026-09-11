@@ -1,0 +1,85 @@
+<div id="sim-result" aria-live="polite" class="sim-result">
+    {% if decision == "allow" %}
+        <div class="sim-verdict">
+            <svg width="20" height="20" aria-hidden="true" class="state-ok"><use href="/admin/static/lucide.svg#check-circle"/></svg>
+            <span class="chip chip--ok sim-verdict__chip">ALLOW</span>
+        </div>
+    {% else if decision == "step_up" %}
+        <div class="sim-verdict">
+            <svg width="20" height="20" aria-hidden="true" class="state-flag"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+            <span class="chip chip--warn sim-verdict__chip">STEP_UP</span>
+        </div>
+        {% if let Some(scope) = step_up_scope %}
+            <p class="sim-note sim-stepup__note">
+                {% if let Some(id) = determinative_policy_id %}
+                    Would be allowed by <a class="sim-trace__link" href="#policy-{{ id }}"><code>{{ id }}</code></a> once the caller adds the
+                {% else %}
+                    Caller needs the
+                {% endif %}
+                <code>{{ scope }}</code> scope. Re-authenticate to add it to your session and retry.
+            </p>
+            <p class="sim-stepup__action">
+                <a class="btn btn--warn sim-stepup__btn"
+                   href="/admin/login?step_up_scope={{ scope }}&amp;next={{ self.nav_url("/policies") }}">
+                    <svg width="16" height="16" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+                    Re-authenticate
+                </a>
+            </p>
+        {% endif %}
+    {% else if decision == "approval_required" %}
+        <div class="sim-verdict">
+            <svg width="20" height="20" aria-hidden="true" class="state-flag"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+            <span class="chip chip--warn sim-verdict__chip">APPROVAL_REQUIRED</span>
+        </div>
+        <p class="sim-note sim-stepup__note">
+            {% if let Some(id) = determinative_policy_id %}
+                Gated by <a class="sim-trace__link" href="#policy-{{ id }}"><code>{{ id }}</code></a>:
+            {% endif %}
+            an administrator-minted approval grant for this exact call would allow it; without one the call is refused.
+        </p>
+    {% else %}
+        <div class="sim-verdict">
+            <svg width="20" height="20" aria-hidden="true" class="state-err"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+            <span class="chip chip--bad sim-verdict__chip">DENY</span>
+        </div>
+    {% endif %}
+
+    {% if trace.is_empty() %}
+        {% if decision == "deny" %}
+            <p class="sim-trace__floor">Denied by default — no policy permits this request (Cedar's deny-by-default floor).</p>
+        {% endif %}
+    {% else %}
+        <p class="sim-trace__label">Evaluation trace</p>
+        <ol class="sim-trace">
+            {% for e in trace %}
+                <li class="sim-trace__entry{% if e.determinative %} sim-trace__entry--det{% endif %}">
+                    <div class="sim-trace__head">
+                        {% if e.effect == "permit" %}
+                            <span class="chip chip--ok chip--xs">permit</span>
+                        {% else %}
+                            <span class="chip chip--bad chip--xs">forbid</span>
+                        {% endif %}
+                        <span class="sim-trace__layer">{{ e.layer }}</span>
+                        <a class="sim-trace__id sim-trace__link" href="#policy-{{ e.policy_id }}" title="Jump to this policy">{{ e.policy_id }}</a>
+                        {% if e.determinative %}<span class="sim-trace__det">determinative</span>{% endif %}
+                    </div>
+                    {% if !e.description.is_empty() %}
+                        <p class="sim-trace__desc">{{ e.description }}</p>
+                    {% endif %}
+                    {% if !e.reason.is_empty() %}
+                        <p class="sim-trace__reason">{{ e.reason }}</p>
+                    {% endif %}
+                </li>
+            {% endfor %}
+        </ol>
+    {% endif %}
+
+    {% if !reasons.is_empty() %}
+        <p class="sim-trace__label">Diagnostics</p>
+        <ul class="result-list">
+            {% for r in reasons %}
+                <li>{{ r }}</li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+</div>

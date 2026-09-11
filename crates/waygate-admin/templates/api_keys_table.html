@@ -1,0 +1,64 @@
+{% if keys.is_empty() %}
+<div class="card"><div class="empty">No API keys yet — mint one on the right.</div></div>
+{% else %}
+<table class="data-table data-table--sm" role="table" aria-label="API keys">
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Prefix</th>
+            <th>Subject</th>
+            <th>Scopes</th>
+            <th>Status</th>
+            <th>Created</th>
+            <th>Last used</th>
+            <th>Expires</th>
+            <th>Usage (7d)</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for k in keys %}
+        <tr id="key-row-{{ k.id }}"{% if k.revoked %} class="revoked"{% endif %}>
+            <td>{{ k.name }}</td>
+            <td class="mono">{{ k.key_prefix }}…</td>
+            <td>
+                {{ k.sub }}
+                {% if !k.email.is_empty() %}<br><span class="hint">{{ k.email }}</span>{% endif %}
+                {% if !k.groups.is_empty() %}<br><span class="hint mono">{{ k.groups }}</span>{% endif %}
+            </td>
+            <td class="mono">{{ k.scopes }}</td>
+            <td><span class="{{ k.status_class }}">{{ k.status }}</span></td>
+            <td title="{{ k.created_at_abs }}">{{ k.created_at_rel }}</td>
+            <td>{{ k.last_used }}</td>
+            <td title="{{ k.expires }}">{{ k.expires }}</td>
+            <td>
+                <span hx-get="{{ self.nav_url("/identities/api-keys/") }}{{ k.id }}/usage"
+                      hx-trigger="load"
+                      hx-swap="innerHTML">…</span>
+            </td>
+            <td class="row-actions">
+                {% if !k.revoked %}
+                <form hx-post="{{ self.nav_url("/identities/api-keys/") }}{{ k.id }}/rename"
+                      hx-target="#keys-table"
+                      hx-swap="innerHTML"
+                      onsubmit="const n = window.prompt('Rename API key. New name:', this.dataset.current); if (n === null || n.trim() === '') return false; this.elements.name.value = n.trim();"
+                      data-current="{{ k.name }}">
+                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                    <input type="hidden" name="name" value="">
+                    <button type="submit" class="linklike">rename</button>
+                </form>
+                <form hx-post="{{ self.nav_url("/identities/api-keys/") }}{{ k.id }}/revoke"
+                      hx-target="#keys-table"
+                      hx-swap="innerHTML"
+                      hx-confirm="Revoke this key? In-flight callers will fail within ~60s.">
+                    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                    <button type="submit" class="linklike">revoke</button>
+                </form>
+                <a class="linklike" href="{{ self.nav_url("/identities/api-keys/") }}{{ k.id }}/grants">edit grants</a>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}

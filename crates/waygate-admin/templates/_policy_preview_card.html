@@ -1,0 +1,90 @@
+{# Policy-change EFFECT preview card. Rendered wherever a pending change can be
+   approved (the /changes queue and the /decisions inbox), so no approval surface
+   shows a previewable policy action with only raw params. Expects `pv` (a
+   `PolicyChangePreviewView`) bound by the caller's `{% match … %}`. Read-only. #}
+<div class="card">
+    <p>
+        <strong>{{ pv.kind_label }}</strong>
+        {% match pv.blocked %}{% when Some with (b) %}<span class="chip chip--bad">won't execute</span>{% when None %}{% endmatch %}
+        {% if pv.compile_state == "ok" %}<span class="chip chip--ok">compiles</span>
+        {% else if pv.compile_state == "error" %}<span class="chip chip--bad">won't compile</span>
+        {% else %}<span class="chip chip--warn">not evaluated</span>{% endif %}
+        {% match pv.tests %}
+        {% when Some with (t) %}
+            {% if t.all_passed %}<span class="chip chip--ok">tests {{ t.passed }}/{{ t.total }}</span>
+            {% else %}<span class="chip chip--bad">tests {{ t.passed }}/{{ t.total }}</span>{% endif %}
+        {% when None %}{% endmatch %}
+        {% match pv.impact %}
+        {% when Some with (im) %}
+            {% if im.error.is_none() %}
+                {% if im.changed > 0 %}<span class="chip chip--warn">{{ im.changed }} decision{% if im.changed != 1 %}s{% endif %} would change</span>
+                {% else %}<span class="chip chip--ok">no decisions change</span>{% endif %}
+            {% endif %}
+        {% when None %}{% endmatch %}
+    </p>
+
+    {# The executor would REFUSE this change (non-draft publish target, draft
+       rollback target, malformed tests) — surfaced prominently so the approver
+       doesn't approve an effect that can't happen. #}
+    {% match pv.blocked %}
+    {% when Some with (b) %}
+        <div class="callout callout--err"><strong>Will not execute:</strong> {{ b }}</div>
+    {% when None %}{% endmatch %}
+
+    {% match pv.compile_error %}
+    {% when Some with (e) %}
+        <div class="callout callout--err">Won't compile — approving would publish a policy that can't load: {{ e }}</div>
+    {% when None %}{% endmatch %}
+
+    {% match pv.note %}
+    {% when Some with (n) %}
+        <p class="section-kicker">{{ n }}</p>
+    {% when None %}{% endmatch %}
+
+    {% match pv.tests %}
+    {% when Some with (t) %}
+        {% if !t.all_passed %}
+        <p class="section-kicker">Failing policy tests — publish would be REJECTED at execute:</p>
+        <ul>
+            {% for r in t.results %}{% if !r.passed %}
+            <li><code>{{ r.name }}</code>{% match r.detail %}{% when Some with (d) %} — {{ d }}{% when None %}{% endmatch %}</li>
+            {% endif %}{% endfor %}
+        </ul>
+        {% endif %}
+    {% when None %}{% endmatch %}
+
+    {% match pv.impact %}
+    {% when Some with (im) %}
+        {% match im.error %}
+        {% when Some with (e) %}
+            <div class="callout callout--err">Blast-radius replay error: {{ e }}</div>
+        {% when None %}
+            <p class="section-kicker">
+                Replaying <strong>{{ im.replayed }}</strong> of <strong>{{ im.considered }}</strong> recent decision{% if im.considered != 1 %}s{% endif %} against this policy:
+                <span class="chip chip--ok">{{ im.unchanged }} unchanged</span>
+                <span class="chip chip--bad">{{ im.changed }} would change</span>
+                <span class="chip">{{ im.not_replayable }} not replayable</span>
+            </p>
+            {% if !im.deltas.is_empty() %}
+            <p class="chip-row">
+                {% for d in im.deltas %}<span class="chip chip--warn"><code>{{ d.from }} → {{ d.to }}</code> · {{ d.count }}</span>{% endfor %}
+            </p>
+            {% endif %}
+            {% if !im.samples.is_empty() %}
+            <table class="data-table data-table--sm" aria-label="Recorded decisions this policy change would flip">
+                <thead><tr><th>Recorded → candidate</th><th>Principal</th><th>Server.tool</th></tr></thead>
+                <tbody>
+                    {% for s in im.samples %}
+                    <tr>
+                        <td class="mono">{{ s.recorded }} → {{ s.candidate }}</td>
+                        <td><span class="truncate">{{ s.principal }}</span></td>
+                        <td class="mono">{{ s.server_tool }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+            <p class="section-kicker">Replay covers only decisions carrying the captured inputs — a sample of recent activity, not the complete history.</p>
+        {% endmatch %}
+    {% when None %}{% endmatch %}
+</div>

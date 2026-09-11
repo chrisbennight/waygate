@@ -1,0 +1,25 @@
+{
+  "name": "triage_fetch_allow",
+  "description": "20-example-triage.cedar opens example-fetch side-effecting fetch tools (below high) to the incident-triage role so a synthetic enrichment worker can pull advisory and release-note pages. pages.fetch_markdown is `low + side_effects: true` (caller-controlled outbound fetch) after the medium retirement, so it falls outside the read-only baseline and is granted only via the triage permit — which keys on side_effects, not the risk tier.",
+  "principal": {
+    "sub": "svc:incident-triage",
+    "auth_method": "api_key",
+    "groups": ["incident-triage"],
+    "scopes": ["mcp:invoke", "mcp:read"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-fetch.pages.fetch_markdown",
+    "risk": "low"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-fetch",
+    "name": "pages.fetch_markdown",
+    "risk": "low",
+    "side_effects": true
+  },
+  "expected": {
+    "decision": "Allow"
+  }
+}

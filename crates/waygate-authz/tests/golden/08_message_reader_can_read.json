@@ -1,0 +1,25 @@
+{
+  "name": "example-messages_receiver_can_read",
+  "description": "policies/20-example-message-roles.cedar: a Group::\"message-reader\" API key may call low-risk example-messages read tools, and the example-messages-scoped PII exemption (15-pii-default.cedar) clears the pii forbid on a pii-tagged receive tool.",
+  "principal": {
+    "sub": "example-messages-reader-bot",
+    "auth_method": "api_key",
+    "groups": ["message-reader"],
+    "scopes": ["mcp:invoke", "mcp:read"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-messages.messages.receive",
+    "risk": "low"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-messages",
+    "name": "messages.receive",
+    "risk": "low",
+    "pii": true
+  },
+  "expected": {
+    "decision": "Allow"
+  }
+}

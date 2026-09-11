@@ -1,0 +1,11 @@
+target
+.git
+.github
+.claude
+.env
+.env.*
+!.env.example
+*.log
+tmp
+docs
+README.md

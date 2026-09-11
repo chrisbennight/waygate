@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Migration issue tracker
+    url: https://gitea.cacahuate.org/bennight/mcp-tool-search-gateway/issues
+    about: Keep migration issues and review evidence in the retained private Gitea repository.

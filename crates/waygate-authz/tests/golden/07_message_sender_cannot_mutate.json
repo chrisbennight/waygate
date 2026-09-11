@@ -1,0 +1,26 @@
+{
+  "name": "example-messages_sender_cannot_mutate",
+  "description": "The sender role is strictly send-only: it has no permit for any other example-messages tool (and a forbid blocks them), so a message-sender key is denied a group mutation — groups.delete is low + side_effects: true. Pins that message-sender does not inherit the broad message-operators permit.",
+  "principal": {
+    "sub": "example-operations-alerter",
+    "auth_method": "api_key",
+    "groups": ["message-sender"],
+    "scopes": ["mcp:invoke", "mcp:invoke:high"]
+  },
+  "action": {
+    "kind": "CallTool",
+    "name": "example-messages.groups.delete",
+    "risk": "low"
+  },
+  "resource": {
+    "kind": "Tool",
+    "server": "example-messages",
+    "name": "groups.delete",
+    "risk": "low",
+    "side_effects": true,
+    "pii": true
+  },
+  "expected": {
+    "decision": "Deny"
+  }
+}

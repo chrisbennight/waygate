@@ -1,0 +1,29 @@
+[package]
+name = "waygate-apikeys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+waygate-core.workspace = true
+waygate-oidc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+time.workspace = true
+uuid.workspace = true
+sqlx.workspace = true
+moka.workspace = true
+argon2.workspace = true
+password-hash.workspace = true
+base64.workspace = true
+rand.workspace = true
+async-trait.workspace = true
+utoipa.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

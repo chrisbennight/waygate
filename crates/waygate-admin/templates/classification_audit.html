@@ -1,0 +1,74 @@
+{% extends "layout.html" %}
+
+{% block main %}
+<header class="page-header">
+    <h1 class="page-title">Classification Audit</h1>
+</header>
+
+{# Classification-audit task agent (Gateway-Agents). An mcp:admin operator
+   picks a classification agent and runs a one-shot, governed audit of the
+   upstream tool classifications (risk / side_effects / pii). The agent emits
+   structured findings — it never mutates; applying a change goes through the
+   governed manifest editor, or refine the finding in chat. See
+   src/agent_review.rs. #}
+
+{% if !is_admin %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+        <p class="empty-state__title">Classification audit requires mcp:admin</p>
+        <p class="empty-state__body">
+            Auditing the tool catalog reads every tool's definition and spends
+            model budget, so it is restricted to administrators.
+        </p>
+    </div>
+</div>
+{% else if !ready %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+        <p class="empty-state__title">Classification audit is not available</p>
+        <p class="empty-state__body">
+            This gateway is missing a piece the audit needs — an agent-config
+            store or an inference plane.
+        </p>
+    </div>
+</div>
+{% else if agents.is_empty() %}
+<div class="card">
+    <div class="empty-state">
+        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+        <p class="empty-state__title">No enabled classification agents</p>
+        <p class="empty-state__body">
+            Create and enable a <strong>classification</strong> agent on the
+            <a href="{{ self.chrome.nav_url("/agents") }}">Agents</a> tab, then run it here.
+        </p>
+    </div>
+</div>
+{% else %}
+<section class="page-section">
+    <div class="card"
+         data-agent-review
+         data-run-url="{{ self.chrome.nav_url("/classification_audit/run") }}"
+         data-chat-url="{{ self.chrome.nav_url("/agent_chat") }}"
+         data-csrf="{{ chrome.csrf_token }}">
+        <div class="chat-toolbar">
+            <label class="chat-model-label" for="review-agent">Agent</label>
+            <select id="review-agent" class="chat-model" data-review-agent>
+                {% for a in agents %}
+                <option value="{{ a.0 }}">{{ a.1 }}</option>
+                {% endfor %}
+            </select>
+            <button type="button" class="btn btn-primary" data-review-run>Run audit</button>
+        </div>
+
+        <div class="review-status" data-review-status></div>
+        <div class="review-findings" data-review-findings></div>
+    </div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/admin/static/js/agent_review.js" defer></script>
+{% endblock %}

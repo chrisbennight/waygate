@@ -1,0 +1,32 @@
+[package]
+name = "waygate-telemetry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true
+prometheus.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+# tonic version must match opentelemetry-proto's (currently 0.14) — otherwise
+# `TraceServiceServer` / `NamedService` collide across incompatible trait
+# definitions and the integration test won't link. Bump in lockstep with
+# opentelemetry-otlp. (opentelemetry-proto 0.32 still requires tonic ^0.14, so
+# this pin is unchanged by the otel 0.31→0.32 bump.)
+tonic = { version = "0.14", default-features = false, features = ["transport", "codegen", "server", "router"] }
+tonic-prost = "0.14"
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic", "trace"] }
