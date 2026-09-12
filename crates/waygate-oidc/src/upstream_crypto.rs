@@ -10,7 +10,7 @@
 //!
 //! ## Keyring
 //!
-//! [`UpstreamCrypto`] now holds a map of `key_id` → AES-256-GCM
+//! [`UpstreamCrypto`] holds a map of `key_id` → AES-256-GCM
 //! cipher plus an `active_id`. New writes encrypt with the active
 //! key and stamp the row's `key_id` column; reads decrypt with the
 //! key matching the stored `key_id`. Rotation is operator-driven:
@@ -18,13 +18,8 @@
 //! background re-encrypt job to migrate old-key rows.
 //!
 //! Format on the wire: `nonce (12 bytes) || ciphertext || tag`. The
-//! `key_id` lives in a column, NOT in the blob — keeping the format
-//! identical to the pre-keyring single-key era means a deployment
-//! encrypted under one key that just upgrades the binary stays
-//! decryptable without a re-encrypt pass (every existing row gets
-//! `key_id='v1'` from the migration default, and the operator pins
-//! `GATEWAY_UPSTREAM_TOKEN_KEY_V1` to the bytes their current
-//! single-key env var holds).
+//! `key_id` lives in a separate column. Keep the corresponding key bytes
+//! available until every row using that ID has been re-encrypted.
 
 use std::collections::HashMap;
 
@@ -33,11 +28,8 @@ use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine as _;
 use thiserror::Error;
 
-/// Default key id used when an operator hasn't migrated to the
-/// multi-key env-var shape and is still setting the legacy
-/// `GATEWAY_UPSTREAM_TOKEN_KEY` env var. The migration's column
-/// default uses the same literal so existing rows stay decryptable.
-pub const LEGACY_KEY_ID: &str = "v1";
+/// Key ID used by the single-key constructor and database column default.
+pub const DEFAULT_KEY_ID: &str = "v1";
 
 #[derive(Debug, Error)]
 pub enum CryptoError {
@@ -85,16 +77,15 @@ impl std::fmt::Debug for UpstreamCrypto {
 }
 
 impl UpstreamCrypto {
-    /// Build a single-key keyring with `active_id = LEGACY_KEY_ID`.
-    /// Shorthand for the legacy single-key deployment shape; production
-    /// composition wires the keyring from
+    /// Build a single-key keyring with `active_id = DEFAULT_KEY_ID`.
+    /// Production composition supplies explicitly named keys through
     /// `waygate_as::config::AsConfig::upstream_token_keys`.
     pub fn from_key_bytes(key: [u8; 32]) -> Self {
-        Self::single_key(LEGACY_KEY_ID, key)
+        Self::single_key(DEFAULT_KEY_ID, key)
     }
 
     /// Build a single-key keyring under an arbitrary id. Convenience
-    /// for tests and the legacy-env-var compat path.
+    /// for callers that need exactly one named key.
     pub fn single_key(id: impl Into<String>, key: [u8; 32]) -> Self {
         let id = id.into();
         let mut keys = HashMap::with_capacity(1);
@@ -325,17 +316,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_single_key_constructor_stamps_v1() {
+    fn single_key_constructor_stamps_default_id() {
         let c = UpstreamCrypto::from_key_bytes([1u8; 32]);
-        assert_eq!(c.active_id(), LEGACY_KEY_ID);
+        assert_eq!(c.active_id(), DEFAULT_KEY_ID);
     }
 
-    /// Ciphertext produced by the pre-consolidation `encrypt_with` (its
-    /// nonce came from `rand::rng()`) under key `[42u8; 32]`. The shared
-    /// envelope must keep decrypting it — live `user_upstream_sessions`
-    /// rows encrypted before the deploy must survive it.
+    /// A fixed ciphertext vector under key `[42u8; 32]` verifies the
+    /// nonce/ciphertext/tag envelope independently of the encrypt path.
     #[test]
-    fn pre_consolidation_blob_still_decrypts() {
+    fn fixed_ciphertext_vector_decrypts() {
         let c = key();
         let blob = base64::engine::general_purpose::STANDARD
             .decode("YIlQ1MlLANQxb0xF/us9lsmRwsLekTZRdMJNgW7/HKLJgY/iuXIGUx53SPwsZL2T2MYD")

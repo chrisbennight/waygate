@@ -2,10 +2,7 @@
 # CI gate: no unused dependencies in any crate manifest.
 #
 # Runs cargo-machete (source-scan mode, no cargo/toolchain needed) across the
-# workspace. A dependency a crate declares but never names is dead weight and
-# the F1 vertical-slice signature: manifests cloned from a sibling crate carry
-# the sibling's deps along (a 2026-07 sweep removed 14 such deps across
-# 9 crates).
+# workspace. Remove dependencies that the crate does not use.
 #
 # The tool version is PINNED: machete's detection heuristics change between
 # releases, and a gate must give the same answer locally and in CI. The pin
@@ -20,7 +17,7 @@
 #      release tarball and run it from a temp dir. Compile-free, so this check
 #      can run in the workflows' fast-fail block before the toolchain install.
 #
-# Known limitation (probed 2026-07): machete 0.9.2 does not flag unused
+# Known limitation: machete 0.9.2 does not flag unused
 # [dev-dependencies] — this gate covers [dependencies] only.
 #
 # Exit codes: 0 clean; 1 unused deps found (the finding); 2 environment /

@@ -23,18 +23,12 @@ scoped location. A separate refresher owns rotation of externally managed OAuth
 tokens. The gateway must not compete for a single-use refresh token; reading
 the newly published credential preserves the single-owner contract.
 
-Configure the reload mapping with `GATEWAY_LLM_CRED_RELOAD`. To enable its client,
-supply the API URL, read-only service token, and project identifier through
-`GATEWAY_INFISICAL_API_URL`, `GATEWAY_INFISICAL_TOKEN`, and
-`GATEWAY_INFISICAL_PROJECT_ID`. The enabled client also requires explicit
-`GATEWAY_INFISICAL_ENV` and `GATEWAY_INFISICAL_SECRET_PATH`. The latter two are
-location metadata, not credential values. Scope the service token to only that
-location. An absent client configuration leaves this optional adapter disabled.
-
-Use the same credential location as the designated refresher. Select `GATEWAY_LLM_CRED_RELOAD_SECS` according to the
-credential lifetime and refresher cadence; its default is 300 seconds and zero
-disables polling. See [inference configuration](inference-plane.md) for mapping
-provider and credential labels.
+Use the same credential location as the designated refresher, and scope the
+service token to read only that location. Choose a polling interval that fits
+the credential lifetime and refresher cadence. The
+[configuration reference](configuration-reference.md) defines the Infisical
+client settings and credential reload mapping; the
+[inference guide](inference-plane.md) explains provider and credential labels.
 
 ## OIDC configuration names
 

@@ -193,7 +193,6 @@ const DESTINATIONS: &[DestDef] = &[
             ("Bundles", "/policy_bundles"),
             ("Playground", "/playground"),
             ("Rate limits", "/rate_limits"),
-            ("Inspection rules", "/inspection_rules"),
         ],
     ),
     // The Decision Log — a server-rendered browser over the
@@ -561,7 +560,6 @@ fn page_routes(state: Arc<AdminState>) -> Router<()> {
         .merge(crate::dashboard_rate_limits::router())
         // Inspection-rules page (full CRUD over the per-tenant
         // response-inspector rule overrides).
-        .merge(crate::dashboard_inspection_rules::router())
         // OAuth-consent page (read-only operator view of
         // consent grants).
         .merge(crate::dashboard_oauth_consent::router())

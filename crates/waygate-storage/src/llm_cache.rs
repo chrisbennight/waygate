@@ -1,15 +1,14 @@
 //! Postgres store + key for the per-principal exact-match
-//! completion cache (`migrations/0050_llm_cache.sql`, design §9).
+//! completion cache (`migrations/0050_llm_cache.sql`).
 //!
 //! The cache is keyed by a BLAKE3 hash over the canonical request PLUS the
 //! principal, so an entry is per-principal scoped — a cross-principal hit is
 //! structurally impossible because the principal is part of the key. Unlike the
-//! audit / usage ledgers (metadata only, I9), the cache stores response content
+//! audit / usage ledgers (metadata only), the cache stores response content
 //! (a hit replays it); the per-principal key is what keeps that safe.
 //!
-//! This module is the storage + key layer only. Wiring the cache into the
-//! invocation pipeline (check-before-dispatch on a hit, store-after-dispatch on
-//! a miss) lands in a follow-up slice.
+//! This module implements storage and cache keys. The invocation pipeline
+//! checks the cache before dispatch and stores eligible responses after a miss.
 
 use std::time::Duration;
 
@@ -21,7 +20,7 @@ use serde_json::Value;
 pub struct CachedResponse {
     pub model_served: Option<String>,
     /// Canonical provider identifier (`LlmProvider::as_str`) that served the
-    /// original miss; `None` for a legacy row predating the column.
+    /// original miss; `None` when the entry has no recorded provider.
     pub provider: Option<String>,
     pub response_body: Value,
 }

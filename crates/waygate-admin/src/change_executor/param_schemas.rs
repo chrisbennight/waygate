@@ -38,14 +38,6 @@ pub(super) fn action_param_schemas() -> Vec<(&'static str, Value)> {
             params_schema_of::<RateLimitDeleteParams>(),
         ),
         (
-            "inspection_rule.create",
-            params_schema_of::<CreateRuleRequest>(),
-        ),
-        (
-            "inspection_rule.update",
-            params_schema_of::<InspectionRuleUpdateParams>(),
-        ),
-        (
             "inspection_rule.delete",
             params_schema_of::<InspectionRuleDeleteParams>(),
         ),

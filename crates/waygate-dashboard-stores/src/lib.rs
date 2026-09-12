@@ -15,4 +15,3 @@ pub mod agent_config;
 pub mod inspection_rules;
 pub mod playground_scenarios;
 pub mod scim_provisioning_log;
-pub mod tasks;

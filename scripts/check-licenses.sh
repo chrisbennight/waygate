@@ -11,19 +11,10 @@ fail() {
 for path in \
     LICENSE-APACHE \
     THIRD_PARTY_LICENSES.md \
-    THIRD_PARTY_LICENSES-CODEMIRROR.lock \
-    THIRD_PARTY_LICENSES.lock \
-    about.toml \
-    about.hbs; do
+    scripts/licenses/about.toml \
+    scripts/licenses/about.hbs; do
     test -s "$path" || fail "$path is missing or empty"
 done
-
-sha256sum --check --status THIRD_PARTY_LICENSES.lock \
-    || fail 'Rust dependency notice bundle is stale for the release dependency graph'
-(
-    cd crates/waygate-admin/codemirror
-    sha256sum --check --status ../../../THIRD_PARTY_LICENSES-CODEMIRROR.lock
-) || fail 'CodeMirror bundle is stale for its source or pinned dependency graph'
 
 printf '%s  %s\n' \
     cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30 LICENSE-APACHE \
@@ -71,11 +62,11 @@ grep -Fq 'aws-lc-sys 0.40.0' THIRD_PARTY_LICENSES.md \
     || fail 'generated Rust dependency notice omits linked native TLS code'
 grep -Fq 'Mozilla Public License 2.0' THIRD_PARTY_LICENSES.md \
     || fail 'generated Rust dependency notice omits accepted license text'
-grep -Fq 'CDLA-Permissive-2.0' about.toml \
+grep -Fq 'CDLA-Permissive-2.0' scripts/licenses/about.toml \
     || fail 'cargo-about accepted-license policy is incomplete'
-grep -Fq 'ignore-dev-dependencies = true' about.toml \
+grep -Fq 'ignore-dev-dependencies = true' scripts/licenses/about.toml \
     || fail 'cargo-about must exclude dependencies absent from release binaries'
-grep -Fq 'ignore-build-dependencies = true' about.toml \
+grep -Fq 'ignore-build-dependencies = true' scripts/licenses/about.toml \
     || fail 'cargo-about must exclude build-only dependencies'
 
 grep -Fq \

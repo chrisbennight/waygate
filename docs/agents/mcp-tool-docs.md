@@ -5,29 +5,19 @@ or editing a tool in `crates/waygate-server/src/mcp_builtin.rs`,
 `mcp_observe.rs`, `mcp_control.rs`, the `BuiltinTools` impls in
 `crates/waygate-mcp/src/builtin.rs`, or any future built-in namespace.
 
-## Why this exists
+## Current requirement
 
-Clients (LLM agents) calling our control-plane tools — `propose_change` above
-all — have had to read this repo's source to learn the request shape, because
-the wire schema punted: `params` was a bare `{"type":"object"}` "validated at
-execute time, not here." That is a defect, not a design choice. The variants are
-compile-time Rust types; their schemas are generable. This SOP codifies the fix
-so it stays fixed for every action we add later.
+A client must be able to discover a tool's contract without reading repository
+source. Built-in tools expose typed input and output schemas, titles, and
+behavioral annotations. Polymorphic operations use `describe_action` to expose
+an exact action schema on demand.
 
-**Migration status — complete.** Every built-in tool in the `gateway-admin`,
-`gateway-observe`, and `gateway-control` namespaces now meets this standard: each
-advertises a `schemars`-derived `output_schema`, a title, and behavioral
-annotations (the PR-F series). The `propose_change.params` polymorphism — the
-motivating case above — is resolved by the `describe_action` discovery tool, not
-an inline union. A tool shipped *after* this SOP must meet it from day one, and
-that is now **mechanically enforced**: `every_builtin_tool_is_self_documenting`
-(`crates/waygate-server/src/main_tests/builtin_selfdoc_enforcement.rs`) fails CI if any built-in tool, in any
-namespace, ships without a valid object-rooted `input_schema`, a title, an
-`output_schema`, or a `read_only_hint`, or ships an `input_schema` that applies a
-composition keyword at its root — so a new tool cannot silently regress the
-guarantee.
+The `every_builtin_tool_is_self_documenting` test in
+`crates/waygate-server/src/main_tests/builtin_selfdoc_enforcement.rs` checks these
+requirements across namespaces, including object-rooted input schemas without
+root composition keywords.
 
-## The litmus (north star)
+## Client contract
 
 > Hand a tool's `tools/list` entry — plus its advertised on-demand discovery
 > calls — to a fresh agent with no repo access. If it cannot construct a valid
@@ -207,7 +197,7 @@ canonicalized; detailed store, database, and filesystem diagnostics remain in
 operator logs and dashboard surfaces. Preview never replaces the proposal or
 execution freshness checks.
 
-## Enforcement (tests, not vibes)
+## Enforcement
 
 A tool is not done until:
 

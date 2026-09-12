@@ -75,8 +75,7 @@ only `(FailClosed, side_effecting, Err)` blocks dispatch).
 
 Every `AuditEvent` carries an `EvidenceCategory` discriminator
 (persisted to `audit_log.category` via migration `0006_audit_category.sql`).
-Categories defined today; some are recorded now, others are wiring
-in incrementally:
+The table distinguishes emitted categories from reserved enum values:
 
 | Category | Recorded today? | Notes |
 |----------|-----------------|-------|
@@ -88,13 +87,9 @@ in incrementally:
 | `UpstreamHealth` | ✅ once per reconnect failure episode, plus recovery/admin refresh outcomes | `action` is `UpstreamReconnected` (outcome=success) or `UpstreamReconnectFailed` (outcome=execution_error). The first failed attempt opens one evidence episode with the raw dial error and selected retry delay; repeats are represented by the every-attempt metric and sampled power-of-two WARN summaries rather than one audit row per retry. Recovery reports the episode's aggregate failed-attempt count. **Boot-time dial failures are NOT recorded here** — `UpstreamPool::connect_inner` runs before the `.with_evidence()` builder chain can attach a recorder. The first failed scheduled retry opens the episode. Discrete connection-loss events likewise become visible through the recovery episode rather than an unbounded event stream. Correlates with the Grafana upstream-recovery panels. |
 | `AdminMutation` | ✅ on operator-driven CRUD across `/admin` REST surfaces | Security-impacting mutations require durable evidence. Producers include catalog approval / quarantine, policy bundle publish / rollback, inspection-rules CRUD, federated_peers CRUD, break-glass mint / revoke, tenant CRUD, rate-limit policy CRUD, api-key profile CRUD, OAuth consent revoke. `action` discriminates the specific mutation; `reason` carries the sanitized identifiers + the actor's sub. |
 | `AuthAttempt` | ✅ on every rejected bearer validation in `waygate-oidc::middleware` | `action` discriminates the failure class: `AuthAttemptMissingHeader` (no `Authorization` header), `AuthAttemptRejected` (header malformed OR every validator returned a client-error rejection), `AuthAttemptInfraUnavailable` (one or more validators infra-errored and none accepted — surfaced as HTTP 503). All three carry `AuditOutcome::ExecutionError`. **Successful validations are NOT recorded** — every accepted request immediately produces an `Invocation` row downstream that already carries the principal; emitting an `AuthAttemptAccepted` row per request would 2× the audit-log volume with no security signal. Adapter pattern (`waygate-server::EvidenceAuthAttempts`) translates `AuthAttemptRecorder` outcomes to the bounded `SharedEvidence` submission queue, so rejection floods neither spawn one task per request nor wait on PostgreSQL. `waygate-oidc` stays free of a `waygate-mcp::audit` dependency (which would form a cycle). |
-| `ApprovalLifecycle` | ⏳ category reserved; HITL grant lifecycle records `AdminMutation`-category rows today via the `waygate-admin::approval_grants` handler, not a distinct `ApprovalLifecycle` row. Promoting to a dedicated category would let SIEM rules filter approval traffic without joining on `action`; not wired yet. |
+| `ApprovalLifecycle` | Reserved; no producer. Approval grants are persisted in the catalog and their lifecycle operations emit tracing logs. | No separate durable `ApprovalLifecycle` event is emitted. |
 | `CatalogDrift` | ✅ on every mode-specific contract mismatch detected during a `tools/list` republish in `crates/waygate-upstream/src/pool/reload.rs`. Compatibility `manifest` mode retains its legacy name/description/input-schema hash; `mcp_annotations` mode hashes both schemas and security metadata. An approved mode cutover seeds the new baseline instead of reporting synthetic drift. `record_observed_schemas` returns the real drift events it detected; while the originating span is still active, the pool captures its trace ID, then a detached task stamps and submits one chained-best-effort row per drifted tool to the bounded queue off the baseline-lock path: `outcome=Denied` when the live contract diverged enough to auto-quarantine, `outcome=Success` for informational drift. This is in addition to the existing `WARN` log and the `mcp_tool_drift_total{server}` metric. First observations and boot-time seeding are not drift and emit nothing. Compliance reviewers can pivot from a metric spike straight to the offending tool's audit row. |
-| `DataInspection` | ⏳ category reserved; the inspector chain (Pii / Secrets / Poisoning + per-tenant `inspection_rules`) currently records its findings on the existing `Invocation`-category audit row for the dispatched call (the inspector verdict shows up in `reason` / outcome). A distinct `DataInspection`-category row per finding (rather than per call) would let SIEM enrich a single tool call with multiple inspector hits; the per-finding producer hasn't shipped. |
-
-Reserving the names now means downstream OCSF / syslog / ECS / S3
-exporters can stabilise their vocabulary without later
-renames.
+| `DataInspection` | ⏳ category reserved; the inspector chain (Pii / Secrets / Poisoning + per-tenant `inspection_rules`) currently records its findings on the existing `Invocation`-category audit row for the dispatched call (the inspector verdict shows up in `reason` / outcome). No separate per-finding event is emitted. |
 
 ## OTel spans
 
@@ -106,9 +101,9 @@ instruments follow the OTel MCP semantic conventions
 
 | Span | Where | `otel.kind` | Attributes |
 |------|-------|-------------|------------|
-| `tools/call` (inbound) | `waygate-mcp::server::call_tool` | `server` | `mcp.method.name`, `gen_ai.tool.name`, `error.type`, `user.sub` + legacy `mcp.method`, `mcp.tool` |
-| `tools/list` (inbound) | `waygate-mcp::server::list_tools` | `server` | `mcp.method.name`, `user.sub` + legacy `mcp.method` |
-| `tools/call` (upstream) | `waygate-upstream::pool::call_tool` | `client` | `mcp.server`, `mcp.method.name`, `gen_ai.tool.name`, `error.type`, `upstream.outcome` + legacy `mcp.tool` |
+| `tools/call` (inbound) | `waygate-mcp::server::call_tool` | `server` | `mcp.method.name`, `gen_ai.tool.name`, `error.type`, `user.sub` |
+| `tools/list` (inbound) | `waygate-mcp::server::list_tools` | `server` | `mcp.method.name`, `user.sub` |
+| `tools/call` (upstream) | `waygate-upstream::pool::call_tool` | `client` | `mcp.server`, `mcp.method.name`, `gen_ai.tool.name`, `error.type`, `upstream.outcome` |
 
 The inbound span is the parent and the upstream span its child (one trace),
 joined by `_meta` propagation (below). Attribute notes:
@@ -117,13 +112,9 @@ joined by `_meta` propagation (below). Attribute notes:
   JSON-RPC error-code string on a protocol error, unset on success. One shared
   helper — `waygate_mcp::protocol::tool_call_error_type` — classifies both
   legs identically.
-- **Dual-emit** — the pre-semconv `mcp.method` / `mcp.tool` fields are kept
-  alongside the semconv names for a migration window because
-  [`docs/compliance.md`](../compliance.md) cites them as SOC2 / NIST control
-  evidence. They will be dropped once the doc and any Tempo dashboards cut
-  over. `mcp.server` / `upstream.outcome` are gateway-specific (no semconv
-  equivalent) and stay permanently.
-- **`mcp.session.id`** — not yet emitted; rmcp's `RequestContext` doesn't
+- **Gateway attributes** — `mcp.server` identifies the upstream, and
+  `upstream.outcome` records its outcome.
+- **`mcp.session.id`** — not emitted; rmcp's `RequestContext` doesn't
   surface the streamable-HTTP session id cheaply. The one remaining semconv
   attribute.
 - **No PII** — tool arguments / results are never attached to spans (semconv's
@@ -156,9 +147,9 @@ Best-effort: no `traceparent`, or no tracer provider installed ⇒ no-op.
 ## Prometheus metrics
 
 Pull-based, scraped at `/metrics`; all registered in
-`crates/waygate-telemetry/src/metrics.rs` under the `mcp_` prefix (the
-canonical list also appears in [`docs/compliance.md`](../compliance.md)
-MEASURE 1). Operation-duration highlights:
+`crates/waygate-telemetry/src/metrics.rs`. Request-path metrics use `mcp_`,
+fleet-state gauges use `gateway_`, and model usage metrics use `gen_ai_`.
+Metric semantics and operational uses:
 
 - `mcp_server_operation_duration_seconds{method,outcome}` — gateway-as-server
   handling time (semconv `mcp.server.operation.duration`); `outcome` is

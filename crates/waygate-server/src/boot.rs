@@ -915,24 +915,12 @@ pub(crate) async fn build_bearer_layer(
                          AND GATEWAY_ACCEPT_UPSTREAM_TOKENS!=true — introspection validator \
                          not wired (would be the OAuth token-passthrough anti-pattern). \
                          Unset GATEWAY_INTROSPECTION_URL, OR set \
-                         GATEWAY_ACCEPT_UPSTREAM_TOKENS=true (deprecated, prod refuses) to \
+                         GATEWAY_ACCEPT_UPSTREAM_TOKENS=true (development only; prod refuses) to \
                          opt in explicitly."
                     );
                 } else {
-                    // Keep the tenant-claim name in lockstep
-                    // with the JWT validator. The JWT validator reads
-                    // the literal `tenant` field today
-                    // (`crates/waygate-oidc/src/validator.rs`),
-                    // so the introspection validator must
-                    // too — otherwise a deployment that ever
-                    // adds `GATEWAY_TENANT_CLAIM` (planned)
-                    // would have JWT principals land in
-                    // `default` and opaque principals land
-                    // in the renamed claim, splitting
-                    // tenant-gated authz + audit. When the
-                    // JWT validator grows env-driven claim
-                    // selection, this default flips to the
-                    // same env var in lockstep.
+                    // JWT and opaque-token validators must both read the literal
+                    // `tenant` claim so authorization and audit agree on tenancy.
                     let intro_cfg = waygate_oidc::IntrospectionConfig {
                         introspection_url: intro.introspection_url.clone(),
                         client_id: intro.client_id.clone(),
@@ -1165,15 +1153,6 @@ pub(crate) fn llm_cache_row_cap(rows: u64) -> Option<i64> {
 /// admin reads / mints and runtime claims see the same rows.
 pub(crate) fn build_break_glass_store(pg: sqlx::PgPool) -> waygate_authz::SharedBreakGlassStore {
     std::sync::Arc::new(waygate_authz::PgBreakGlassStore::new(pg))
-}
-
-/// MCP Tasks store constructor for the `AdminState` wiring: the
-/// persistence layer behind the read-only admin surface; future
-/// Tasks-aware `InvocationService` work will write through it.
-pub(crate) fn build_tasks_store(
-    pg: sqlx::PgPool,
-) -> waygate_dashboard_stores::tasks::SharedTaskStore {
-    std::sync::Arc::new(waygate_dashboard_stores::tasks::PgTaskStore::new(pg))
 }
 
 #[cfg(test)]

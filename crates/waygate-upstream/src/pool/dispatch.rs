@@ -370,16 +370,13 @@ impl UpstreamPool {
     // Upstream leg of the call: semconv span name `tools/call`, `otel.kind` =
     // `client` (the gateway is the MCP client here), plus `mcp.method.name` /
     // `gen_ai.tool.name`. `mcp.server` is gateway-specific (no semconv
-    // equivalent for the upstream name) and `upstream.outcome` is retained;
-    // both pre-semconv `mcp.tool` and the new `gen_ai.tool.name` are emitted
-    // during the dual-emit window.
+    // equivalent for the upstream name); `upstream.outcome` records the result.
     #[tracing::instrument(
         name = "tools/call",
         skip(self, args, principal, mrtr),
         fields(
             mcp.server = %server,
             mcp.method.name = "tools/call",
-            mcp.tool = %tool_name,
             gen_ai.tool.name = %tool_name,
             otel.kind = "client",
             error.type = tracing::field::Empty,
@@ -449,7 +446,6 @@ impl UpstreamPool {
         fields(
             mcp.server = %server,
             mcp.method.name = "tools/call",
-            mcp.tool = %tool_name,
             gen_ai.tool.name = %tool_name,
             otel.kind = "client",
             error.type = tracing::field::Empty,

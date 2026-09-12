@@ -1066,9 +1066,6 @@ struct ServerRow {
     tenant_id: String,
     name: String,
     transport: String,
-    /// Compatibility alias for `catalog_status`. This is durable catalog
-    /// lifecycle, not runtime availability.
-    status: String,
     /// Durable catalog lifecycle, e.g. `live` | `quarantined` | `approved` |
     /// `proposed`.
     catalog_status: String,
@@ -1108,7 +1105,6 @@ fn server_row(
         tenant_id: s.tenant_id,
         name: s.name,
         transport: s.transport,
-        status: catalog_status.clone(),
         catalog_status,
         runtime_status: runtime.map(|h| h.runtime_state.as_str().to_owned()),
         last_success_at: runtime.and_then(|h| h.last_success_at.map(format_ts_rfc3339)),
@@ -1127,17 +1123,19 @@ fn server_row(
 
 #[derive(Serialize, schemars::JsonSchema)]
 struct RateLimitPolicyRow {
-    /// Pass as `policy_id` to `rate_limit.update` / `rate_limit.delete`.
+    /// Pass as `policy_id` to `rate_limit.delete`, or `rate_limit.update` when active.
     id: String,
     tenant_id: String,
     name: String,
-    /// `tenant` | `principal` | `client` | `server` | `tool`.
+    /// Stored scope. `client` is unsupported and makes the policy inactive.
     scope: String,
     scope_value: Option<String>,
     bucket_capacity: i32,
     refill_per_second: f64,
-    /// `call` | `high_risk_call` | `cost_bearing` | `discovery`.
+    /// Stored action. `cost_bearing` is unsupported and makes the policy inactive.
     action: String,
+    /// Present when the stored policy is unsupported and does not protect calls.
+    inactive_reason: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -1145,6 +1143,7 @@ struct RateLimitPolicyRow {
 impl From<waygate_quota::RateLimitPolicy> for RateLimitPolicyRow {
     fn from(p: waygate_quota::RateLimitPolicy) -> Self {
         Self {
+            inactive_reason: p.inactive_reason().map(str::to_owned),
             id: p.id.to_string(),
             tenant_id: p.tenant_id,
             name: p.name,
@@ -1304,7 +1303,7 @@ impl From<waygate_apikeys::ScopeView> for ScopeRow {
 
 #[derive(Serialize, schemars::JsonSchema)]
 struct InspectionRuleRow {
-    /// Pass as `id` to `inspection_rule.update` / `inspection_rule.delete`.
+    /// Pass as `id` to `inspection_rule.delete`.
     id: String,
     tenant_id: String,
     /// `pii` | `secrets` | `poisoning` | `custom`.
@@ -1312,7 +1311,9 @@ struct InspectionRuleRow {
     name: String,
     config: Value,
     applies_to: Value,
+    /// Stored flag only; does not enable runtime enforcement.
     enabled: bool,
+    enforcement: crate::inspection_rules::RuleEnforcement,
     created_at: String,
     updated_at: String,
 }
@@ -1327,6 +1328,7 @@ impl From<waygate_dashboard_stores::inspection_rules::InspectionRule> for Inspec
             config: r.config,
             applies_to: r.applies_to,
             enabled: r.enabled,
+            enforcement: crate::inspection_rules::RuleEnforcement::NotEnforced,
             created_at: format_ts_rfc3339(r.created_at),
             updated_at: format_ts_rfc3339(r.updated_at),
         }
@@ -1669,7 +1671,6 @@ mod tests {
 
         let row = serde_json::to_value(server_row(catalog, Some(&runtime)))
             .expect("serialize observable server row");
-        assert_eq!(row["status"], "live", "legacy lifecycle alias remains");
         assert_eq!(row["catalog_status"], "live");
         assert_eq!(row["runtime_status"], "disconnected");
         assert_eq!(row["last_error_class"], "dns");

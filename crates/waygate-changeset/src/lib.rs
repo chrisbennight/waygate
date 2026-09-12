@@ -222,18 +222,6 @@ impl ApprovalRequirement {
     }
 }
 
-/// True iff a requirement of `required_approvals` distinct approvals is
-/// satisfiable given an eligible pool of `eligible_pool_size` members.
-///
-/// The load-time guard against a self-inflicted lockout (Vault's
-/// documented footgun: requiring more approvers than exist). A
-/// deployment resolving a requirement against its approver set calls
-/// this and refuses / WARNs loudly on `false` rather than queuing a
-/// change nobody can ever approve.
-pub fn requirement_satisfiable(required_approvals: i32, eligible_pool_size: usize) -> bool {
-    required_approvals >= 1 && (required_approvals as usize) <= eligible_pool_size
-}
-
 /// Progress of an M-of-N approval collection, returned by
 /// [`ChangeRequestStore::record_approval`]. `collected` distinct approvals
 /// have been recorded toward `required`; `approved` is `Some` iff THIS
@@ -1982,19 +1970,6 @@ mod tests {
     #[test]
     fn binding_code_nil_uuid_is_first_words() {
         assert_eq!(binding_code_from_uuid(&Uuid::nil()), "AMBER-OTTER-00");
-    }
-
-    #[test]
-    fn requirement_satisfiable_guards_against_lockout() {
-        assert!(requirement_satisfiable(1, 1));
-        assert!(requirement_satisfiable(1, 5));
-        assert!(requirement_satisfiable(2, 2));
-        // more approvers required than exist -> unsatisfiable.
-        assert!(!requirement_satisfiable(2, 1));
-        // must require at least one.
-        assert!(!requirement_satisfiable(0, 5));
-        // empty pool can satisfy nothing.
-        assert!(!requirement_satisfiable(1, 0));
     }
 
     #[test]

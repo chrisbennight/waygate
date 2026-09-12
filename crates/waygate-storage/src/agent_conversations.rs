@@ -12,7 +12,7 @@
 //! can only ever read or mutate their OWN conversations. `get` / `messages` /
 //! `append_message` / `set_title` / `delete` all collapse "no such id" and
 //! "exists but not yours" so cross-user existence never leaks — the same
-//! posture as `task_states` / `agent_configs`.
+//! posture as `agent_configs`.
 //!
 //! ## Content-bearing (unlike audit)
 //!

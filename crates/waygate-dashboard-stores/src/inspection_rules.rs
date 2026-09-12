@@ -1,25 +1,5 @@
-//! Per-tenant response-inspector rule storage.
-//!
-//! Owns the `inspection_rules` table (migration 0032) — the
-//! per-tenant custom rules meant to layer on top of the
-//! hard-coded built-in inspector rulesets.
-//!
-//! ## Why this crate
-//!
-//! Same shape as `tasks` / `waygate-quota` /
-//! `waygate-rbac`: per-feature crate owning its own trait +
-//! types + Pg impl, kept dependency-light so a future runtime
-//! consumer (the inspector loading rows on each invoke / via a
-//! cached refresh worker) can hold the trait by handle without
-//! pulling in admin-only baggage.
-//!
-//! ## What this crate provides
-//!
-//! Storage + trait + Pg impl only. No runtime inspector reads
-//! these rules and enforces them yet — rows in
-//! `inspection_rules` are inert (visible via the admin REST
-//! surface in `waygate-admin::inspection_rules` but not
-//! enforced on tool calls).
+//! Stored custom inspection-rule records. No runtime inspector consumes these
+//! records; the administrator API retains tenant-scoped read/delete access.
 
 use std::sync::Arc;
 
@@ -30,7 +10,7 @@ use sqlx::Row;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-/// Built-in inspector this rule layers onto. Closed enum so
+/// Stored inspector category. Closed enum so
 /// typos at insert time fail fast; mirrors the SQL CHECK
 /// constraint in `migrations/0032_inspection_rules.sql`.
 #[derive(
@@ -49,10 +29,7 @@ pub enum InspectorKind {
     Pii,
     Secrets,
     Poisoning,
-    /// Reserved label for inspector kinds a future runtime
-    /// will introduce when per-tenant rules unlock new
-    /// inspector shapes (e.g. tenant-defined regex inspector
-    /// not tied to a built-in).
+    /// Custom rule category.
     Custom,
 }
 
@@ -84,17 +61,14 @@ pub struct InspectionRule {
     pub tenant_id: String,
     pub inspector: InspectorKind,
     pub name: String,
-    /// Inspector-specific rule body (pattern, replacement
-    /// token, label, etc.). Shape validated by the future
-    /// runtime consumer; the storage layer is opaque so
-    /// future inspector kinds can store richer data without
-    /// a schema rev.
+    /// Stored rule configuration; not interpreted by the runtime.
     pub config: serde_json::Value,
     /// Operator-authored selector for which tools/principals
     /// this rule applies to (e.g.
     /// `{"tools": ["example-messages.send"], "principals": ["*"]}`).
     /// `{}` ⇒ "any tool, any principal".
     pub applies_to: serde_json::Value,
+    /// Stored flag only; this rule is not enforced regardless of its value.
     pub enabled: bool,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -109,6 +83,7 @@ pub struct NewInspectionRule<'a> {
     pub name: &'a str,
     pub config: &'a serde_json::Value,
     pub applies_to: &'a serde_json::Value,
+    /// Stored flag only; this rule is not enforced regardless of its value.
     pub enabled: bool,
 }
 
@@ -142,7 +117,7 @@ pub enum RuleError {
 
 /// Hard ceiling on `list_rules` page size — mirrors the other
 /// admin stores (`oauth_consent`, `break_glass_tokens`,
-/// `task_states`).
+/// `inspection_rules`).
 pub use waygate_core::page::MAX_LIST_LIMIT;
 
 #[async_trait]
@@ -153,7 +128,7 @@ pub trait InspectionRulesStore: Send + Sync + 'static {
 
     /// Single fetch by id, tenant-scoped. `Ok(None)` covers
     /// both "no such id" and "exists but wrong tenant" — same
-    /// existence-disclosure-collapsing rule as `task_states`.
+    /// existence-disclosure-collapsing rule as other tenant-scoped stores.
     async fn get(&self, tenant_id: &str, id: Uuid) -> Result<Option<InspectionRule>, RuleError>;
 
     /// Paginated list, tenant-scoped. Filters AND together.

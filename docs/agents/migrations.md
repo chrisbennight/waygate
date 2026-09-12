@@ -4,8 +4,7 @@ Rules for the `sqlx` migrations under [`migrations/`](../../migrations/). The
 gateway applies them at boot from a single embedded set
 (`sqlx::migrate!("../../migrations")`, see
 [`crates/waygate-storage/src/audit.rs`](../../crates/waygate-storage/src/audit.rs)).
-Two properties of that set are load-bearing and have each crash-looped prod when
-violated: **migrations are immutable once shipped**, and **one file per
+Two properties are required for safe upgrades: **migrations are immutable once shipped**, and **one file per
 version**.
 
 ## The one rule that matters: shipped migrations are immutable
@@ -32,37 +31,12 @@ to its applied bytes (or every deployed DB's checksum is surgically rewritten �
 don't). Because the comment is part of the hash, a "harmless" doc-only edit is
 just as fatal as a schema change.
 
-### Incidents this rule comes from
 
-- **PR #190** — the original checksum-mismatch crash-loop.
-- **2026-06-20 / PR #451** — a *repeat*. AERB flagged a stale comment inside
-  `0025_rate_limits.sql` (`risk_tier ∈ {high, critical}`, outdated after the
-  bucket was decoupled onto `side_effects`). The change "fixed" the comment in
-  place. Commit message even read *"SQL comment only; schema and runtime
-  unchanged"* — true and irrelevant: the bytes changed, the checksum changed,
-  the next deploy crash-looped. Fixed by reverting the file to its applied bytes
-  (PR #454); the corrected wording already lived where it belongs — the Rust
-  handler that reads the column.
+### When clarification or a change is needed
 
-The lesson from the repeat: the prose rule alone did not hold (an agent acting
-on a review finding re-introduced it), which is why there is now a mechanical CI
-guard (below).
-
-### What to do instead
-
-- **A migration's comment / column semantics are stale or need clarifying?**
-  Put the explanation where the code reads the column — the Rust gate/handler —
-  or in `docs/`. Example: the `high_risk_call → side_effects` decouple is
-  documented on `QuotaAction::HighRiskCall` in
-  [`crates/waygate-quota/src/lib.rs`](../../crates/waygate-quota/src/lib.rs),
-  not in the migration. Leave the historical migration comment as-is; it is a
-  record of what shipped, not live documentation.
-- **The schema needs to change?** Add a new migration (`ALTER TABLE …`, a new
-  table, a backfill). Forward-only. There is no "edit the old one."
-- **A review (AERB or human) asks you to change a shipped migration?** Don't.
-  Reply that migrations are append-only, make the equivalent fix in the Rust
-  handler / docs, and point at this file. A finding that targets the migration
-  body is asking for the exact change that breaks prod.
+Keep applied SQL unchanged, including its comments. Explain existing behavior
+in the consuming Rust code or documentation. Change schema or stored data with
+a new migration. Review findings do not override the checksum constraint.
 
 ## The other rule: one file per version
 
@@ -72,8 +46,7 @@ it (`0042_a.sql`, `0042_b.sql`) collide on the `_sqlx_migrations` version key;
 the gateway crash-loops after merge.
 
 - **Pick the next number against the latest `main`, not your branch point** — and
-  re-check after a rebase. Parallel worktrees are the trap: each mints `0042`
-  unaware of the other (the **2026-06-13 incident**).
+  re-check after a rebase. Parallel branches can otherwise choose the same number.
 - Use the four-digit `NNNN_<name>.sql` convention (keeps prefixes lexically
   sortable; the guard enforces the width).
 
@@ -104,8 +77,7 @@ the merge-base with the PR's base branch, and fails on any `M` (modified) or `D`
 shape of the violation, caught before merge. It compares against the base
 branch; on push-to-`main`, where `HEAD` is the base, its comparison is empty.
 The image workflow invokes it for both events and checks out full GitHub
-history with `fetch-depth: 0`. The snapshot import needs no old Gitea ancestry:
-all shipped migrations are already in the GitHub root tree. Run it
+history with `fetch-depth: 0`. Run it
 locally with `bash scripts/check-migrations-immutable.sh [base-ref]`; its
 classifier has a `--self-test`.
 

@@ -3,17 +3,10 @@
 //! The drain worker (`crate::drain`) walks
 //! [`crate::outbox::dequeue_ready`] batches and dispatches each
 //! row to the [`Exporter`] registered for its `target_sink`
-//! identifier. Adding a new exporter shape (OCSF, Syslog, S3,
-//! ECS) means: implement `Exporter` + register the impl under
-//! the identifier the operator uses in
-//! `GATEWAY_EVIDENCE_OUTBOX_TARGETS`.
-//!
-//! Today's only impl is [`WebhookExporter`] (HTTP POST). The
-//! trait surface stays narrow on purpose — a single async
-//! `export` returning typed success/error — so future impls
-//! don't need to bring HTTP transport machinery they don't use
-//! (`SyslogExporter` opens a TCP socket, `S3Exporter` PUTs to a
-//! bucket, etc.).
+//! identifier. Supported implementations are [`WebhookExporter`],
+//! [`OcsfExporter`], [`EcsExporter`], and [`SyslogExporter`]. The composition
+//! root registers configured sinks; exporters return typed retryable or
+//! permanent errors to the drain worker.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,14 +34,8 @@ pub enum ExportError {
     Permanent(String),
 }
 
-/// Single-method trait so any future exporter (OCSF / Syslog /
-/// ECS / S3) plugs in identically. `target_sink` is the
-/// identifier the operator used in
-/// `GATEWAY_EVIDENCE_OUTBOX_TARGETS`; impls can ignore it
-/// (most do — they're tied to one sink by construction) but
-/// it's threaded so a single impl can multiplex if needed
-/// (e.g., one WebhookExporter dispatching to several
-/// URL-by-name targets).
+/// Delivery contract for a configured evidence sink. `target_sink` identifies
+/// the destination selected by the outbox row.
 #[async_trait]
 pub trait Exporter: Send + Sync + 'static {
     async fn export(
@@ -141,6 +128,9 @@ pub struct OcsfExporter {
 }
 
 impl OcsfExporter {
+    /// Identifier used by the shipped gateway configuration and registry.
+    pub const TARGET: &'static str = "ocsf";
+
     /// Construct with the same URL validation + 10s client
     /// timeout as WebhookExporter. The mapping itself doesn't
     /// need a client; the client lives here for the actual
@@ -264,8 +254,7 @@ impl Exporter for OcsfExporter {
 /// `_bulk` requires NDJSON framing (action line + event line
 /// per item) and `application/x-ndjson`; pointing this
 /// exporter at a `_bulk` URL would 400 and dead-letter every
-/// row. Direct `_bulk` ingest is tracked as a follow-up
-/// (issue #140).
+/// row.
 ///
 /// Same retry shape (transient on 5xx + network, permanent
 /// on 4xx other than 408/429), same payload-deserialise
@@ -279,6 +268,9 @@ pub struct EcsExporter {
 }
 
 impl EcsExporter {
+    /// Identifier used by the shipped gateway configuration and registry.
+    pub const TARGET: &'static str = "ecs";
+
     pub fn new(url: impl Into<String>) -> Result<Self, ExportError> {
         let url_str = url.into();
         let parsed = reqwest::Url::parse(&url_str)
@@ -348,20 +340,13 @@ impl Exporter for EcsExporter {
     }
 }
 
-/// HTTP-POST exporter. The drain's first concrete impl
-/// (`webhook` target). Posts the audit-event JSON to a single
-/// pre-configured URL with a 10s request timeout. Returns
 /// RFC 5424 syslog exporter over plain TCP.
 /// Targets the `syslog` identifier in
 /// `GATEWAY_EVIDENCE_OUTBOX_TARGETS`; destination from
 /// `GATEWAY_EVIDENCE_SYSLOG_TARGET` (`host:port`).
 ///
 /// Per-event TCP connect → newline-terminated RFC 5424
-/// line → close. Connection pooling is a follow-up; the
-/// per-event connect overhead is acceptable at the
-/// gateway's normal audit-event rate, and a one-shot
-/// connection means no half-open / broken-pipe corner
-/// cases for round 1.
+/// line → close. Connections are not pooled.
 ///
 /// Transient on any connect/write failure (syslog is
 /// fire-and-forget — no response to interpret). Permanent
@@ -369,8 +354,7 @@ impl Exporter for EcsExporter {
 /// (`SyslogExporter::new` validates the target).
 ///
 /// **Plain TCP only.** Operators wanting `syslog+tls://`
-/// front the receiver with stunnel / haproxy / a sidecar
-/// until a follow-up adds native rustls handling.
+/// front the receiver with stunnel / haproxy / a TLS sidecar.
 #[derive(Debug)]
 pub struct SyslogExporter {
     /// Resolved `host:port` target. Stored as a string and
@@ -384,6 +368,9 @@ pub struct SyslogExporter {
 }
 
 impl SyslogExporter {
+    /// Identifier used by the shipped gateway configuration and registry.
+    pub const TARGET: &'static str = "syslog";
+
     /// Construct + validate. `target` is `host:port`; we
     /// parse it as a `SocketAddr`-compatible string but
     /// don't resolve at boot (DNS is per-send so a transient
@@ -513,6 +500,9 @@ pub struct WebhookExporter {
 }
 
 impl WebhookExporter {
+    /// Identifier used by the shipped gateway configuration and registry.
+    pub const TARGET: &'static str = "webhook";
+
     /// Construct with a fresh `reqwest::Client`. The 10s
     /// timeout bounds tail-latency — without it a wedged
     /// remote would block the drain task's whole tick.

@@ -141,7 +141,7 @@ Append to the producer list in `crate::palette::collect_items`:
 - **Pages**: add a tuple to the `PAGES` const. Each item gets a hint string
   rendered as a second line.
 - **Per-page navigations** (e.g. "Open Identities for alice-deploy",
-  "Jump to API key alice-deploy"): future PRs will query the relevant
+  "Jump to API key alice-deploy"): query the relevant
   store and emit `SearchItem { category: "action", ... }` rows with
   `href` pointing at a server-side endpoint. Keep the endpoint **a
   read-only GET that navigates** — render a detail page, or 303 to one.
@@ -232,12 +232,7 @@ See [distribution review](../skill-distribution-review.md).
 | CRUD table with inline edit | Pure htmx + askama | The happy path. |
 | Server-paginated list with filters | Pure htmx | Use `hx-get` with `hx-trigger="change, search"`. |
 | Drawer / detail panel | Pure htmx | `hx-target` on a fixed element; `hx-swap="innerHTML"`. |
-| Modal open/close, dropdowns | Add a small **Alpine.js sprinkle** | When/if we need it. Today not yet imported. |
-| "Type the resource name to confirm" | Vanilla JS or Alpine | Tiny state machine; vanilla suffices. |
-| Drag-and-drop policy precedence | Mount a **JS island** | Future D4b decision. Pure htmx pinches here. |
-| Cedar policy editor | **CodeMirror island** | Shipped (policy-edit PR-A→E). Vendored CM6 bundle (`static/js/codemirror.bundle.js`, built from `crates/waygate-admin/codemirror/`) mounts over the editor textarea — Cedar syntax + line numbers, themed via `--syntax-*` tokens — with an **as-you-type lint gutter** (`POST /policy_bundles/diagnostics` → `waygate_authz::validate_diagnostics`, the same parser publish enforces). Editing is **per-policy**: `waygate_authz::segment` splits a bundle by `@id` so one policy can be edited/added/removed (`/policy_bundles/policy/*`), and the **Policies pane (`/policies`) hosts an inline editor per policy** (edit in place → Save creates a draft → land in the bundle editor's Publish / Preview impact). The one place a real editor is justified. See `crates/waygate-admin/codemirror/README.md` for the bundle. |
-| Live-updating chart | Mount a chart library (uPlot / echarts) once, feed via SSE | Future D6b (activity facet explorer) decision. |
-| Multi-step wizard with branching state | Single-page progressive disclosure, or mount one Alpine component | Don't try to do this in pure htmx. |
+| Cedar policy editor | **CodeMirror island** | Vendored CM6 bundle (`static/js/codemirror.bundle.js`, built from `crates/waygate-admin/codemirror/`) mounts over the editor textarea — Cedar syntax + line numbers, themed via `--syntax-*` tokens — with an **as-you-type lint gutter** (`POST /policy_bundles/diagnostics` → `waygate_authz::validate_diagnostics`, the same parser publish enforces). Editing is **per-policy**: `waygate_authz::segment` splits a bundle by `@id` so one policy can be edited/added/removed (`/policy_bundles/policy/*`), and the **Policies pane (`/policies`) hosts an inline editor per policy** (edit in place → Save creates a draft → land in the bundle editor's Publish / Preview impact). The one place a real editor is justified. See `crates/waygate-admin/codemirror/README.md` for the bundle. |
 
 The default is "no JS until a feature needs it." Three existing vanilla-JS
 modules (`palette.js`, `badge.js`, `try_tool.js`) are the precedent
@@ -338,98 +333,21 @@ Two orthogonal decisions per mutation handler: (1) which
 without failing the request), or `record_best_effort` (unchained and
 non-failing).
 
-**Reference source-of-truth:** the checked-in producer inventory in
-[`docs/evidence-caller-classification.md`](../evidence-caller-classification.md),
-verified against `grep "record_required\\|record_chained_best_effort\\|
-record_best_effort\\|with_category" crates/waygate-admin/src/`. The current
-admin modules that actually call into `state.evidence.record_*` are listed
-below.
-
 ### Pick the right category
 
-Use the category the surrounding module already uses; don't invent a new
-one for a dashboard page. Active producers in `crates/waygate-admin/src/`
-today, grouped by category:
-
-- `AdminMutation` — broad bucket for operator-driven CRUD: `audit_bundle`,
-  `audit_retention`, `audit_routing`, `audit_sweep`, `break_glass`,
-  `federated_peers`, `inspection_rules`, `oauth_consent`, `policy_bundles`,
-  `rate_limit_policies`, `rbac`, `scim_groups`, `scim_users`, `tenants`,
-  `api_key_profiles`, `upstream_sessions`.
-- `ApiKeyLifecycle` — `api_keys.rs` mint / rename / revoke. **Don't switch
-  these to `AdminMutation`** — the distinct category is part of the contract
-  Grafana / OCSF consumers join on.
-- `OAuthEvent` — `oauth_clients.rs` admin-driven session revoke, plus every
-  `/oauth/*` outcome in `waygate-as`. Same cross-surface-contract reasoning.
-- `Invocation` / `PolicyReload` / `ManifestReload` / `UpstreamHealth` /
-  `AuthAttempt` — recorded by non-admin surfaces (not by handlers in
-  `crates/waygate-admin/src/`).
-- `CatalogDrift` — produced by `waygate-upstream` (behavior-contract drift /
-  quarantine audit rows), **not** by an admin-crate handler; listed here only so
-  the category isn't mistaken for unused.
-- `ApprovalLifecycle` / `DataInspection` — reserved enum values; no producers
-  anywhere yet.
-
-**Modules that don't emit evidence today** (the dashboard surface does
-something else with the audit trail — direct table write, tracing only,
-or read-only): `approval_grants.rs` (HITL grants — emit via tracing +
-`approval_grants` row; promoting to `ApprovalLifecycle` is a future
-cross-cutting decision), `catalog.rs` (direct approve, immediate quarantine,
-and governed unquarantine write the `catalog_approvals` row directly; no
-`AdminMutation` emit), the read-only
-`audit.rs` / `audit_verify.rs` / `servers.rs` / `policies.rs`, and
-infrastructure modules (`auth.rs`, `dashboard.rs`, `hitl_ws.rs`,
-`palette.rs`, `tasks.rs`, `tenant_ctx.rs`).
-
-Promoting a surface to a more-specific category (lifting HITL to
-`ApprovalLifecycle`, adding `Evidence` calls to `catalog.rs` so SIEMs can
-pivot on it) is a separate cross-cutting decision that belongs in the
-telemetry doc — not in a dashboard PR.
+Use the category defined for the operation in the
+[telemetry reference](telemetry.md#event-categories). Dashboard and API
+paths for the same operation must use the same category and shared recording
+helper. Read-only handlers do not need mutation events.
 
 ### Pick the right reliability
 
-Decision is per-handler. Three recording methods are available on
-`AdminState::evidence`:
-
-- **`record_best_effort(event).await`** — non-blocking submission to the
-  separate bounded informational queue. Its worker makes one unchained insert
-  attempt. Full/closed admission and backing-write failures are logged and
-  dropped without failing the mutation.
-- **`record_chained_best_effort(event).await`** — non-blocking submission to a
-  tenant-sharded bounded queue. Its worker makes one chain-covered attempt,
-  reports known pre-commit failures as dropped, and reports commit uncertainty
-  as unknown without failing the mutation. Hierarchy-bearing events enqueue
-  configured external targets inside the same bounded transaction; ordinary
-  admin events skip outbox delivery.
-- **`record_required(event).await?`** — fail-closed. The handler aborts
-  the mutation with an error response if the audit write fails. The
-  PR #187 r1 HIGH precedent established this for security-impacting
-  admin CRUD.
-
-What the current code does — use as the reference for new handlers (per
-the grep above):
-
-- **`record_chained_best_effort`**: OAuth session revocation, blocked policy
-  publication (including tenant seed publication), and other classified
-  security refusals whose absence must be visible without changing the
-  response.
-- **`record_required`** (fail-closed): `audit_bundle`, `audit_retention`,
-  `audit_routing`, `audit_sweep`, `break_glass`, `federated_peers`,
-  `inspection_rules`, `oauth_consent`, `rate_limit_policies`, `rbac`,
-  `scim_groups`, `scim_users`, `tenants`, `upstream_sessions`,
-  `api_key_profiles`. All emit `AdminMutation`. (`oauth_consent` and
-  `upstream_sessions` were flipped from best-effort when their revoke paths
-  became proposable through the HITL control plane — a security-relevant
-  mutation's audit-of-record must not be silently dropped on a sink failure.)
-- **`record_best_effort`** (unchained, non-failing): `api_keys`
-  (ApiKeyLifecycle) and successful legacy `policy_bundles` draft / publish /
-  rollback rows. Moving those post-mutation rows to required evidence first
-  needs a side-effect-ordering change.
-
-For NEW security-impacting CRUD surfaces under `AdminMutation`, default to
-`record_required` — that matches the established pattern. Flipping any listed
-`record_best_effort` producer to `record_required` is a separate
-side-effect-ordering decision.
+Choose the recording method from the
+[telemetry delivery contract](telemetry.md#evidencerecorder). For new
+security-impacting admin mutations, use `record_required` and the shared
+admin mutation recorder. An audit failure must be surfaced to the operator;
+it cannot roll back a store write that already committed. Review operation
+ordering before changing an existing handler's failure behavior.
 
 All three methods take the same `AuditEvent` shape; chain coverage, outbox
 delivery, and failure propagation differ. Always populate
@@ -464,7 +382,7 @@ delivery, and failure propagation differ. Always populate
 9. If the page emits durable events on mutation, pick the right category +
    reliability per [Audit evidence — categories and reliability](#audit-evidence--categories-and-reliability).
    For NEW `AdminMutation` surfaces, default to `record_required(event).
-   await?` (matches the post-PR #187 fail-closed precedent). When the
+   await?`. When the
    surface already has a domain-specific category (e.g. `ApiKeyLifecycle`,
    `OAuthEvent`), follow the established producer's reliability choice
    rather than flipping it inline.

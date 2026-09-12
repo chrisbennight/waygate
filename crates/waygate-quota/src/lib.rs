@@ -9,8 +9,7 @@
 //! ## Surface
 //!
 //! Callers build a [`QuotaContext`] from the resolved
-//! invocation (tenant, principal, client, fully-qualified tool
-//! name, risk tier, cost class) and call
+//! invocation (tenant, principal, server, and fully-qualified tool name) and call
 //! [`QuotaService::check_and_consume`]. The service walks every
 //! policy matching the tenant + action class, attempts to
 //! consume one token from each matching bucket atomically, and
@@ -32,6 +31,11 @@
 //! `waygate-admin::rate_limit_policies` consumes. Split from
 //! [`QuotaService`] because the hot path only consumes tokens —
 //! it doesn't need any of CRUD's structured error mapping.
+//!
+//! Supported scopes are tenant, principal, server, and tool. Supported actions
+//! are call, side_effecting_call, and discovery. Stored client-scoped or
+//! cost_bearing policies are inactive: they remain readable and deletable, but
+//! creation and updates reject them.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -64,6 +68,7 @@ pub use store::{
 pub enum QuotaScope {
     Tenant,
     Principal,
+    /// Stored policies only; production callers do not supply client IDs.
     Client,
     Server,
     Tool,
@@ -99,13 +104,9 @@ pub enum QuotaAction {
     /// Every tool call (the broadest bucket).
     Call,
     /// Side-effecting calls (`side_effects: true`) — the mutating surface.
-    /// The name `high_risk_call` is historical: the re-governance campaign
-    /// decoupled this bucket from the risk tier onto `side_effects`, so it now
-    /// also covers a destructive tool reclassified `high -> low + side_effects`
-    /// AND LLM completions (a billable external side-effect). The wire string is
-    /// kept for operator-config compatibility.
-    HighRiskCall,
-    /// Tools with a non-null `cost_class`.
+    /// Includes billable LLM completions and applies independently of risk tier.
+    SideEffectingCall,
+    /// Stored policies only; no production invocation selects this action.
     CostBearing,
     /// `tools/list` + `tools/search` traffic (separate bucket
     /// so chatty discovery can't starve real calls).
@@ -116,7 +117,7 @@ impl QuotaAction {
     pub const fn as_str(self) -> &'static str {
         match self {
             QuotaAction::Call => "call",
-            QuotaAction::HighRiskCall => "high_risk_call",
+            QuotaAction::SideEffectingCall => "side_effecting_call",
             QuotaAction::CostBearing => "cost_bearing",
             QuotaAction::Discovery => "discovery",
         }
@@ -140,10 +141,7 @@ pub struct QuotaContext {
     /// runs with `AUTH_MODE=disabled` (dev). The service skips
     /// `principal`-scoped policies in that case.
     pub principal_sub: Option<String>,
-    /// `Some` when the principal came from an OAuth token that
-    /// included a `client_id` claim (or an API-key principal
-    /// whose `sub` follows a `client:<id>` convention). `None`
-    /// otherwise.
+    /// Production callers provide `None`; client-scoped policies are unsupported.
     pub client_id: Option<String>,
     /// Upstream MCP server name (the `<server>` half of the
     /// fully-qualified tool name). The service uses this for
@@ -189,7 +187,7 @@ pub trait QuotaService: Send + Sync {
     /// debit-up-to-that-policy" shape would leak partial debits
     /// when (a) layered policies inside the same action denied
     /// late or (b) the caller invoked twice (Call then
-    /// HighRiskCall) for the same invocation. Both classes of
+    /// SideEffectingCall) for the same invocation. Both classes of
     /// leak are prevented by:
     ///
     /// - Accepting `&[QuotaAction]` so all action classes the
@@ -526,7 +524,10 @@ mod tests {
     #[test]
     fn quota_action_round_trips_against_sql_check_values() {
         assert_eq!(QuotaAction::Call.as_str(), "call");
-        assert_eq!(QuotaAction::HighRiskCall.as_str(), "high_risk_call");
+        assert_eq!(
+            QuotaAction::SideEffectingCall.as_str(),
+            "side_effecting_call"
+        );
         assert_eq!(QuotaAction::CostBearing.as_str(), "cost_bearing");
         assert_eq!(QuotaAction::Discovery.as_str(), "discovery");
     }

@@ -2,12 +2,8 @@
 //!
 //! Every mutating admin REST/dashboard handler must emit an `AdminMutation`
 //! evidence row via `record_required` after its store write commits.
-//! Fifteen per-file copies of the
-//! same fn had accumulated, differing only in the resource label baked into
-//! the log line and the operator-facing fallback message — exactly the kind
-//! of security-relevant duplication where one copy silently drifts (a copy
-//! that downgraded `record_required` to `record_best_effort` would turn a
-//! fail-closed audit into a fail-open one).
+//! A shared recorder keeps the required audit behavior consistent across
+//! admin mutation handlers.
 //!
 //! [`record_admin_mutation`] is the single copy. Per-resource callers pass
 //! their resource label and a verify hint; everything else — the event
@@ -22,11 +18,9 @@
 //! audit failure to a plain `Internal` error. Folding it would mean growing
 //! this module's common signature for one caller.
 //!
-//! Known follow-up (carried over from the per-file copies): the store
-//! mutation and the audit-row INSERT are not atomic. A tx-aware
-//! `EvidenceRecorder::record_required` would make them commit-or-fail
-//! together; until then the `InternalOperatorVisible` fallback tells the
-//! operator to verify via the resource's list endpoint.
+//! The store mutation and audit INSERT are not atomic. If the audit write
+//! fails after the mutation commits, `InternalOperatorVisible` tells the
+//! operator to verify the resource through its list endpoint.
 
 use crate::error::ApiError;
 use crate::state::AdminState;
@@ -40,8 +34,7 @@ use waygate_oidc::Principal;
 /// - `verify_hint` — where the operator can confirm the committed state when
 ///   the audit write failed (e.g. `"GET /api/v1/admin/rate_limit_policies"`).
 /// - `tenant_id` — the TARGET tenant of the mutation (not necessarily the
-///   actor's); unparseable ids fall back to the default tenant, matching the
-///   prior per-file copies.
+///   actor's); unparseable ids fall back to the default tenant.
 /// - `action` — the `audit_log.action` value (e.g.
 ///   `"rate_limit_policies.create"`).
 /// - `reason` — human-readable mutation detail recorded on the row.

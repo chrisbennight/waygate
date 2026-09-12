@@ -1,13 +1,8 @@
 //! Shared audit/evidence and inference-plane seam types.
 //!
-//! These four modules were extracted from
-//! `waygate-mcp` so that the crates *below* the MCP layer that implement
-//! the traits — `waygate-storage` (audit sink, LLM cache/usage/budget
-//! stores) and `waygate-as` (OAuth-event audit) — no longer depend *up*
-//! on the protocol crate for pure types. `waygate-mcp` re-exports every
-//! path it used to own (`waygate_mcp::audit`, `::cache`, `::usage`,
-//! `::budget`, and the crate-root aliases), so its consumers are
-//! unaffected; the canonical home is here.
+//! This crate owns the shared types consumed by the protocol layer and by
+//! implementations such as `waygate-storage` and `waygate-as`, keeping those
+//! implementations independent of the MCP protocol crate.
 //!
 //! The pattern each module follows is identical: this crate defines the
 //! trait and its DTOs, a storage crate provides the Postgres

@@ -308,12 +308,6 @@ const PAGES: &[(&str, &str, &str, &str)] = &[
         "Per-tenant token-bucket policies (scope / action / capacity)",
     ),
     (
-        "Inspection rules",
-        "/inspection_rules",
-        "shield-check",
-        "Per-tenant response-inspector overrides (PII / secrets / poisoning / custom)",
-    ),
-    (
         "Gateway Agents",
         "/agents",
         "box",

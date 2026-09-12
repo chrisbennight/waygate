@@ -245,11 +245,11 @@ pub(crate) async fn evaluate(
     if let Some(quota) = state.quota.as_ref() {
         // Same action derivation as the pipeline's check_quota: every
         // call falls under `Call`; side-effecting tools additionally
-        // fall under `HighRiskCall`. Argument-independent facts make
+        // fall under `SideEffectingCall`. Argument-independent facts make
         // this derivation exact, not conservative.
         let mut actions = vec![waygate_quota::QuotaAction::Call];
         if facts.side_effects {
-            actions.push(waygate_quota::QuotaAction::HighRiskCall);
+            actions.push(waygate_quota::QuotaAction::SideEffectingCall);
         }
         let qctx = waygate_quota::QuotaContext {
             tenant_id: principal.tenant.as_str().to_owned(),

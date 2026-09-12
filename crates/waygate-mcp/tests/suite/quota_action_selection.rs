@@ -1,6 +1,6 @@
 //! Pins the quota action-selection contract after the campaign decouple: the
-//! `HighRiskCall` quota bucket fires on `facts.side_effects`, NOT the risk tier.
-//! A `low + side_effects` tool consumes `[Call, HighRiskCall]`; a
+//! `SideEffectingCall` quota bucket fires on `facts.side_effects`, NOT the risk tier.
+//! A `low + side_effects` tool consumes `[Call, SideEffectingCall]`; a
 //! `high + !side_effects` tool consumes only `[Call]`. The quota stage no-ops
 //! for anonymous calls, so these invoke WITH a principal and capture the
 //! `actions` vector passed to `QuotaService::check_and_consume`.
@@ -501,28 +501,27 @@ async fn file_admission_refusal_consumes_no_quota() {
 }
 
 #[tokio::test]
-async fn high_risk_call_quota_fires_on_side_effects_not_risk() {
-    // low + side_effects → the mutating surface → [Call, HighRiskCall].
+async fn side_effecting_call_quota_fires_on_side_effects_not_risk() {
+    // low + side_effects → the mutating surface → [Call, SideEffectingCall].
     let low_se = quota_actions_for(facts(RiskTier::Low, true)).await;
     assert!(
         low_se.contains(&QuotaAction::Call),
         "every call consumes the Call bucket: {low_se:?}"
     );
     assert!(
-        low_se.contains(&QuotaAction::HighRiskCall),
-        "a low + side_effects tool must consume HighRiskCall — the gate keys on \
+        low_se.contains(&QuotaAction::SideEffectingCall),
+        "a low + side_effects tool must consume SideEffectingCall — the gate keys on \
          side_effects, not the risk tier: {low_se:?}"
     );
 
-    // high + !side_effects → read-only → only [Call] (proves it moved OFF risk).
+    // high + !side_effects → read-only → only [Call].
     let high_ro = quota_actions_for(facts(RiskTier::High, false)).await;
     assert!(
         high_ro.contains(&QuotaAction::Call),
         "every call consumes the Call bucket: {high_ro:?}"
     );
     assert!(
-        !high_ro.contains(&QuotaAction::HighRiskCall),
-        "a high + !side_effects tool must NOT consume HighRiskCall after the \
-         decouple from the risk tier: {high_ro:?}"
+        !high_ro.contains(&QuotaAction::SideEffectingCall),
+        "a high + !side_effects tool must not consume SideEffectingCall: {high_ro:?}"
     );
 }

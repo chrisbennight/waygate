@@ -1,16 +1,4 @@
-//! Live-Postgres audit-row assertions for the six mutation paths that go
-//! through the shared `admin_mutation::record_admin_mutation`
-//! helper. Pins the emitted rows end-to-end, not just the
-//! helper's unit behavior.
-//!
-//! Drives the REAL REST surface — `api_router` → handler → `*_core` →
-//! shared recorder → `PgAuditSink` → `audit_log` — and asserts each of the
-//! six actions landed exactly one `admin_mutation` row whose `reason`
-//! carries the created row's id. Skips (loudly) without
-//! `AUDIT_DATABASE_URL`, like every `*_pg` suite; CI provisions the
-//! prod-pinned Postgres. Audit rows are append-only by design (migration
-//! 0018's triggers), so the test isolates by the per-run unique ids in
-//! `reason` rather than cleaning up.
+//! Live-Postgres API contracts for audited mutations and retained inspection rules.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -83,7 +71,7 @@ async fn assert_one_audit_row(pool: &sqlx::PgPool, action: &str, id_marker: &str
 }
 
 #[tokio::test]
-async fn six_converted_mutation_paths_emit_admin_mutation_audit_rows() {
+async fn supported_mutations_emit_audit_and_custom_rule_writes_are_refused() {
     let Some(pool) = audit_pool_or_skip().await else {
         return;
     };
@@ -151,33 +139,53 @@ async fn six_converted_mutation_paths_emit_admin_mutation_audit_rows() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
-    // ---- inspection_rules: create → update → delete ----
-    let resp = app
+    // Seed retained data directly; public writes must not create inert controls.
+    let rule_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO inspection_rules (id, tenant_id, inspector, name, config, applies_to, enabled) VALUES ($1::uuid, 'default', 'pii', $2, '{}'::jsonb, '{}'::jsonb, true)")
+        .bind(&rule_id).bind(format!("audit-pin-{run}")).execute(&pool).await.unwrap();
+    let detail = format!("/api/v1/admin/inspection_rules/{rule_id}");
+    for (method, path) in [
+        ("POST", "/api/v1/admin/inspection_rules"),
+        ("PATCH", detail.as_str()),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(req(method, path, Some(json!({}))))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+    let response = app
         .clone()
-        .oneshot(req(
-            "POST",
-            "/api/v1/admin/inspection_rules",
-            Some(json!({
-                "inspector": "pii",
-                "name": format!("audit-pin-{run}"),
-                "config": {},
-            })),
-        ))
+        .oneshot(req("GET", &detail, None))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-    let rule_id = body_json(resp).await["id"].as_str().unwrap().to_owned();
-
-    let resp = app
-        .clone()
-        .oneshot(req(
-            "PATCH",
-            &format!("/api/v1/admin/inspection_rules/{rule_id}"),
-            Some(json!({ "enabled": false })),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
+    let row = body_json(response).await;
+    assert_eq!(row["enforcement"], "not_enforced");
+    assert_eq!(row["enabled"], true);
+    let listed = body_json(
+        app.clone()
+            .oneshot(req("GET", "/api/v1/admin/inspection_rules", None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(listed["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["enforcement"] == "not_enforced"));
+    for method in ["GET", "DELETE"] {
+        let mut other = req(method, &detail, None);
+        let mut principal = admin_principal();
+        principal.tenant = "other-tenant".parse().unwrap();
+        other.extensions_mut().insert(principal);
+        assert_eq!(
+            app.clone().oneshot(other).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+    }
 
     let resp = app
         .clone()
@@ -190,11 +198,9 @@ async fn six_converted_mutation_paths_emit_admin_mutation_audit_rows() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
-    // ---- the six audit rows, matched by action + the mutated row's id ----
+    // ---- the audit rows, matched by action + the mutated row's id ----
     assert_one_audit_row(&pool, "rate_limit_policies.create", &policy_id).await;
     assert_one_audit_row(&pool, "rate_limit_policies.update", &policy_id).await;
     assert_one_audit_row(&pool, "rate_limit_policies.delete", &policy_id).await;
-    assert_one_audit_row(&pool, "InspectionRuleCreated", &rule_id).await;
-    assert_one_audit_row(&pool, "InspectionRuleUpdated", &rule_id).await;
     assert_one_audit_row(&pool, "InspectionRuleDeleted", &rule_id).await;
 }

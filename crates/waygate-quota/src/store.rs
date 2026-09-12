@@ -44,6 +44,23 @@ pub struct RateLimitPolicy {
     pub updated_at: OffsetDateTime,
 }
 
+impl RateLimitPolicy {
+    /// Unsupported policies remain readable and deletable, but do not protect calls.
+    pub fn inactive_reason(&self) -> Option<&'static str> {
+        inactive_reason(self.scope, self.action)
+    }
+}
+
+fn inactive_reason(scope: QuotaScope, action: QuotaAction) -> Option<&'static str> {
+    if scope == QuotaScope::Client {
+        Some("Client-scoped quotas are not enforced. Delete this policy and choose a supported scope.")
+    } else if action == QuotaAction::CostBearing {
+        Some("Cost-bearing quotas are not enforced. Delete this policy and choose a supported action.")
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RateLimitStoreError {
     #[error("postgres: {0}")]
@@ -130,6 +147,9 @@ impl RateLimitPolicyStore for PgRateLimitPolicyStore {
         refill_per_second: f64,
         action: QuotaAction,
     ) -> Result<RateLimitPolicy, RateLimitStoreError> {
+        if let Some(reason) = inactive_reason(scope, action) {
+            return Err(RateLimitStoreError::InvalidShape(reason.into()));
+        }
         let id = Uuid::now_v7();
         match sqlx::query(
             r#"
@@ -210,15 +230,15 @@ impl RateLimitPolicyStore for PgRateLimitPolicyStore {
         refill_per_second: Option<f64>,
     ) -> Result<Option<RateLimitPolicy>, RateLimitStoreError> {
         // COALESCE keeps each column untouched when the input is
-        // None — single round-trip regardless of which subset of
-        // fields the caller wants to change. updated_at is
-        // bumped by the trigger.
+        // None. The write predicate refuses unsupported policies atomically;
+        // updated_at is bumped by the trigger.
         let row = sqlx::query(
             r#"
             UPDATE rate_limit_policies
                SET bucket_capacity   = COALESCE($3, bucket_capacity),
                    refill_per_second = COALESCE($4, refill_per_second)
              WHERE tenant_id = $1 AND id = $2
+               AND scope <> 'client' AND action <> 'cost_bearing'
             RETURNING id, tenant_id, name, scope, scope_value,
                       bucket_capacity, refill_per_second, action,
                       created_at, updated_at
@@ -231,6 +251,13 @@ impl RateLimitPolicyStore for PgRateLimitPolicyStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(RateLimitStoreError::Sqlx)?;
+        if row.is_none() {
+            if let Some(policy) = self.get(tenant_id, id).await? {
+                if let Some(reason) = policy.inactive_reason() {
+                    return Err(RateLimitStoreError::InvalidShape(reason.into()));
+                }
+            }
+        }
         row.map(|r| row_to_policy(&r)).transpose()
     }
 
@@ -291,7 +318,7 @@ fn parse_scope(s: &str) -> Result<QuotaScope, RateLimitStoreError> {
 fn parse_action(s: &str) -> Result<QuotaAction, RateLimitStoreError> {
     Ok(match s {
         "call" => QuotaAction::Call,
-        "high_risk_call" => QuotaAction::HighRiskCall,
+        "side_effecting_call" => QuotaAction::SideEffectingCall,
         "cost_bearing" => QuotaAction::CostBearing,
         "discovery" => QuotaAction::Discovery,
         other => {

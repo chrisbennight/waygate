@@ -267,16 +267,6 @@ fn build_capabilities(state: &AdminState) -> Vec<CapabilityRow> {
             env_hint: "GATEWAY_DATABASE_URL",
         },
         CapabilityRow {
-            name: "MCP Tasks",
-            enabled: state.dashboard.tasks.enabled(),
-            env_hint: "GATEWAY_DATABASE_URL",
-        },
-        CapabilityRow {
-            name: "Inspection rules",
-            enabled: state.policy.inspection_rules.enabled(),
-            env_hint: "GATEWAY_DATABASE_URL",
-        },
-        CapabilityRow {
             name: "Federated peers",
             enabled: state.federation.federated_peers.enabled(),
             env_hint: "GATEWAY_DATABASE_URL",

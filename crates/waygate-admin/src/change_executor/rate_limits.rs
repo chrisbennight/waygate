@@ -188,5 +188,3 @@ impl ActionExecutor for RateLimitDeleteExecutor {
         })))
     }
 }
-
-// ---- inspection_rule.create ----

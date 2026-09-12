@@ -98,9 +98,7 @@ pub struct Principal {
     pub issuer: String,
     pub scopes: Vec<String>,
     /// Tenant this principal belongs to. Populated by the bearer
-    /// validator from the literal `tenant` JWT claim (the claim
-    /// name is hardcoded today; an operator-configurable
-    /// `GATEWAY_TENANT_CLAIM` is planned). API-key principals take
+    /// validator from the literal `tenant` JWT claim. API-key principals take
     /// their tenant from the `api_keys.tenant_id` row column.
     /// Absent or invalid claim → default tenant.
     ///

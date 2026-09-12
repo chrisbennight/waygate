@@ -47,19 +47,10 @@ Cedar classifies every proposed action into a tier; the agent never
 learns which tier applies (the elicitation decoupling principle — the
 classification lives in the gateway, never in the agent's prompt).
 
-> **Status (PR-5):** the **spine** is built — the maker's
-> `propose_change` / `describe_action` / `get_action_context` /
-> `preview_change` / `get_change_status` / `get_change_secret` /
-> `list_my_changes` ship as a built-in `gateway-admin.*` MCP namespace (see
-> "Where the pieces will live"). Both **elicitation layers are deferred**:
-> although the pinned `rmcp` (3.0) exposes `elicitation/create`, wiring
-> the gateway to issue an outbound prompt to the client mid-tool-call is
-> deferred to a follow-up. The always-on fallback stands in until that wiring
-> lands — `propose_change`
-> returns the binding code + approval URL in the tool-result text, which
-> the agent repeats in the transcript (the "Agent-side surface" below).
-> Adding elicitation later is additive; it does not change the tool
-> contract.
+> The built-in `gateway-admin.*` namespace exposes proposal, preview, status,
+> and result tools. `propose_change` returns a binding code and approval URL
+> for the agent to show the user. Client elicitation is not implemented;
+> approval takes place in the dashboard.
 
 ## Proposal and approval as distinct authorities
 
@@ -122,7 +113,7 @@ get_change_status(change_request_id)            # the CIBA poll
 
 ## Classification and tiers (Cedar)
 
-An action registry (PR-2) tags each admin op with a risk class. Cedar
+An action registry tags each admin op with a risk class. Cedar
 maps `(principal, action_type, params)` to one of:
 
 | Tier | Meaning | Friction |
@@ -165,8 +156,8 @@ approval_requirement = {
 
 Resolved today from the action-executor registry default and per-action
 override, then re-validated at execute against the *captured* requirement.
-Cedar and deployment-level overrides remain future work; there is currently
-no environment variable that changes the reviewer count.
+Cedar and deployment-level reviewer-count overrides are unsupported; no
+environment variable changes the reviewer count.
 
 **Status (per-action resolution wired):** `propose_core` resolves the
 requirement from the action's executor — `ActionExecutor::requirement()`
@@ -236,8 +227,6 @@ between the direct-admin and propose paths.
 | `rate_limit.create` | standard | new rate-limit policy | no |
 | `rate_limit.update` | standard | mutate capacity/refill | no |
 | `rate_limit.delete` | standard | remove a policy | no |
-| `inspection_rule.create` | standard | new inspection rule | no |
-| `inspection_rule.update` | standard | mutate a rule's fields | no |
 | `oauth_consent.revoke` | standard | soft-revoke a consent grant (idempotent) | no |
 | `inspection_rule.delete` | elevated | remove an inspection rule | no |
 | `peer.create` | elevated | register a federated peer | no |
@@ -321,12 +310,12 @@ explicitly configured fresh factor evidence, and proposal-age cooldowns;
 unsupported factors still fail the proposal latch. Existing executors remain
 at the default until their risk-specific bars are assigned in focused action
 changes.
-`rbac.role.delete` (PR-C4a) likewise ships at the single-operator default — it
+`rbac.role.delete` likewise ships at the single-operator default — it
 completes the `rbac.role.{create,update,delete}` triad at the same bar
 create/update use. Like create/update it carries the control-plane-scope guard
 (it refuses to delete a role that grants
 `mcp:admin` / `mcp:propose` / `scim:write`, as that is a protected approver-set
-change — see below). `policy.publish` / `policy.rollback` (PR-C4d-1) likewise
+change — see below). `policy.publish` / `policy.rollback` likewise
 ship at the single-operator default; they are tenant-scoped (a maker publishes
 or rolls back **their own tenant's** policy bundle, resolved from the approver's
 principal — no cross-tenant reach) and run the same `publish_bundle_core` /
@@ -335,7 +324,7 @@ turnstile, the draft/version prechecks, and the audit are identical on the
 direct-admin and propose paths. A lost turnstile, a no-op (content already
 live), or a non-draft / never-published target maps to a precondition failure
 (the change is durably `failed`); a disk-ahead double-fault maps to a loud store
-error. `manifest.publish` / `manifest.rollback` (PR-C4d-2) are the
+error. `manifest.publish` / `manifest.rollback` are the
 server-manifest twins of the policy executors — same tenant-scoping, the same
 locked publish/rollback cores in `manifest_bundles.rs`, and the same fail-closed
 execution mapping (a target that becomes non-draft or missing
@@ -504,7 +493,7 @@ rollback context comes from their own durable bundle ledgers; their policy
 bundles become live through the tenant-engine registry, while their manifests
 remain ledger-only.
 
-`tenant.update` (PR-C4c) lets a maker rename **its own** tenant — `display_name`
+`tenant.update` lets a maker rename **its own** tenant — `display_name`
 only, reusing `update_tenant_core` (so the `validate_display_name` bound, the
 bearer-layer status-cache invalidation, and the fail-closed `tenants.update`
 audit match the REST PATCH). It is deliberately display-name-only: a maker
@@ -512,7 +501,7 @@ cannot set `status` (suspending your own tenant through the single-approval
 propose path is a self-lockout footgun), and it captures a freshness token over
 the target's current `display_name`, so an out-of-band rename during the pending
 window is refused rather than clobbered. The audit-config quartet
-`audit.retention.set` / `.clear` and `audit.routing.set` / `.clear` (PR-C4c)
+`audit.retention.set` / `.clear` and `audit.routing.set` / `.clear`
 configure the maker's own tenant's evidence-retention windows and exporter
 routing, reusing `set_retention_core` / `clear_retention_core` /
 `set_routing_core` / `clear_routing_core` — so the same validation and the
@@ -522,8 +511,7 @@ or shrink a tenant's evidence without a chain-covered row). The `.clear` variant
 are idempotent (clearing an absent policy/route is already the desired end-state,
 so it records nothing and still reports success).
 
-The remaining destructive/meta surface stays deferred. **Tenant lifecycle
-(create/delete)** awaits a platform-tenant authority model: there is no
+**Tenant lifecycle (create/delete)** is not proposable: there is no
 operator-tenant to authorize cross-tenant lifecycle, and
 `change_requests.tenant_id` cascades on tenant delete, so a self-tenant delete
 would erase its own in-flight change request + audit mid-execution.
@@ -538,8 +526,7 @@ operator manages them via the direct admin API.
 scopes include the control-plane authority scopes `mcp:admin` / `mcp:propose` /
 `scim:write` (`reject_privileged_role_scopes`, checked before the store write);
 delete refuses when the *target* role carries one of them (the executor
-prefetches the role and checks its scopes before the irreversible delete — AERB
-PR #372 r2). A role's scopes merge into every assignee's `Principal.scopes`, so
+prefetches the role and checks its scopes before the irreversible delete). A role's scopes merge into every assignee's `Principal.scopes`, so
 granting one of those through the single-approval propose path would be a
 privilege escalation, and *deleting* a role that carries one manipulates the
 approver/maker/provisioning set — both are **approver-set changes**, which the
@@ -644,7 +631,7 @@ is proposable today.
 
 Approval review is only meaningful if the human approver can see **what** they are
 authorizing, not just the `action_type` and a maker-written `justification`
-(AERB PR #362 r1: a maker could otherwise propose one subject / scope / TTL
+(a maker could otherwise propose one subject / scope / TTL
 while writing a benign justification). Both approval surfaces — the `/changes`
 pending table (a full-width detail row per change) and the `/decisions` queue
 (under each change-request item) — render the captured `params` as pretty JSON,
@@ -652,8 +639,7 @@ always visible above the Approve button. Rendering is the raw stored `params`
 (askama auto-escapes, so it's injection-safe). The params are rendered in
 **full, never truncated** — a hidden field is exactly the blind-approval hole
 this closes, and there is no admin-reachable endpoint that re-serves the
-captured params as a fallback (the status poll omits them and is maker-gated,
-AERB PR #365 r1). The visual size is bounded by CSS instead: the review well has
+captured params as a fallback (the status poll omits them and is maker-gated). The visual size is bounded by CSS instead: the review well has
 a `max-height` and scrolls, so a large payload stays fully in the DOM for the
 reviewer to scroll through. The shared renderer is
 `dashboard_changes::render_params`.
@@ -738,16 +724,7 @@ requirement, which a lone operator can satisfy:
   injection-induced rubber-stamp without a second person.
 
 The shipped protected RBAC requirement uses `count: 1`, `factors: []`, and a
-five-minute cooldown. A future deployment-level configuration could opt
-multi-user sites up to `count: 2`.
-
-### Satisfiability guard (no self-inflicted lockout)
-
-`requirement_satisfiable` models the `count <= eligible pool` guard and is unit
-tested, but no config/policy loader calls it today because those override
-planes are not implemented. Any future override loader must refuse or loudly
-warn on an unsatisfiable quorum and retain a recovery path, mirroring the repo
-invariant that a broken `.cedar` file must not lock the operator out.
+five-minute cooldown.
 
 ### Protected/meta controls
 
@@ -884,7 +861,7 @@ phone push) means approval from wherever the operator is.
   opaque token, not a universal hash contract, and only the owning executor may
   interpret its value. Most mutable-target executors use a one-way sha256 of
   mutable fields:
-  `rate_limit.update`, `inspection_rule.update`, `rbac.role.update`,
+  `rate_limit.update`, `rbac.role.update`,
   `peer.update`, `tenant.update`, and the natural-key audit-config actions.
   The one-way tokens are safe to persist even when the hashed fields are
   sensitive. Creates, content-independent identity deletes, and ordinary
@@ -975,7 +952,7 @@ decision view) or any log. The channel:
   a fail-closed audit there would lose the just-claimed secret; the mint
   itself is already fail-closed-audited at execute).
 
-## Where the pieces will live
+## Implementation map
 
 | Concern | Location |
 |---|---|
@@ -986,72 +963,9 @@ decision view) or any log. The channel:
 | Classification | `crates/waygate-authz/src/cedar.rs` |
 | REST: propose / status / list | `crates/waygate-admin/src/change_requests.rs` (new) |
 | MCP tool surface | `waygate_mcp::BuiltinTools` trait + `GatewayServer::with_builtin_tools` (the seam, in `crates/waygate-mcp/src/builtin.rs`); the `gateway-admin` namespace impl in `crates/waygate-server/src/mcp_builtin.rs`, with state preparation in `mcp_action_context.rs` + `waygate-admin/src/change_context.rs`, the shared change-request cores for proposal/polling, and `retrieve_secret_core` for the `get_change_secret` burn-on-read reveal. (In `waygate-server`, not `waygate-admin`, so the REST crate keeps `rmcp` dev-only.) |
-| Dashboard queue + detail | `crates/waygate-admin/src/dashboard_changes.rs` + templates (clone of `dashboard_approvals.rs` / `approvals.html`) |
-| Notify (out-of-band) | `ChangeRequestNotifier` trait + payload in `crates/waygate-admin/src/change_notify.rs` (fired best-effort from `propose_core`); `WebhookChangeNotifier` impl in `crates/waygate-server/src/change_notify.rs` behind `GATEWAY_HITL_WEBHOOK_URL`. CIBA ping/push + live WS toast deferred. |
+| Dashboard queue + detail | `crates/waygate-admin/src/dashboard_changes.rs` + templates |
+| Notify (out-of-band) | `ChangeRequestNotifier` trait + payload in `crates/waygate-admin/src/change_notify.rs` (fired best-effort from `propose_core`); `WebhookChangeNotifier` impl in `crates/waygate-server/src/change_notify.rs` behind `GATEWAY_HITL_WEBHOOK_URL`. |
 | Audit | existing evidence sink, `EvidenceCategory::AdminMutation`, actions `ChangeRequestPropose/Approve/Execute/Deny` |
-
-## PR phasing
-
-1. **PR-1 — primitive + CIBA initiate/poll.** `0039_change_requests.sql`;
-   `waygate-changeset` store (atomic claim, lifecycle enum, etag,
-   binding_code, `required_approvals`/`eligible_role`/`required_factors`/
-   `cooldown`); `propose_change` + `get_change_status` (poll:
-   `authorization_pending`/`slow_down`/`expired`) behind `mcp:propose`;
-   satisfiability guard. Pending only, no execute. Tests mirror
-   break-glass (negative, concurrent claim, replay, expiry,
-   unsatisfiable-requirement).
-2. **PR-2 — registry + execute-on-approval** for `rate_limit.update` and
-   `api_key.mint`: `render_preview`, idempotent `execute`,
-   validate-before-irreversible, etag guard, failure capture, Cedar
-   tiering.
-3. **PR-3 — dashboard approval UX:** queue + detail page + per-class
-   preview/simulation + binding-code verify + countdown + freshness
-   banner + risk-scaled friction + configured-quorum guard + deny-reason +
-   execution-result + responsive. "1 of N" only when `count > 1`.
-4. **PR-4 — MCP surface + optional elicitation:** `propose_change` /
-   `get_change_status` / `list_my_changes` + read introspection as a
-   built-in namespace; binding code in transcript; optional URL-mode
-   (jump to dashboard) and form-mode (`confirm` tier) elicitation;
-   graceful degradation when the capability is absent.
-5. **PR-5 — out-of-band notify + ping/push:** pluggable webhook notifier
-   (summary + code + deep link); CIBA ping/push for REST agents.
-   **Status:** the out-of-band *operator* notifier shipped — a
-   `ChangeRequestNotifier` (`waygate-admin/src/change_notify.rs`) fired
-   best-effort from `propose_core` (so REST *and* MCP propose both notify),
-   with a `WebhookChangeNotifier` impl in `waygate-server/src/change_notify.rs`
-   behind `GATEWAY_HITL_WEBHOOK_URL` — a link, not an approve button, carrying
-   no params/justification. **Split out (to PR-6/follow-up):** CIBA
-   **ping/push** for REST agents (net-new — needs a client-notification-URI on
-   the change-request schema + a callback dispatcher), the **risk tier** in the
-   payload (the action registry has no per-action tier yet — `change_executor`
-   exposes no `risk_tier()`), and the **live dashboard WS toast** (the data-
-   plane `ApprovalHub` models a different event; the PR-4 review queue already
-   surfaces pending changes at-desk).
-6. **PR-6 — harden + widen + optional factor evidence:** approver assurance;
-   `policy.edit` (lockout-safe),
-   `upstream_session.revoke`, OAuth client reg; the protected/meta class;
-   protected action assignments; audit/history views. The distinct-sub M-of-N,
-   exact-role, optional fresh factor, and proposal-age cooldown enforcement
-   paths have landed. They use encrypted dashboard-session assurance rather
-   than widening `Principal` for every authentication method. Shipped action
-   requirements do not mandate MFA.
-   **Status:** the reserved-namespace loader guard shipped:
-   `waygate_upstream::validate_manifest_invariants` rejects an upstream whose
-   name equals or is nested beneath any entry in
-   [`waygate_core::RESERVED_BUILTIN_NAMESPACES`] on every load path (boot,
-   SIGHUP/bundle, import), so gateway-local surfaces cannot be shadowed by a
-   proxied server. The dotted-prefix case matters because the dispatcher
-   intercepts any `<namespace>.*` tool call before the `<server>.<tool>` split;
-   a mere lookalike without the dot remains valid. The remaining action work —
-   the `policy.edit` executor, OAuth
-   client registration, and assigning the protected/meta class — is best
-   landed as focused PRs. (`upstream_session.revoke` has since landed — it's in
-   the proposable-actions table above.) The `count ≥ 2`
-   multi-human path is **no longer** in this list — it landed (the
-   `record_approval` distinct-sub accumulation path described above). All
-   approval-requirement dimensions supported by the session assurance model
-   are enforced; the remaining work is to apply stricter bars to protected
-   executors.
 
 ## See also
 

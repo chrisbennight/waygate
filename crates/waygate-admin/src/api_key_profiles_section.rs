@@ -1,8 +1,7 @@
 //! API-key profiles section — the body of the
-//! `/admin/t/{tenant}/profiles` page, split onto its own page from
-//! the API-keys page as part of the identities revamp.
+//! `/admin/t/{tenant}/profiles` page.
 //!
-//! Read-only operator view of the per-tenant `api_key_profiles`
+//! Operator listing, creation, and deletion of the per-tenant `api_key_profiles`
 //! registry from `waygate_apikeys`. A profile is the constraint
 //! envelope a mint must satisfy: `max_ttl_seconds`,
 //! `allowed_scopes`, optional `allowed_servers` /
@@ -19,10 +18,6 @@
 //!   path's `create_profile_core` (validate → store.create →
 //!   `AdminMutation` audit), so the HTML and JSON surfaces can't
 //!   drift.
-//! - **Mint-via-profile composer (still deferred).** A mint form
-//!   that pre-fills from a selected profile (so an operator can't
-//!   fat-finger a scope outside the allowlist). The free-form
-//!   mint composer in the API-keys block stays for now.
 //! - **Per-row delete** (this module's `delete` handler) — an
 //!   admin-gated, CSRF-protected `<form>` per row that posts to
 //!   `/identities/api-key-profiles/{id}/delete` and reuses the REST
@@ -31,7 +26,7 @@
 //!   so the HTML and JSON surfaces can't drift. The trigger's
 //!   live-reference 409 is surfaced beside the table via the same
 //!   `?akp_error=` PRG channel the create form uses.
-//! - **Inline edit (intentionally absent — not a TODO).** Profiles
+//! - **Profiles cannot be edited.** Profiles
 //!   are immutable post-create (see the module doc on
 //!   `api_key_profiles.rs`): mutating `allowed_scopes` would let
 //!   already-minted keys keep now-disallowed scopes, since profile

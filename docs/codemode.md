@@ -18,9 +18,7 @@ durable journal with fenced ownership and immutable tool snapshots.
 spending the same operator execution budget as computation.
 `execution.pause(checkpoint)` and `codemode.resume` provide explicit durable
 continuations through normal calls and optional MCP Task augmentation.
-`codemode.mutate` uses direct-authority execution.
-`codemode.resume_mutation` has been removed; clients must submit
-rewritten source through `codemode.execute`. MCP Tasks
+The MCP Tasks interface
 also projects durable executions for direct status polling, bounded result
 retrieval, and owner-scoped cancellation.
 Persisted programs can emit bounded intermediate JSON artifacts and receive
@@ -89,7 +87,7 @@ of them.
 
 ### Source submission and reuse
 
-`codemode.execute`, `codemode.start`, and `codemode.mutate` accept exactly one
+`codemode.execute` and `codemode.start` accept exactly one
 source selector:
 
 - `source`: inline JavaScript.
@@ -98,7 +96,7 @@ source selector:
 - `source_sha256`: the lowercase SHA-256 returned for an earlier retained
   source owned by the same tenant, issuer, and subject.
 - `skill_script`: an exact `skill://` resource URI in the active verified
-  Agent Skills catalog. It is accepted by execute, start, and the mutate alias
+  Agent Skills catalog. It is accepted by execute and start
   with the same caller authority as other source forms.
 
 The published schema carries the selectors as independent optional properties rather
@@ -238,7 +236,7 @@ execution do not implement a second permission boundary.
 withheld unless durable continuation is available, which requires both a
 configured execution store and `GATEWAY_CODEMODE_RESULT_STORAGE=allow`. Either
 one alone is not enough. The default `disabled` posture therefore serves
-`search`, `describe`, `execute`, and `mutate` only. The withholding is
+`search`, `describe`, and `execute` only. The withholding is
 deliberate: a
 retrieval tool the gateway cannot honor would be a contract it must break.
 
@@ -325,13 +323,12 @@ and both leave durable work running after the call returns, so a policy keyed
 to either one has to be able to see it as what it is.
 
 `codemode.cancel` likewise governs under its own medium-risk, side-effecting
-descriptor. It no longer aliases `codemode.execute` for Cedar facts: an
-operator policy that previously authorized cancellation only because it named
-`execute` must now name `cancel` explicitly. Read-only status and retrieval
+descriptor. A policy authorizing cancellation must name `cancel` explicitly.
+Read-only status and retrieval
 remain continuations of the execution authority.
 
-Code Mode remains a `DelegatedDataPlane` namespace. Blocking `execute`,
-`mutate`, and `resume` release runner capacity before their call returns,
+Code Mode remains a `DelegatedDataPlane` namespace. Blocking `execute`
+and `resume` release runner capacity before their call returns,
 and every nested connector dispatch is confined by the exact current profile
 and Cedar overlay. Owner-scoped status, listing, result, artifact, and cancellation
 operations do not create independent data reach. Any consumption shape that
@@ -754,26 +751,9 @@ Pause and continuation add `execution_pause_unavailable`,
 ## Mutation contract
 
 Cross-server calls are not a transaction and Code Mode does not promise generic
-exactly-once execution. The future recovery model uses the following state
-distinctions; direct-authority execution does not implement automatic recovery:
+exactly-once execution.
 
-| Known state | Permitted behavior |
-| --- | --- |
-| Durably known not dispatched | Dispatch normally |
-| Success durably recorded | Return the recorded result |
-| Failure known to precede the effect | Retry within the reviewed policy |
-| Outcome uncertain and trusted idempotency exists | Retry with the same durable idempotency identity |
-| Outcome uncertain without trusted idempotency | Mark `ambiguous`; do not retry |
-| An earlier effect applied and a later step failed | Stop, continue, or compensate only as explicitly declared |
-| Compensation exists | Execute it as a new authorized and audited mutation |
-| Compensation fails | Preserve both effects and expose the failure |
-
-Mutations are sequential unless an operator-reviewed contract declares them
-independent. Idempotency, retry, reconciliation, and compensation facts are
-trusted catalog metadata; unreviewed upstream hints cannot enable a safer
-execution class.
-
-Client-authored `codemode.execute`, `codemode.mutate`, and `codemode.start`
+Client-authored `codemode.execute` and `codemode.start`
 use direct authority. Every nested operation visible to the caller, including
 side-effecting upstream and non-Code-Mode built-in operations, re-enters the
 ordinary direct invocation path under the same principal. Ordinary Cedar
@@ -787,27 +767,13 @@ than repeating completed work. This is not a transaction or an exactly-once
 execution guarantee.
 
 Approved Agent Skills scripts use the same caller authority without an automatic
-read-only or connector-call ceiling. The former `codemode.resume_mutation` tool
-has been removed. Old approval-bound executions cannot be resumed, and their
-stored records are unchanged. Clients must rewrite and submit their source explicitly.
+read-only or connector-call ceiling.
 
 ## Data movement
 
 Tool authorization and information-flow authorization are separate decisions.
 Permission to read data does not imply permission to return it to the model,
 persist it, show it to an operator, or send it through another tool.
-
-The end-state policy distinguishes:
-
-- source and sink classification;
-- sensitivity and tenant boundary;
-- sandbox, model, operator, storage, and downstream-tool audiences;
-- propagation through artifacts and nested calls;
-- explicit declassification;
-- opaque secret handles redeemed only by a narrow trusted connector.
-
-Response inspection remains an egress control. It does not replace propagation
-or source-to-sink policy.
 
 ## Current execution contract
 

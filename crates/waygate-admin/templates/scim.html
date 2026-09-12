@@ -10,12 +10,8 @@
     {% endif %}
 </header>
 
-{# SCIM-provisioned identity directory. Read-only Users
-   section plus the provisioning-log timeline below; groups
-   now live on the unified /groups page (Identities revamp), so this
-   page only carries a pointer card to them. Mutations are IdP-driven
-   via the SCIM endpoints (/scim/v2/*). The per-row drawer (attributes
-   + membership) is deferred to a future slice. #}
+{# SCIM-provisioned users and provisioning log. Groups are listed at /groups.
+   Identity changes are driven by the IdP through /scim/v2/*. #}
 
 {% if insufficient_scope %}
 <div class="card">

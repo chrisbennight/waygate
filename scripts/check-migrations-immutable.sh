@@ -7,21 +7,10 @@
 #   migration <N> was previously applied but has been modified
 # Only ADDING new migration files is allowed.
 #
-# Why it exists: on 2026-06-20, a stale comment inside
-# migrations/0025_rate_limits.sql was flagged during review; the "fix"
-# rewrote that comment in place. The bytes changed, the checksum changed,
-# and the next deploy crash-looped in prod. (This is a recurring failure
-# class: any comment-only edit to a shipped migration invalidates its sqlx
-# checksum.) The fix is to never edit a shipped migration — document
-# semantic clarifications in the Rust handler that reads the column, or in
-# docs/, instead.
-#
-# Why CI was previously blind to it: the *_pg test suites self-migrate against a
-# FRESH, empty Postgres every run, which has no prior _sqlx_migrations rows, so a
-# checksum mismatch (a property of already-deployed state) can never surface
-# there. check-migrations.sh and the waygate-storage `migration_versions` test
-# only catch duplicate version NUMBERS, not content drift. This guard closes that
-# gap with a git diff against the base branch.
+# Document semantic clarifications in the consuming Rust code or docs/.
+# Tests that migrate an empty database cannot detect checksum drift in an
+# existing deployment. This guard compares migration content with the base
+# branch; check-migrations.sh separately checks version uniqueness.
 #
 # PR-only by design: it compares HEAD against the merge-base with the base
 # branch, so it is meaningful only when base != head. On push-to-main (HEAD is

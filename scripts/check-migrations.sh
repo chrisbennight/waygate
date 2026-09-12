@@ -5,11 +5,6 @@
 # so a duplicate fails in seconds with a clear message — not buried in
 # cargo-test output and not at prod boot.
 #
-# Why it exists: the 2026-06-13 incident. Two parallel worktrees each minted a
-# `0042` migration; sqlx embeds duplicate versions silently, so both PRs were
-# green and the gateway crash-looped after merge. See
-# crates/waygate-storage/src/migration_versions.rs for the full write-up.
-#
 # Intentionally redundant with the Rust test: this gate still fires if the test
 # crate fails to compile for an unrelated reason, and runs without a toolchain.
 set -euo pipefail

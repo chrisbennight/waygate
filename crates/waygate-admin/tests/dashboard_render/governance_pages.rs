@@ -1200,15 +1200,29 @@ pub(crate) async fn rate_limits_search_item_appears_in_palette_catalogue() {
     );
 }
 
-/// Palette finds Inspection rules in its catalogue: the new page
-/// must be Cmd-K discoverable, not just in the sidebar.
+/// Unenforced custom rules are absent from dashboard discovery.
 #[tokio::test]
-pub(crate) async fn inspection_rules_search_item_appears_in_palette_catalogue() {
+pub(crate) async fn inspection_rules_are_absent_from_palette_catalogue() {
     let app = dashboard_router(empty_state().await, DashboardAuth::Disabled);
     let (status, body) = body_of(app, "/search?q=inspection").await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        body.contains(r#""label":"Inspection rules""#),
-        "Inspection rules missing from palette search results: {body}",
+        !body.contains(r#""label":"Inspection rules""#),
+        "Unenforced inspection rules appeared in palette search results: {body}",
     );
+}
+
+#[tokio::test]
+async fn custom_inspection_dashboard_is_not_exposed() {
+    for path in ["/inspection_rules", "/t/default/inspection_rules"] {
+        let app = dashboard_router(empty_state().await, DashboardAuth::Disabled);
+        let (status, _) = body_of(app, path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    for path in ["/evidence", "/settings"] {
+        let app = dashboard_router(empty_state().await, DashboardAuth::Disabled);
+        let (status, body) = body_of(app, path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("Inspection rules"));
+    }
 }

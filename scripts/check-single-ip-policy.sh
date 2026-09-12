@@ -3,15 +3,7 @@
 # for outbound-destination policy itself. Fast, compile-free CI tripwire
 # (image.yml).
 #
-# Why it exists: waygate-as carried its own `is_public_ip` alongside the
-# waygate-core one. The two drifted — the local copy unwrapped only
-# `::ffff:0:0/96`, so NAT64 (`64:ff9b::/96`), 6to4 (`2002::/16`), and the
-# deprecated IPv4-compatible `::a.b.c.d` forms each classified an embedded
-# internal IPv4 as public, and it also admitted `0.0.0.0/8`, `192.0.0.0/24`,
-# and the `198.18.0.0/15` benchmarking block. A second implementation of an
-# SSRF classifier is a second thing to keep correct, and the copy that gets
-# forgotten is the one guarding the surface reached by untrusted input.
-#
+# Outbound address classification belongs to waygate_core::net for consistent SSRF checks.
 # What to do instead of hand-rolling a classifier:
 # `use waygate_core::net::is_public_ip;` and call it on every resolved
 # address before dialing. If a surface needs a DIFFERENT policy — the

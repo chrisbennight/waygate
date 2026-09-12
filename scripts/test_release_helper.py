@@ -15,18 +15,17 @@ class HelperReleaseTests(unittest.TestCase):
         for event, ref in [('push', 'refs/tags/mcp-files-v1.2.3'),
                            ('pull_request', 'refs/pull/1/merge'),
                            ('workflow_dispatch', 'refs/heads/main')]:
-            self.assertEqual(resolve(event, ref, '1.2.3', '1.2.3'), '1.2.3')
-        for event, ref, recorded, requested in [
-            ('push', 'refs/heads/main', '1.2.3', ''),
-            ('push', 'refs/tags/v1.2.3', '1.2.3', ''),
-            ('push', 'refs/tags/mcp-files-v2.0.0', '1.2.3', ''),
-            ('pull_request', 'refs/pull/1/merge', '1.2.2', ''),
-            ('workflow_dispatch', 'refs/heads/main', '1.2.3', '2.0.0'),
-            ('workflow_dispatch', 'refs/heads/main', '1.2.3', '$(id)'),
-            ('release', 'refs/tags/mcp-files-v1.2.3', '1.2.3', ''),
+            self.assertEqual(resolve(event, ref, '1.2.3'), '1.2.3')
+        for event, ref, requested in [
+            ('push', 'refs/heads/main', ''),
+            ('push', 'refs/tags/v1.2.3', ''),
+            ('push', 'refs/tags/mcp-files-v2.0.0', ''),
+            ('workflow_dispatch', 'refs/heads/main', '2.0.0'),
+            ('workflow_dispatch', 'refs/heads/main', '$(id)'),
+            ('release', 'refs/tags/mcp-files-v1.2.3', ''),
         ]:
             with self.subTest(event=event, ref=ref), self.assertRaises(ValueError):
-                resolve(event, ref, '1.2.3', recorded, requested)
+                resolve(event, ref, '1.2.3', requested)
 
     def test_script_validates_real_checkout_before_emitting_version(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -37,9 +36,7 @@ class HelperReleaseTests(unittest.TestCase):
             git('config', 'user.name', 'Release test')
             git('config', 'user.email', 'test@example.com')
             (root / 'Cargo.toml').write_text('[workspace.package]\nversion = "1.2.3-rc.1"\n')
-            (root / 'release').mkdir()
-            (root / 'release/mcp-files.version').write_text('1.2.3-rc.1\n')
-            git('add', 'Cargo.toml', 'release')
+            git('add', 'Cargo.toml')
             git('commit', '-q', '-m', 'release')
             sha = git('rev-parse', 'HEAD')
             git('update-ref', 'refs/remotes/origin/main', sha)

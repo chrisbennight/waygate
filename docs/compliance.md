@@ -4,11 +4,7 @@
 > the NIST AI Risk Management Framework (AI RMF 1.0,
 > GOVERN/MAP/MEASURE/MANAGE) to **concrete gateway features**: audit
 > columns, Cedar policies, deployment settings, code paths, registered
-> Prometheus metrics. Every cell that names a code path, env var, SQL
-> column, or metric is verifiable by `grep` / `sqlx` against this
-> repository at the PR commit; AERB PR #168 round 1 flagged drift in
-> the first draft and that's now the maintenance contract enforced at
-> the bottom.
+> Prometheus metrics. Validate these controls against the deployed version.
 >
 > **What this is NOT.** Not a certification claim, not a SOC 2
 > attestation, not a SOC 2 system description (AT-C 205). The gateway
@@ -16,8 +12,7 @@
 > with the gateway as a contributing control.
 >
 > Items marked **Partial** describe what's shipped today plus an
-> explicit gap (named, with the PR or follow-up that closes it where
-> known). Items marked **Out of scope** belong to layers outside the
+> explicit limitation. Items marked **Out of scope** belong to layers outside the
 > gateway (HR, physical security, encryption-at-rest on the Postgres
 > host, etc.) — listed so a reader can see they were intentionally
 > excluded rather than forgotten.
@@ -66,50 +61,16 @@ the discriminator is the `category` column, with `admin_mutation`
 audit.rs::PgAuditSink` or the bundle export
 (`crates/waygate-storage/src/bundle.rs`).
 
-## Prometheus metric glossary
+## Prometheus metrics
 
-All gateway-registered metrics live in
-`crates/waygate-telemetry/src/metrics.rs`. Request-path metrics use the `mcp_`
-prefix; fleet-state gauges use `gateway_`. Names cited below are taken verbatim from the
-`register_*_with_registry!` calls in that file as of this commit:
-`mcp_authz_decisions_total`, `mcp_authz_latency_seconds`,
-`mcp_upstream_calls_total`, `mcp_upstream_latency_seconds`,
-`gateway_upstream_protocol_generation`, `gateway_upstream_runtime_state`,
-`mcp_server_operation_duration_seconds`,
-`mcp_tools_list_requests_total`,
-`mcp_tools_list_returned_tools`, `mcp_tools_list_serialized_bytes`,
-`mcp_identity_cell_wait_seconds`, `mcp_identity_cell_queue_depth`,
-`mcp_database_pool_connections`,
-`mcp_tool_drift_total`, `mcp_tool_quarantined`,
-`mcp_upstream_rejected_output_schemas`,
-`mcp_upstream_unregisterable_input_schemas`,
-`mcp_evidence_drain_total`, `mcp_evidence_drain_errors_total`,
-`mcp_evidence_chained_best_effort_total`,
-`mcp_evidence_chained_best_effort_failures_total`,
-`mcp_evidence_chained_best_effort_duration_seconds`,
-`mcp_evidence_submission_total`, `mcp_evidence_submission_pending`,
-`mcp_evidence_reason_truncations_total`,
-`mcp_grant_sweep_total`, `mcp_bearer_validations_total`,
-`mcp_output_schema_violations_total`,
-`mcp_schema_validator_cache_hits_total`,
-`mcp_schema_validator_cache_misses_total`,
-`mcp_schema_validator_cache_evictions_total`,
-`mcp_schema_validator_compile_failures_total`,
-`mcp_invocation_manifest_fallback_total`,
-`mcp_invocation_approval_unknown_refusals_total`,
-`mcp_response_inspector_blocks_total`,
-`mcp_response_inspector_redactions_total`, `mcp_tasks_total`.
+See the [telemetry reference](agents/telemetry.md#prometheus-metrics) for metric
+semantics and labels. Definitions are in
+[`metrics.rs`](../crates/waygate-telemetry/src/metrics.rs); individual criteria
+below cite the measurements relevant to that control.
 
-Rows that mention a metric name confirm the exact registered name.
-Break-glass use is counted via `mcp_break_glass_total` (registered in `crates/waygate-telemetry/src/metrics.rs::record_break_glass_use`).
-Rate-limit denial counter and a dedicated break-glass-MINT counter
-are NOT yet registered as distinct Prometheus metrics — the
-underlying features ship (rate limits via `waygate-quota`, mint via
-`/api/v1/admin/break_glass`) but operators alerting at the metric
-layer must currently pivot off audit rows (`AdminMutation` with
-`action="BreakGlassMint"`; `Invocation`-category Deny rows from
-the quota gate) rather than direct Prometheus counters. Any
-`Partial` cells call out the specific gap.
+Rate-limit denials and break-glass token minting have no dedicated Prometheus
+counters. Use their audit events for those alerts; break-glass token use is
+counted by `mcp_break_glass_total`.
 
 ---
 
@@ -146,7 +107,7 @@ the quota gate) rather than direct Prometheus counters. Any
 
 | Criterion | Gateway control | Evidence | Status |
 |-----------|-----------------|----------|--------|
-| CC4.1 Selects, develops, performs monitoring | OTel spans on every `tools/call` that reaches the MCP handler (semconv `mcp.method.name`, `gen_ai.tool.name`, `otel.kind`, `error.type`; plus gateway-specific `mcp.server`, `mcp.tool`, `upstream.outcome`); calls refused by the pre-parse routing-header gate are terminated before the handler exists and are evidenced instead by their `CallTool`/`Denied` audit row (trace-id stamped) and the `mcp_authz_decisions_total` sample the gate records; Prometheus counters `mcp_authz_decisions_total`, `mcp_authz_latency_seconds`, `mcp_upstream_calls_total`, `mcp_server_operation_duration_seconds` (semconv `mcp.server.operation.duration`), `mcp_identity_cell_wait_seconds`, `mcp_tool_drift_total`, `mcp_bearer_validations_total` | `/metrics` Prometheus endpoint; registrations in `crates/waygate-telemetry/src/metrics.rs`; Grafana dashboard described in `docs/agents/telemetry.md` | Yes |
+| CC4.1 Selects, develops, performs monitoring | OTel spans on every `tools/call` that reaches the MCP handler (semconv `mcp.method.name`, `gen_ai.tool.name`, `otel.kind`, `error.type`; plus gateway-specific `mcp.server`, `upstream.outcome`); calls refused by the pre-parse routing-header gate are terminated before the handler exists and are evidenced instead by their `CallTool`/`Denied` audit row (trace-id stamped) and the `mcp_authz_decisions_total` sample the gate records; Prometheus counters `mcp_authz_decisions_total`, `mcp_authz_latency_seconds`, `mcp_upstream_calls_total`, `mcp_server_operation_duration_seconds` (semconv `mcp.server.operation.duration`), `mcp_identity_cell_wait_seconds`, `mcp_tool_drift_total`, `mcp_bearer_validations_total` | `/metrics` Prometheus endpoint; registrations in `crates/waygate-telemetry/src/metrics.rs`; Grafana dashboard described in `docs/agents/telemetry.md` | Yes |
 | CC4.2 Communicates deficiencies | Operator-facing deny reasons (`data.reasons`) on the MCP wire; admin "Activity" view (`/admin/activity`) paginates `audit_log` rows filtered by outcome / risk / server / principal | Activity handlers in `crates/waygate-admin/src/dashboard_activity_page.rs` (activity routes + templates around lines 765–1007) | Partial — no built-in alerting bus for repeated-deny / rate-limit-storm patterns; operator wires their own Prometheus alert rules off `mcp_authz_decisions_total{decision="deny"}` |
 
 ### CC5 — Control Activities
@@ -167,7 +128,7 @@ the quota gate) rather than direct Prometheus counters. Any
 | CC6.4 Restricts physical access | n/a (deployer's data center / cloud) | — | Out of scope |
 | CC6.5 Protects against unauthorized access | Step-up promotion: MCP JSON-RPC `insufficient_scope` error → HTTP 403 with `WWW-Authenticate: Bearer error="insufficient_scope" scope=…`; `forbid` policy default for PII tools under API-key auth (`crates/waygate-authz/tests/fixtures/policies/15-pii-default.cedar`) | `crates/waygate-server/src/mcp_http_promote.rs::promote_mcp_errors`; `data.reasons` denial annotation | Yes |
 | CC6.6 Implements logical access controls | Cedar entity model exposes (flat attrs, no nested records — Cedar can't formally type those without a schema): `principal.scim_present`, `principal.scim_active`, `principal.scim_groups`, `principal.scim_user_name`, `principal.scim_attrs`, `principal.roles`, `principal.scopes`, `principal.auth_method`, `principal.tenant`, `resource.server`, `resource.name`, `resource.uri`, `resource.risk`, `resource.pii`, `resource.side_effects` | `crates/waygate-authz/src/cedar.rs::build_entities` (each attr name appears in a `*_attrs.insert(...)` call); URI-specific resource authorization is pinned by `waygate-authz::gate::tests::resource_operations_use_their_dedicated_cedar_actions`; tool attributes are used by `crates/waygate-authz/tests/fixtures/policies/16-scim-active.cedar` (`!principal.scim_active`), `crates/waygate-authz/tests/fixtures/policies/15-pii-default.cedar` (`resource.pii`), etc. | Yes |
-| CC6.7 Restricts movement of information | Per-upstream identity-chain (Tier A via RFC 8693 token exchange, Tier B via gateway-minted JWT with `act` claim, Tier C via per-upstream `tier_c_peer:` selector that mints a peer-audienced JWT on `Authorization: Bearer`) so upstream calls carry the original principal rather than a synthetic service account; per-upstream mTLS via `manifest.mtls.{cert_path, key_path, ca_path}`; output inspection at the dispatch boundary (PiiInspector + SecretsInspector + PoisoningInspector with per-tenant rule storage at `inspection_rules`) | `docs/agents/identity.md`; `docs/agents/federation.md`; `crates/waygate-upstream/src/identity_client.rs`; `crates/waygate-manifest-types/src/lib.rs` (`UpstreamManifest::auth.bearer_env`, `mtls`, `tier_c_peer`); `crates/waygate-dashboard-stores/src/inspection_rules.rs` | Yes |
+| CC6.7 Restricts movement of information | Per-upstream identity-chain (Tier A via RFC 8693 token exchange, Tier B via gateway-minted JWT with `act` claim, Tier C via per-upstream `tier_c_peer:` selector that mints a peer-audienced JWT on `Authorization: Bearer`) so upstream calls carry the original principal rather than a synthetic service account; per-upstream mTLS via `manifest.mtls.{cert_path, key_path, ca_path}`; output inspection at the dispatch boundary (opt-in built-in PiiInspector, SecretsInspector, and PoisoningInspector) | `docs/agents/identity.md`; `docs/agents/federation.md`; `crates/waygate-upstream/src/identity_client.rs`; `crates/waygate-manifest-types/src/lib.rs` (`UpstreamManifest::auth.bearer_env`, `mtls`, `tier_c_peer`); `crates/waygate-mcp/src/inspection.rs` | Yes |
 | CC6.8 Prevents / detects unauthorized software | Per-tool behavior-contract change detection in `crates/waygate-upstream/src/pool/`; drift covers schemas and security metadata, fires `tracing::warn!` + `mcp_tool_drift_total{server}`, and auto-quarantines high-risk or side-effecting tools under `GATEWAY_QUARANTINE_ON_DRIFT_RISK=high\|medium\|all` | `mcp_tool_drift_total{server}` from `/metrics`; quarantine flag visible in tool-list response | Partial — drift emits a chained-best-effort `CatalogDrift` audit row (`outcome=Denied` on quarantine, `Success` informational) in addition to the warn + metric; `mcp_servers.signing_pubkey` column exists (migration `0011_catalog.sql`) but no verification code path is wired |
 
 ### CC7 — System Operations
@@ -221,7 +182,7 @@ observability + access-control choke point.
 | Subcategory | Gateway control | Evidence | Status |
 |-------------|-----------------|----------|--------|
 | MAP 1 (context established) | Per-tenant `tenant_id` substrate threads through every catalog / policy / audit row; per-tool `risk`, `pii`, `side_effects` classifications on `tool_classifications` | `tenants` table; `mcp_tool_versions` + `tool_classifications` columns (migration `0011_catalog.sql`) | Yes |
-| MAP 2.1 (AI system task understood) | OTel span on every `tools/call` captures semconv `mcp.method.name` / `gen_ai.tool.name` / `otel.kind` / `error.type` plus gateway-specific `mcp.server`, `mcp.tool`, `upstream.outcome`, latency; `audit_log` row records `latency_ms` + `principal_sub` + `trace_id` (trace↔audit correlation) | Span attributes in `crates/waygate-mcp/src/server.rs` (inbound, kind=server) and `crates/waygate-upstream/src/pool/` (upstream leg, kind=client); `audit_log.latency_ms` / `audit_log.trace_id` columns | Yes |
+| MAP 2.1 (AI system task understood) | OTel span on every `tools/call` captures semconv `mcp.method.name` / `gen_ai.tool.name` / `otel.kind` / `error.type` plus gateway-specific `mcp.server`, `upstream.outcome`, latency; `audit_log` row records `latency_ms` + `principal_sub` + `trace_id` (trace↔audit correlation) | Span attributes in `crates/waygate-mcp/src/server.rs` (inbound, kind=server) and `crates/waygate-upstream/src/pool/` (upstream leg, kind=client); `audit_log.latency_ms` / `audit_log.trace_id` columns | Yes |
 | MAP 2.2 (risks / benefits documented) | Per-tool `description` + `risk` + `pii` flags in manifest; admin REST surfaces them via `/api/v1/catalog/*` | `servers/*.yaml`; `crates/waygate-admin/src/catalog.rs` (admin REST handlers + the manifest-importer test fixtures) | Yes |
 | MAP 3 (categorization of AI systems) | Tools classified into `low`/`medium`/`high` risk + `pii=true/false` + `side_effects=true/false` | `tool_classifications` table | Yes |
 | MAP 4 (AI system impact assessed) | Approval grants required for tools flagged `requires_approval=true`; admin REST `/api/v1/admin/approval_grants` lists already-issued grants (operator authors a grant in advance against a `(principal, tool, argument_hash)` tuple so the caller's matching invocation passes the gate); on a miss the invocation pipeline returns `ApprovalRequired` to the caller without persisting a pending-request row | `approval_grants` table; `crates/waygate-admin/src/approval_grants.rs` (REST handlers); `crates/waygate-mcp/src/invocation/mod.rs` (`check_approval`'s `ApprovalRequired` return) | Partial — no durable "pending request" queue today: a caller hits a `requires_approval` tool, gets an `ApprovalRequired` MCP error, and either (a) the operator independently authors a grant + caller retries, or (b) the call fails. Building a request-driven queue (caller-initiated → operator approves) is the open gap; the current grant surface only supports operator-initiated pre-authorization |
@@ -231,12 +192,12 @@ observability + access-control choke point.
 
 | Subcategory | Gateway control | Evidence | Status |
 |-------------|-----------------|----------|--------|
-| MEASURE 1 (identify & implement appropriate metrics) | Prometheus counters / histograms / gauges: `mcp_authz_decisions_total{decision,risk}`, `mcp_authz_latency_seconds`, `mcp_upstream_calls_total`, `mcp_upstream_latency_seconds`, `gateway_upstream_protocol_generation{server,generation}`, `gateway_upstream_runtime_state{server,state}`, `mcp_server_operation_duration_seconds{method,outcome}`, `mcp_tools_list_requests_total{protocol_generation,discovery_mode,client_class}`, `mcp_tools_list_returned_tools{protocol_generation,discovery_mode,client_class}`, `mcp_tools_list_serialized_bytes{protocol_generation,discovery_mode,client_class}`, `mcp_identity_cell_wait_seconds`, `mcp_identity_cell_queue_depth`, `mcp_database_pool_connections{role,state}`, `mcp_tool_drift_total{server}`, `mcp_tool_quarantined`, `mcp_upstream_rejected_output_schemas{server}`, `mcp_upstream_unregisterable_input_schemas{server}`, `mcp_evidence_drain_total`, `mcp_evidence_drain_errors_total`, `mcp_evidence_chained_best_effort_total{outcome}`, `mcp_evidence_chained_best_effort_failures_total{stage}`, `mcp_evidence_chained_best_effort_duration_seconds{outcome}`, `mcp_evidence_submission_total{posture,outcome}`, `mcp_evidence_submission_pending{posture}`, `mcp_evidence_reason_truncations_total`, `mcp_grant_sweep_total`, `mcp_bearer_validations_total`, `mcp_break_glass_total`, `mcp_output_schema_violations_total`, `mcp_schema_validator_cache_hits_total`, `mcp_schema_validator_cache_misses_total`, `mcp_schema_validator_cache_evictions_total`, `mcp_schema_validator_compile_failures_total`, `mcp_invocation_manifest_fallback_total{approval_authority}`, `mcp_invocation_approval_unknown_refusals_total`, `mcp_response_inspector_blocks_total`, `mcp_response_inspector_redactions_total`, `mcp_tasks_total{status}` | `/metrics` Prometheus endpoint; canonical list in `crates/waygate-telemetry/src/metrics.rs` (every name + label set above appears verbatim in a `register_*_with_registry!` call) | Yes |
+| MEASURE 1 (identify & implement appropriate metrics) | Prometheus counters, histograms, and gauges measure authorization, upstream health, evidence delivery, and invocation behavior. | `/metrics`; [metric semantics and labels](agents/telemetry.md#prometheus-metrics) | Yes |
 | MEASURE 2.1 (trustworthy AI characteristics evaluated) | Per-call audit row records outcome + reason; admin "Activity" view filters by deny / step-up | Activity handlers in `crates/waygate-admin/src/dashboard_activity_page.rs` (search `activity` for routes + templates) | Yes |
 | MEASURE 2.7 (security & resilience) | Required writes and successfully inserted chained-best-effort writes are hash chained and can be checked by the chain walker; every row is protected from ordinary update/delete by the append-only trigger. Best-effort admission is bounded and exposes saturation, shutdown loss, pending work, and payload truncation. A signed bundle protects the bytes selected for export. | Bundle contract: `crates/waygate-storage/src/bundle.rs`; chain reader: `crates/waygate-storage/src/chain_verify.rs`; bounded submission contract: `crates/waygate-evidence/src/audit.rs`; write-path split: `crates/waygate-storage/src/audit.rs`; hash columns: migration `0015_audit_hashchain.sql` | Partial — unchained `record_best_effort` rows are outside the hash chain. Chained-best-effort events may be dropped when their bounded queue is full/closed, on tenant-lock contention, or on another known pre-commit failure or deadline. Only a commit error or commit deadline produces an unknown outcome because the worker cannot prove whether PostgreSQL committed. Bundle format version 1 does not attest chain coverage or prove that the exported slice represents every database row outside its query contract. |
 | MEASURE 2.8 (validity & reliability of AI) | Per-tool behavior drift detection in `crates/waygate-upstream/src/pool/` covers schemas and security metadata, fires `tracing::warn!` + `mcp_tool_drift_total{server}`, and optionally auto-quarantines high-risk or side-effecting tools | `mcp_tool_drift_total{server}` from `/metrics`; quarantine surfaced via tool-list response | Partial — drift emits a chained-best-effort `CatalogDrift` audit row (`EvidenceCategory::CatalogDrift`) in addition to the log + metric; the durable catalog re-approval gate (`CatalogStore::record_drift`) still has no production caller — see CC3.4 |
 | MEASURE 2.11 (third-party AI components valid) | `mcp_servers.signing_pubkey` schema column reserved for per-upstream Ed25519 public-key registration | Migration `migrations/0011_catalog.sql` defines the column | Partial — column-only today; no verification or quarantine code path is wired yet. Behavior drift detection across schemas and security metadata is the only third-party-validity signal in use. |
-| MEASURE 3 (mechanisms for tracking risks) | OTel + Prometheus + per-call audit row; per-tenant audit routing (`tenant_evidence_routing`) sends rows to `webhook` / `ocsf` / `ecs` / `syslog` sinks via the outbox drain (registered in `crates/waygate-server/src/main.rs`) | routing in `crates/waygate-storage/src/routing.rs`; exporters at `crates/waygate-storage/src/{ocsf,ecs,syslog}.rs` + webhook wiring in `main.rs` | Partial — `S3Exporter` is described as future work in the module documentation for `crates/waygate-storage/src/exporter.rs` and is not registered; the four sinks above are the only ones the drain can actually deliver to today |
+| MEASURE 3 (mechanisms for tracking risks) | OTel + Prometheus + per-call audit row; per-tenant audit routing (`tenant_evidence_routing`) sends rows to `webhook` / `ocsf` / `ecs` / `syslog` sinks via the outbox drain (registered in `crates/waygate-server/src/main.rs`) | routing in `crates/waygate-storage/src/routing.rs`; exporters at `crates/waygate-storage/src/{ocsf,ecs,syslog}.rs` + webhook wiring in `main.rs` | Yes — the configured sink must be one of these four supported types |
 | MEASURE 4 (feedback from end-users / operators) | Cedar policies carry `@reason("…")` annotations surfaced in MCP `forbidden` envelope as `data.reasons` so a denied user sees *why* and the operator sees *which rule fired* | `data.reasons` in MCP error JSON; pinned by `crates/waygate-authz/tests/policy_golden.rs` with `reason_contains` assertions on the prod forbid policies | Yes |
 
 ### MANAGE
@@ -248,30 +209,3 @@ observability + access-control choke point.
 | MANAGE 2.4 (continuous monitoring) | Prometheus metrics exported at `/metrics`; OTel spans on hot paths | `crates/waygate-telemetry/src/metrics.rs` | Partial — alert rules and notification webhooks are operator-supplied and belong in the private deployment overlay, not this repository. |
 | MANAGE 3.2 (third-party risks treated) | Per-upstream rate-limit policies (`rate_limit_policies` scope=`server`) isolate a misbehaving upstream from starving others | `crates/waygate-quota/src/store.rs` + `crates/waygate-quota/src/lib.rs` (token-bucket); `rate_limit_policies` table (migration `0025_rate_limits.sql`) | Yes |
 | MANAGE 4 (documented response to identified risks) | Admin dashboard records every mutation as a `category='admin_mutation'` audit row with the actor's `principal_sub`, `principal_email`, `tenant_id` | `SELECT principal_sub, principal_email, action, reason, ts FROM audit_log WHERE category='admin_mutation' ORDER BY ts DESC` | Yes |
-
----
-
-## Maintenance contract
-
-Add or update a row whenever a feature lands that contributes to a
-CC or AI RMF subcategory. The PR that adds the feature should update
-this doc in the same diff. **Every cell that names a code path, audit
-column, env var, or metric is verifiable by `grep`** — AERB PR #168
-round 1 caught the first draft drifting (wrong column names, missing
-metrics, files that don't exist) and the verification habit lives here
-now.
-
-When in doubt, confirm before writing:
-
-- Audit query columns: `migrations/0002_audit_log.sql` +
-  `0006_audit_category.sql`.
-- Outcome / category string values: `crates/waygate-evidence/src/audit.rs`
-  (`AuditOutcome::as_str()`, `EvidenceCategory::as_str()`).
-- Metric names: `crates/waygate-telemetry/src/metrics.rs` (every
-  `register_*_with_registry!` call).
-- Code paths: just `ls` / `grep` before naming them.
-
-This is not a substitute for a real audit. It is a starting point so
-the gateway's compliance posture is **inspectable from a markdown
-file**, instead of being reverse-engineered from the codebase every
-time a buyer asks.

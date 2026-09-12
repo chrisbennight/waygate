@@ -22,10 +22,8 @@
 </div>
 {% endif %}
 
-{# Cedar policy-bundle versions. The inline editor, Validate / Save Draft, and
-   per-row Publish / Rollback live here too. Preview against draft has a
-   backend endpoint (POST /api/v1/policy_bundles/preview_simulate) but its
-   dashboard UI is a deferred follow-up (see dashboard_policy_bundles.rs). #}
+{# Cedar policy-bundle versions, draft editing, publishing, and rollback.
+   Draft simulation is available through POST /api/v1/policy_bundles/preview_simulate. #}
 
 {% if insufficient_scope %}
 <div class="card">

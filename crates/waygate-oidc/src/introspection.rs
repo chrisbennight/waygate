@@ -131,17 +131,8 @@ pub struct IntrospectionConfig {
     /// to the same value as the JWT validator's audience
     /// (`GATEWAY_AUDIENCE`).
     pub expected_audience: String,
-    /// Claim name the gateway reads to populate
-    /// `Principal.tenant`.
-    /// Must match the JWT validator's claim name in
-    /// lockstep so opaque and JWT tokens from the same IdP
-    /// populate the same tenant. The JWT validator
-    /// currently reads the literal `tenant` claim
-    /// (`crates/waygate-oidc/src/validator.rs`), so callers
-    /// should pass `"tenant"` here. If the JWT validator
-    /// grows env-driven claim selection
-    /// (`GATEWAY_TENANT_CLAIM`), this field must track
-    /// it in the same change.
+    /// Claim used to populate `Principal.tenant`. The gateway supplies
+    /// `tenant` to match JWT validation and preserve consistent attribution.
     pub tenant_claim: String,
     /// Ceiling on the positive cache TTL. The effective
     /// TTL is `min(exp - now, max_positive_ttl)` so a
@@ -664,8 +655,7 @@ mod tests {
 
     #[test]
     fn build_principal_uses_configurable_tenant_claim_name() {
-        // Operator sets GATEWAY_TENANT_CLAIM=org; introspection
-        // response carries `org` not `tenant`.
+        // A library caller can select the `org` claim explicitly.
         let mut extra = serde_json::Map::new();
         extra.insert("org".into(), serde_json::json!("acme"));
         let p = build_principal(&cfg("org"), &resp(extra)).unwrap();

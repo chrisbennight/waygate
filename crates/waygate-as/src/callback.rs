@@ -167,7 +167,7 @@ async fn handle(state: &AsState, q: CallbackQuery) -> Result<CallbackOk, Callbac
     //
     // `access_expires_at` carries the *upstream IdP's* access-token
     // expiry, not the gateway code TTL. The refresh-on-demand path
-    // (next slice) consults this column to decide whether to spend a
+    // consults this column to decide whether to spend a
     // refresh token before forwarding the access token to an upstream
     // call.
     let access_expires_at = match token_resp.expires_in {
@@ -278,8 +278,6 @@ async fn handle(state: &AsState, q: CallbackQuery) -> Result<CallbackOk, Callbac
             client_id: &txn.client_id,
             scopes: &consent_scopes,
             // This never sets an expiry — grants live until revoked.
-            // A future per-tenant max-ttl setting may populate this
-            // field.
             expires_at: None,
         })
         .await

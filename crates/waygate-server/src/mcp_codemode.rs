@@ -257,10 +257,7 @@ pub struct CodeModeTools {
 impl CodeModeTools {
     fn with_call_timeout(&self, tool: &str, arguments: &mut JsonObject) -> Result<Self, McpError> {
         let mut narrowed = self.clone();
-        if matches!(
-            tool,
-            "execute" | "start" | "mutate" | "resume" | "start_resume"
-        ) {
+        if matches!(tool, "execute" | "start" | "resume" | "start_resume") {
             if let Some(value) = arguments.remove("timeout_seconds") {
                 let timeout: ExecutionTimeout =
                     serde_json::from_value(serde_json::json!({"timeout_seconds": value})).map_err(
@@ -1000,52 +997,6 @@ impl CodeModeTools {
             None => {
                 self.execute_ephemeral(principal, source, input, profile, permits)
                     .await
-            }
-        }
-    }
-
-    async fn mutate(
-        &self,
-        principal: &Principal,
-        params: ExecuteParams,
-    ) -> Result<CallToolResult, McpError> {
-        let (selector, retain_for_seconds, input) = params.into_parts(true)?;
-        let remote_skill_script = matches!(&selector, SourceSelector::SkillScript(..));
-        let mut permits = if remote_skill_script {
-            self.check_execution_quota(principal, "mutate").await?;
-            Some(self.execution_capacity.acquire_execution(principal)?)
-        } else {
-            None
-        };
-        let source = self
-            .resolve_source(principal, selector, retain_for_seconds)
-            .await?;
-        if !remote_skill_script {
-            self.check_execution_quota(principal, "mutate").await?;
-            permits = Some(self.execution_capacity.acquire_execution(principal)?);
-        }
-        let permits = permits.expect("source admission acquires execution capacity");
-        match self.execution_store.as_ref() {
-            Some(store) => {
-                self.execute_durable(
-                    store,
-                    principal,
-                    source,
-                    input,
-                    CodeExecutionProfile::Direct,
-                    permits,
-                )
-                .await
-            }
-            None => {
-                self.execute_ephemeral(
-                    principal,
-                    source,
-                    input,
-                    CodeExecutionProfile::Direct,
-                    permits,
-                )
-                .await
             }
         }
     }
@@ -3680,7 +3631,6 @@ impl BuiltinTools for CodeModeTools {
                     tool.name.as_ref(),
                     "codemode.execute"
                         | "codemode.resume"
-                        | "codemode.mutate"
                         | "codemode.result"
                         | "codemode.artifacts"
                         | "codemode.artifact"
@@ -3722,7 +3672,6 @@ impl BuiltinTools for CodeModeTools {
             tool,
             "execute"
                 | "resume"
-                | "mutate"
                 | "result"
                 | "artifacts"
                 | "artifact"
@@ -3792,10 +3741,6 @@ impl BuiltinTools for CodeModeTools {
                 this.resume(principal, parse_args(&arguments, "resume")?)
                     .await
             }
-            "mutate" => {
-                this.mutate(principal, parse_args(&arguments, "mutate")?)
-                    .await
-            }
             "result" => {
                 self.stored_result(principal, parse_args(&arguments, "result")?)
                     .await
@@ -3832,8 +3777,7 @@ impl BuiltinTools for CodeModeTools {
                 format!(
                     "unknown {NAMESPACE} tool: {other}; use `{NAMESPACE}.search`, \
                      `{NAMESPACE}.describe`, `{NAMESPACE}.execute`, or \
-                     `{NAMESPACE}.resume`; direct-authority execution also uses \
-                     `{NAMESPACE}.mutate`; persisted executions also expose \
+                     `{NAMESPACE}.resume`; persisted executions also expose \
                      `{NAMESPACE}.result`, `{NAMESPACE}.artifacts`, \
                      `{NAMESPACE}.artifact`, `{NAMESPACE}.start`, \
                      `{NAMESPACE}.start_resume`, `{NAMESPACE}.status`, \
@@ -5687,7 +5631,7 @@ fn parse_args<T: DeserializeOwned>(arguments: &JsonObject, action: &str) -> Resu
         let example = match action {
             "search" => r#"{"query":"email","limit":20}"#,
             "describe" => r#"{"name":"email.read"}"#,
-            "execute" | "mutate" | "start" => {
+            "execute" | "start" => {
                 r#"{"source":"return connectors.email.read({value: \"inbox\"});","retain_for_seconds":3600}"#
             }
             "resume" => r#"{"execution_id":"019c...","input":{"choice":"west"}}"#,
@@ -5891,51 +5835,7 @@ struct DescribeParams {
 // `anyOf`/`oneOf`/`allOf` is valid JSON Schema and valid MCP, but the
 // tool-calling APIs that consume `tools/list` refuse such a tool definition, so
 // a published union costs the tool its place in the client's catalog entirely.
-// `select_source` enforces the exclusion the union used to express, and reports
-// which fields conflicted.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ExecuteParams {
-    /// JavaScript function body. Use synchronous
-    /// `connectors[server][operation]({...})` calls and return a
-    /// JSON-compatible value. Supply exactly one source field. The source limit
-    /// counts UTF-8 bytes; read `codemode.limits` for the effective budget.
-    #[schemars(length(min = 1, max = limits().source_bytes), regex(pattern = r"\S"))]
-    source: Option<String>,
-    /// Owner-scoped `mcp-file://gateway/...` URI returned after uploading a
-    /// UTF-8 JavaScript source file with `gateway-files.prepare_upload`.
-    /// Supply exactly one source field.
-    #[schemars(length(min = 1, max = MAX_SELECTOR_LENGTH))]
-    source_file: Option<String>,
-    /// Lowercase SHA-256 returned by an earlier retained Code Mode source
-    /// submission. The artifact must still be live and owned by this caller.
-    /// Supply exactly one source field.
-    #[schemars(length(equal = 64), regex(pattern = r"^[0-9a-f]{64}$"))]
-    source_sha256: Option<String>,
-    /// Exact `skill://...` URI of a JavaScript file available to this tenant.
-    /// The gateway fetches its bytes directly, without putting source into the
-    /// client's context. No compatibility metadata or separate execution grant
-    /// is required. Uses the caller's ordinary Code Mode and tool permissions.
-    /// Example: skill://homelab/demo/scripts/helper.js. Supply exactly one source field.
-    #[schemars(length(min = 1, max = MAX_SELECTOR_LENGTH))]
-    skill_script: Option<String>,
-    /// Optional catalog revision returned by gateway-skills.load. Valid only
-    /// with skill_script. Pins the helper to the loaded workflow revision;
-    /// unavailable or unapproved revisions fail rather than using newer bytes.
-    /// Omit to select the currently approved serving revision.
-    #[schemars(length(equal = 71), regex(pattern = r"^sha256:[0-9a-f]{64}$"))]
-    skill_revision: Option<String>,
-    /// Keep these exact UTF-8 source bytes for private reuse by SHA-256 for
-    /// this many seconds. Omit to execute without creating a reusable source.
-    /// Valid with inline, uploaded, or skill source bytes.
-    #[schemars(range(min = MIN_SOURCE_RETENTION_SECONDS, max = MAX_SOURCE_RETENTION_SECONDS))]
-    retain_for_seconds: Option<u32>,
-    /// Any JSON-compatible value the program reads as `execution.input`. Put
-    /// arguments here rather than editing them into the source: a program is
-    /// identified by its exact bytes, so an edited-in value makes a different
-    /// program that cannot reuse a retained source.
-    input: Option<Value>,
-}
+// `select_source` enforces mutual exclusion and reports conflicting fields.
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -6062,28 +5962,6 @@ fn admit_program_input(input: Option<Value>) -> Result<Value, McpError> {
         ));
     }
     Ok(input)
-}
-
-impl ExecuteParams {
-    fn into_parts(
-        self,
-        include_skill_script_in_guidance: bool,
-    ) -> Result<(SourceSelector, Option<u32>, Value), McpError> {
-        let (selector, retain_for_seconds) = select_source(
-            self.source,
-            self.source_file,
-            self.source_sha256,
-            self.skill_script,
-            self.skill_revision,
-            self.retain_for_seconds,
-            include_skill_script_in_guidance,
-        )?;
-        Ok((
-            selector,
-            retain_for_seconds,
-            admit_program_input(self.input)?,
-        ))
-    }
 }
 
 impl StartParams {
@@ -7118,19 +6996,6 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         .with_output_schema::<ExecuteResponse>()
         .annotate(ToolAnnotations::new().read_only(false).destructive(true)),
         Tool::new(
-            format!("{NAMESPACE}.mutate"),
-            "Requires `mcp:invoke`. Compatibility alias for `codemode.execute` using inline, \
-             uploaded-file, retained-hash, or skill-script JavaScript source. It requires no result-storage \
-             setting and carries no separate mutation admission policy: every connector call \
-             re-enters the same direct authorization, approval, validation, quota, inspection, \
-             and audit path available to this client. There is no Code Mode-only effect count or \
-             connector-call ceiling. Skill scripts use the same caller authority.",
-            source_input_schema::<ExecuteParams>(),
-        )
-        .with_title("Execute Code Mode JavaScript with direct authority")
-        .with_output_schema::<ExecuteResponse>()
-        .annotate(ToolAnnotations::new().read_only(false).destructive(true)),
-        Tool::new(
             format!("{NAMESPACE}.resume"),
             "Requires `mcp:invoke`. Resume one durable Code Mode execution that returned \
              `waiting_for_resume`. Pass the original `execution_id` and any JSON-compatible \
@@ -7335,7 +7200,7 @@ pub(crate) fn surface_catalog() -> BuiltinCatalog {
                 .strip_prefix(&prefix)
                 .unwrap_or(tool.name.as_ref())
                 .to_owned();
-            let effect_capable = matches!(name.as_str(), "execute" | "mutate" | "start");
+            let effect_capable = matches!(name.as_str(), "execute" | "start");
             // Cancellation changes durable execution state and can stop work
             // already in flight, so it is not side-effect free. It is not an
             // approval-bound external effect either, so it does not carry the
@@ -12084,7 +11949,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_and_mutate_visibility_and_dispatch_require_invoke_scope() {
+    async fn execute_visibility_and_dispatch_requires_invoke_scope() {
         let catalog: SharedCatalog = Arc::new(FakeCatalog::with_tools(&[("email", "read", false)]));
         let authz: SharedAuthz = Arc::new(SelectiveAuthz);
         let execution_store: SharedExecutionStore = Arc::new(RecordingExecutionStore::default());
@@ -12109,15 +11974,6 @@ mod tests {
             error.data.as_ref().unwrap()["required_scope"],
             Scope::McpInvoke.as_str()
         );
-        let error = server
-            .dispatch_tool_call(call("codemode.mutate", json!({})), Some(&reader))
-            .await
-            .expect_err("discovery-only scope must not execute mutations");
-        assert_eq!(
-            error.data.as_ref().unwrap()["required_scope"],
-            Scope::McpInvoke.as_str()
-        );
-
         let mut invoker = reader;
         invoker.scopes.push(Scope::McpInvoke.as_str().to_owned());
         let visible: Vec<String> = server
@@ -12127,9 +11983,8 @@ mod tests {
             .map(|tool| tool.name.to_string())
             .collect();
         assert!(visible.contains(&"codemode.execute".to_owned()));
-        assert!(visible.contains(&"codemode.mutate".to_owned()));
         let mutation_error = server
-            .dispatch_tool_call(call("codemode.mutate", json!({})), Some(&invoker))
+            .dispatch_tool_call(call("codemode.execute", json!({})), Some(&invoker))
             .await
             .expect_err("real mutation dispatch validates its source after authorization");
         assert_eq!(
@@ -12471,7 +12326,7 @@ mod tests {
         });
         assert_eq!(structured(&sample)["sdk_contract_version"], "4");
         assert_eq!(structured(&sample)["runner_contract_version"], "7");
-        for name in ["codemode.execute", "codemode.mutate", "codemode.resume"] {
+        for name in ["codemode.execute", "codemode.resume"] {
             let definition = tool_defs()
                 .into_iter()
                 .find(|tool| tool.name == name)
@@ -12506,7 +12361,7 @@ mod tests {
             match tool.name.as_str() {
                 // These operations can reach whatever direct tool the caller
                 // is authorized to invoke, including external effects.
-                "execute" | "mutate" | "start" => {
+                "execute" | "start" => {
                     assert!(tool.side_effects);
                     assert_eq!(tool.risk, RiskTier::High);
                 }
@@ -12599,16 +12454,6 @@ mod tests {
                 .expect("read-only source tool");
             assert!(definition.input_schema["properties"]["skill_script"].is_object());
         }
-
-        let mutation = definitions
-            .iter()
-            .find(|tool| tool.name == "codemode.mutate")
-            .expect("mutation tool");
-        assert!(mutation.input_schema["properties"]["skill_script"].is_object());
-        let guidance = mutation.input_schema["properties"]["skill_script"]["description"]
-            .as_str()
-            .unwrap();
-        assert!(guidance.contains("No compatibility metadata or separate execution grant"));
     }
 
     #[test]
@@ -12764,22 +12609,22 @@ mod tests {
         assert_eq!(loads.load(Ordering::SeqCst), 0);
 
         for revision in [Some(current.revision()), None] {
-            let params: ExecuteParams = serde_json::from_value(json!({
+            let params: StartParams = serde_json::from_value(json!({
                 "skill_script": uri, "skill_revision": revision,
             }))
             .unwrap();
-            let (selector, retention, _) = params.into_parts(true).unwrap();
+            let (selector, retention, _, _) = params.into_parts().unwrap();
             let source = tools
                 .resolve_source(&reader(), selector, retention)
                 .await
                 .unwrap();
             assert_eq!(source.source, "return 2;");
         }
-        let unrelated: ExecuteParams = serde_json::from_value(json!({
+        let unrelated: StartParams = serde_json::from_value(json!({
             "source": "return 2;", "skill_revision": current.revision(),
         }))
         .unwrap();
-        assert!(unrelated.into_parts(true).is_err());
+        assert!(unrelated.into_parts().is_err());
     }
 
     #[tokio::test]
@@ -12922,7 +12767,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mutate_refuses_skill_downloads_when_quota_or_capacity_is_exhausted() {
+    async fn execute_refuses_skill_downloads_when_quota_or_capacity_is_exhausted() {
         for refusal in [
             "rate_limited",
             "tenant_execution_capacity",
@@ -12955,13 +12800,13 @@ mod tests {
             )))
             .with_execution_capacity(capacity);
             if refusal == "rate_limited" {
-                tools = tools.with_quota(Some(Arc::new(DenyExecutionQuota("mutate"))));
+                tools = tools.with_quota(Some(Arc::new(DenyExecutionQuota("execute"))));
             }
             let params = serde_json::from_value(json!({
                 "skill_script": "skill://homelab/pr-and-monitor/scripts/pr-wait.js"
             }))
             .unwrap();
-            let error = tools.mutate(&reader(), params).await.unwrap_err();
+            let error = tools.execute(&reader(), params).await.unwrap_err();
             assert_eq!(error.data.as_ref().unwrap()["error"], refusal);
             assert_eq!(loads.load(Ordering::SeqCst), 0, "{refusal}");
         }
@@ -12995,11 +12840,11 @@ mod tests {
             .with_reviewed_skills(Some(
                 waygate_test_support::skills::reviewed_catalog(catalog, reviews),
             ));
-            let params: ExecuteParams = serde_json::from_value(json!({
+            let params: StartParams = serde_json::from_value(json!({
                 "skill_script": uri, "input": {"issue": 42}, "retain_for_seconds": 3600
             }))
             .unwrap();
-            let (selector, retention, input) = params.into_parts(true).unwrap();
+            let (selector, retention, _, input) = params.into_parts().unwrap();
             let resolved = tools
                 .resolve_source(&reader(), selector, retention)
                 .await
@@ -13682,21 +13527,17 @@ mod tests {
                     "codemode.resume" | "codemode.resume_mutation"
                 )
             }));
-        assert!(disabled
-            .list_tools(Some(&principal))
-            .await
-            .iter()
-            .any(|tool| tool.name == "codemode.mutate"));
         let mutation_error = disabled
-            .mutate(
+            .execute(
                 &principal,
-                ExecuteParams {
+                StartParams {
                     source: None,
                     source_file: None,
                     source_sha256: None,
                     skill_script: None,
                     skill_revision: None,
                     retain_for_seconds: None,
+                    repeat_after: None,
                     input: None,
                 },
             )
@@ -13738,9 +13579,6 @@ mod tests {
         // the capability level (supports_tasks above) and keyed to execute.
         assert_eq!(allowed.task_tool(), Some("execute"));
         assert_eq!(allowed.cancel_task_tool(), Some("cancel"));
-        assert!(allowed_tools
-            .iter()
-            .any(|tool| tool.name == "codemode.mutate"));
         assert!(!allowed_tools
             .iter()
             .any(|tool| tool.name == "codemode.resume_mutation"));

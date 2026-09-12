@@ -2,28 +2,10 @@
 //! sqlx version (the leading integer prefix). Test-only — it exists purely to
 //! turn a duplicate version into a red `cargo test` instead of a prod boot.
 //!
-//! Background — the 2026-06-13 incident. Two PRs developed in parallel
-//! worktrees each added a migration numbered `0042`; neither branch could see
-//! the other's file, so a branch-local check would have passed in both.
-//! `sqlx::migrate!` embeds duplicate versions without complaint, so it slipped
-//! past both PRs' `cargo check`. At runtime the second `0042` collided on the
-//! `_sqlx_migrations` version key and the gateway crash-looped on boot.
-//! Renaming one to `0044` afterward then left every already-deployed DB
-//! recording the *old* file at version 42, so the next deploy hit
-//! `migration 42 was previously applied but has been modified`.
-//!
-//! This module reads the SAME directory `sqlx::migrate!("../../migrations")`
-//! embeds (see `audit.rs`) and fails if any version maps to more than one
-//! file. Because it runs under `cargo test --workspace`, a duplicate is caught
-//! in the image workflow's test job before either PR image verification or
-//! main-branch publication can run.
-//!
-//! Detection, not prevention: two parallel branches each still pass in
-//! isolation. The companion control is the repo's "require branch up-to-date
-//! with main before merge" rule (see CLAUDE.md), which forces the second
-//! merger to pull in the other branch's file first — at which point this test
-//! trips in their CI and they renumber. A pure-shell mirror runs even earlier
-//! in CI: `scripts/check-migrations.sh`.
+//! The test reads the directory embedded by `sqlx::migrate!` and rejects
+//! duplicate versions. Parallel branches can each pass in isolation, so
+//! re-check against the latest main before merging a new migration.
+//! `scripts/check-migrations.sh` provides the same check without a compiler.
 
 use std::collections::BTreeMap;
 
@@ -105,8 +87,7 @@ fn migration_versions_are_unique() {
     assert!(
         dups.is_empty(),
         "duplicate migration version(s) in migrations/ — sqlx collides on the \
-         _sqlx_migrations version key at boot (see the 2026-06-13 duplicate-0042 \
-         incident). Renumber so each version maps to one file:\n{}",
+         _sqlx_migrations version key at boot. Renumber so each version maps to one file:\n{}",
         dups.iter()
             .map(|(version, files)| format!("  {version:04}: {}", files.join(", ")))
             .collect::<Vec<_>>()

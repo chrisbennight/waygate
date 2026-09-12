@@ -26,15 +26,9 @@
 //!   Inbound verification (this file) and outbound minting
 //!   (`waygate_upstream::pool::session_identity`) are
 //!   separate pathways.
-//! - Trust-tier-driven principal shape: today both `Full` and
-//!   `Restricted` peers produce identical principals (sub +
-//!   issuer + tenant). Restricted-tier wrapping
-//!   (`peer:<peer_id>`-style sub rewrite, suppression of the
-//!   original user identity) lands later. The migration's
-//!   `trust_tier` column stays advisory for now and the
-//!   validator records it on the principal-attribution
-//!   tracing field so operators can see which tier accepted
-//!   the call.
+//!
+//! Peer identities retain the asserted subject and use the locally assigned tenant.
+//! Stored trust labels do not change authorization; Cedar policies govern tool access.
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

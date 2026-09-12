@@ -1,27 +1,6 @@
-# Inference Plane — Design
+# Inference reference
 
-> **Status:** implemented (living design doc). The core inference plane —
-> `/v1/chat/completions` **and** `/v1/responses` ingress (unary + streaming), the
-> canonical request **and** response models, all four provider outbound adapters,
-> translation (incl. tool calling and structured output), credentials,
-> routing/failover, quota/budgets, and caching — is shipped. Remaining follow-ups
-> are called out inline and in §15.
-This document extends the gateway's charter from an **MCP tool gateway** to a **unified
-control plane for MCP tool calls and LLM inference**. Both become *invocations* through the
-same pipeline, under the same identity, Cedar policy, quota/budget, audit, and telemetry.
-
----
-
-## 1. Purpose & charter
-
-The gateway already is the single enforcement point in front of upstream MCP servers
-(OIDC + Cedar + RBAC + tenants + quota + audit + admin UI + OTel). The inference plane adds
-LLM providers as a second class of upstream, reached through the **same** governance core.
-The only inference-specific surface is: OpenAI-shaped HTTP ingress, streaming SSE egress,
-provider translation, subscription-OAuth credential handling, and model routing — confined
-to a small set of `waygate-llm-*` crates. Everything else is reuse.
-
-**In scope (v1):**
+## Supported behavior
 
 - Client surfaces: `POST /v1/chat/completions` and `POST /v1/responses` are both mounted
   today, **unary and streaming**. The Responses route parses to the same canonical
@@ -34,7 +13,7 @@ to a small set of `waygate-llm-*` crates. Everything else is reuse.
   text + function calls; reasoning is preserved only for the native-protocol
   (OpenAI-Responses) upstream. **Exception — the ChatGPT/Codex subscription backend is
   streaming-only:** a non-streaming call to a Codex-backed model is rejected fail-closed
-  (`use stream=true`) because that backend streams-only and this slice does not aggregate the
+  (`use stream=true`) because that backend streams-only and the gateway does not aggregate the
   upstream SSE back into a unary body (§13.1). Every other route serves both transports.
 - **Images surface:** `POST /v1/images/generations` and `POST /v1/images/edits`
   serve explicitly configured Codex image models through the same model gates.
@@ -48,9 +27,9 @@ to a small set of `waygate-llm-*` crates. Everything else is reuse.
   route, or a chat model on `/v1/embeddings`) with a clean client error. Only the
   OpenAI-compatible `/embeddings` shape is wired (covering OpenAI, OpenRouter, Together,
   Voyage, Mistral, Jina, Cohere-compat, and self-hosted TEI/vLLM/Ollama); native non-OpenAI
-  embed protocols (Gemini `:embedContent`, Cohere `/v1/embed`) remain deferred follow-ups.
+  embed protocols (Gemini `:embedContent`, Cohere `/v1/embed`) are not supported.
   Embeddings *discovery* is wired for **OpenRouter** (its dedicated `/embeddings/models`
-  listing); auto-discovery for the other providers stays deferred (§7.1).
+  listing); auto-discovery for the other providers is not supported (§7.1).
 - Four providers: **OpenAI** (ChatGPT/Codex subscription → Responses API), **Google Gemini**
   (Code Assist subscription → `generateContent`), **Anthropic** (first-party `x-api-key` →
   Messages API), **OpenRouter** (API key → OpenAI-compatible Chat Completions).
@@ -66,7 +45,7 @@ inference-specific SAML/SSO or multi-region HA.
 
 ## 2. Invariants (load-bearing rules)
 
-These are the rules the implementation may not violate. Tests assert them; the AERB checks them.
+These are the rules the implementation may not violate. Tests assert them.
 
 - **I1 — One enforcement service.** Every LLM call enters the existing
   `DefaultInvocationService` and reuses its authorization, profile,
@@ -87,7 +66,7 @@ These are the rules the implementation may not violate. Tests assert them; the A
   `LLM_CRED_*` values injected by Infisical, refreshes OAuth access tokens **in-process and
   in-memory**, and never mints a credential nor writes back to Infisical or to disk. The
   `waygate-llm-credentials` crate itself holds no Infisical client. **Scoped read exception
-  (PR-C):** for credentials kept fresh by an out-of-band refresher (`ai-credential-refresh`),
+:** for credentials kept fresh by an out-of-band refresher (`ai-credential-refresh`),
   `waygate-server` runs a **read-only** Infisical re-read poller (scoped service token, single
   secret path) that re-fetches the refresher's *current access token* into the in-memory store.
   Those credentials are **not** refreshed in-process (their seed refresh token rotates away),
@@ -137,19 +116,18 @@ InvocationResponse::Stream → axum Sse (text/event-stream) → OpenAI-shaped fr
    (stream:false → InvocationResponse::UnaryValue(json) → single JSON body to client)
 ```
 
-New crates: `waygate-llm-translate`, `waygate-llm-providers`, `waygate-llm-credentials`,
-`waygate-llm-dispatch`. Reused crates and the full reuse/net-new table are in the plan (§2).
+Provider-specific crates: `waygate-llm-translate`, `waygate-llm-providers`, `waygate-llm-credentials`,
+`waygate-llm-dispatch`. Shared components are listed in §2.
 
 The unification is at the **pipeline/governance** layer; ingress and egress are OpenAI-shaped
 protocol adapters (not MCP JSON-RPC). The one structural pipeline change is a streaming
-response type (§5 of the plan / §5 below).
+response type (§5).
 
 ---
 
 ## 4. Data contracts
 
-The data model is the heart of this design — most provider divergence and most of the
-observability/budget value lives here.
+The shared data model represents provider differences, usage, and cost.
 
 ### 4.1 Canonical request (`LlmRequest`)
 
@@ -323,10 +301,8 @@ agree — the same alignment the unary path enforces.
 
 The response path mirrors the request path: every provider's native reply folds into one
 typed `CanonicalResponse` (modelled on the OpenAI Responses *superset* — the most expressive
-client surface), and each client surface renders *from* it. This replaces an earlier shape
-where the four `*_to_openai_chat` translators emitted raw chat *wire* JSON, making chat an
-accidental, lossy response hub (a Responses reply was reconstructed
-provider→**chat**→Responses, unable to carry reasoning / annotations / built-in-tool items).
+client surface), and each client surface renders from it. This preserves reasoning,
+annotations, and built-in-tool items without routing them through chat-only JSON.
 
 ```rust
 struct CanonicalResponse {
@@ -480,7 +456,7 @@ token class only.
 
 ---
 
-## 6. Credentials (design)
+## 6. Credentials
 
 **Injection contract.** Infisical injects each credential into the container as an env var (or
 mounted file). Naming is semantic — `LLM_CRED_<PROVIDER>_<LABEL>`, where `<LABEL>` names the
@@ -513,14 +489,14 @@ that **rotate** their refresh token single-use (the subscription harness — Cod
 kept fresh by `ai-credential-refresh`) can't be refreshed in-process: the seed refresh token
 rotates away within minutes. Those credentials are instead marked **externally-refreshed** —
 the gateway serves the current access token and never refreshes it itself — and the scoped
-read-only re-read poller (the I4 exception, PR-C) pulls the refresher's *current* access token
+read-only re-read poller (the I4 exception) pulls the refresher's *current* access token
 from Infisical on a cadence (`GATEWAY_LLM_CRED_RELOAD*`). An externally-refreshed credential
 whose token lapses before the next re-read surfaces an `awaiting re-read` error and a
 "failing / stale" dashboard state (§10) rather than attempting a doomed in-process refresh.
 
 ---
 
-## 7. Routing & failover (design)
+## 7. Routing & failover
 
 - **Model alias → ordered target groups**, each a list of `(provider, credential_label)`
   targets (e.g. a "subscription" group falling back to an "api-key" group).
@@ -619,7 +595,7 @@ two fields at parse time, and is mutually exclusive with them.
   touches a `config` pin (the upsert's provenance gate), never clobbers operator
   costing (cost columns are COALESCE-filled, NULL-only, currency-consistent), and
   never moves `enabled`/`risk` (discovered rows take the schema-default `risk`,
-  now `low` per migration 0057 — an omitted risk defaults low).
+  `low` when omitted).
   A config pin that reclaims a previously-discovered alias drops the now-stale
   discovery pricing only when it re-routes to a different `(provider,
   upstream_model)`.
@@ -681,11 +657,11 @@ two fields at parse time, and is mutually exclusive with them.
   no dedicated embeddings listing (OpenAI-direct) cannot be auto-classified, so their
   embeddings models stay configured via env pins (`kind: embeddings`). Gemini's
   `models.list` *does* flag embeddings (`supportedGenerationMethods ∋ embedContent`),
-  but its discovery adapter is unwired — a deferred follow-up (§15).
+  but its discovery adapter is not supported (§15).
 
 ---
 
-## 8. Quota & budgets (design)
+## 8. Quota & budgets
 
 Formalizes I3. Dimensions: requests, `input_tokens`, `output_tokens`, `cached_read_tokens`
 (cost-weighted), and `cost`. Scopes: principal, tenant, model (and combinations). Windows:
@@ -704,7 +680,7 @@ rolling/daily/weekly/monthly. Cost weighting comes from the `llm_models` costing
 
 ---
 
-## 9. Caching (design)
+## 9. Caching
 
 - **Key:** BLAKE3 over the canonical request **plus the principal** — exact-match cache
   entries are **per-principal scoped**, so one user's completion is never served to another
@@ -715,7 +691,7 @@ rolling/daily/weekly/monthly. Cost weighting comes from the `llm_models` costing
   (system-level; default off, since this is the one place the gateway stores response *content*)
   AND a per-model `cache_ttl_ms` (the per-alias opt-in + the entry's TTL). Either unset ⇒ the
   model is never cached. (Per-request no-store flag and a `temperature == 0` default-gate are
-  deferred.)
+  not supported.)
 - **Streaming:** on miss, tee the assembled completion into the cache as it streams; on hit,
   replay as a synthetic SSE stream (client behaviour identical). A cache hit still produces an
   `InferenceRecord` (`gateway_cache_hit = true`, zero upstream tokens/cost).
@@ -730,12 +706,11 @@ rolling/daily/weekly/monthly. Cost weighting comes from the `llm_models` costing
 
 ---
 
-## 10. Observability & dashboard (design)
+## 10. Observability & dashboard
 
 - **OTel GenAI semantic conventions** emitted from the `InferenceRecord`: `gen_ai.request.model`
   (requested) and the served model, `gen_ai.usage.input_tokens` / `output_tokens`, cached and
-  reasoning tokens, cost, TTFT, finish reason, provider. This replaces `openaiproxy`'s ad-hoc
-  metric names.
+  reasoning tokens, cost, TTFT, finish reason, and provider.
 - **Audit:** `LlmCompletion` pre-call intent uses the chained/outbox-capable required path only
   when fail-closed mode is active. Final LLM outcomes use chained best effort and can be
   dropped on contention or storage failure without failing the response. Records carry
@@ -750,7 +725,7 @@ rolling/daily/weekly/monthly. Cost weighting comes from the `llm_models` costing
 
 ---
 
-## 11. Authorization (Cedar) design
+## 11. Authorization (Cedar)
 
 Models are Cedar resources (via the catalog view, I7). Policies gate per-model by
 scope/role/tenant via a `permit` on a group. Models are **not** step-up-gated:
@@ -762,7 +737,7 @@ examples live under `crates/waygate-authz/tests/fixtures/policies`.
 
 ---
 
-## 12. Persistence (schema sketch)
+## 12. Persistence
 
 Postgres stores the inference configuration and usage records:
 
@@ -841,8 +816,8 @@ strict about the request *body* and rejects a generic Responses body. A Codex ro
 `finalize_codex_responses_body`, mirroring the Codex CLI's own request shape:
 
 - **Streaming-only.** A non-streaming (`stream:false`) call is rejected **before dispatch**
-  with a clear, non-retryable error (`use stream=true`) — the backend streams-only and this
-  slice does not aggregate the upstream SSE back into a unary body. The finalizer also forces
+  with a clear, non-retryable error (`use stream=true`) — the backend streams-only and the gateway
+  does not aggregate the upstream SSE back into a unary body. The finalizer also forces
   `stream:true` on the body it sends.
 - **Stateless.** It forces `store:false` and **removes** `previous_response_id` (the
   subscription backend has no server-side store to honour either against), and requests
@@ -884,13 +859,11 @@ written (§14).
   not a Responses upstream (there is no store to resolve it against). Note the gate runs
   against the primary route only — a model whose **fallbacks** (§7) cross to a non-Responses
   protocol can still fail over to one, where the id is dropped and continuity is best-effort;
-  configure Responses aliases with Responses-only fallbacks (tightening the gate to every
-  fallback target is tracked in §15). `store` is **forwarded to the upstream**, so
+  configure Responses aliases with Responses-only fallbacks (§15). `store` is **forwarded to the upstream**, so
   `store:false` stops the *provider* from persisting the response. **Caveat:** this does
   **not** suppress the gateway's own opt-in exact-match cache (§9) — when caching is enabled
   for a model (the system flag *and* a per-model TTL), a `store:false` request's completion
-  can still be persisted in that cache; honouring `store:false` there (the per-request
-  no-store flag) is **deferred** (§9, §15). This forwarding describes the **standard**
+  can still be persisted in that cache (§9, §15). This forwarding describes the **standard**
   api-key OpenAI Responses upstream; the **ChatGPT/Codex subscription** backend is
   stateless-by-design and overrides it — its finalizer (`finalize_codex_responses_body`)
   forces `store:false` and **strips** `previous_response_id` (§13.1), because the subscription
@@ -907,48 +880,18 @@ written (§14).
 
 ---
 
-## 15. Open items
+## 15. Current limitations
 
-- **LLM egress inspection and output validation.** Wire the generic governance stages or
-  explicit LLM equivalents before claiming DLP or catalog-schema coverage for inference.
-  Streaming inspection needs bounded cross-chunk buffering and a defined post-first-byte
-  failure envelope.
-- **Budget enforcement durability.** Usage recording is best-effort and there is no
-  pre-dispatch reservation, so the current ledger cannot guarantee a one-request overrun
-  bound. Decide whether usage persistence or reservation must fail closed for configured
-  budgets.
-- Whether cost-based budgets should hard-block or warn-then-block at the window boundary
-  (default: block once the recorded ledger reaches the limit; I3 documents the absence of a
-  hard overrun bound).
-- **Embeddings follow-ups (§4.7).** Two remaining deferrals from the OpenAI-compatible
-  embeddings slice (the per-principal cache is now wired, §9): (a) **native non-OpenAI embed
-  protocols** — Gemini `:embedContent`, Cohere `/v1/embed` — behind the `EmbeddingsProtocol`
-  enum (the embeddings analog of adding Anthropic/Gemini to the chat path); (b)
-  **embeddings discovery for the remaining providers** (§7.1) — OpenRouter is wired (its
-  dedicated `/embeddings/models` listing); Gemini (`supportedGenerationMethods ∋ embedContent`)
-  and OpenAI-direct (id-prefix / operator allow-list, since `/v1/models` does not flag
-  modality) stay operator-pinned until their adapters land.
-- **Discovery dashboard visibility** — the read-only `/llm_models` page does not yet
-  surface a model's `source` (`config` vs `discovered`) or `present_upstream`
-  (soft-disabled) state; an operator can only see those by querying the DB. A
-  follow-up adds badges (§7.1).
-- **More discovery adapters** — Gemini OAuth (provider-specific internal endpoint,
-  unwired until verifiable against the real credential). OpenRouter (api key) and
-  OpenAI Codex (subscription OAuth) are wired; Anthropic (first-party `x-api-key`)
-  has an `x-api-key` `/v1/models` listing endpoint but its adapter is unwired, so it
-  stays operator-pinned (§7.1).
-- **`previous_response_id` fallback gate** — `check_provider_support` runs against the
-  primary route only, so a Responses alias whose §7 fallbacks cross to a non-Responses
-  protocol can fail over to a route that cannot honour `previous_response_id` (the id is
-  dropped, continuity lost). A follow-up should re-check the capability per fallback target
-  (or refuse to register a Responses alias with cross-protocol fallbacks) so the gate's
-  guarantee holds across failover, not just on the primary (§14).
-- **Per-request `store:false` vs. the gateway cache** — `store:false` is forwarded upstream
-  but does **not** suppress the gateway's opt-in exact-match cache (§9): a client's
-  no-store completion can still be persisted in that cache when caching is enabled for the
-  model. A follow-up should make the cache consult `LlmRequest.store` (skip the tee/store on
-  `store:false`) so the per-request opt-out is honoured end-to-end, not only upstream-ward
-  (the per-request no-store flag already noted as deferred in §9).
+- Inference does not provide general DLP or catalog-schema output validation.
+- Usage is recorded after calls without pre-dispatch reservation, so recorded
+  budgets do not provide a hard concurrent spending cap.
+- Native Gemini and Cohere embedding protocols are not supported. Embedding
+  auto-discovery is available for OpenRouter; other models require configuration.
+- The discovery dashboard does not expose every model-source or presence field.
+- Cross-protocol fallback routes cannot preserve Responses conversation IDs.
+- An upstream `store:false` request does not disable the gateway's separately
+  configured exact-match cache. Keep that cache disabled when local persistence
+  is unwanted.
 
 **Design constraints:**
 

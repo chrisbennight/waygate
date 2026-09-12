@@ -16,33 +16,36 @@ if [ "$actual_version" != "cargo-about $required_version" ]; then
     exit 1
 fi
 
-output_file="$(mktemp)"
-trap 'rm -f "$output_file"' EXIT
+case "${1:-}" in
+    '') check=0 ;;
+    --check) check=1 ;;
+    *) echo 'Usage: generate-rust-licenses.sh [--check]' >&2; exit 2 ;;
+esac
+test "$#" -le 1 || exit 2
+output_dir="$(mktemp -d)"
+trap 'rm -rf "$output_dir"' EXIT
+output_file="$output_dir/raw.md"
 
 cargo-about generate \
     --workspace \
     --frozen \
     --fail \
     --output-file "$output_file" \
-    about.hbs
+    --config scripts/licenses/about.toml \
+    scripts/licenses/about.hbs
 
 # Upstream license files can use CRLF or contain trailing spaces. Normalize
 # only whitespace so the checked-in generated artifact passes repository
 # hygiene checks without changing the license wording.
 sed -i -e 's/\r$//' -e 's/[[:blank:]]*$//' "$output_file"
 awk 'NF { while (blank_lines > 0) { print ""; blank_lines-- }; print; next }
-     { blank_lines++ }' "$output_file" > THIRD_PARTY_LICENSES.md
+     { blank_lines++ }' "$output_file" > "$output_dir/THIRD_PARTY_LICENSES.md"
 
-mapfile -t workspace_manifests < <(
-    find crates -mindepth 2 -maxdepth 2 -name Cargo.toml -type f -print \
-        | LC_ALL=C sort
-)
-sha256sum \
-    Cargo.toml \
-    Cargo.lock \
-    "${workspace_manifests[@]}" \
-    about.toml \
-    about.hbs \
-    scripts/generate-rust-licenses.sh \
-    THIRD_PARTY_LICENSES.md \
-    > THIRD_PARTY_LICENSES.lock
+if [ "$check" -eq 1 ]; then
+    if ! cmp -s "$output_dir/THIRD_PARTY_LICENSES.md" THIRD_PARTY_LICENSES.md; then
+        echo 'Third-party notices are stale; run scripts/generate-rust-licenses.sh' >&2
+        exit 1
+    fi
+else
+    cp "$output_dir/THIRD_PARTY_LICENSES.md" THIRD_PARTY_LICENSES.md
+fi

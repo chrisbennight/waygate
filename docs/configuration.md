@@ -29,77 +29,44 @@ policies, not the environment. See
 [runtime configuration ownership](server-config-source-of-truth.md) for
 publication, recovery, and multi-replica coordination.
 
-## Required deployment settings
+## Configure an authenticated deployment
 
-These defaults describe the binary, which may differ from the tutorial's
-explicit values. Ordinary URLs, client identifiers, key identifiers, and file
-paths are configuration metadata. Password-bearing database URLs, client
-secrets, encryption keys, and private signing-key contents are credentials.
-Keep credential values out of Git and diagnostic output.
+Use the [runtime setting reference](configuration-reference.md) for exact
+names, defaults, formats, and required credential groups. Keep credential
+values out of Git and diagnostic output.
 
-| Setting | Default or requirement |
-| --- | --- |
-| `GATEWAY_LISTEN_ADDR` | `0.0.0.0:8080`. Use `127.0.0.1:8080` for a native local listener. Inside a container, bind its interface and restrict host publication or ingress separately. |
-| `GATEWAY_PUBLIC_URL` | Derived from the listener unless set. Set the public HTTPS origin used by clients; it determines the gateway issuer and default callback URLs. |
-| `GATEWAY_AUDIENCE` | Defaults to the public URL. External access tokens must name the configured audience. |
-| `GATEWAY_AUTH_MODE` | `enforce`; requires `AUTHENTIK_ISSUER`. `disabled` is accepted only by debug builds and disables both bearer authentication and Cedar enforcement. |
-| `GATEWAY_DEPLOYMENT_PROFILE` | `dev`. Set `prod` for deployment safety checks; this is independent of the Cargo build profile. |
-| `AUTHENTIK_ISSUER` | Required in enforce mode and with the built-in authorization server. The issuer must expose OIDC discovery and JWKS. |
-| `GATEWAY_DATABASE_URL` | Unset uses a warning-producing null audit sink in development. Required by the production profile, built-in authorization server, and persistent file/Code Mode features. Contains a database credential. |
-| `GATEWAY_SERVERS_DIR` | `/etc/mcp-gateway/servers`; deployment-owned upstream manifests. |
-| `GATEWAY_POLICIES_DIR` | `/etc/mcp-gateway/policies`; deployment-owned Cedar policies. |
-| `GATEWAY_POLICY_EDITING` | On by default; `false` disables policy mutation. Publication also requires a writable persistent policy directory. |
+1. Choose the public HTTPS origin and token audience, then configure the OIDC
+   issuer and register the dashboard client with that provider.
+2. Provision Postgres and persistent manifest and policy directories. Start
+   from the [authenticated deployment example](../examples/deployment/README.md).
+3. Select the production deployment profile and mount signing and encryption
+   keys through your secret provider. Supply the dashboard credential group
+   together; do not reuse its session key as an OAuth client secret.
+4. Decide whether to run the built-in authorization server. If enabled,
+   register its separate upstream OAuth client and callback and supply the
+   complete authorization-server credential group. See
+   [identity setup](agents/identity.md).
+5. Configure upstream manifests and Cedar policies for your organization,
+   then verify an allowed call and an expected refusal before exposing ingress.
 
-The production profile additionally requires dashboard authentication and rejects
-stdio upstreams and deprecated upstream-token passthrough. The profile does not
-provision TLS, register OAuth clients, or make example policies appropriate for
-your organization. Supply those deployment decisions explicitly.
+The production profile validates settings; it does not provision TLS, register
+OAuth clients, or select appropriate access policies for your organization.
 
-## Dashboard and authorization server
+## Enable optional capabilities
 
-Dashboard login and the built-in OAuth authorization server have separate
-credential groups and callback routes. Configure each OAuth client at the
-identity provider before enabling it.
+Choose the services you intend to operate, then use the setting reference for
+their configuration. Runtime catalogs and policies have separate update paths.
 
-| Group | Required together | Purpose and format |
-| --- | --- | --- |
-| Dashboard | `GATEWAY_DASHBOARD_CLIENT_ID`, `GATEWAY_DASHBOARD_CLIENT_SECRET`, `GATEWAY_DASHBOARD_SESSION_KEY` | Client identifier, client secret, and a distinct random 32-byte session key encoded as base64 or 64 hexadecimal characters. Callback defaults to `<public URL>/admin/auth/callback`. All absent leaves dashboard login disabled in development; a partial group fails startup. |
-| Built-in authorization server | `GATEWAY_AS_ENABLED=true`, `GATEWAY_AS_UPSTREAM_CLIENT_ID`, `GATEWAY_AS_UPSTREAM_CLIENT_SECRET`, `GATEWAY_UPSTREAM_TOKEN_KEY` | Client identifier, client secret, and random 32-byte key in standard base64 for stored upstream-token encryption. Also requires the issuer, database, and signing key. Callback defaults to `<public URL>/oauth/callback`. |
-| Signing key | Exactly one of `GATEWAY_IDENTITY_SIGNING_KEY_PATH` or `GATEWAY_IDENTITY_SIGNING_KEY_PEM` | Ed25519 PKCS8 PEM. Prefer a read-only secret mount and the path setting. `GATEWAY_IDENTITY_KID` labels the public verification key; its default is `gateway-v1`. |
-| Signing-key rotation | `GATEWAY_IDENTITY_JWT_KEYS` and `GATEWAY_IDENTITY_JWT_ACTIVE` | Comma-separated `kid:path` entries and the active signing identifier. This pair takes precedence over the single-key settings. Preserve verification keys while tokens issued under them remain valid. |
-
-The session key and token-encryption key must be independently generated and
-stored securely. They are not OAuth client secrets or signing keys. The
-[identity guide](agents/identity.md) explains registration and key rotation,
-including the versioned `GATEWAY_UPSTREAM_TOKEN_KEY_<id>` family. Do not combine
-that family with the legacy single-key `GATEWAY_UPSTREAM_TOKEN_KEY` setting.
-
-For a resource-server-only deployment, leave `GATEWAY_AS_ENABLED` absent or
-false and omit its credential group. The gateway validates external tokens
-against the issuer and audience; clients need an authorization flow compatible
-with that provider. The tutorial's disposable issuer is not such a login
-service. Changing to resource-server-only mode does not remove the production
-database or dashboard requirements.
-
-## Optional capabilities
-
-Enable only the services you intend to operate. Each setting below is read at
-startup; runtime catalogs and policies have their own governed update paths.
-
-| Capability | Starting settings and dependencies |
-| --- | --- |
-| File transfer | `GATEWAY_FILE_STORAGE_DIR` plus the database. Use storage accessible to every serving replica. The directory enables uploads and downloads; leaving it absent disables those production paths. See [file transfer](file-transfer.md). |
-| Durable Code Mode results | `GATEWAY_CODEMODE_RESULT_STORAGE=allow` plus the database. Default is `disabled`; persistence is an explicit operator choice. See [Code Mode execution behavior](guides/code-mode.md). |
-| Code Mode execution budget | `GATEWAY_CODEMODE_EXECUTION_LIMIT_SECONDS`: default 300 seconds (5 minutes), configurable up to 86,400 seconds (24 hours). It bounds program execution, including deliberate waits. Client and upstream operation timers still apply independently. |
-| Skills from Git | `GATEWAY_SKILLS_GIT_API_URL`, `GATEWAY_SKILLS_GIT_REPOSITORY`, and `GATEWAY_SKILLS_GIT_ROOTS` are required together. Set `GATEWAY_SKILLS_SOURCE_ID` explicitly. `GATEWAY_SKILLS_GIT_TOKEN_ENV` names a credential variable; it is not the token itself. See [skills from Git](skills-git-source.md). |
-| Inference | Model/provider configuration and credentials are opt-in. See [inference configuration](inference-plane.md) for `GATEWAY_LLM_MODELS`, dynamic discovery, and credential labels. These settings can enable provider-network access. |
-| Tracing | `OTEL_EXPORTER_OTLP_ENDPOINT` selects the collector; omit it when no collector is available. `OTEL_SERVICE_NAME` identifies this service. See [telemetry](agents/telemetry.md). |
-
-The [runtime setting reference](configuration-reference.md) covers additional
-operator controls. The implementation reference is
-[`Config::from_env`](../crates/waygate-server/src/config.rs), with subsystem
-readers next to the features they configure. The example is intentionally a
-deployment starting point, not an exhaustive list of every environment reader.
+- [File transfer](file-transfer.md) requires persistent storage visible to
+  serving replicas and a database.
+- [Durable Code Mode](guides/code-mode.md) requires an explicit decision to
+  persist execution data and a database.
+- [Git skills](skills-git-source.md) require a source identity, repository
+  access, and distribution approval.
+- [Model routing](guides/inference.md) requires provider credentials and an
+  authorized model catalog.
+- [Observability](guides/observability.md) describes telemetry destinations and
+  the evidence available for operational diagnosis.
 
 ## Diagnose startup failures
 

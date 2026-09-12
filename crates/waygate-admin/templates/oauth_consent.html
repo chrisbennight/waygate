@@ -141,9 +141,9 @@
 </section>
 
 <p class="table-hint" style="margin-top: 16px">
-    Use the per-row Revoke button to kill a single active grant (idempotent —
-    the user is simply re-prompted on their next authorize). Bulk
-    per-principal and per-client revoke are not yet implemented.
+    Use Revoke to remove one active consent grant. When explicit consent is
+    enabled for the gateway, the next authorization requires consent again.
+    Revoking consent does not revoke already-issued access tokens.
 </p>
 
 {% endmatch %}

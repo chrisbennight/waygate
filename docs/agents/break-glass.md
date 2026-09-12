@@ -244,19 +244,7 @@ and `mint_token_core` / `revoke_token_core` in
 Failed uses (wrong `sub`, expired token, no matching row)
 do not consume the token and follow the regular Cedar-deny
 path; the original deny lands as the standard
-`Invocation`-category row from the dispatch pipeline. A
-dedicated `break_glass_attempt_failed` row per failed
-match is reserved for a future iteration.
-
-## Operator overview banner (planned)
-
-The dashboard overview will show a red banner when ANY row
-matches `used_at IS NULL AND expires_at > now()` so
-operators can't accidentally leave an active override in
-the world. (There is no `revoked_at` column to filter on
-— admin DELETE hard-deletes the row, so a revoked token
-isn't in the table at all.) Dashboard D2d in the
-expansion plan; the REST surface is shipped.
+`Invocation`-category row from the dispatch pipeline. There is no separate failed-attempt event.
 
 ## Invariants the code enforces
 
@@ -286,22 +274,16 @@ expansion plan; the REST surface is shipped.
   mint handler refuses non-empty values (no `amr` field on
   `Principal`). Leave this field empty.
 
-## What's NOT in scope
+## Current limitations
 
-- **Slack-bot integration to push token ids to recipients.**
-  Out-of-band delivery is the operator's problem today.
-- **N-of-M co-signed break-glass.** A future tighter posture
-  would require multiple admins to mint before the token
-  is usable; not shipped.
-- **Self-mint by the recipient.** Strictly minted by a
-  DIFFERENT admin from the user (no UI check today, but the
-  audit row captures both subs so review can flag self-mint).
+Token delivery is operator-managed. Multiple-administrator co-signing is not
+implemented. The mint handler records issuer and recipient but does not require
+them to differ; deployments needing separation must enforce it operationally.
 
 ## See also
 
-- [`docs/agents/identity.md`](identity.md) — `AuthMethod` /
-  `Principal.amr` shape that break-glass reads.
+- [`docs/agents/identity.md`](identity.md) — authentication methods and available factor evidence.
 - [`docs/compliance.md`](../compliance.md) — CC6.5 (emergency
-  access) cell once the dashboard banner ships.
+  access) control mapping.
 - `migrations/0029_break_glass.sql` — schema with the
   invariants doc.

@@ -2,10 +2,10 @@
 //!
 //! Operator view of the per-tenant `rate_limit_policies` registry
 //! from `waygate_quota`, with full inline CRUD. Each row
-//! carries: name, scope (`tenant` / `principal` / `client` /
+//! carries: name, scope (`tenant` / `principal` /
 //! `server` / `tool`), optional scope_value (the scope's anchor —
 //! sub for `principal`, server slug for `server`, etc.), action
-//! (`call` / `high_risk_call` / `cost_bearing` / `discovery`),
+//! (`call` / `side_effecting_call` / `discovery`),
 //! bucket_capacity, refill_per_second, created_at, updated_at.
 //!
 //! ## Inline actions
@@ -121,6 +121,7 @@ struct PolicyRow {
     /// for the `None` case.
     scope_value: Option<String>,
     action: &'static str,
+    inactive_reason: Option<&'static str>,
     bucket_capacity: i32,
     /// Pre-formatted "X.YY/sec" string so the template doesn't
     /// have to know the f64 precision rules.
@@ -442,7 +443,6 @@ fn parse_scope(s: &str) -> Option<QuotaScope> {
     match s {
         "tenant" => Some(QuotaScope::Tenant),
         "principal" => Some(QuotaScope::Principal),
-        "client" => Some(QuotaScope::Client),
         "server" => Some(QuotaScope::Server),
         "tool" => Some(QuotaScope::Tool),
         _ => None,
@@ -453,8 +453,7 @@ fn parse_scope(s: &str) -> Option<QuotaScope> {
 fn parse_action(s: &str) -> Option<QuotaAction> {
     match s {
         "call" => Some(QuotaAction::Call),
-        "high_risk_call" => Some(QuotaAction::HighRiskCall),
-        "cost_bearing" => Some(QuotaAction::CostBearing),
+        "side_effecting_call" => Some(QuotaAction::SideEffectingCall),
         "discovery" => Some(QuotaAction::Discovery),
         _ => None,
     }
@@ -489,6 +488,7 @@ fn principal_has_dashboard_admin(p: Option<&Principal>) -> bool {
 
 fn policy_row(p: RateLimitPolicy) -> PolicyRow {
     PolicyRow {
+        inactive_reason: p.inactive_reason(),
         update_rel: format!("/rate_limits/{}/update", p.id),
         delete_rel: format!("/rate_limits/{}/delete", p.id),
         id: p.id,
@@ -520,7 +520,7 @@ fn quota_scope_str(s: QuotaScope) -> &'static str {
 fn quota_action_str(a: QuotaAction) -> &'static str {
     match a {
         QuotaAction::Call => "call",
-        QuotaAction::HighRiskCall => "high_risk_call",
+        QuotaAction::SideEffectingCall => "side_effecting_call",
         QuotaAction::CostBearing => "cost_bearing",
         QuotaAction::Discovery => "discovery",
     }
@@ -572,6 +572,17 @@ mod tests {
             enrichment_blocked: None,
             api_key_profile_restrictions: None,
         }
+    }
+
+    #[test]
+    fn unsupported_policy_controls_are_not_accepted_by_forms() {
+        assert!(parse_scope("client").is_none());
+        assert!(parse_action("cost_bearing").is_none());
+        assert_eq!(parse_scope("principal"), Some(QuotaScope::Principal));
+        assert_eq!(
+            parse_action("side_effecting_call"),
+            Some(QuotaAction::SideEffectingCall)
+        );
     }
 
     #[test]
@@ -640,8 +651,8 @@ mod tests {
     fn quota_action_strings_match_db_constraints() {
         assert_eq!(quota_action_str(QuotaAction::Call), "call");
         assert_eq!(
-            quota_action_str(QuotaAction::HighRiskCall),
-            "high_risk_call"
+            quota_action_str(QuotaAction::SideEffectingCall),
+            "side_effecting_call"
         );
         assert_eq!(quota_action_str(QuotaAction::CostBearing), "cost_bearing");
         assert_eq!(quota_action_str(QuotaAction::Discovery), "discovery");

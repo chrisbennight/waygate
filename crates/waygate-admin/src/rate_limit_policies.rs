@@ -14,8 +14,7 @@
 //! Per-tenant: each operator only sees + modifies their own
 //! tenant's policies (read from `principal.tenant`). The store
 //! filters `WHERE tenant_id = $1` on every query so the admin
-//! API can't accidentally cross-read. Future cross-tenant
-//! ("super-admin") surfaces would route differently.
+//! API can't accidentally cross-read.
 //!
 //! ## Audit posture
 //!
@@ -60,8 +59,49 @@ pub fn router(state: Arc<AdminState>) -> Router<()> {
 }
 
 #[derive(Debug, Deserialize, ToSchema, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportedQuotaScope {
+    Tenant,
+    Principal,
+    Server,
+    Tool,
+}
+
+#[derive(Debug, Deserialize, ToSchema, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportedQuotaAction {
+    Call,
+    SideEffectingCall,
+    Discovery,
+}
+
+fn deserialize_scope<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<QuotaScope, D::Error> {
+    Ok(match SupportedQuotaScope::deserialize(deserializer)? {
+        SupportedQuotaScope::Tenant => QuotaScope::Tenant,
+        SupportedQuotaScope::Principal => QuotaScope::Principal,
+        SupportedQuotaScope::Server => QuotaScope::Server,
+        SupportedQuotaScope::Tool => QuotaScope::Tool,
+    })
+}
+
+fn deserialize_action<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<QuotaAction, D::Error> {
+    Ok(match SupportedQuotaAction::deserialize(deserializer)? {
+        SupportedQuotaAction::Call => QuotaAction::Call,
+        SupportedQuotaAction::SideEffectingCall => QuotaAction::SideEffectingCall,
+        SupportedQuotaAction::Discovery => QuotaAction::Discovery,
+    })
+}
+
+#[derive(Debug, Deserialize, ToSchema, schemars::JsonSchema)]
 pub struct CreatePolicyRequest {
     pub name: String,
+    #[serde(deserialize_with = "deserialize_scope")]
+    #[schema(value_type = SupportedQuotaScope)]
+    #[schemars(with = "SupportedQuotaScope")]
     pub scope: QuotaScope,
     /// Required for every scope EXCEPT `tenant`. Validated at
     /// the HTTP boundary so the operator gets a 400 with a clear
@@ -72,6 +112,9 @@ pub struct CreatePolicyRequest {
     pub scope_value: Option<String>,
     pub bucket_capacity: i32,
     pub refill_per_second: f64,
+    #[serde(deserialize_with = "deserialize_action")]
+    #[schema(value_type = SupportedQuotaAction)]
+    #[schemars(with = "SupportedQuotaAction")]
     pub action: QuotaAction,
 }
 
@@ -105,6 +148,8 @@ pub struct PolicyView {
     pub bucket_capacity: i32,
     pub refill_per_second: f64,
     pub action: QuotaAction,
+    /// Present when this policy is unsupported and does not protect calls.
+    pub inactive_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -112,6 +157,7 @@ pub struct PolicyView {
 impl From<RateLimitPolicy> for PolicyView {
     fn from(p: RateLimitPolicy) -> Self {
         Self {
+            inactive_reason: p.inactive_reason().map(str::to_owned),
             id: p.id.to_string(),
             tenant_id: p.tenant_id,
             name: p.name,
@@ -321,6 +367,11 @@ pub(crate) async fn update_policy_core(
         refill_per_second,
     };
     validate_update(&req)?;
+    if let Some(policy) = store.get(tenant_id, uuid).await.map_err(map_store_err)? {
+        if let Some(reason) = policy.inactive_reason() {
+            return Err(ApiError::BadRequest(reason.into()));
+        }
+    }
     match store
         .update(tenant_id, uuid, bucket_capacity, refill_per_second)
         .await
@@ -425,6 +476,12 @@ fn parse_uuid(id: &str) -> Result<Uuid, ApiError> {
 }
 
 fn validate_create(req: &CreatePolicyRequest) -> Result<(), ApiError> {
+    if req.scope == QuotaScope::Client || req.action == QuotaAction::CostBearing {
+        return Err(ApiError::BadRequest(
+            "Client scope and cost_bearing action are not enforced and cannot be configured."
+                .into(),
+        ));
+    }
     if req.name.is_empty() || req.name.len() > 128 {
         return Err(ApiError::BadRequest(
             "`name` must be non-empty and ≤128 chars".into(),
@@ -502,6 +559,59 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_policies_are_rejected_by_input_and_core_validation() {
+        let base = serde_json::json!({"name":"quota", "scope":"tenant", "bucket_capacity":10, "refill_per_second":1.0, "action":"call"});
+        assert!(serde_json::from_value::<CreatePolicyRequest>(base.clone()).is_ok());
+        for (field, value) in [("scope", "client"), ("action", "cost_bearing")] {
+            let mut input = base.clone();
+            input[field] = value.into();
+            assert!(serde_json::from_value::<CreatePolicyRequest>(input).is_err());
+        }
+        assert!(validate_create(&req(QuotaScope::Client, Some("client-id"))).is_err());
+        let mut unsupported = req(QuotaScope::Tenant, None);
+        unsupported.action = QuotaAction::CostBearing;
+        assert!(validate_create(&unsupported).is_err());
+    }
+
+    #[test]
+    fn creation_schema_only_offers_supported_controls() {
+        let schema = serde_json::to_value(schemars::schema_for!(CreatePolicyRequest)).unwrap();
+        let definitions = &schema["$defs"];
+        assert_eq!(
+            definitions["SupportedQuotaScope"]["enum"],
+            serde_json::json!(["tenant", "principal", "server", "tool"])
+        );
+        assert_eq!(
+            definitions["SupportedQuotaAction"]["enum"],
+            serde_json::json!(["call", "side_effecting_call", "discovery"])
+        );
+    }
+
+    #[test]
+    fn openapi_creation_schema_only_offers_supported_controls() {
+        use utoipa::OpenApi;
+        let document = serde_json::to_value(crate::openapi::ApiDoc::openapi()).unwrap();
+        let schemas = &document["components"]["schemas"];
+        let properties = &schemas["CreatePolicyRequest"]["properties"];
+        for (field, expected) in [
+            (
+                "scope",
+                serde_json::json!(["tenant", "principal", "server", "tool"]),
+            ),
+            (
+                "action",
+                serde_json::json!(["call", "side_effecting_call", "discovery"]),
+            ),
+        ] {
+            let reference = properties[field]["$ref"].as_str().expect("enum reference");
+            let schema = document
+                .pointer(reference.strip_prefix('#').unwrap())
+                .expect("referenced enum must exist in OpenAPI components");
+            assert_eq!(schema["enum"], expected);
+        }
+    }
+
+    #[test]
     fn tenant_scope_rejects_scope_value() {
         let r = req(QuotaScope::Tenant, Some("acme"));
         assert!(matches!(validate_create(&r), Err(ApiError::BadRequest(_))));
@@ -515,12 +625,7 @@ mod tests {
 
     #[test]
     fn non_tenant_scopes_require_scope_value() {
-        for scope in [
-            QuotaScope::Principal,
-            QuotaScope::Client,
-            QuotaScope::Server,
-            QuotaScope::Tool,
-        ] {
+        for scope in [QuotaScope::Principal, QuotaScope::Server, QuotaScope::Tool] {
             assert!(
                 matches!(
                     validate_create(&req(scope, None)),

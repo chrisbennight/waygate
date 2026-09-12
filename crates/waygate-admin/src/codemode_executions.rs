@@ -1,11 +1,9 @@
 //! `/api/v1/admin/codemode/executions` — operator visibility into
 //! in-flight Code Mode executions, plus tenant-scoped cancellation.
 //!
-//! Projects the Code Mode execution journal (the source of truth) rather
-//! than duplicating rows into `task_states`; `docs/agents/tasks.md`
-//! records why those must stay separate. This is the operator's answer to
-//! "what is running here, for whom, and since when" — a different
-//! audience from `codemode.executions`, which is owner-scoped by
+//! Projects the Code Mode execution journal for operators who need to see
+//! what is running and for whom. The caller-facing `codemode.executions`
+//! tool is owner-scoped by
 //! construction. Both endpoints are behind `mcp:admin` and tenant-scoped
 //! via `principal.tenant` (NOT via anything in the request), the same
 //! shape as the approval-request surface beside them.

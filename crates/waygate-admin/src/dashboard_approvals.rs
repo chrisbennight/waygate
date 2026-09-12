@@ -18,8 +18,7 @@
 //!    truncated to [`HISTORY_LIMIT`]. Includes BOTH caller-consumed
 //!    and operator-revoked grants — the store's `revoke_grant`
 //!    reuses `consumed_at = now()` for revocations, so the schema
-//!    can't distinguish the two cases without a future
-//!    `revoked_at` column. The template surface labels these as
+//!    cannot distinguish the two cases. The template surface labels these as
 //!    "closed" rather than "consumed" so a revoked grant doesn't
 //!    look caller-used. Older closed rows live in the catalog
 //!    itself; pull via
@@ -49,20 +48,8 @@
 //!   path. The tracing-only audit posture (no Evidence event) is
 //!   preserved by the shared core.
 //!
-//! ## What's NOT here (deferred)
-//!
-//! - **Live WebSocket subscription** to `/api/v1/admin/approval_grants/subscribe`
-//!   for in-progress invocation-blocked notifications. The hub
-//!   (`crate::hitl_ws::ApprovalHub`) already exists; the dashboard JS
-//!   that subscribes + renders "WAITING" rows is not yet implemented.
-//! - **Inline mint form**. POST via REST today; an in-page
-//!   "Approve alice for tool X with hash Y" composer is deferred — minting
-//!   binds the grant to a canonical `argument_hash` over the exact call
-//!   arguments, which needs a dedicated composer rather than a flat
-//!   form, so it stays on the REST surface for now.
-//! - **Age coding + SLA badges + keyboard shortcuts**. Plan calls for
-//!   these on the active section; ship the visibility first, then
-//!   layer ergonomics in follow-ups.
+//! Mint grants through the REST API with the canonical argument hash of
+//! the exact tool call being approved.
 //!
 //! ## Tenant scoping
 //!
@@ -167,8 +154,7 @@ struct GrantRow {
     client_id: Option<String>,
     /// Catalog server id — shown alongside `tool_id` because operators
     /// triaging a misfire need to know which upstream the grant binds
-    /// to (the catalog mcp_servers join for human-friendly names is a
-    /// follow-up; UUIDs serve until then).
+    /// to.
     server_id: Uuid,
     tool_id: Uuid,
     argument_hash: String,

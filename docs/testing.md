@@ -53,7 +53,13 @@ cancellation, retry, and transaction tests remain required. Convert an excluded
 check to explicit synchronization or an injected clock before returning it to
 required CI; preserving its name alone does not preserve its contract.
 
-Voyager throughput and latency measurements are separate release evidence.
-Run them with recorded CPU/GPU load and compare the direct backend, private
-gateway, and public gateway using identical inputs. A loaded CI runner is not
-a performance baseline.
+## Performance and context measurements
+
+Run `cargo bench -p waygate-mcp --bench validator_cache --locked` to compare
+schema compilation, cached validation, and hashing plus cached validation on
+the same host and toolchain. The benchmark excludes network and database work;
+it is not an end-to-end latency or capacity measurement.
+
+Use [the tool-context report](tool-context-budget.md) to measure the catalog
+presented to an authorized client. Record inputs and resource conditions so
+comparisons remain reproducible.
