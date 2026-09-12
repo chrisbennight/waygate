@@ -459,9 +459,8 @@ This document covers:
   breaker is half-open, and `disconnected` when no lane is present or the
   breaker is open. This is
   deliberately separate from the durable catalog lifecycle (`live`,
-  `quarantined`, and so on). The `gateway-observe` `server` resource retains
-  `status` as a compatibility alias for catalog lifecycle, publishes the
-  explicit `catalog_status`, and joins runtime fields only onto catalog rows
+  `quarantined`, and so on). The `gateway-observe` `server` resource publishes
+  `catalog_status` and joins runtime fields only onto catalog rows
   already visible to that tenant. The joined projection carries the tri-state
   as `runtime_status`, plus `last_success_at`, bounded `last_error_class`, and
   `next_retry_at` from the same pool snapshot. Raw transport errors remain in
@@ -597,19 +596,19 @@ in authority: the file wins, the store records.
   multi-file view: the pointer is advanced before the mirror, reload retains
   the prior set, and an interrupted mirror's synced marker routes readers to the
   last complete ledger snapshot even after the pointer grace window expires.
-- **Seed CLI** (PR-S1): `gateway-server --import-server-bundle [<dir>]`
+- **Seed CLI**: `gateway-server --import-server-bundle [<dir>]`
   loads `servers/*.yaml` strictly, applies the prod-safety gate,
   round-trip self-checks the serialization, refuses an empty set, then
   records it as the first ledger version. Distinct from `--import-manifests`
   (which seeds the catalog). Non-idempotent: re-running records
   a new version from the current YAML.
-- **Admin REST** (PR-S2): `/api/v1/server_manifests` — `GET` (list),
+- **Admin REST**: `/api/v1/server_manifests` — `GET` (list),
   `GET /active`, `POST /validate` (parse-only, no persist),
   `POST` (stage a draft), `POST /{id}/publish`, `POST /{version}/rollback`.
   All `mcp:admin`-gated; `503` without a DB. `validate` and the
   create-draft pre-store guard both run `parse_manifest_set` (per-entry
   invariant checks + duplicate-name rejection).
-- **Dashboard editor** (PR-S3): `/admin/server_manifests` — a YAML
+- **Dashboard editor**: `/admin/server_manifests` — a YAML
   textarea (Validate / Save draft), a versions table with per-row Publish
   / Rollback / Load, and **Export active (YAML)** which downloads the
   active version as `servers.yaml`. Mutations delegate to the same store the
@@ -698,7 +697,7 @@ old session is torn down and the new shape dialed in place — a fresh identity
 cell, a re-resolved bearer, freshly read mTLS material — no restart (reported
 `redialed`). The swap commits under every slot's conn write lock, so a
 concurrent `call_tool` never runs on the old bearer/cert after the manifest has
-advanced (AERB #315), and each lane's dial is bounded by a per-lane timeout
+advanced, and each lane's dial is bounded by a per-lane timeout
 (default 15s) so an unresponsive new target surfaces as `redial_failed` instead
 of wedging the awaited reload. The old session keeps serving until a new-shape
 session is in hand; if *every* new-shape dial fails the old shape is kept and

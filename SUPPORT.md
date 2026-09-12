@@ -6,7 +6,7 @@ For an operational problem, follow the [runbook](docs/operations.md) and
 [observability guide](docs/guides/observability.md).
 
 Use
-[the private Gitea issue tracker](https://gitea.cacahuate.org/bennight/mcp-tool-search-gateway/issues)
+[GitHub issues](https://github.com/chrisbennight/waygate/issues)
 for reproducible bugs, documentation gaps,
 and feature proposals. Include:
 

@@ -4,8 +4,7 @@
 # point sideways or downward in the layer order Leaf < Foundation < Domain <
 # Composition, with the layer assignment read from the architecture doc's
 # CI-synced crate map (the doc is the source of truth, not a copy here).
-# Dev-dependencies are exempt (§1's snapshot excludes them). Zero allow-list:
-# all historical upward-dependency violations were retired before this landed.
+# Dev-dependencies are exempt; production dependencies have no upward-edge exceptions.
 # Toolchain-free (parses Cargo.toml text, not cargo metadata) so it runs in
 # the fast check job before Rust is installed.
 set -euo pipefail

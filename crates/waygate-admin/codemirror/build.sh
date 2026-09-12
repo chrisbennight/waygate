@@ -14,7 +14,18 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 OUT=../static/js/codemirror.bundle.js
-LOCK=../../../THIRD_PARTY_LICENSES-CODEMIRROR.lock
+case "${1:-}" in
+  '') check=0 ;;
+  --check) check=1 ;;
+  *) echo 'Usage: build.sh [--check]' >&2; exit 2 ;;
+esac
+test "$#" -le 1 || exit 2
+expected="$OUT"
+if [ "$check" -eq 1 ]; then
+  build_dir="$(mktemp -d)"
+  trap 'rm -rf "$build_dir"' EXIT
+  OUT="$build_dir/codemirror.bundle.js"
+fi
 
 npx --no-install esbuild src/cedar-editor.mjs \
   --bundle \
@@ -25,12 +36,9 @@ npx --no-install esbuild src/cedar-editor.mjs \
   --legal-comments=none \
   --outfile="$OUT"
 
-sha256sum \
-  package.json \
-  package-lock.json \
-  src/cedar-editor.mjs \
-  build.sh \
-  "$OUT" \
-  > "$LOCK"
-
-echo "built $OUT ($(wc -c < "$OUT") bytes)"
+if [ "$check" -eq 1 ]; then
+  cmp "$OUT" "$expected"
+  echo 'CodeMirror bundle is current'
+else
+  echo "built $OUT ($(wc -c < "$OUT") bytes)"
+fi

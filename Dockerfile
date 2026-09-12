@@ -16,17 +16,9 @@
 #                          so the documented `docker compose up --build`
 #                          workflow keeps working with AUTH_MODE=disabled.
 #
-# BINARY_SUBDIR was previously called CARGO_TARGET_DIR. The original name
-# collided with cargo's actual `CARGO_TARGET_DIR` env var: buildkit
-# propagates every ARG into RUN steps' environment (verified empirically
-# — `RUN env | grep CARGO_TARGET_DIR` printed the ARG value), so cargo
-# saw it as a target-dir override and wrote the binary to
-# `/app/release/release/gateway-server` instead of the default
-# `/app/target/release/gateway-server` that the runtime stage's COPY
-# reads from. That mismatch silently dropped the binary on every image
-# build since PR #73. Renamed so cargo can't grab it.
-#
-# Rationale + the larger dev-vs-prod posture story live in docs/deployment.md.
+# BINARY_SUBDIR selects the compiled profile directory without overriding
+# Cargo's CARGO_TARGET_DIR environment variable. Build and COPY paths must agree.
+# See docs/deployment.md for supported build profiles.
 
 # RUST_VERSION pins the rust base image. Keep this aligned with the
 # stable channel `rust-toolchain.toml` resolves to at build time — if
@@ -41,25 +33,8 @@ FROM rust:${RUST_VERSION}-${DEBIAN_CODENAME} AS chef
 # Nested build containers cannot reliably detect the enclosing runner's quota.
 # All derived build stages inherit the explicit job limit when one is supplied.
 ARG CARGO_BUILD_JOBS
-# cargo-chef 0.1.77 brings two changes we need to keep image builds
-# from silently dropping the gateway-server binary on the floor:
-#
-#   * 0.1.76 — minimized recipe when `cargo chef prepare --bin <name>`
-#     is used. With `--bin`, cook builds ONLY the dep closure of the
-#     target as rlibs; it does NOT generate a dummy binary at
-#     `target/release/<name>`. That closes the failure mode where
-#     cook wrote a dummy bin → its own cleanup deleted the file →
-#     real build's fingerprint cache saw a completed link step →
-#     skipped re-linking → "Finished" with no binary in the image
-#     (cargo-chef #192, #212). Every image build on `main` since
-#     PR #73 (~25 runs) failed because of this.
-#
-#   * 0.1.77 — stops injecting `plugin = false` into recipe manifests,
-#     killing the 47 spurious `warning: unused manifest key` lines
-#     that newer rustc emits per cook (cargo-chef #301).
-#
-# Pin exactly. Renovate-class bumps want a real review since
-# cargo-chef changes recipe-generation behaviour between minors.
+# Pin recipe generation and use --bin so dependency cooking does not create a
+# dummy gateway binary whose fingerprint could suppress the final link step.
 RUN cargo install cargo-chef --locked --version 0.1.77
 WORKDIR /app
 

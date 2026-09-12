@@ -3,7 +3,7 @@
 Start with the [tutorial](examples/quickstart/README.md) and
 [architecture](docs/architecture.md). Report a reproducible bug, improve an
 example, or propose a focused change through
-[the private Gitea issue tracker](https://gitea.cacahuate.org/bennight/mcp-tool-search-gateway/issues).
+[GitHub issues](https://github.com/chrisbennight/waygate/issues).
 Discuss a new protocol surface or substantial architecture change before
 implementing it. Use [private reporting](SECURITY.md) for security findings.
 
@@ -16,19 +16,16 @@ for the repository's script checks; individual tooling directories declare
 their own locked dependencies. Public package registries are sufficient;
 private compiler caches and artifact mirrors are optional deployment settings.
 
-Clone `git@github.com:chrisbennight/waygate.git` with your authorized GitHub
-identity. Keep task changes isolated from the primary checkout:
+Clone the public repository and create a branch:
 
 ```sh
-git fetch origin
-git worktree add -b my-change .worktrees/my-change origin/main
-cd .worktrees/my-change
+git clone https://github.com/chrisbennight/waygate.git
+cd waygate
+git switch -c my-change
 ```
 
-Add `.worktrees/` to your local Git exclude file if it is not already ignored.
-Preserve unrelated changes and remove only your own clean worktree after its
-PR merges. Contributors without upstream push access can use a fork and fetch
-the target repository's current `main` through a separate upstream remote.
+Use a fork when you do not have upstream push access. Keep your branch current
+with the target repository's `main` and preserve unrelated local changes.
 
 ## Validate the contract you change
 
@@ -100,4 +97,3 @@ third-party notices. No separate contributor license agreement is currently
 required. Be respectful, discuss technical disagreements with evidence, and
 avoid harassment or disclosure of another person's private information.
 Maintainers may moderate abusive content and close unsuitable contributions.
-The [code of conduct](CODE_OF_CONDUCT.md) explains participation and reporting.

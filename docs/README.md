@@ -20,6 +20,5 @@ and a policy refusal. Then choose a workflow below.
 | Publish or adopt a release | [Release notes](release-notes.md) | [Source publication](source-release.md) |
 
 The workflow guides describe implemented behavior and identify prerequisites
-beside each capability. Design documents also contain proposed work; their
-future-state sections are not a support promise. Protocol proposals and
+beside each capability. Protocol proposals and
 gateway extensions are distinguished from core MCP in the capability guide.

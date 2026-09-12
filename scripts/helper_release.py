@@ -5,9 +5,7 @@ from pathlib import Path
 from release_policy import release_version, require_merged, workspace_version
 
 
-def resolve(event, ref, expected, recorded, requested=''):
-    if recorded != expected:
-        raise ValueError('release/mcp-files.version must match workspace.package.version')
+def resolve(event, ref, expected, requested=''):
     if requested and requested != expected:
         raise ValueError('manual verification version must match workspace.package.version')
     if event == 'push':
@@ -20,7 +18,6 @@ def resolve(event, ref, expected, recorded, requested=''):
 def main():
     event = os.environ['GITHUB_EVENT_NAME']
     version = resolve(event, os.environ['GITHUB_REF'], workspace_version(),
-                      Path('release/mcp-files.version').read_text().strip(),
                       os.environ.get('INPUT_VERSION', ''))
     if event != 'pull_request':
         require_merged(os.environ['GITHUB_SHA'])

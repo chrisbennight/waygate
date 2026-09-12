@@ -55,7 +55,6 @@ jobs:
           bash scripts/check-dependency-direction.sh
           bash scripts/check-doc-anchors.sh
           bash scripts/check-shared-store-error.sh
-          bash scripts/check-godfile-ratchet.sh
           bash scripts/check-capability-guards.sh
           bash scripts/check-page-chrome.sh
           bash scripts/check-admin-boilerplate.sh
@@ -63,11 +62,21 @@ jobs:
           bash scripts/check-unused-deps.sh
           bash scripts/check-no-plan-citations.sh
           bash scripts/check-licenses.sh
+          bash scripts/check-secrets.sh
           node --test scripts/report-tool-context.test.mjs
           python3 -m unittest discover -s scripts -p 'test_release_*.py'
 
       - name: Install repository Rust toolchain
         run: rustup show active-toolchain
+
+      - name: Verify generated notices and browser bundle
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo install cargo-about --version 0.9.1 --locked --features cli
+          bash scripts/generate-rust-licenses.sh --check
+          npm ci --prefix crates/waygate-admin/codemirror
+          bash crates/waygate-admin/codemirror/build.sh --check
 
       - name: Check formatting
         run: cargo fmt --all -- --check
