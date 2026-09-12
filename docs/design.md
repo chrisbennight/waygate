@@ -154,3 +154,17 @@ SHA-256 `fc7287273e66929776e2ba54f144fe699080bec29f61bf649d70d871468aeade`.
 Its copyright and SIL Open Font License are retained with the other fonts in
 [Third-party licenses](../THIRD_PARTY_LICENSES.md#outfit). Artwork licensing does
 not imply endorsement of another project using the Waygate name or mark.
+
+### Product screenshots
+
+The README uses the [policy review images](images/policy-review-light.png),
+with a [dark variant](images/policy-review-dark.png). Refresh them from the
+actual `/admin/t/default/changes` page, using the existing
+[`replayable_decision_state` fixture](../crates/waygate-admin/tests/dashboard_render/decisions.rs)
+with a pending policy publication, a `forbid(principal, action, resource);`
+draft, a passing deny test, and the recorded allow from
+`replayable_decision_row`. Render through `dashboard_router` with the current
+static assets. Capture at a 1120-pixel viewport width, cropping the top 780
+pixels to include the impact preview and approval controls. Wait for fonts and
+theme transitions before capturing each theme. Keep fixture setup and capture
+tools out of the product images.
