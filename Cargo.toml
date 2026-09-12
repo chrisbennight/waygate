@@ -105,24 +105,9 @@ schemars = "1"
 # ed25519-dalek for EdDSA, the `rsa`/`p256`/`p384`/`sha2` RustCrypto crates for
 # RSA/ECDSA verification).
 #
-# History — prod outage 2026-06-10, bisected to PR #289: that PR bumped
-# jsonwebtoken 9 -> 10 and selected `aws_lc_rs`, which made *jsonwebtoken itself*
-# perform JWT crypto through the native aws-lc-rs library. The first JWT operation
-# during the AS/identity boot phase then wedged the process before it bound :8080
-# (every thread parked on futex, no log, no audit rows) under the hardened
-# distroless runtime (read_only rootfs, cap_drop ALL, no-new-privileges). The
-# prior build (273fc5a, jsonwebtoken 9) booted and served for ~6 h; #289's only
-# code delta was this bump.
-#
-# NOTE: aws-lc-rs is still LINKED into the binary — `rustls` carries both `ring`
-# and `aws_lc_rs` features (via reqwest/hyper-rustls/sqlx/axum-server) and that
-# was already true in the known-good 273fc5a build, where it was harmless because
-# those callers pass an explicit provider and jsonwebtoken 9 used `ring` directly.
-# So the fix is NOT "remove aws-lc-rs from the tree" (we can't, cheaply) — it is
-# "stop jsonwebtoken from exercising aws-lc-rs", which `rust_crypto` does, exactly
-# matching the working pre-#289 topology. No `CryptoProvider::install_default()` is
-# added: 273fc5a proves the rustls stack is fine without one, so adding it would be
-# an unvalidated deviation from the known-good baseline.
+# JWT operations use RustCrypto in the hardened runtime. TLS callers select
+# their providers explicitly; the presence of aws-lc-rs in the dependency graph
+# does not mean JWT operations use it.
 #
 # RSA here is verify-only (IdP/peer public keys), so the unpatched RustCrypto `rsa`
 # Marvin timing flaw (RUSTSEC-2023-0071, a private-key recovery attack) does not
@@ -135,7 +120,7 @@ jsonwebtoken = { version = "10", default-features = false, features = ["use_pem"
 cedar-policy = "4"
 # Cedar parse errors implement `miette::Diagnostic`; we read their source spans
 # (LabeledSpan offsets) to surface line/col parse diagnostics for the policy
-# editor's lint gutter (policy-edit PR D). Core trait only — no fancy reporter.
+# editor's lint gutter. Core trait only — no fancy reporter.
 miette = { version = "7", default-features = false }
 http = "1"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
@@ -149,7 +134,7 @@ rand = "0.10"
 # gateway authorization and audit evidence.
 sha1 = "0.11"
 sha2 = "0.11"
-# Phase 5: BLAKE3 keys the per-principal exact-match completion cache.
+# BLAKE3 keys the per-principal exact-match completion cache.
 blake3 = "1"
 sqlx = { version = "0.9", default-features = false, features = [
     # sqlx 0.9 split the old combined `runtime-tokio-rustls` feature into a
@@ -162,7 +147,7 @@ sqlx = { version = "0.9", default-features = false, features = [
     "time",
     "migrate",
     "macros",
-    # Phase 3.3a-iii: decode the NUMERIC cost columns (llm_models / llm_usage)
+    # Decode the NUMERIC cost columns (llm_models / llm_usage)
     # as exact `rust_decimal::Decimal`. Money math must not carry binary-
     # fraction error — see the cost-column comments in 0047/0048.
     "rust_decimal",
@@ -191,14 +176,14 @@ utoipa = { version = "5", features = ["axum_extras", "uuid", "time"] }
 # directory is populated from the upstream tool catalog at boot and on reload.
 tantivy = "0.26"
 
-# Phase 9 PR9-c1: JSON-schema validator for the
+# JSON-schema validator for the
 # InvocationService `validate_output` stage. Validates tool
 # response payloads against `mcp_tool_versions.output_schema`
 # (the schema the upstream advertised + an operator approved).
 # Pinned to the 0.46 line; supports JSON Schema Draft 7 + 2020-12.
 jsonschema = { version = "0.46", default-features = false }
 
-# Phase 9 PR9-c2: response-inspector pattern matching.
+# Response-inspector pattern matching.
 # `regex` is RE2-derivative — no backtracking, so the worst-
 # case match time is O(n) regardless of input. Critical for an
 # inspector that runs on every upstream response.

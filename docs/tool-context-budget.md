@@ -66,10 +66,8 @@ substitute for measuring a deployment's authorization-scoped live catalog.
 
 The output-schema budget includes the gateway's retained-response delivery
 alternative. Strict clients need the file descriptor and delivery-error schema
-alongside the upstream data schema to validate the result they receive. This
-adds 1,364 bytes to the representative catalog and its output-schema group,
-including 46 additional repeated-string bytes; the corresponding limits include
-that measured cost.
+alongside the upstream data schema to validate the result they receive. The limits in the budget file include that schema.
+
 
 The checked-in fixture at
 `scripts/fixtures/tool-context/standard-tools-list.json` is intentionally a
@@ -83,23 +81,6 @@ tool that declares it: clients use `outputSchema` to understand and validate
 `structuredContent`. Likewise, a repeated leading description block is a
 candidate for inspection; the downstream-authored remainder remains part of
 the tool contract.
-
-## Codex integration baseline (2026-08-28)
-
-Inspection of the tool catalog exposed through the Codex integration found
-803 gateway-backed declarations: 774 directly callable tools and 29 synthetic
-per-upstream `searchTools` declarations. Materializing the whole catalog would
-serialize to approximately 1.11 million characters, or roughly 278,500 tokens
-at the four-characters-per-token planning heuristic. Repeated gateway
-boilerplate accounts for roughly 33,500 of those estimated tokens, and the
-synthetic search declarations roughly 14,000.
-
-Codex deferred that catalog instead of placing it in the initial model
-context, so the observed initial-context cost was near zero. These integration
-figures are an environment-specific observation rather than a repository
-golden: installed upstreams, authorization, host serialization, and model
-tokenization can all change them. Use the reporter against a captured
-`tools/list` response to compare gateway releases on the same inputs.
 
 ## Optimization boundary
 

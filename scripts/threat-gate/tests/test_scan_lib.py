@@ -8,10 +8,10 @@ Pinned invariants:
    shape (missing or non-list `vulnerabilities`) must also raise — an
    upstream schema change cannot be allowed to degrade the gate to
    "no KEV hits ever".
-3. Default behaviour (required=False) preserves the historical fail-open
-   for both failure modes — used where KEV data is advisory only.
+3. Default behaviour (required=False) allows advisory scans to continue
+   after either failure mode.
 4. ``load_policy`` honours ``THREAT_GATE_POLICY_PATH`` first, then the
-   bundled ``default-policy.json``, then the hardcoded baseline.
+   bundled ``default-policy.json``. Missing files stop the scan.
 5. ``grype_image_ref`` qualifies bare single-name official images to
    ``docker.io/library/<name>`` so a repo name that collides with a Grype
    source scheme (``registry:``, ``docker:``, ...) cannot be misparsed and
@@ -121,7 +121,7 @@ def test_load_policy_uses_env_var_override(tmp_path, monkeypatch):
 
 
 def test_load_policy_falls_back_to_bundled_default(monkeypatch):
-    """When the env var is unset (or points at a missing file), the
+    """When the env var is unset, the
     action's bundled ``default-policy.json`` is loaded.
     """
     monkeypatch.delenv("THREAT_GATE_POLICY_PATH", raising=False)
@@ -131,18 +131,24 @@ def test_load_policy_falls_back_to_bundled_default(monkeypatch):
     assert scan_lib.load_policy() == expected
 
 
-def test_load_policy_falls_back_to_hardcoded_baseline_when_default_missing(
-    tmp_path, monkeypatch
-):
-    """If neither override nor bundled default exists, the hardcoded
-    baseline is returned. Guards against a packaging regression that
-    would otherwise silently produce an empty policy.
-    """
-    monkeypatch.delenv("THREAT_GATE_POLICY_PATH", raising=False)
-    monkeypatch.setattr(
-        scan_lib, "DEFAULT_POLICY_PATH", tmp_path / "missing.json"
-    )
-    assert scan_lib.load_policy() == scan_lib.HARDCODED_BASELINE_POLICY
+@pytest.mark.parametrize("explicit_override", [False, True])
+def test_load_policy_missing_file_stops_scan(tmp_path, monkeypatch, explicit_override):
+    missing = tmp_path / "missing.json"
+    if explicit_override:
+        monkeypatch.setenv("THREAT_GATE_POLICY_PATH", str(missing))
+    else:
+        monkeypatch.delenv("THREAT_GATE_POLICY_PATH", raising=False)
+        monkeypatch.setattr(scan_lib, "DEFAULT_POLICY_PATH", missing)
+    with pytest.raises(FileNotFoundError):
+        scan_lib.load_policy()
+
+
+def test_load_policy_invalid_file_stops_scan(tmp_path, monkeypatch):
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("not json")
+    monkeypatch.setenv("THREAT_GATE_POLICY_PATH", str(invalid))
+    with pytest.raises(json.JSONDecodeError):
+        scan_lib.load_policy()
 
 
 @pytest.mark.parametrize(

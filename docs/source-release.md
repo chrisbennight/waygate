@@ -49,7 +49,7 @@ hosting settings are not enabled by committing a workflow file.
 The [helper release workflow](../.github/workflows/release-mcp-files.yml)
 builds Linux amd64/arm64, Windows amd64, and macOS arm64 artifacts on PRs,
 manual dispatches, and `mcp-files-v<version>` tag pushes. Only tag pushes publish.
-The tag, `release/mcp-files.version`, and workspace version must agree. Native runners verify
+The tag and workspace version must agree. Native runners verify
 their executable, and the publication job collects checked artifacts, verifies SHA-256 checksums, and
 attaches binaries and license notices to a `mcp-files-v<version>` release.
 Build jobs have read-only repository permissions; only publication receives
@@ -70,11 +70,11 @@ explains draft creation, asset upload, and immutability.
 ## Prepare and trigger a release
 
 1. Open a release PR that updates `workspace.package.version` in `Cargo.toml`
-   and `release/mcp-files.version` together, plus release notes describing the
-   user-visible changes. Keep workspace crates on the shared version.
+   and release notes describing the user-visible changes. Gateway and helper
+   releases use this single version.
 2. Refresh `Cargo.lock` with Cargo and regenerate the consolidated third-party
    notice with [`scripts/generate-rust-licenses.sh`](../scripts/generate-rust-licenses.sh)
-   when the license guard reports it stale. Include the resulting metadata in the PR.
+   after dependency changes. Include the generated notice in the PR.
 3. Run the release tests, normal source checks, and helper platform builds.
    Obtain AERB review of the current head and merge after GitHub CI passes.
 4. Push `v<version>` pointing to that merged commit for the gateway image, and
@@ -110,3 +110,23 @@ run pytest, or use the included public-index uv lock. The scanner uses the
 [CISA KEV feed](https://www.cisa.gov/known-exploited-vulnerabilities-catalog).
 Infrastructure-specific mirrors, cache addresses, and runner labels belong in
 the consuming deployment's configuration.
+
+## Generated assets and source checks
+
+The image workflow runs source guards, formatting, Clippy, workspace tests with
+an isolated Postgres instance, doctests, and workspace checks before building
+and smoke-testing the optimized image. Postgres starts after test compilation;
+source tests and image smoke use the same pinned database image. Source guards
+include the secret scanner.
+
+Install `cargo-about` 0.9.1 with `cargo install cargo-about --version 0.9.1 --locked --features cli`
+and fetch locked dependencies with `cargo fetch --locked`. After changing Rust
+dependencies, run `bash scripts/generate-rust-licenses.sh`. Browser and font
+attributions are maintained in `scripts/licenses/about.hbs`. CI regenerates the
+notice with `--check` and fails if the checked-in Markdown differs; it does not
+commit changes automatically.
+
+After changing CodeMirror dependencies or source, run `npm ci` and `./build.sh`
+in `crates/waygate-admin/codemirror`. CI rebuilds with `./build.sh --check` and
+compares the bundle directly. Dependency updates must include changed generated
+assets in the same PR.

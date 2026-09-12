@@ -2,14 +2,7 @@
 # Fail if any code outside waygate-oidc's aead module touches aes-gcm
 # directly. Fast, compile-free CI tripwire (image.yml).
 #
-# Why it exists: before consolidation, two independent AES-256-GCM envelope
-# implementations existed — the session-cookie codec in waygate-oidc and the
-# upstream-token keyring in waygate-as — with the same `nonce || ct || tag`
-# framing but divergent nonce RNG sources. Security-relevant framing must have exactly one
-# implementation: `waygate_oidc::aead::{seal, open, cipher}`. Callers name
-# the cipher type via the module's re-export and never depend on the
-# aes-gcm crate themselves, so a new hand-rolled envelope can't slip in.
-#
+# Security-relevant envelope framing and randomness belong to waygate_oidc::aead.
 # What to do instead of adding a direct dependency:
 # `use waygate_oidc::aead::{self, Aes256Gcm};` and call seal/open/cipher.
 set -euo pipefail

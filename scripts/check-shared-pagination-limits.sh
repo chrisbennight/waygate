@@ -2,12 +2,7 @@
 # Fail if a crate redefines the shared pagination limits instead of using
 # waygate_core::page. Fast, compile-free CI tripwire (image.yml).
 #
-# Why it exists: before consolidation, MAX_LIST_LIMIT was redefined in
-# nine crates — seven at 500, one at
-# 200, one at 100 under a different name/type — with comments claiming
-# they "mirror" each other (i.e. kept in sync by hand). The shared
-# default/ceiling now live in waygate_core::page; crates re-export them.
-#
+# Pagination defaults and ceilings are defined by waygate_core::page.
 # Deliberate overrides are allowed but must be the EXPLICIT, commented
 # exceptions listed here — add to this allow-list only with a comment in
 # the source explaining why the surface diverges:

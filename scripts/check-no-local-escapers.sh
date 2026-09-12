@@ -2,16 +2,7 @@
 # Fail if any crate defines a local HTML escaper instead of using the shared
 # one in waygate-core. Fast, compile-free CI tripwire (image.yml).
 #
-# Why it exists: before consolidation, five hand-rolled `fn html_escape` /
-# `fn escape_html` copies existed
-# across waygate-admin and waygate-as with THREE different character sets —
-# the weakest escaped only `< > &`, which is unsafe the moment a caller uses
-# it in an attribute context. The escaping contract now lives in exactly one
-# place, `waygate_core::html::escape` (all five of `& < > " '`). A new local
-# definition would reintroduce the drift this guard exists to prevent: each
-# parallel-authored feature quietly minting its own, slightly different,
-# security-relevant escaper.
-#
+# HTML escaping uses waygate_core::html::escape consistently for & < > " and apostrophes.
 # What to do instead of adding one: `use waygate_core::html::escape;`
 # (waygate-core is dependency-light; any crate can take it).
 set -euo pipefail

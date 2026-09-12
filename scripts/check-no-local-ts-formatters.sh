@@ -3,17 +3,7 @@
 # the shared ones in waygate-core. Fast, compile-free CI tripwire
 # (image.yml).
 #
-# Why it exists: before consolidation, `fn format_ts_abs` was copy-pasted
-# ~21 times across waygate-admin,
-# RFC 3339 formatting existed under three different names, and the two
-# `format_ts_rel` copies had drifted behaviorally (a future timestamp
-# rendered as an absolute date in one and as "0s ago" in the other). The
-# formatting contract now lives in exactly one place,
-# `waygate_core::fmt::{format_ts_abs, format_ts_rel, format_ts_rfc3339}`.
-# A new local definition is the first step of that drift re-forming.
-#
-# What to do instead of adding one: `use waygate_core::fmt::format_ts_abs;`
-# (waygate-core is dependency-light; any crate can take it).
+# Use waygate_core::fmt for consistent absolute, relative, and RFC 3339 output.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,7 +24,7 @@ if [ -n "$hits" ]; then
     echo "ERROR: local timestamp formatter definition(s) found —"
     echo "use waygate_core::fmt::{format_ts_abs, format_ts_rel, format_ts_rfc3339} instead."
     echo "The shared contract lives in $allowed; local copies drift"
-    echo "(two format_ts_rel copies disagreed on future timestamps before consolidation):"
+    echo "Use the shared implementation:"
     echo "$hits" | sed 's/^/  /'
   } >&2
   exit 1

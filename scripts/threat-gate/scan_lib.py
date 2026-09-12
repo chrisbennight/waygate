@@ -1,16 +1,4 @@
-"""Scanning utilities for the container update threat gate.
-
-The scanner runs from this repository in either Gitea or GitHub Actions.
-
-Policy resolution order:
-  1. ``THREAT_GATE_POLICY_PATH`` env var, if it points at an existing
-     file. The workflow selects ``policy/container-threat-policy.json``
-     when present.
-  2. ``default-policy.json`` shipped alongside this module — the
-     baseline used when a consumer doesn't provide its own override.
-  3. A hardcoded baseline (critical/high + KEV, no ignores) as the
-     last-resort fallback if neither file exists.
-"""
+"""Container vulnerability scanning with an explicit policy file."""
 
 from __future__ import annotations
 
@@ -29,13 +17,6 @@ MODULE_DIR = Path(__file__).resolve().parent
 DEFAULT_POLICY_PATH = MODULE_DIR / "default-policy.json"
 SEVERITY_ORDER = ["negligible", "low", "medium", "high", "critical"]
 
-HARDCODED_BASELINE_POLICY: dict = {
-    "fail_on_severities": ["critical", "high"],
-    "fail_on_kev": True,
-    "ignored_vulnerabilities": [],
-    "blocked_images": [],
-    "warn_only_images": [],
-}
 
 
 @dataclass
@@ -69,24 +50,10 @@ def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
 
 
 def load_policy() -> dict:
-    """Resolve and return the active policy dict.
-
-    Tries the env-var override, then the bundled default, then the
-    hardcoded baseline. Each step is logged so operators can tell from
-    the run log which policy actually applied.
-    """
-    override = os.environ.get("THREAT_GATE_POLICY_PATH")
-    if override:
-        path = Path(override)
-        if path.exists():
-            log(f"Loading policy from THREAT_GATE_POLICY_PATH={path}")
-            return json.loads(path.read_text())
-        log(f"THREAT_GATE_POLICY_PATH={path} not found; falling back")
-    if DEFAULT_POLICY_PATH.exists():
-        log(f"Loading bundled default policy from {DEFAULT_POLICY_PATH}")
-        return json.loads(DEFAULT_POLICY_PATH.read_text())
-    log("No policy file found; using hardcoded baseline")
-    return dict(HARDCODED_BASELINE_POLICY)
+    """Read the selected policy; a missing or invalid file stops the scan."""
+    path = Path(os.environ.get("THREAT_GATE_POLICY_PATH") or DEFAULT_POLICY_PATH)
+    log(f"Loading policy from {path}")
+    return json.loads(path.read_text())
 
 
 def grype_image_ref(image_ref: str) -> str:
