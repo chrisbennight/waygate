@@ -24,7 +24,7 @@ Published container: `ghcr.io/chrisbennight/waygate`.
 Use a [release digest](https://github.com/chrisbennight/waygate/releases/latest)
 for deployment; `latest` follows stable releases and `edge` follows main.
 
-## Try it locally
+## Quick start (local)
 
 Install Docker with Compose and Python 3, then run from this checkout:
 
