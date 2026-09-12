@@ -7,22 +7,42 @@
   <img src="docs/branding/assets/header-light.svg" width="760" alt="Ideas connect through Waygate to models, data, and tools.">
 </picture>
 
-Waygate connects MCP clients to tools and model providers, with identity,
-Cedar access policy, quotas, and audit applied at the gateway.
-
-The gateway is useful when an assistant needs many tools, several identities or
-providers, and a clear boundary for what it may do. Ordinary MCP calls remain
-available alongside server-side search, file transfer, reviewed workflows, and
-Code Mode orchestration.
+Connect your MCP servers and model providers to Waygate. Your agents can find
+tools as they need them, combine calls into workflows, and propose changes for
+you to approve. You control access and can inspect what happened.
 
 **[Run the local tutorial](examples/quickstart/README.md)** ·
 **[Explore the documentation](docs/README.md)** ·
 **[Deploy with real identity](docs/configuration.md)** ·
 **[Get the latest release](https://github.com/chrisbennight/waygate/releases/latest)**
 
-Published container: `ghcr.io/chrisbennight/waygate`.
-Use a [release digest](https://github.com/chrisbennight/waygate/releases/latest)
-for deployment; `latest` follows stable releases and `edge` follows main.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/policy-review-dark.png">
+  <img src="docs/images/policy-review-light.png" width="960" alt="A policy change awaiting approval, with validation results and a preview of its effect on recorded tool calls.">
+</picture>
+
+Review an agent's proposed policy change and see its effect on recent calls
+before approving it. Full size: [light](docs/images/policy-review-light.png) ·
+[dark](docs/images/policy-review-dark.png).
+
+## Things to try
+
+**Find the right tool without loading the whole catalog.** Connect several MCP
+servers for your code host, logs, or documentation. An agent can search across
+them and load the definition it needs. Waygate checks access when tools are
+discovered and again when they are called.
+[Explore tool discovery](docs/guides/mcp.md).
+
+**Check the builds, return the failures.** With your code host connected, an
+agent can use Code Mode to check CI across repositories and return only the
+jobs that need attention. The intermediate responses can stay outside the
+model's context, and each call still passes through the gateway's access
+checks. [Combine tool calls](docs/guides/code-mode.md).
+
+**Let an agent prepare the change.** An agent can propose a gateway change
+without receiving the authority to approve it. Inspect the captured change in
+the dashboard, approve or deny it, and let the agent follow the result.
+[Try the approval workflow](docs/guides/gateway-administration.md).
 
 ## Quick start (local)
 
@@ -56,96 +76,19 @@ request flow, configuration, troubleshooting, and cleanup:
 POSTGRES_PASSWORD=dev docker compose down --volumes
 ```
 
-## What you can build
+## Go further
 
-| Outcome | Capability |
-| --- | --- |
-| Give an assistant a large tool catalog without loading every schema at once | [Progressive discovery](docs/guides/mcp.md), exact typed inspection, and ordinary direct MCP calls. |
-| Process files without pasting their bytes into model context | [Governed file transfer](docs/guides/files.md), key-bound helper grants, retained responses, and owner-scoped file references. |
-| Share workflows whose contents can be reviewed and pinned | [Verified skills](docs/guides/skills.md), progressive loading, distribution approval, and direct execution of selected JavaScript helpers. |
-| Filter and combine several tool results before returning an answer | [Code Mode](docs/guides/code-mode.md), isolated execution, per-call authorization, durable checkpoints, artifacts, and cancellation. |
-| Express access rules beyond an API-key allowlist | [Cedar and identity](docs/guides/security.md), tenant-aware policy, directory lifecycle, step-up, federation, and enterprise authorization. |
-| Let an agent prepare a gateway change for a human to approve | [Gateway administration over MCP](docs/guides/gateway-administration.md), typed action discovery, previews, captured proposals, and dashboard review. |
-| Govern model requests and explain their cost or failures | [Inference routing](docs/guides/inference.md), provider adapters, usage accounting, and [correlated audit and telemetry](docs/guides/observability.md). |
+Published container: `ghcr.io/chrisbennight/waygate`. Use a
+[release digest](https://github.com/chrisbennight/waygate/releases/latest) for
+deployment; `latest` follows stable releases and `edge` follows main.
 
-## How it fits together
+The [documentation](docs/README.md) covers files, models, reusable workflows,
+identity, deployment, and operations. See the [architecture](docs/architecture.md)
+for how the gateway fits together and the [MCP guide](docs/guides/mcp.md) for
+client support.
 
-```mermaid
-flowchart LR
-    C[MCP clients and model applications] --> G[Gateway: identity and policy]
-    G --> M[MCP upstreams]
-    G --> L[Model providers]
-    G --> E[Audit, traces, and metrics]
-    A[Human administrator] --> D[Dashboard review]
-    D --> G
-    G --> R[Isolated Code Mode runner]
-    R --> G
-```
-
-Each nested Code Mode call returns through the gateway's enforcement boundary.
-Provider credentials stay in the gateway's authorized runtime. Deployment
-repositories own manifests, policies, secret injection, storage, network routes,
-and the immutable image selected for rollout.
-
-The Rust workspace builds the gateway server and companion command-line tools.
-The container is distroless and non-root. See the [architecture](docs/architecture.md)
-for crate responsibilities and the request lifecycle.
-
-## Standards and compatibility
-
-The gateway supports MCP `2026-07-28` self-contained requests and a negotiated
-legacy session path, explicitly advertising `2025-11-25` alongside the newer
-version. It exposes standard tools, resources, and prompts, and preserves the
-ordinary direct-call path for capable hosts.
-
-Optional features include the official Tasks and enterprise-managed
-authorization extensions. SEP-1888 search and SEP-2631 file transfer are draft
-compatibility surfaces; Code Mode and the helper tools are gateway enhancements.
-The [capability guide](docs/guides/mcp.md) distinguishes those categories and
-links to authoritative specifications. Capability availability also depends on
-configuration, caller authority, and client support.
-
-This is an actively developed project. The guides describe implemented
-workflows and their prerequisites. Durable execution does not imply automatic
-rollback, integrity checks do not imply malware scanning, and usage accounting
-does not guarantee a hard concurrent spending cap.
-
-## Configuration
-
-Use [the configuration guide](docs/configuration.md) and the authenticated
-[environment template](.env.example). Replace placeholders through your
-launcher or secret provider; the binary does not automatically load `.env`.
-The tutorial's Compose file has its own fixed environment.
-
-[The operator runbook](docs/operations.md) and
-[authenticated Compose example](examples/deployment/README.md) cover installation,
-acceptance, upgrades, and recovery. [Deployment details](docs/deployment.md)
-cover storage and ingress. [Runtime settings](docs/configuration-reference.md)
-and [integration compatibility](docs/integration-configuration.md) cover
-optional controls and upgrade requirements. Generated administration clients
-are available through [the OpenAPI workflow](docs/admin-clients.md).
-
-## Contribute
-
-Read [the contribution guide](CONTRIBUTING.md), [architecture](docs/architecture.md),
-[design language](docs/design.md), and [repository instructions](AGENTS.md). Use the checked-in Rust toolchain and
-lockfile. Core validation is:
-
-```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --locked
-cargo check --workspace
-```
-
-Database-backed tests require Postgres; a local run without their database
-settings does not exercise that layer. CI supplies a database and also checks
-the image's hardened startup and real upstream handshake.
-
-Use [support guidance](SUPPORT.md) for bug reports and feature requests, and
-[private security reporting](SECURITY.md) for vulnerabilities.
-See [release notes](docs/release-notes.md) for adoption changes and
-[source publication](docs/source-release.md) for artifact/version conventions.
+[Contribute](CONTRIBUTING.md) · [Get help](SUPPORT.md) ·
+[Report a vulnerability](SECURITY.md) · [Release notes](docs/release-notes.md)
 
 ## License
 

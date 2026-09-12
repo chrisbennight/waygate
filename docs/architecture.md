@@ -4,6 +4,25 @@ This document defines crate ownership, dependency direction, shared abstractions
 and the request lifecycle. CI enforces the crate map and dependency rules.
 Domain-specific guidance lives in [`docs/agents/`](agents/).
 
+## How it fits together
+
+```mermaid
+flowchart LR
+    C[MCP clients and model applications] --> G[Gateway: identity and policy]
+    G --> M[MCP upstreams]
+    G --> L[Model providers]
+    G --> E[Audit, traces, and metrics]
+    A[Human administrator] --> D[Dashboard review]
+    D --> G
+    G --> R[Isolated Code Mode runner]
+    R --> G
+```
+
+Each nested Code Mode call returns through the gateway's enforcement boundary.
+Provider credentials stay in the gateway's authorized runtime. Deployment
+repositories own manifests, policies, secret injection, storage, network routes,
+and the immutable image selected for rollout.
+
 ## §1 Layering rule & dependency direction
 
 The contract:
