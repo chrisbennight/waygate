@@ -596,6 +596,10 @@ pub(crate) async fn tenant_prefix_nav_links_carry_prefix() {
     let (status, body) = body_of(app, "/t/default").await;
     assert_eq!(status, StatusCode::OK);
     assert!(
+        body.contains(r#"class="topbar__brand" href="/admin/t/default/""#),
+        "the brand home link must preserve the selected tenant",
+    );
+    assert!(
         body.contains(r#"href="/admin/t/default/servers""#),
         "Servers sidebar link missing tenant prefix",
     );

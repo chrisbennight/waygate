@@ -100,10 +100,6 @@ Some icons in Lucide derive from Feather and retain Feather's MIT license:
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 > THE SOFTWARE.
 
-## Adobe Source Serif 4
-
-Copyright 2014 - 2023 Adobe (http://www.adobe.com/), with Reserved Font Name ‘Source’. All Rights Reserved. Source is a trademark of Adobe in the United States and/or other countries.
-
 ## Adobe Source Sans 3
 
 Copyright 2010-2024 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'. All Rights Reserved. Source is a trademark of Adobe in the United States and/or other countries.
@@ -114,13 +110,13 @@ Copyright 2010-2024 Adobe (http://www.adobe.com/), with Reserved Font Name 'Sour
 
 ## Outfit
 
-Bundled source: `docs/branding/Outfit.ttf` (used to typeset the brand artwork).
+Bundled source: `crates/waygate-admin/static/fonts/outfit.ttf` (dashboard display font and brand artwork source).
 
 Upstream: <https://github.com/Outfitio/Outfit-Fonts>
 
 Copyright 2021 The Outfit Project Authors (https://github.com/Outfitio/Outfit-Fonts)
 
-All four font families use the following license.
+All three font families use the following license.
 
 ### SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
 

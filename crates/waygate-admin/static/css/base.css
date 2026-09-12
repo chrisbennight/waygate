@@ -19,11 +19,12 @@ code, pre, .mono {
     font-variant-ligatures: none;
 }
 
-/* Links are green and really underlined — this is a document. */
+/* Links remain identifiable without relying on color. */
 a { color: var(--green); text-decoration: underline; text-underline-offset: 2px; }
 a:hover { color: var(--green-strong); }
 a:focus-visible, button:focus-visible, [role="button"]:focus-visible,
-input:focus-visible, select:focus-visible, textarea:focus-visible {
+input:focus-visible, select:focus-visible, textarea:focus-visible,
+summary:focus-visible, [tabindex]:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 2px;
     border-radius: 2px;
@@ -50,25 +51,13 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 .skip-link:focus { top: 8px; }
 
-/* --- Shell: one sheet of paper — topbar, sidebar, and main
-   all sit on --paper-0; reading surfaces (tables, forms, wells) sit on
-   --paper-1. Sections divide by hairline + whitespace, not floating boxes. */
+/* Shared shell: quiet surfaces, fine rules, and a compact brand header. */
 .shell {
     display: grid;
-    grid-template-columns: 220px 1fr;
-    grid-template-rows: 48px 1fr;
+    grid-template-columns: 224px minmax(0, 1fr);
+    grid-template-rows: var(--topbar-height) 1fr;
     grid-template-areas: "topbar topbar" "sidebar main";
     min-height: 100dvh;
-}
-@media (max-width: 1023px) {
-    .shell { grid-template-columns: 64px 1fr; }
-    /* At the narrow breakpoint the sidebar collapses to a 64px icon
-       column — labels and the badge hide. The section-header collapse
-       lives next to the.sidebar__section base rule below, so it wins on
-       source order (same specificity); putting it here would lose to that
-       later rule and leave the labels visible. */
-    .sidebar-label { display: none; }
-    .nav-badge { display: none; }
 }
 
 .topbar {
@@ -80,8 +69,20 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
     background: var(--paper-0);
     border-bottom: 1px solid var(--rule);
 }
-/* The masthead — the one place chrome uses the display serif. */
-.topbar__brand { font-family: var(--font-display); font-weight: 600; font-size: 17px; }
+.topbar__brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    font-family: var(--font-display);
+    font-weight: 350;
+    font-size: 18px;
+    letter-spacing: .24em;
+    text-decoration: none;
+    color: var(--ink);
+    flex-shrink: 0;
+}
+.topbar__brand:hover { color: var(--ink); text-decoration: none; }
+.topbar__mark { width: 38px; height: 38px; flex-shrink: 0; }
 .topbar__spacer { flex: 1; }
 .topbar__env {
     font-family: var(--font-mono);
@@ -93,7 +94,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
     border-radius: var(--radius-interactive);
     color: var(--ink-muted);
 }
-.topbar__user { font-size: 14px; color: var(--ink-muted); }
+.topbar__user { font-size: 14px; color: var(--ink-muted); overflow-wrap: anywhere; min-width: 0; }
 .topbar__logout { margin: 0; }
 .topbar__logout-btn {
     background: transparent;
@@ -136,11 +137,11 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
     border-left: 2px solid transparent;
 }
 .sidebar__link:hover { background: var(--paper-2); color: var(--ink); text-decoration: none; }
-/* Active destination: green text + 2px green left rule, no filled pill
-  . */
+/* Active navigation retains both a word and a visible edge marker. */
 .sidebar__link[aria-current="page"] {
     color: var(--green);
     border-left-color: var(--green);
+    background: var(--paper-2);
     font-weight: 600;
 }
 .sidebar__icon { width: 20px; height: 20px; flex-shrink: 0; }
@@ -162,22 +163,6 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 /* The first section header sits flush with the top of the nav. */
 .sidebar__nav > .sidebar__section:first-child { margin-top: 0; }
-
-/* Collapsed icon column (<=1023px): the header text can't fit in 64px, so
-   each section header becomes a hairline divider that keeps the three
-   groups visually separated. Declared AFTER the base.sidebar__section
-   rule above so it wins on source order at equal specificity — the shell
-   collapse block earlier in the file would lose to that base rule. */
-@media (max-width: 1023px) {
-    .sidebar__section {
-        font-size: 0;
-        letter-spacing: 0;
-        margin: 8px 6px;
-        padding: 0;
-        border-top: 1px solid var(--rule);
-    }
-    .sidebar__nav > .sidebar__section:first-child { border-top: 0; margin-top: 0; }
-}
 
 /* Tenant selector --------------------------------------------------------- */
 .sidebar__tenant {
@@ -272,8 +257,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
     gap: 16px;
     margin-bottom: 20px;
 }
-/* Page title: display serif, one per page. */
-.page-title { font: 600 1.5rem/1.25 var(--font-display); margin: 0; }
+/* One display heading per page, with ordinary sentence spacing. */
+.page-title { font: 400 1.625rem/1.25 var(--font-display); margin: 0; }
 .page-header__actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* Narrow-viewport polish: the page-title can be allowed to wrap
@@ -312,7 +297,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .btn-danger:hover { color: var(--on-err); }
 .btn[aria-disabled="true"], .btn:disabled { opacity: .5; cursor: not-allowed; }
 
-/* --- Cards: square containers on the sheet  ------------------ */
+/* --- Cards -------------------------------------------------- */
 .card {
     background: var(--paper-1);
     border: 1px solid var(--rule);
@@ -328,14 +313,14 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
     padding: 0;
     overflow: auto;
 }
-/* Card headings use a small display serif and sentence case. */
+/* Card headings use the shared display face and sentence case. */
 .card-title {
-    font: 600 1.0625rem/1.4 var(--font-display);
+    font: 450 1.125rem/1.4 var(--font-display);
     color: var(--ink);
     margin: 0 0 8px;
 }
 
-/* --- Chips: clerk's annotations  --------------------------- */
+/* --- Status chips ------------------------------------------ */
 .chip {
     display: inline-flex;
     align-items: center;
@@ -516,7 +501,6 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
     align-items: center;
     gap: 8px;
     padding: 5px 10px;
-    margin-right: 8px;
     background: var(--paper-2);
     border: 1px solid var(--rule);
     border-radius: var(--radius-interactive);
@@ -577,7 +561,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
     font-family: var(--font-ui);
     font-size: 16px;
     line-height: 1.4;
-    outline: none;
+    min-width: 0;
 }
 .palette__esc-hint {
     font-family: var(--font-mono);
@@ -705,3 +689,33 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .skills-inventory { overflow-x: auto; }
 .skills-inventory td { overflow-wrap: anywhere; max-width: 24rem; }
 @media (max-width: 767px) { .skills-comparison { grid-template-columns: minmax(0, 1fr); } }
+
+/* Mobile navigation keeps tenant selection and named destinations usable. */
+@media (max-width: 767px) {
+    .shell {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto auto 1fr;
+        grid-template-areas: "topbar" "sidebar" "main";
+    }
+    .topbar { min-height: var(--topbar-height); flex-wrap: wrap; gap: 8px; padding: 10px 16px; }
+    .topbar__brand { margin-right: auto; }
+    .topbar__spacer { display: none; }
+    .topbar__user { flex: 1; font-size: 12px; }
+    .topbar__env { font-size: 11px; }
+    .sidebar { border-right: 0; border-bottom: 1px solid var(--rule); padding: 8px; min-width: 0; }
+    .sidebar__tenant { padding: 0 8px 8px; margin: 0 0 8px; }
+    .sidebar__tenant-label { display: inline-block; margin-right: 8px; }
+    .sidebar__tenant-form { display: inline-block; max-width: 100%; }
+    .sidebar__tenant-select { min-width: 12rem; max-width: 100%; }
+    .sidebar__nav { flex-direction: row; overflow-x: auto; flex: none; padding-bottom: 4px; }
+    .sidebar__nav > li { flex-shrink: 0; }
+    .sidebar__nav .sidebar__bottom { margin-top: 0; }
+    .sidebar__link { padding: 10px; gap: 6px; border-left: 0; border-bottom: 2px solid transparent; }
+    .sidebar__link[aria-current="page"] { border-bottom-color: var(--green); }
+    .sidebar-label { display: inline; }
+    .nav-badge { display: inline-block; }
+    .nav-badge[hidden] { display: none; }
+    .sidebar__section { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    .palette__row { grid-template-columns: 20px minmax(0, 1fr); gap: 8px; }
+    .palette__hint, .palette__category { grid-column: 2; }
+}

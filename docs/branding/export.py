@@ -19,7 +19,7 @@ PALETTES = {
     'light': ('#f7f5f0', '#23201b', '#1e5f46', '#80642d'),
     'dark': ('#191b1a', '#f3f0e7', '#86b39b', '#d4b77c'),
 }
-FONT = instantiateVariableFont(TTFont(ROOT / 'Outfit.ttf'), {'wght': 350})
+FONT = instantiateVariableFont(TTFont(ROOT.parents[1] / 'crates/waygate-admin/static/fonts/outfit.ttf'), {'wght': 350})
 GLYPHS = FONT.getGlyphSet()
 CMAP = FONT.getBestCmap()
 UNITS = FONT['head'].unitsPerEm
@@ -104,21 +104,34 @@ def outputs():
     return result
 
 
+def dashboard_outputs():
+    """Export the shared symbol with dashboard theme tokens and a tab icon."""
+    source = ET.tostring(SYMBOL, encoding='unicode')
+    for old, new in zip(PALETTES['light'], ('var(--paper-0)', 'var(--ink)', 'var(--paper-2)', 'var(--brand-brass)')):
+        source = source.replace(old, new)
+    sprite = ('<svg xmlns="http://www.w3.org/2000/svg"><symbol id="waygate" '
+              'viewBox="0 0 128 128">' + source + '</symbol></svg>\n').encode()
+    favicon = svg(128, 128, 'Waygate',
+                  '<rect width="128" height="128" rx="24" fill="' + PALETTES['dark'][0] + '"/>' + mark(8, 8, 112, 'dark'))
+    destination = ROOT.parents[1] / 'crates/waygate-admin/static/branding'
+    return {destination / 'brand.svg': sprite, destination / 'favicon.svg': favicon}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true', help='compare exports without writing')
     args = parser.parse_args()
-    assets = outputs()
-    destination = ROOT / 'assets'
+    assets = {ROOT / 'assets' / name: data for name, data in outputs().items()}
+    assets.update(dashboard_outputs())
     if args.check:
-        different = [name for name, data in assets.items() if not (destination / name).is_file() or (destination / name).read_bytes() != data]
+        different = [str(path.relative_to(ROOT.parents[1])) for path, data in assets.items() if not path.is_file() or path.read_bytes() != data]
         if different:
             raise SystemExit('Outdated branding exports: ' + ', '.join(different))
         print('Branding exports match their sources.')
     else:
-        destination.mkdir(exist_ok=True)
-        for name, data in assets.items():
-            (destination / name).write_bytes(data)
+        for path, data in assets.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
         print('Exported branding assets.')
 
 

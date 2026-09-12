@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{ chrome.title }} · Waygate</title>
+<link rel="icon" type="image/svg+xml" href="/admin/static/branding/favicon.svg">
 <link rel="stylesheet" href="/admin/static/css/fonts.css">
 <link rel="stylesheet" href="/admin/static/css/tokens.css">
 <link rel="stylesheet" href="/admin/static/css/base.css">
@@ -33,7 +34,10 @@
 
 <div class="shell">
     <header class="topbar" role="banner">
-        <div class="topbar__brand">Waygate</div>
+        <a class="topbar__brand" href="{{ self.chrome.nav_url("/") }}" aria-label="Waygate overview">
+            <svg class="topbar__mark" viewBox="0 0 128 128" aria-hidden="true"><use href="/admin/static/branding/brand.svg#waygate"/></svg>
+            <span>WAYGATE</span>
+        </a>
         <span class="topbar__env mono" aria-label="environment">{{ chrome.env }}</span>
         <div class="topbar__spacer"></div>
         {# Cmd-K palette opener. Always visible in the topbar

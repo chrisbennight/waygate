@@ -201,9 +201,10 @@ the chrome moved.
   pending operator decisions.
 - Add new Lucide icons by appending a `<symbol>` to `static/lucide.svg`.
 
-At the `@media (max-width: 1023px)` breakpoint, the sidebar collapses to a
-64px icon column (labels and the badge hide); each section header collapses
-to a hairline divider so the three groups stay visually separated.
+The sidebar retains named destinations and a readable tenant selector on wide
+screens. At phone widths it becomes a horizontally scrollable row of named
+destinations below the tenant selector. The shared CSS owns the exact
+breakpoints and spacing.
 
 ## Skills review
 

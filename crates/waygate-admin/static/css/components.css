@@ -3,15 +3,14 @@
 
 /* --- Section headings (in-page <h2> above a sheet) ----------------------- */
 .section-heading {
-    font: 600 1.0625rem/1.4 var(--font-display);
+    font: 450 1.125rem/1.4 var(--font-display);
     color: var(--ink);
     margin: 0 0 10px;
 }
 
-/* --- Ledger tables  ---------------------------------------- */
-/* White sheet, hairline row rules, double rule under the header (the
-   classic ledger cue), sentence-case headers, tabular numerals via.mono /
-  .tabular on numeric cells. */
+/* Dense tables use fine rules and sentence-case headings. Numeric cells
+   retain tabular figures through .mono / .tabular. */
+.table-scroll { max-width: 100%; overflow-x: auto; }
 .data-table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .data-table th,
 .data-table td { padding: 9px 14px; text-align: left; border-bottom: 1px solid var(--rule); }
@@ -23,10 +22,11 @@
     font-weight: 500;
     line-height: 1.5;
     color: var(--ink-muted);
-    border-bottom: 3px double var(--rule-strong);
+    border-bottom: 1px solid var(--rule-strong);
 }
 .data-table tbody tr:hover,
-.data-table tbody tr:focus-visible { background: var(--paper-2); outline: none; }
+.data-table tbody tr:focus-visible { background: var(--paper-2); }
+.data-table tbody tr:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .data-table td.mono { font-family: var(--font-mono); font-size: 13px; font-variant-numeric: tabular-nums; }
 .truncate {
     max-width: 28ch;
@@ -73,9 +73,9 @@
 }
 @media (max-width: 1279px) { .tile-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 767px)  { .tile-grid { grid-template-columns: 1fr; } }
-/* Display figure: the serif, tabular-lining numerals. */
+/* Summary figures retain stable numeric widths. */
 .tile-value {
-    font: 600 1.875rem/1.2 var(--font-display);
+    font: 400 1.875rem/1.2 var(--font-mono);
     font-variant-numeric: tabular-nums lining-nums;
 }
 .tile-sub { color: var(--ink-muted); font-size: 13px; margin-top: 4px; }
@@ -126,7 +126,7 @@
 
 /* --- First-run "Getting started" checklist (Overview) --------------------- */
 .gs-card { margin: 0 0 24px; }
-.gs-card h2 { font: 600 1.0625rem/1.4 var(--font-display); margin: 0 0 4px; }
+.gs-card h2 { font: 450 1.125rem/1.4 var(--font-display); margin: 0 0 4px; }
 .gs-card h2 .gs-count { font: 400 13px/1.4 var(--font-ui); color: var(--ink-muted); }
 .gs-sub { color: var(--ink-muted); font-size: 13px; margin: 0 0 14px; }
 .gs-list { list-style: none; padding: 0; margin: 0; }
@@ -162,8 +162,9 @@
     gap: 16px;
     align-items: start;
 }
+.activity-shell > * { min-width: 0; }
 @media (max-width: 900px) {
-    .activity-shell { grid-template-columns: 1fr; }
+    .activity-shell { grid-template-columns: minmax(0, 1fr); }
 }
 .filter-bar {
     display: flex;
@@ -456,7 +457,7 @@ tr.activity-row--new > td { animation: activity-row-flash 2.2s ease-out 1; }
 /* Fade, don't slide —  motion: opacity only. */
 .drawer {
     position: fixed;
-    top: 48px;
+    top: var(--topbar-height);
     right: 0;
     bottom: 0;
     width: min(520px, 100%);
@@ -472,7 +473,7 @@ tr.activity-row--new > td { animation: activity-row-flash 2.2s ease-out 1; }
 }
 .drawer[data-open="true"] { opacity: 1; pointer-events: auto; }
 .drawer header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; }
-.drawer h2 { font: 600 1.0625rem/1.4 var(--font-display); margin: 0; }
+.drawer h2 { font: 450 1.125rem/1.4 var(--font-display); margin: 0; }
 .drawer dl {
     display: grid;
     grid-template-columns: max-content 1fr;
@@ -520,7 +521,7 @@ tr.activity-row--new > td { animation: activity-row-flash 2.2s ease-out 1; }
    The legend pairs each color with a word; never color alone. */
 .hist-card { margin-bottom: 12px; }
 .hist-head { display: flex; justify-content: space-between; align-items: baseline; }
-.hist-head h3 { font: 600 1.0625rem/1.4 var(--font-display); margin: 0; }
+.hist-head h3 { font: 450 1.125rem/1.4 var(--font-display); margin: 0; }
 .hist-total { color: var(--ink-muted); font-size: 13px; }
 /* Plot = y-axis label column + bars, sharing a baseline rule. The peak label tops the axis so full bar height reads as a
    number; the 1px baseline anchors zero. */
@@ -553,7 +554,7 @@ tr.activity-row--new > td { animation: activity-row-flash 2.2s ease-out 1; }
 .hist-seg.hist-stepup { background: var(--flag); }
 .hist-seg.hist-err    { background: var(--err); }
 .hist-seg.hist-other  { background: var(--ink-faint); }
-.hist-legend { display: flex; gap: 14px; font-size: 12px; color: var(--ink-muted); }
+.hist-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--ink-muted); }
 .hist-legend span { display: inline-flex; align-items: center; }
 .hist-legend span::before {
     content: "";
@@ -567,7 +568,7 @@ tr.activity-row--new > td { animation: activity-row-flash 2.2s ease-out 1; }
 .hist-legend .hist-stepup::before { background: var(--flag); }
 .hist-legend .hist-err::before    { background: var(--err); }
 /* "View as table" disclosure — the numeric alternative to the chart. */
-.hist-table-toggle { margin-top: 10px; }
+.hist-table-toggle { margin-top: 10px; overflow-x: auto; }
 .hist-table-toggle > summary {
     cursor: pointer;
     font-size: 12px;
@@ -601,7 +602,7 @@ tr.activity-row--new > td { animation: activity-row-flash 2.2s ease-out 1; }
     line-height: 1.4;
     color: var(--ink-muted);
     background: var(--paper-1);
-    border-bottom: 3px double var(--rule-strong);
+    border-bottom: 1px solid var(--rule-strong);
 }
 .compare-table tbody th {
     font-family: var(--font-ui);
@@ -651,7 +652,7 @@ tr.activity-row--new > td { animation: activity-row-flash 2.2s ease-out 1; }
     margin: 0 0 12px;
 }
 
-/* --- Small ledger table (13px dense variant) ------------------------------ */
+/* --- Compact data table -------------------------------------------------- */
 .data-table--sm { font-size: 13px; }
 .data-table--sm th,
 .data-table--sm td { padding: 8px 12px; vertical-align: top; }
@@ -1311,7 +1312,7 @@ td.cell-url { word-break: break-all; max-width: 360px; }
 /* CodeMirror 6 Cedar editor. The vendored bundle mounts over
    the textarea above and adds the.cm-cedar class to its root; size + chrome
    match the textarea it replaces, and all colors route through design tokens
-   (syntax via --syntax-* in tokens.css) so it follows the Day/Night ledger. */
+   (syntax via --syntax-* in tokens.css) so it follows the selected theme. */
 .cm-cedar.cm-editor {
     height: 360px;
     border: 1px solid var(--rule-strong);
@@ -1335,11 +1336,11 @@ td.cell-url { word-break: break-all; max-width: 360px; }
 .cm-cedar .cm-activeLineGutter { background: var(--paper-2); color: var(--ink-muted); }
 .cm-cedar .cm-cursor { border-left-color: var(--ink); }
 .cm-cedar .cm-selectionBackground,
-.cm-cedar.cm-focused .cm-selectionBackground { background: var(--focus-ring); }
+.cm-cedar.cm-focused .cm-selectionBackground { background: var(--selection); }
 /* Bracket matching is enabled in the bundle; override CM6's compiled-in default
    match/mismatch colors so this visible state also follows the token theme
    (the.cm-cedar prefix outscopes CM6's single-class default). */
-.cm-cedar .cm-matchingBracket { background: var(--focus-ring); color: var(--ink); }
+.cm-cedar .cm-matchingBracket { background: var(--selection); color: var(--ink); }
 .cm-cedar .cm-nonmatchingBracket { color: var(--deny); }
 
 /* Cedar token classes emitted by the bundle's HighlightStyle — color only,
@@ -1460,7 +1461,7 @@ td.cell-url { word-break: break-all; max-width: 360px; }
 
 /* --- Overview: status sentence + figures  -------------------- */
 .status-sentence {
-    font: 600 1.25rem/1.5 var(--font-display);
+    font: 400 1.25rem/1.5 var(--font-display);
     margin: 0 0 20px;
     max-width: 70ch;
 }
@@ -1477,7 +1478,7 @@ td.cell-url { word-break: break-all; max-width: 360px; }
     padding: 14px 18px;
 }
 .figure__value {
-    font: 600 1.875rem/1.2 var(--font-display);
+    font: 400 1.875rem/1.2 var(--font-mono);
     font-variant-numeric: tabular-nums lining-nums;
 }
 .figure__delta { color: var(--ink-muted); font-size: 13px; margin-top: 2px; }
@@ -1546,7 +1547,7 @@ td.cell-url { word-break: break-all; max-width: 360px; }
 .attn-item--stacked .row-actions { text-align: left; margin-top: 4px; }
 
 /* Manifest approvals lead with the projected service outcome, then retain
-   replay as supporting evidence. Rules separate the ledger sections without
+   replay as supporting evidence. Rules separate the review sections without
    turning each fact into another nested card. */
 .manifest-preview__title { margin: 0; }
 .manifest-impact,
@@ -1558,7 +1559,7 @@ td.cell-url { word-break: break-all; max-width: 360px; }
 }
 .manifest-impact__outcome {
     margin: 0 0 6px;
-    font: 600 1rem/1.4 var(--font-display);
+    font: 450 1rem/1.4 var(--font-display);
     color: var(--ink);
 }
 .manifest-impact__outcome--blocked { color: var(--err); }
@@ -1711,3 +1712,16 @@ td.cell-url { word-break: break-all; max-width: 360px; }
 }
 .review-finding__detail { color: var(--ink); white-space: pre-wrap; word-break: break-word; margin: 0; }
 .review-finding__rec { color: var(--ink-muted); white-space: pre-wrap; word-break: break-word; margin: 0; }
+
+/* Shared surfaces inherit the same geometry without changing page behavior. */
+.figure, .filter-bar, .facets, .saved-views, .skills-content {
+    border-radius: var(--radius-container);
+}
+@media (max-width: 767px) {
+    .attn-list > li, .changed-list li, .bg-banner, .hist-head { flex-wrap: wrap; }
+    .attn-link, .gs-link { white-space: normal; }
+    .drawer { padding: 16px; }
+    .drawer dl { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+    .drawer dd { margin-bottom: 8px; }
+    .filter-bar > input, .filter-bar > select { max-width: 100%; }
+}
