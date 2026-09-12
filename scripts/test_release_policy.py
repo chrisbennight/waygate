@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -19,6 +20,17 @@ REPO = 'ghcr.io/test/waygate'
 
 
 class IdentityTests(unittest.TestCase):
+    def test_failed_command_preserves_diagnostic_and_exit_failure(self):
+        result = subprocess.run(
+            [sys.executable, '-c',
+             'from release_policy import run; import sys; '
+             'run(sys.executable, "-c", '
+             '"import sys; print(\'registry denied publication\', file=sys.stderr); sys.exit(1)")'],
+            cwd=Path(__file__).parent, text=True, capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('registry denied publication', result.stderr.splitlines())
+
     def test_event_publication_matrix(self):
         cases = [
             ('pull_request', 'refs/pull/1/merge', 'verify', ''),
