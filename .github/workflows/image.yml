@@ -73,7 +73,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo fetch --locked
-          cargo install cargo-about --version 0.9.1 --locked
+          cargo install cargo-about --version 0.9.1 --locked --features cli
           bash scripts/generate-rust-licenses.sh --check
           npm ci --prefix crates/waygate-admin/codemirror
           bash crates/waygate-admin/codemirror/build.sh --check

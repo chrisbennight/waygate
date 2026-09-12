@@ -119,7 +119,7 @@ and smoke-testing the optimized image. Postgres starts after test compilation;
 source tests and image smoke use the same pinned database image. Source guards
 include the secret scanner.
 
-Install `cargo-about` 0.9.1 with `cargo install cargo-about --version 0.9.1 --locked`
+Install `cargo-about` 0.9.1 with `cargo install cargo-about --version 0.9.1 --locked --features cli`
 and fetch locked dependencies with `cargo fetch --locked`. After changing Rust
 dependencies, run `bash scripts/generate-rust-licenses.sh`. Browser and font
 attributions are maintained in `scripts/licenses/about.hbs`. CI regenerates the

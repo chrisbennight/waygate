@@ -65,8 +65,8 @@ These are the rules the implementation may not violate. Tests assert them.
 - **I4 — Credentials are injected, never minted or written back.** The gateway reads
   `LLM_CRED_*` values injected by Infisical, refreshes OAuth access tokens **in-process and
   in-memory**, and never mints a credential nor writes back to Infisical or to disk. The
-  `waygate-llm-credentials` crate itself holds no Infisical client. **Scoped read exception
-:** for credentials kept fresh by an out-of-band refresher (`ai-credential-refresh`),
+  `waygate-llm-credentials` crate itself holds no Infisical client. **Scoped read exception:**
+  for credentials kept fresh by an out-of-band refresher (`ai-credential-refresh`),
   `waygate-server` runs a **read-only** Infisical re-read poller (scoped service token, single
   secret path) that re-fetches the refresher's *current access token* into the in-memory store.
   Those credentials are **not** refreshed in-process (their seed refresh token rotates away),
