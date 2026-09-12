@@ -6144,12 +6144,27 @@ async fn stale_publish_and_rollback_baselines_refuse_before_approval_is_consumed
 #[tokio::test]
 async fn custom_inspection_writes_cannot_be_proposed() {
     let app = api_router(state_with(Some(mem_store())).await);
-    for action in ["inspection_rule.create", "inspection_rule.update"] {
+    for (action, params) in [
+        (
+            "inspection_rule.create",
+            json!({"inspector": "pii", "name": "custom rule", "config": {}}),
+        ),
+        (
+            "inspection_rule.update",
+            json!({"id": uuid::Uuid::new_v4(), "name": "updated rule"}),
+        ),
+    ] {
         let response = app.clone().oneshot(post_req(
             "/api/v1/admin/change_requests",
-            &json!({"action_type": action, "params": {}, "justification": "test unsupported rule"}),
+            &json!({"action_type": action, "params": params, "justification": "test unsupported rule"}),
             "alice", &["mcp:propose"],
         )).await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(response).await;
+        assert_eq!(body["error"], "bad_request");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("unknown or non-executable action_type"));
     }
 }
