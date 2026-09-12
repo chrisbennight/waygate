@@ -129,7 +129,7 @@ implementation.
 
 Durable review needs `GATEWAY_DATABASE_URL`. The accepted and current contracts
 are bounded to 256 KiB each in storage; an observation that cannot be stored is
-refused before replacing the serving session. Database failures refuse protected
+refused for that tool without preventing review of other tools. Database failures refuse protected
 admission. Existing quarantines survive restart, reconnect, and the upstream's
 Clear quarantine control. Without a database, the existing process-local
 quarantine remains available, but this durable review screen is unavailable.

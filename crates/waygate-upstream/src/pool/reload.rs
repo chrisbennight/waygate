@@ -1339,7 +1339,7 @@ impl UpstreamPool {
             };
             let review_manifest = entry.manifest_snapshot();
             if self
-                .observe_tool_reviews(entry, name, &review_manifest, &common_live_tools)
+                .observe_tool_reviews(entry, name, &review_manifest, &common_live_tools, false)
                 .await
                 .is_err()
             {
@@ -1880,7 +1880,7 @@ impl UpstreamPool {
         let review_manifest = entry.manifest_snapshot();
         for conn in dialed.iter().filter_map(Option::as_ref) {
             if self
-                .observe_tool_reviews(entry, name, &review_manifest, &conn.live_tools)
+                .observe_tool_reviews(entry, name, &review_manifest, &conn.live_tools, false)
                 .await
                 .is_err()
             {
@@ -2275,7 +2275,7 @@ impl UpstreamPool {
         // drift on a quarantined / unclassified tool still surfaces.
         // Per-upstream — the first slot of a multi-slot publication records
         // the observation so sibling slots do not double-count it.
-        let drift = entry.record_observed_schemas_against(
+        let mut drift = entry.record_observed_schemas_against(
             name,
             &conn.live_tools,
             source,
@@ -2296,10 +2296,16 @@ impl UpstreamPool {
         // implementation. Production recording only submits to the bounded
         // chained queue; database latency stays in its workers. Empty on the
         // boot pass and when nothing drifted.
-        if !drift.is_empty()
-            && (self.tool_reviews.is_none()
-                || matches!(self.quarantine_threshold, QuarantineThreshold::Off))
-        {
+        if self.tool_reviews.is_some() {
+            let quarantine = entry
+                .quarantined
+                .read()
+                .expect("upstream quarantine lock poisoned");
+            for report in &mut drift {
+                report.quarantined = quarantine.contains(&report.tool);
+            }
+        }
+        if !drift.is_empty() {
             if let Some(evidence) = self.evidence.clone() {
                 let server = name.to_string();
                 let trace_id = waygate_telemetry::correlation::current_trace_id();
@@ -2326,22 +2332,34 @@ impl UpstreamPool {
         for slot in &entry.slots {
             if let Some(conn) = slot.conn.read().await.as_ref() {
                 if self
-                    .observe_tool_reviews(entry, name, &entry.manifest_snapshot(), &conn.live_tools)
+                    .observe_tool_reviews(
+                        entry,
+                        name,
+                        &entry.manifest_snapshot(),
+                        &conn.live_tools,
+                        false,
+                    )
                     .await
                     .is_err()
                 {
                     tracing::warn!(server = %name, "rebuilt tool review observation failed; admission will refuse unobserved contracts");
                 }
-                let drift = entry.record_observed_schemas(
+                let mut drift = entry.record_observed_schemas(
                     name,
                     &conn.live_tools,
                     "rebuild",
                     self.runtime_quarantine_threshold(),
                 );
-                if !drift.is_empty()
-                    && (self.tool_reviews.is_none()
-                        || matches!(self.quarantine_threshold, QuarantineThreshold::Off))
-                {
+                if self.tool_reviews.is_some() {
+                    let quarantine = entry
+                        .quarantined
+                        .read()
+                        .expect("upstream quarantine lock poisoned");
+                    for report in &mut drift {
+                        report.quarantined = quarantine.contains(&report.tool);
+                    }
+                }
+                if !drift.is_empty() {
                     if let Some(evidence) = self.evidence.clone() {
                         let server = name.to_string();
                         let trace_id = waygate_telemetry::correlation::current_trace_id();
@@ -2519,7 +2537,7 @@ impl UpstreamPool {
                 .filter_map(|guard| guard.as_ref())
             {
                 if self
-                    .observe_tool_reviews(entry, name, new_manifest, &conn.live_tools)
+                    .observe_tool_reviews(entry, name, new_manifest, &conn.live_tools, false)
                     .await
                     .is_err()
                 {

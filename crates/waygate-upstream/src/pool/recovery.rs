@@ -202,6 +202,7 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
                                 .find(|tool| tool.name.as_ref() == setup.tool_name)
                                 .map(std::slice::from_ref)
                                 .unwrap_or_default(),
+                            true,
                         )
                         .await
                         .is_ok()

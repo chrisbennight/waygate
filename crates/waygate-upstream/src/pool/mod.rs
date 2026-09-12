@@ -1895,6 +1895,7 @@ impl UpstreamPool {
                         server,
                         &current_manifest,
                         raw_contract.map(std::slice::from_ref).unwrap_or_default(),
+                        true,
                     )
                     .await
                     .is_err()
@@ -2118,6 +2119,7 @@ impl UpstreamPool {
                             server,
                             &current_manifest,
                             current_tool.map(std::slice::from_ref).unwrap_or_default(),
+                            true,
                         )
                         .await
                         .is_err()

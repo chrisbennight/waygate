@@ -77,6 +77,7 @@ impl UpstreamPool {
                             name,
                             &entry.manifest_snapshot(),
                             &conn.live_tools,
+                            true,
                         )
                         .await
                         .is_err()
@@ -99,6 +100,7 @@ impl UpstreamPool {
         name: &str,
         manifest: &UpstreamManifest,
         tools: &[Tool],
+        emit_evidence: bool,
     ) -> Result<(), waygate_catalog::tool_reviews::ReviewError> {
         let Some(store) = self.tool_reviews.as_ref() else {
             return Ok(());
@@ -121,7 +123,7 @@ impl UpstreamPool {
             {
                 continue;
             }
-            let changed = store
+            let observation = store
                 .observe(
                     waygate_core::TenantId::DEFAULT,
                     name,
@@ -130,7 +132,26 @@ impl UpstreamPool {
                     &contract,
                     self.quarantine_threshold.covers(class.risk, side_effects),
                 )
-                .await?;
+                .await;
+            let changed = match observation {
+                Ok(changed) => changed,
+                Err(waygate_catalog::CatalogError::Database(error))
+                    if error.as_database_error().is_some_and(|error| {
+                        matches!(
+                            error.constraint(),
+                            Some("tool_contract_reviews_approved_contract_check")
+                                | Some("tool_contract_reviews_observed_contract_check")
+                        )
+                    }) =>
+                {
+                    // A contract that cannot be recorded fails its own
+                    // admission check; it must not prevent a peer's review.
+                    tracing::warn!(server = name, tool = %class.name,
+                            "tool contract exceeds review storage bound");
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if let Some(review) = store
                 .get(waygate_core::TenantId::DEFAULT, name, &class.name)
                 .await?
@@ -146,7 +167,7 @@ impl UpstreamPool {
                 }
                 waygate_telemetry::metrics::set_tool_quarantined(name, quarantined.len() as i64);
             }
-            if changed {
+            if changed && emit_evidence {
                 if let (Some(evidence), Some(review)) = (
                     &self.evidence,
                     store

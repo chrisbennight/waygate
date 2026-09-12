@@ -11,7 +11,10 @@ use waygate_catalog::{tool_reviews::PgCatalogStore, ImportServer, ImportTool, Ma
 use waygate_upstream::UpstreamPool;
 
 #[derive(Clone)]
-struct ReviewUpstream(Arc<std::sync::RwLock<rmcp::model::Tool>>);
+struct ReviewUpstream(
+    Arc<std::sync::RwLock<rmcp::model::Tool>>,
+    Arc<std::sync::RwLock<Option<rmcp::model::Tool>>>,
+);
 impl rmcp::ServerHandler for ReviewUpstream {
     fn get_info(&self) -> rmcp::model::ServerInfo {
         rmcp::model::ServerInfo::new(
@@ -27,11 +30,9 @@ impl rmcp::ServerHandler for ReviewUpstream {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
-        Ok(rmcp::model::ListToolsResult::with_all_items(vec![self
-            .0
-            .read()
-            .unwrap()
-            .clone()]))
+        let mut tools = vec![self.0.read().unwrap().clone()];
+        tools.extend(self.1.read().unwrap().clone());
+        Ok(rmcp::model::ListToolsResult::with_all_items(tools))
     }
     async fn call_tool(
         &self,
@@ -107,7 +108,12 @@ async fn acceptance_workflow(annotation_mode: bool) {
             .clone(),
         ));
     }
-    let upstream = ReviewUpstream(descriptor.clone());
+    let sibling = Arc::new(std::sync::RwLock::new((!annotation_mode).then(|| {
+        let mut tool = descriptor.read().unwrap().clone();
+        tool.name = "sibling".into();
+        tool
+    })));
+    let upstream = ReviewUpstream(descriptor.clone(), sibling.clone());
     let service = StreamableHttpService::new(
         move || Ok(upstream.clone()),
         LocalSessionManager::default().into(),
@@ -135,6 +141,16 @@ async fn acceptance_workflow(annotation_mode: bool) {
             &descriptor.read().unwrap(),
         ));
     }
+    if !annotation_mode {
+        manifest
+            .tools
+            .push(waygate_upstream::ToolClassification::new(
+                "sibling",
+                waygate_core::RiskTier::Low,
+                false,
+                false,
+            ));
+    }
     let initial_manifests = BTreeMap::from([(manifest.name.clone(), manifest.clone())]);
     let dir = std::env::temp_dir().join(format!("waygate-tool-review-{}", uuid::Uuid::new_v4()));
     if annotation_mode {
@@ -156,15 +172,19 @@ async fn acceptance_workflow(annotation_mode: bool) {
                     "manifest"
                 }
                 .into(),
-                tools: vec![ImportTool {
-                    name: "search".into(),
-                    approved_behavior_hash: manifest.tools[0].approved_behavior_hash.clone(),
-                    risk: "low".into(),
-                    side_effects: false,
-                    pii: false,
-                    discriminator: None,
-                    operations: vec![],
-                }],
+                tools: manifest
+                    .tools
+                    .iter()
+                    .map(|tool| ImportTool {
+                        name: tool.name.clone(),
+                        approved_behavior_hash: tool.approved_behavior_hash.clone(),
+                        risk: "low".into(),
+                        side_effects: false,
+                        pii: false,
+                        discriminator: None,
+                        operations: vec![],
+                    })
+                    .collect(),
             }],
             false,
         )
@@ -222,6 +242,9 @@ async fn acceptance_workflow(annotation_mode: bool) {
         .unwrap()
         .unwrap();
     assert!(review.quarantined);
+    if let Some(tool) = sibling.write().unwrap().as_mut() {
+        tool.description = Some("x".repeat(262145).into());
+    }
     descriptor.write().unwrap().description = Some("Search the current documentation index".into());
     let submit = |review: &waygate_catalog::tool_reviews::ToolReview| {
         Request::builder()
@@ -249,6 +272,16 @@ async fn acceptance_workflow(annotation_mode: bool) {
         "approval returned {status}: {}",
         String::from_utf8_lossy(&response_body)
     );
+    if !annotation_mode {
+        assert!(
+            matches!(
+                pool.resolve_invocation_tool("default", &server, "sibling")
+                    .await,
+                ResolvedInvocationTool::Quarantined { .. }
+            ),
+            "oversized sibling must stay refused while the reviewed tool recovers"
+        );
+    }
     let evidence: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit_log WHERE action='tool_contract.approve' AND reason=$1",
     )
