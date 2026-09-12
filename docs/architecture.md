@@ -377,6 +377,12 @@ Where each kind of state lives and how it changes:
   Git commit, verified against the decision, and held in the same bounded cache.
   Every content release rechecks approval; distribution approval grants no script
   execution authority. See [skill distribution review](skill-distribution-review.md).
+- **Upstream tool review** — the governed catalog retains the accepted and
+  observed contract plus durable quarantine per tool. Replacement connections
+  record observations before publication. Discovery and dispatch consult this
+  refusal state; exact-generation acceptance uses the existing admin action
+  registry and preserves manifest authority for annotation-mode hashes.
+  See [tool change review](guides/security.md#review-an-upstream-tool-change).
 - **In-memory caches** — JWKS (per-issuer in `waygate-oidc`; per-peer with
   a generation fence in `waygate-federation`), session state, the upstream
   connection pool, quota buckets. All rebuildable; none is a source of

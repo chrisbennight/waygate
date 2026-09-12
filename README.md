@@ -25,6 +25,16 @@ Review an agent's proposed policy change and see its effect on recent calls
 before approving it. Full size: [light](docs/images/policy-review-light.png) ·
 [dark](docs/images/policy-review-dark.png).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/tool-change-review-dark.png">
+  <img src="docs/images/tool-change-review-light.png" width="864" alt="An upstream tool changed its description to request credentials. Waygate quarantined it and shows the accepted and replacement descriptions side by side.">
+</picture>
+
+An upstream tool changes what it asks your agent to do. With
+[tool-change quarantine enabled](docs/guides/security.md#review-an-upstream-tool-change),
+Waygate blocks the tool while you inspect the difference. Keep it quarantined
+or approve that exact replacement.
+
 ## Things to try
 
 **Find the right tool without loading the whole catalog.** Connect several MCP

@@ -337,11 +337,10 @@ fn tool_quarantined() -> &'static IntGaugeVec {
     M.get_or_init(|| {
         register_int_gauge_vec_with_registry!(
             "mcp_tool_quarantined",
-            "Per-upstream count of tools currently quarantined by the gateway \
-             (e.g. observed behavior drift on a tool whose catalog risk meets the \
-             GATEWAY_QUARANTINE_ON_DRIFT_RISK threshold). Non-zero means calls to \
-             those tools are being refused at resolve_invocation_tool. Cleared on \
-             gateway restart — there is no persistence yet.",
+            "Per-upstream count of tool quarantines known to this replica. \
+             Durable review decisions survive restart; another replica's \
+             acceptance may precede this gauge's next refresh. Without a \
+             database, quarantine is process-local.",
             &["server"],
             registry()
         )

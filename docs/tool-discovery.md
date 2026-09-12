@@ -270,7 +270,9 @@ Use this recovery sequence:
    runtime drift-quarantine count. Quarantined tools are absent from the
    authoritative served count but can remain in the advisory index, so an
    ordinary source refresh alone does not repair that skew. Diagnose and
-   correct the contract drift, then use the audited runtime recovery path
+   correct the contract drift. With durable tool-change review configured,
+   [review and accept the exact replacement](guides/security.md#review-an-upstream-tool-change).
+   Otherwise use the audited runtime recovery path
    (`upstream.reconnect` with `clear_quarantine`,
    `upstream.quarantine.clear`, or
    `POST /api/v1/servers/{name}/quarantine/clear`) before refreshing and

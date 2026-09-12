@@ -5,7 +5,7 @@
 use rmcp::model::Tool;
 use serde_json::Value;
 
-use super::UpstreamEntry;
+use super::{Connection, UpstreamEntry};
 use waygate_mcp::protocol::RiskTier;
 
 use super::{DriftReport, QuarantineThreshold};
@@ -15,6 +15,8 @@ pub(super) struct PublishedToolContract {
     /// Exact normalized definition captured from the same connection snapshot
     /// as the contract fields below.
     pub(super) definition: Option<Tool>,
+    /// Original descriptor before client-compatibility schema normalization.
+    pub(super) advertised_definition: Option<Tool>,
     pub(super) input_schema: Option<Value>,
     pub(super) output_schema: Option<Value>,
     pub(super) tool_annotations: Option<Value>,
@@ -37,21 +39,25 @@ pub(super) async fn published_tool_contract(
     };
     for slot in &entry.slots {
         if let Some(connection) = slot.conn.read().await.as_ref() {
-            if let Some(mut contract) = contract_for_tool(&connection.tools, tool_name) {
-                // The behavior hash identifies the descriptor the upstream
-                // ADVERTISED, which is what a manifest's approved hash was
-                // computed from. The published view may have had an unusable
-                // output schema cleared, so hashing it would never match an
-                // approval and would quarantine the tool the strip exists to
-                // keep. Schemas below stay the published ones — those are what
-                // callers validate against.
-                contract.behavior_hash = contract_for_tool(&connection.live_tools, tool_name)
-                    .and_then(|advertised| advertised.behavior_hash);
+            if let Some(contract) = connection_tool_contract(connection, tool_name) {
                 return contract;
             }
         }
     }
     PublishedToolContract::default()
+}
+
+pub(super) fn connection_tool_contract(
+    connection: &Connection,
+    tool_name: &str,
+) -> Option<PublishedToolContract> {
+    let mut contract = contract_for_tool(&connection.tools, tool_name)?;
+    let advertised = contract_for_tool(&connection.live_tools, tool_name).unwrap_or_default();
+    // Approval and drift bind the original descriptor. Schema normalization
+    // changes only the client-facing contract, not what the upstream advertised.
+    contract.behavior_hash = advertised.behavior_hash;
+    contract.advertised_definition = advertised.definition;
+    Some(contract)
 }
 
 pub(super) fn admit_input_schema(
@@ -79,6 +85,7 @@ pub(super) fn contract_for_tool(tools: &[Tool], tool_name: &str) -> Option<Publi
     let behavior_hash = Some(crate::security_metadata::behavior_hash(tool));
     Some(PublishedToolContract {
         definition: Some(tool.clone()),
+        advertised_definition: Some(tool.clone()),
         behavior_hash,
         input_schema: Some(Value::Object((*tool.input_schema).clone())),
         output_schema: tool
@@ -95,13 +102,11 @@ impl UpstreamEntry {
     /// being REPLACED by a live slot-resize rebuild into the freshly
     /// built entry. A `build_entry` result starts with an empty quarantine set
     /// and re-seeds its behavior baseline from the new connection — so without this
-    /// a rebuild would silently (a) drop every active drift quarantine, undoing
-    /// the authoritative dispatch BLOCK that [`is_quarantined`] enforces, and (b)
-    /// re-baseline behavior history, which [`clear_quarantine`] documents as a
-    /// restart-only operation. Copy both the quarantined set (the BLOCK) and the
+    /// a rebuild would silently drop process-local quarantine and reset its
+    /// observation baseline. Copy both the quarantined set and the
     /// `observed_schemas` baseline (the drift reference) so they survive the
     /// rebuild; a later reconnect re-measures drift against the carried baseline,
-    /// and only `clear_quarantine` / a restart re-baselines. The
+    /// while durable decisions remain independently authoritative. The
     /// `mcp_tool_quarantined{server}` gauge is per-server and already reflects the
     /// carried count, so it is left untouched. Nothing is carried for refused
     /// output schemas: that record is keyed by server, which a rebuild does

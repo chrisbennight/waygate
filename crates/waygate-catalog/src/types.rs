@@ -278,11 +278,9 @@ pub enum ResolvedTool {
 }
 
 /// Observation reported by [`CatalogStore::record_drift`].
-/// Intended to be constructed by a live-schema observer when an
-/// upstream's live schema doesn't match the catalog's approved
-/// hash; no such observer exists yet — today's schema-drift
-/// detection lives in `waygate-upstream`'s in-memory per-tool
-/// check instead.
+/// External observers may append drift evidence through this interface.
+/// Runtime tool reviews write their comparison and drift event together
+/// through the durable tool-review store.
 #[derive(Debug, Clone)]
 pub struct DriftObservation<'a> {
     pub tenant_id: &'a str,
@@ -497,7 +495,7 @@ impl GrantLifecycle {
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
     #[error("catalog store: {0}")]
-    Database(#[source] sqlx::Error),
+    Database(#[from] sqlx::Error),
     #[error("invalid catalog input: {0}")]
     InvalidInput(String),
     #[error("unknown {0}")]

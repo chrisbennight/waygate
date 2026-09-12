@@ -24,6 +24,7 @@ pub mod grant_sweeper;
 mod import;
 mod schema_hash;
 mod store;
+pub mod tool_reviews;
 mod types;
 
 pub use import::{ImportOperation, ImportServer, ImportStats, ImportTool, ManifestImporter};

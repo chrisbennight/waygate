@@ -40,3 +40,5 @@ mod style_tokens;
 mod upstream_sessions_api;
 
 mod skill_reviews_pg;
+
+mod tool_review_dashboard;

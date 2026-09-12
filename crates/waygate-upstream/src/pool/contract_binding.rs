@@ -377,6 +377,25 @@ impl UpstreamPool {
             manifest_operations,
             mut published,
         } = inputs;
+        let mode = if annotation_mode {
+            crate::ClassificationMode::McpAnnotations
+        } else {
+            crate::ClassificationMode::Manifest
+        };
+        if !self
+            .review_allows(
+                server,
+                tool_name,
+                published.advertised_definition.as_ref(),
+                mode,
+            )
+            .await
+        {
+            return ResolvedInvocationTool::Quarantined {
+                server: server.to_owned(),
+                tool: tool_name.to_owned(),
+            };
+        }
         // A reload publishes manifest fields and reconciles the governed
         // catalog in separate commits. The reload generation is armed before
         // the manifest becomes observable and settled only after the matching
@@ -778,7 +797,7 @@ impl UpstreamPool {
         admitted: &InvocationContractIdentity,
     ) -> bool {
         let published =
-            schema_admission::contract_for_tool(&conn.tools, tool_name).unwrap_or_default();
+            schema_admission::connection_tool_contract(conn, tool_name).unwrap_or_default();
         match self
             .resolve_snapshot_from(
                 tenant,

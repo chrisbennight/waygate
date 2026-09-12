@@ -551,6 +551,7 @@ fn page_routes(state: Arc<AdminState>) -> Router<()> {
         // change-request / break-glass mutation cores.
         .merge(crate::dashboard_decisions::router())
         .merge(crate::dashboard_skills::router())
+        .merge(crate::dashboard_tool_reviews::router())
         // The Decision Log — server-rendered audit-decision
         // browser (the `/api/v1/audit/decisions` surface as a pane), with
         // the `?policy_id=` reverse lookup cross-linked from the Policies pane.

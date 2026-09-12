@@ -261,6 +261,7 @@ between the direct-admin and propose paths.
 | `upstream.reconnect` | standard | recover a disconnected upstream; optionally clear drift quarantine after recovery succeeds | no |
 | `upstream.refresh_catalog` | elevated | replace an upstream MCP session and republish its live classified tool inventory | no |
 | `upstream.quarantine.clear` | standard | clear one upstream's in-process drift quarantine | no |
+| `tool_contract.approve` | standard | accept one exact observed tool replacement and update its annotation approval hash when required | no |
 | `catalog.server.unquarantine` | elevated | restore one exact, reviewed durable catalog server from `quarantined` to `live` | no |
 | `config.reload` | standard | ring the policy and/or manifest fleet reload doorbell for the maker's tenant | no |
 | `break_glass.mint` | elevated | mint a single-use, scope-pinned, ≤24h Cedar override token | no |
@@ -285,8 +286,12 @@ policy/manifest doorbell, which every replica listens to, and the periodic
 pointer poll remains the missed-notification backstop. The result
 reports which configured doorbells actually fired and `fleet_wide: true` when
 at least one did. REST, direct `gateway-control`, and these executors share the
-same core operations, including the invariant that reconnect clears quarantine
-only after a successful re-dial. A forced catalog refresh whose replacement
+same core operations, including the invariant that reconnect clears process-local
+quarantine only after a successful re-dial. Durable tool-change quarantine
+requires an exact `tool_contract.approve` decision; these runtime controls
+cannot release it. Read the action context to inspect the replacement and
+capture its generation and hashes before proposing acceptance.
+A forced catalog refresh whose replacement
 session cannot initialize fails the governed change loudly; the pool keeps the
 prior session and inventory active.
 

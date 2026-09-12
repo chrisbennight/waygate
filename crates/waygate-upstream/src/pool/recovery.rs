@@ -63,6 +63,7 @@ pub(super) struct PerCallExecution<'a> {
     pub(super) timeout: Option<std::time::Duration>,
     pub(super) server: &'a str,
     pub(super) tool_name: &'a str,
+    pub(super) advertised_tool: Option<&'a rmcp::model::Tool>,
     pub(super) trace_id: &'a str,
     pub(super) params: CallToolRequestParams,
     pub(super) processor: Option<&'a dyn CallToolResultProcessor>,
@@ -190,11 +191,36 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
                 .await;
             match session_tools {
                 Ok(tools)
-                    if admission::tool_is_admitted_in_catalog(
-                        setup.current_manifest,
-                        &tools,
-                        setup.tool_name,
-                    ) => {}
+                    if setup
+                        .pool
+                        .observe_tool_reviews(
+                            setup.entry,
+                            setup.server,
+                            setup.current_manifest,
+                            tools
+                                .iter()
+                                .find(|tool| tool.name.as_ref() == setup.tool_name)
+                                .map(std::slice::from_ref)
+                                .unwrap_or_default(),
+                        )
+                        .await
+                        .is_ok()
+                        && setup
+                            .pool
+                            .review_allows(
+                                setup.server,
+                                setup.tool_name,
+                                tools
+                                    .iter()
+                                    .find(|tool| tool.name.as_ref() == setup.tool_name),
+                                setup.current_manifest.classification_mode,
+                            )
+                            .await
+                        && admission::tool_is_admitted_in_catalog(
+                            setup.current_manifest,
+                            &tools,
+                            setup.tool_name,
+                        ) => {}
                 Ok(_) => {
                     if attempts > 1 {
                         dispatch::record_retry_exhausted(setup.server);
@@ -254,6 +280,23 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
                     };
                 }
             }
+        }
+
+        if !setup
+            .pool
+            .review_allows(
+                setup.server,
+                setup.tool_name,
+                setup.advertised_tool,
+                setup.current_manifest.classification_mode,
+            )
+            .await
+        {
+            close_service(service, setup.deadline).await;
+            return PerCallExecutionOutcome::Failed {
+                error: admission::contract_changed_error(setup.server, setup.tool_name),
+                error_class: UpstreamErrorClass::Protocol,
+            };
         }
 
         let mut response = match handoff_budget(setup.deadline, setup.timeout) {

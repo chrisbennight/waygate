@@ -1796,6 +1796,7 @@ fn final_dispatch_fence_rejects_a_changed_approved_behavior() {
         &initial,
         std::slice::from_ref(&live_tool),
         "read",
+        true,
     ));
 
     let mut changed = initial.clone();
@@ -1807,6 +1808,7 @@ fn final_dispatch_fence_rejects_a_changed_approved_behavior() {
             &changed,
             std::slice::from_ref(&live_tool),
             "read",
+            true,
         ),
         "a classification-only reload must invalidate the pre-reload admission"
     );
@@ -2770,13 +2772,13 @@ async fn drift_does_not_quarantine_below_threshold() {
 #[tokio::test]
 async fn published_tools_empty_when_disconnected() {
     let entry = entry_with_classification("send", RiskTier::High);
-    assert!(entry.published_tools().await.is_empty());
+    assert!(entry.published_tools(true).await.is_empty());
     entry
         .quarantined
         .write()
         .expect("upstream quarantine lock poisoned")
         .insert("send".to_owned());
-    assert!(entry.published_tools().await.is_empty());
+    assert!(entry.published_tools(true).await.is_empty());
 }
 
 /// The quarantine-filter conditional that `published_tools` runs
@@ -3093,6 +3095,7 @@ fn published_with_hash(approved: Option<&str>) -> schema_admission::PublishedToo
     // gates, not on the derived facts.
     schema_admission::PublishedToolContract {
         definition: None,
+        advertised_definition: None,
         input_schema: Some(serde_json::json!({"type": "object"})),
         output_schema: None,
         tool_annotations: Some(serde_json::json!({
@@ -3384,6 +3387,7 @@ async fn manifest_fallback_keeps_legacy_snapshot_shape() {
     fn published() -> schema_admission::PublishedToolContract {
         schema_admission::PublishedToolContract {
             definition: None,
+            advertised_definition: None,
             input_schema: Some(serde_json::json!({"type": "object"})),
             output_schema: Some(serde_json::json!({"type": "integer"})),
             tool_annotations: Some(serde_json::json!({

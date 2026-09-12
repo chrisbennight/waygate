@@ -486,6 +486,16 @@ async fn gateway_main() -> anyhow::Result<()> {
     let pool_builder: waygate_upstream::UpstreamPool = pool_builder.with_peer_jwks_cache(
         peer_jwks_cache.clone() as waygate_federation::jwks::SharedPeerJwksCache,
     );
+    let pool_builder = match db_pool.clone() {
+        Some(pg) => {
+            pool_builder
+                .with_tool_reviews(Arc::new(
+                    waygate_catalog::tool_reviews::PgCatalogStore::new(pg),
+                ))
+                .await
+        }
+        None => pool_builder,
+    };
     let pool = Arc::new(pool_builder);
     let tool_catalog_epoch = pool.tool_catalog_epoch();
     match cfg.upstream_call_timeout {

@@ -150,8 +150,8 @@
                 <p class="empty-state__title">No recent drift</p>
                 <p class="empty-state__body">
                     No durable catalog drift events were recorded in the last
-                    30 days. Live observation drift is reported separately in
-                    gateway logs and metrics.
+                    30 days. <a href="{{ self.chrome.nav_url("/servers/tool-changes") }}">Review quarantined tool changes</a>.
+                    Observe-only drift remains available in Activity, logs, and metrics.
                 </p>
             </div>
         {% else %}

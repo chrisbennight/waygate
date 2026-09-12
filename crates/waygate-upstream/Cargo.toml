@@ -51,6 +51,7 @@ name = "classify"
 path = "src/bin/classify.rs"
 
 [dev-dependencies]
+waygate-test-support.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
 jsonwebtoken.workspace = true
