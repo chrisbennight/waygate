@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+<title id="title">Waygate</title>
+
+<g transform="translate(0 0) scale(1.0)"><ns0:g xmlns:ns0="http://www.w3.org/2000/svg" fill="none" stroke="#23201b" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <ns0:path d="M18 44 A49 49 0 0 1 101 27 M111 61 A49 49 0 0 1 69 112 M55 112 A49 49 0 0 1 16 68" />
+    <ns0:path d="M22 56 H35 L50 82 L65 66 L80 82 L106 43" />
+    <ns0:circle cx="16" cy="56" r="6" stroke-width="3.5" fill="#f7f5f0" />
+    <ns0:circle cx="65" cy="66" r="5" stroke-width="3.5" fill="#f7f5f0" />
+    <ns0:circle cx="108" cy="39" r="7" fill="#23201b" stroke="#23201b" stroke-width="2.8" />
+  </ns0:g>
+</g>
+</svg>

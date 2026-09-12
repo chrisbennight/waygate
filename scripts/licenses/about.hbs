@@ -112,7 +112,15 @@ Copyright 2010-2024 Adobe (http://www.adobe.com/), with Reserved Font Name 'Sour
 
 © 2023 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'. All Rights Reserved. Source is a trademark of Adobe in the United States and/or other countries.
 
-All three font families use the following license.
+## Outfit
+
+Bundled source: `docs/branding/Outfit.ttf` (used to typeset the brand artwork).
+
+Upstream: <https://github.com/Outfitio/Outfit-Fonts>
+
+Copyright 2021 The Outfit Project Authors (https://github.com/Outfitio/Outfit-Fonts)
+
+All four font families use the following license.
 
 ### SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
 

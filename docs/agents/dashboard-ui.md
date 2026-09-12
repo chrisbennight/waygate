@@ -25,31 +25,22 @@ framework. The cutoff lines for reaching for more JS live below.
 
 ## Design system
 
-Use the shared styles in `static/css/tokens.css`, `fonts.css`, `base.css`, and
-`components.css`. The dashboard uses warm neutral backgrounds, green interactive
-elements, serif headings, sans-serif body text, and monospace identifiers.
+Follow the canonical [Waygate design language](../design.md) for identity,
+typography, surfaces, icons, and accessibility. Apply it through the shared
+`static/css/tokens.css`, `fonts.css`, `base.css`, and `components.css` rather than
+creating page-specific visual rules.
 
 - Define color and font literals only in `tokens.css` and `fonts.css`. Templates
   use CSS variables and shared classes, with no `<style>` blocks. The
   `style_tokens` tests enforce this for every template.
-- Use `--font-display` for headings and selected figures, `--font-ui` for body
-  text and controls, and `--font-mono` for identifiers and code. Use tabular
-  numerals for comparable quantities. Fonts are self-hosted.
-- Pair decision colors with an icon and a word: allowed (`--ok`), denied
-  (`--deny`), step-up/pending (`--flag`), and failure (`--err`). Denial and
-  failure must remain distinct. Reserve red serif alarm headings for break-glass.
-- Separate sections with spacing and rules. Use sentence-case labels, shared
-  table/form components, and one primary action per view. Links are underlined.
-- Give forms visible labels, associated errors, and a visible keyboard focus
-  ring. Verify text contrast of at least 4.5:1 in both themes.
-- Explain empty states with what the section contains, why it is empty, and an
-  available action. Show unavailable data as unavailable, never as a zero metric.
-- Charts need a baseline, scale, and numeric alternative. Display figures and
-  tables must preserve meaningful comparisons.
-- Keep htmx swaps stable, respect reduced-motion preferences, and support
-  keyboard operation and JavaScript-disabled navigation where applicable.
-- Review changed pages in both themes and at narrow widths. Current token values
-  and component dimensions live in the stylesheets rather than a duplicate table.
+- Preserve `--font-display`, `--font-ui`, and `--font-mono` roles, self-hosted
+  fonts, and numeric readability when updating the visual treatment.
+- Keep decision states, cross-tenant warnings, focus, active navigation,
+  unavailable data, and validation messages explicit. A brand accent is not an
+  authorization result. Break-glass warnings must remain prominent.
+- Review changed pages in both themes and at narrow widths, including keyboard
+  use, reduced motion, and stable htmx updates. Current implementation values
+  live in the stylesheets, not a duplicate table in this guide.
 
 One layout footgun worth calling out: **`.card--table` sets `padding: 0`** so a
 `<table>` (whose cells supply their own gutter) sits flush to the card edge.

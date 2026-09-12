@@ -1,8 +1,14 @@
 # Waygate
 
-One governed entry point for MCP tools and model inference. Connect clients
-once, discover the capabilities they may use, and apply identity, Cedar policy,
-quotas, and audit at the gateway.
+<picture>
+  <source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/branding/assets/wordmark-on-dark.svg">
+  <source media="(max-width: 600px)" srcset="docs/branding/assets/wordmark-on-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/branding/assets/header-dark.svg">
+  <img src="docs/branding/assets/header-light.svg" width="760" alt="Ideas connect through Waygate to models, data, and tools.">
+</picture>
+
+Waygate connects MCP clients to tools and model providers, with identity,
+Cedar access policy, quotas, and audit applied at the gateway.
 
 The gateway is useful when an assistant needs many tools, several identities or
 providers, and a clear boundary for what it may do. Ordinary MCP calls remain
@@ -11,19 +17,12 @@ Code Mode orchestration.
 
 **[Run the local tutorial](examples/quickstart/README.md)** ·
 **[Explore the documentation](docs/README.md)** ·
-**[Deploy with real identity](docs/configuration.md)**
+**[Deploy with real identity](docs/configuration.md)** ·
+**[Get the latest release](https://github.com/chrisbennight/waygate/releases/latest)**
 
-## What you can build
-
-| Outcome | Capability |
-| --- | --- |
-| Give an assistant a large tool catalog without loading every schema at once | [Progressive discovery](docs/guides/mcp.md), exact typed inspection, and ordinary direct MCP calls. |
-| Process files without pasting their bytes into model context | [Governed file transfer](docs/guides/files.md), key-bound helper grants, retained responses, and owner-scoped file references. |
-| Share workflows whose contents can be reviewed and pinned | [Verified skills](docs/guides/skills.md), progressive loading, distribution approval, and direct execution of selected JavaScript helpers. |
-| Filter and combine several tool results before returning an answer | [Code Mode](docs/guides/code-mode.md), isolated execution, per-call authorization, durable checkpoints, artifacts, and cancellation. |
-| Express access rules beyond an API-key allowlist | [Cedar and identity](docs/guides/security.md), tenant-aware policy, directory lifecycle, step-up, federation, and enterprise authorization. |
-| Let an agent prepare a gateway change for a human to approve | [Gateway administration over MCP](docs/guides/gateway-administration.md), typed action discovery, previews, captured proposals, and dashboard review. |
-| Govern model requests and explain their cost or failures | [Inference routing](docs/guides/inference.md), provider adapters, usage accounting, and [correlated audit and telemetry](docs/guides/observability.md). |
+Published container: `ghcr.io/chrisbennight/waygate`.
+Use a [release digest](https://github.com/chrisbennight/waygate/releases/latest)
+for deployment; `latest` follows stable releases and `edge` follows main.
 
 ## Quick start (local)
 
@@ -56,6 +55,18 @@ request flow, configuration, troubleshooting, and cleanup:
 ```sh
 POSTGRES_PASSWORD=dev docker compose down --volumes
 ```
+
+## What you can build
+
+| Outcome | Capability |
+| --- | --- |
+| Give an assistant a large tool catalog without loading every schema at once | [Progressive discovery](docs/guides/mcp.md), exact typed inspection, and ordinary direct MCP calls. |
+| Process files without pasting their bytes into model context | [Governed file transfer](docs/guides/files.md), key-bound helper grants, retained responses, and owner-scoped file references. |
+| Share workflows whose contents can be reviewed and pinned | [Verified skills](docs/guides/skills.md), progressive loading, distribution approval, and direct execution of selected JavaScript helpers. |
+| Filter and combine several tool results before returning an answer | [Code Mode](docs/guides/code-mode.md), isolated execution, per-call authorization, durable checkpoints, artifacts, and cancellation. |
+| Express access rules beyond an API-key allowlist | [Cedar and identity](docs/guides/security.md), tenant-aware policy, directory lifecycle, step-up, federation, and enterprise authorization. |
+| Let an agent prepare a gateway change for a human to approve | [Gateway administration over MCP](docs/guides/gateway-administration.md), typed action discovery, previews, captured proposals, and dashboard review. |
+| Govern model requests and explain their cost or failures | [Inference routing](docs/guides/inference.md), provider adapters, usage accounting, and [correlated audit and telemetry](docs/guides/observability.md). |
 
 ## How it fits together
 
@@ -117,7 +128,7 @@ are available through [the OpenAPI workflow](docs/admin-clients.md).
 ## Contribute
 
 Read [the contribution guide](CONTRIBUTING.md), [architecture](docs/architecture.md),
-and [repository instructions](AGENTS.md). Use the checked-in Rust toolchain and
+[design language](docs/design.md), and [repository instructions](AGENTS.md). Use the checked-in Rust toolchain and
 lockfile. Core validation is:
 
 ```sh
