@@ -384,7 +384,7 @@ const PAGES: &[(&str, &str, &str, &str)] = &[
         "Evidence pipeline",
         "/evidence",
         "shield-check",
-        "Evidence pipeline — routing / retention / inspection rules / bundle / chain integrity",
+        "Evidence pipeline — routing / retention / bundle / chain integrity",
     ),
     (
         "Settings",
