@@ -22,7 +22,7 @@ def parse_version(value):
 
 
 def run(*args):
-    return subprocess.run(args, check=True, text=True, capture_output=True).stdout.strip()
+    return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
 
 
 def workspace_version():
