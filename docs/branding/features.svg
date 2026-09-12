@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <symbol id="models" viewBox="0 0 24 24">
+      <path d="M10 6 5 16 M14 6 19 16 M7 18h10"/>
+      <circle cx="12" cy="4" r="3"/><circle cx="4" cy="19" r="3"/><circle cx="20" cy="19" r="3"/>
+    </symbol>
+    <symbol id="data" viewBox="0 0 24 24">
+      <ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5 M4 12c0 4 16 4 16 0"/>
+    </symbol>
+    <symbol id="tools" viewBox="0 0 24 24">
+      <path d="M14 3a6 6 0 0 0-7 8L2 17a3 3 0 0 0 5 5l6-7a6 6 0 0 0 8-7l-4 4-5-5Z"/>
+    </symbol>
+    <symbol id="policies" viewBox="0 0 24 24">
+      <path d="M12 2 3 6v6c0 5 5 8 9 10 4-2 9-5 9-10V6Z M7 12l3 3 7-7"/>
+    </symbol>
+    <symbol id="activity" viewBox="0 0 24 24">
+      <path d="M2 12h4l4-9 4 18 4-9h4"/>
+    </symbol>
+    <symbol id="workflows" viewBox="0 0 24 24">
+      <path d="M6 12h4q2 0 3-3l2-4h3 M10 12q2 0 3 3l2 4h3"/>
+      <circle cx="3" cy="12" r="3"/><circle cx="21" cy="5" r="3"/><circle cx="21" cy="19" r="3"/>
+    </symbol>
+    <symbol id="files" viewBox="0 0 24 24">
+      <path d="M14 2H5v20h14V7Z M14 2v5h5 M8 12h8 M8 16h6"/>
+    </symbol>
+    <symbol id="identity" viewBox="0 0 24 24">
+      <circle cx="12" cy="7" r="5"/><path d="M3 22v-2a9 7 0 0 1 18 0v2"/>
+    </symbol>
+  </defs>
+</svg>

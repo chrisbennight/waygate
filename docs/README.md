@@ -1,5 +1,10 @@
 # Use and understand Waygate
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="branding/assets/wordmark-on-dark.svg">
+  <img src="branding/assets/wordmark-on-light.svg" width="300" alt="Waygate">
+</picture>
+
 Start with [your first tool call](../examples/quickstart/README.md). It runs
 locally, requires no model-provider account, and proves both a successful call
 and a policy refusal. Then choose a workflow below.
@@ -22,3 +27,5 @@ and a policy refusal. Then choose a workflow below.
 The workflow guides describe implemented behavior and identify prerequisites
 beside each capability. Protocol proposals and
 gateway extensions are distinguished from core MCP in the capability guide.
+
+For visual contributions, use the [Waygate design language](design.md).
