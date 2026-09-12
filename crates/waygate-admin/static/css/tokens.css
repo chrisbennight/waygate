@@ -2,58 +2,58 @@
    contain color or font-family literals; style_tokens.rs enforces this rule.
 
    Theme selection:
-   `:root` = Day ledger (light, default); `[data-theme="dark"]` on <html> =
-   Night ledger; `prefers-color-scheme` applies Night when the user hasn't
+   `:root` = light (default); `[data-theme="dark"]` on <html> =
+   dark; `prefers-color-scheme` applies dark when the user hasn't
    toggled. theme.js persists the toggle to localStorage + a cookie so the
    server renders the right attribute on first paint. */
 
 :root {
     color-scheme: light;
 
-    /* -- Day ledger: warm paper + ink -------------------------------- */
+    /* -- Light surfaces -------------------------------- */
     --paper-0: #f7f5f0;   /* app background */
     --paper-1: #ffffff;   /* reading surfaces: tables, forms, wells */
     --paper-2: #efece4;   /* hover, selected, input fill */
     --rule: #e0dcd2;          /* hairlines */
-    --rule-strong: #b8b2a4;   /* table header rule, input borders */
+    --rule-strong: #8a8478;   /* table header rule, input borders */
 
     --ink: #23201b;
     --ink-muted: #5f594e;
-    --ink-faint: #8a8375;
+    --ink-faint: #6c675d;
 
     --green: #1e5f46;          /* accent: links, primary buttons, active nav */
     --green-strong: #174a37;   /* hover/pressed accent */
     --on-green: #ffffff;
+    --brand-brass: #80642d;
+    --topbar-height: 64px;
+    --selection: rgb(30 95 70 / 18%);
 
     /* Decision contract: allow / deny / step_up / error.
        Always paired with icon + word — never color alone. */
-    --ok: #2e7d52;
+    --ok: #23683f;
     --deny: #9e3325;
-    --flag: #9a6b0f;
+    --flag: #805707;
     --err: #c42b1c;
-    --on-err: #ffffff;   /* text on --err fills (dark text in Night theme) */
+    --on-err: #ffffff;   /* text on --err fills (dark text in dark theme) */
 
-    --focus-ring: rgb(30 95 70 / 45%);
+    --focus-ring: var(--green);
     --scrim: rgb(35 32 27 / 45%);
     --shadow-overlay: 0 8px 24px rgb(35 32 27 / 18%);
 
-    /* -- Typography. The full fallback stack lives in the
-          token so a missing webfont degrades to Georgia / system faces —
-          never to the browser serif default. ---------------------------- */
-    --font-display: "Source Serif 4", Georgia, "Times New Roman", serif;
+    /* Typography roles retain system fallbacks while local fonts load. */
+    --font-display: "Outfit", "Source Sans 3", system-ui, sans-serif;
     --font-ui: "Source Sans 3", system-ui, -apple-system, "Segoe UI", Roboto,
         sans-serif;
     --font-mono: "Source Code Pro", ui-monospace, "SF Mono", Menlo, Consolas,
         monospace;
 
-    /* -- Geometry: rules and containers are square; only
-          interactive elements (inputs, buttons, chips) round to 4px. ---- */
-    --radius-interactive: 4px;
-    --radius-container: 0;
+    /* Fine rules and modest rounding preserve dense layouts. */
+    --radius-interactive: 6px;
+    --radius-container: 8px;
 
     /* -- Cedar syntax highlighting (policy editor, shared token discipline).
           Aliases to the palette above via var() — NOT new literals — so the
-          CodeMirror editor follows the Day/Night ledger automatically: the
+          CodeMirror editor follows the selected theme automatically: the
           referenced tokens are redefined per theme and var() resolves at use,
           so these only need to be declared once here in:root. ------------- */
     --syntax-comment: var(--ink-faint);
@@ -70,29 +70,30 @@
 [data-theme="dark"] {
     color-scheme: dark;
 
-    /* -- Night ledger: the same book under a desk lamp — warm dark,
-          never blue-navy. ---------------------------------------------- */
-    --paper-0: #16130f;
-    --paper-1: #1e1a15;
-    --paper-2: #28231c;
-    --rule: #332e25;
-    --rule-strong: #4a4338;
+    /* Dark surfaces. */
+    --paper-0: #191b1a;
+    --paper-1: #202522;
+    --paper-2: #29312d;
+    --rule: #37413b;
+    --rule-strong: #748578;
 
-    --ink: #ece6da;
-    --ink-muted: #a89f8e;
-    --ink-faint: #776f60;
+    --ink: #f3f0e7;
+    --ink-muted: #b9c2b8;
+    --ink-faint: #a3afa4;
 
-    --green: #5bbf8f;
-    --green-strong: #7acfa5;
+    --green: #86b39b;
+    --green-strong: #a6ccb5;
     --on-green: #10271c;
+    --brand-brass: #d4b77c;
+    --selection: rgb(134 179 155 / 22%);
 
     --ok: #58b583;
     --deny: #d9806f;
     --flag: #d2a249;
-    --err: #f2655a;
+    --err: #fa786d;
     --on-err: #1c0907;
 
-    --focus-ring: rgb(91 191 143 / 50%);
+    --focus-ring: var(--green);
     --scrim: rgb(0 0 0 / 55%);
     --shadow-overlay: 0 8px 24px rgb(0 0 0 / 45%);
 }
@@ -100,23 +101,25 @@
 @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
         color-scheme: dark;
-        --paper-0: #16130f;
-        --paper-1: #1e1a15;
-        --paper-2: #28231c;
-        --rule: #332e25;
-        --rule-strong: #4a4338;
-        --ink: #ece6da;
-        --ink-muted: #a89f8e;
-        --ink-faint: #776f60;
-        --green: #5bbf8f;
-        --green-strong: #7acfa5;
+        --paper-0: #191b1a;
+        --paper-1: #202522;
+        --paper-2: #29312d;
+        --rule: #37413b;
+        --rule-strong: #748578;
+        --ink: #f3f0e7;
+        --ink-muted: #b9c2b8;
+        --ink-faint: #a3afa4;
+        --green: #86b39b;
+        --green-strong: #a6ccb5;
         --on-green: #10271c;
+        --brand-brass: #d4b77c;
+        --selection: rgb(134 179 155 / 22%);
         --ok: #58b583;
         --deny: #d9806f;
         --flag: #d2a249;
-        --err: #f2655a;
+        --err: #fa786d;
         --on-err: #1c0907;
-        --focus-ring: rgb(91 191 143 / 50%);
+        --focus-ring: var(--green);
         --scrim: rgb(0 0 0 / 55%);
         --shadow-overlay: 0 8px 24px rgb(0 0 0 / 45%);
     }

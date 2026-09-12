@@ -192,14 +192,13 @@ fn css_color_and_font_literals_live_only_in_token_files() {
 
 #[test]
 fn shipped_font_files_match_fonts_css() {
-    // fonts.css promises four self-hosted woff2 files; a missing file is
+    // The declared self-hosted fonts must exist; a missing file is
     // exactly the silent-fallback failure this gate exists
     // to prevent, so assert the binaries are actually present and
     // non-trivial.
     let fonts = manifest_dir().join("static").join("fonts");
     for f in [
-        "source-serif-4-latin.woff2",
-        "source-serif-4-italic-latin.woff2",
+        "outfit.ttf",
         "source-sans-3-latin.woff2",
         "source-code-pro-latin.woff2",
     ] {
@@ -215,8 +214,7 @@ fn shipped_font_files_match_fonts_css() {
     }
     let css = fs::read_to_string(manifest_dir().join("static/css/fonts.css")).unwrap();
     for f in [
-        "source-serif-4-latin.woff2",
-        "source-serif-4-italic-latin.woff2",
+        "outfit.ttf",
         "source-sans-3-latin.woff2",
         "source-code-pro-latin.woff2",
     ] {

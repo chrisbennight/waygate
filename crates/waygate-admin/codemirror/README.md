@@ -27,7 +27,7 @@ esbuild and commit the output, mirroring how htmx is vendored.
   types, operators. No external grammar dependency.
 - A `HighlightStyle` that assigns **CSS classes** (`cm-cedar-*`), never colors —
   the palette lives in `static/css/components.css` against `tokens.css` design
-  tokens, so the editor follows the Day/Night ledger theme.
+  tokens, so the editor follows the selected dashboard theme.
 - `@codemirror/lint` — the as-you-type validation gutter. A
   debounced linter POSTs the document to the server's stateless diagnostics
   endpoint (`POST /policy_bundles/diagnostics` → `waygate_authz::validate_diagnostics`,

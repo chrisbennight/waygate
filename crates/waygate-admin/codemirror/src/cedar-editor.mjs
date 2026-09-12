@@ -92,8 +92,8 @@ const cedar = StreamLanguage.define({
 });
 
 // Map highlight tags to CLASS names only — colors are assigned in
-// components.css from design tokens, so the editor follows the Day/Night
-// ledger theme and adds no color literals to a JS asset.
+// components.css from design tokens, so the editor follows the selected
+// theme and adds no color literals to a JS asset.
 const cedarHighlight = HighlightStyle.define([
   { tag: t.comment, class: "cm-cedar-comment" },
   { tag: t.string, class: "cm-cedar-string" },

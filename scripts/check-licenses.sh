@@ -51,7 +51,7 @@ grep -Fq 'Copyright (c) 2013-present Cole Bemis' THIRD_PARTY_LICENSES.md \
 
 grep -Fq '## Rust dependencies' THIRD_PARTY_LICENSES.md \
     || fail 'Rust dependency notices are missing'
-for font in 'Adobe Source Serif 4' 'Adobe Source Sans 3' 'Adobe Source Code Pro'; do
+for font in 'Outfit' 'Adobe Source Sans 3' 'Adobe Source Code Pro'; do
     grep -Fq "## $font" THIRD_PARTY_LICENSES.md \
         || fail "font attribution is missing: $font"
 done

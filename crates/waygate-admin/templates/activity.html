@@ -305,6 +305,7 @@
             <h3 class="card-title">Top tools in this window</h3>
             <p>Per-tool reliability for the active filters — call volume, failures,
                denials, and p95 latency (a separate aggregate, not the paged rows).</p>
+            <div class="table-scroll" tabindex="0" role="region" aria-label="Tool reliability">
             <table class="data-table">
                 <caption class="sr-only">Per-tool reliability for the active filters</caption>
                 <thead>
@@ -324,6 +325,7 @@
                 {% endfor %}
                 </tbody>
             </table>
+            </div>
         </div>
         {% endif %}
 

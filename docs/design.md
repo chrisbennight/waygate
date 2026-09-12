@@ -39,12 +39,13 @@ cartography, fictional glyphs, and elaborate backgrounds behind text.
 - **Code and identifiers:** Source Code Pro with monospace fallbacks. Use
   tabular numerals for comparable quantities.
 
-The [bundled Outfit source](branding/Outfit.ttf) is used by the artwork exporter.
+The [bundled Outfit source](../crates/waygate-admin/static/fonts/outfit.ttf)
+is used by the artwork exporter.
 The dashboard's installed fonts and implementation values are defined in
 [fonts.css](../crates/waygate-admin/static/css/fonts.css) and
-[tokens.css](../crates/waygate-admin/static/css/tokens.css). Change those shared
-roles when applying this specification to the interface; do not add font or
-color literals to individual templates. See the
+[tokens.css](../crates/waygate-admin/static/css/tokens.css). The dashboard uses
+those shared roles; do not add font or color literals to individual templates.
+See the
 [dashboard engineering guide](agents/dashboard-ui.md).
 
 Keep body text at a comfortable reading size. Reserve wide uppercase lettering
@@ -106,8 +107,12 @@ Never rely on color or shape alone to communicate a security decision.
 
 ## Assets and maintenance
 
-Editable geometry, the font source, and the exporter live together in
-[branding](branding/). Exported assets live under `branding/assets/`:
+Editable geometry and the exporter live in [branding](branding/). The
+[font source](../crates/waygate-admin/static/fonts/outfit.ttf) is shared with the
+dashboard. Documentation exports live under `branding/assets/`.
+The same exporter writes the theme-aware dashboard sprite and browser icon to
+[`static/branding`](../crates/waygate-admin/static/branding/); do not edit those
+exports separately.
 
 | Asset | Use |
 | --- | --- |
