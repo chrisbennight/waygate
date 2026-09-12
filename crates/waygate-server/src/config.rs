@@ -105,18 +105,10 @@ pub struct Config {
     /// upstream (Authentik) validator as a fallback. Set
     /// `GATEWAY_ACCEPT_UPSTREAM_TOKENS=true` to enable.
     ///
-    /// **Deprecated.** This is the OAuth "token passthrough" anti-pattern
-    /// (the MCP security best-practices doc explicitly forbids it as a
-    /// permanent posture). Boot emits a loud `WARN` when the flag is set,
-    /// and [`DeploymentProfile::Prod`] refuses to start with it on.
-    ///
-    /// Today the path is still used by **M2M / service-account principals**
-    /// running a standard OAuth 2.0 client_credentials grant against
-    /// Authentik (RFC 6749 §4.4) and presenting the resulting JWT here —
-    /// they have no human at a browser to drive the gateway's PKCE flow.
-    /// A follow-up phase teaches the built-in AS to mint M2M tokens
-    /// directly (likely via a client_credentials flow against the gateway
-    /// itself) so this flag can be removed without breaking those clients.
+    /// Available only outside the production deployment profile. Boot warns
+    /// when enabled; `DeploymentProfile::Prod` refuses it. This permits
+    /// development service-account clients to use the configured external
+    /// issuer's client-credentials flow when the gateway AS is enabled.
     pub accept_upstream_tokens: bool,
     /// Extra `iss` values the upstream (Authentik) bearer validator will
     /// accept beyond `authentik_issuer`. Authentik's `issuer_mode=per_provider`
@@ -377,7 +369,7 @@ pub struct Config {
     /// `GATEWAY_EVIDENCE_OUTBOX_TARGETS`, the drain ships
     /// each audit event as a syslog line. Plain TCP only;
     /// operators wanting TLS front the receiver with
-    /// stunnel/haproxy until a follow-up adds native rustls.
+    /// stunnel/haproxy.
     pub evidence_syslog_target: Option<String>,
     /// RFC 5424 HOSTNAME field value the
     /// syslog exporter places in each line. Default
@@ -491,10 +483,9 @@ pub struct AsServerConfig {
     /// upstream-token envelope. Each entry is `(key_id, base64_key)`.
     /// Rotation is online — operator adds a new key
     /// alongside the old, flips [`Self::upstream_token_active_id`],
-    /// and the background re-encrypt sweeper moves legacy rows
-    /// forward. Legacy single-key deployments (only
-    /// `GATEWAY_UPSTREAM_TOKEN_KEY` set, no `_<ID>` family) map to a
-    /// one-entry keyring with id `v1`.
+    /// and the background re-encrypt sweeper updates rows encrypted
+    /// under other keys. Preserve each stored row's key ID and key bytes
+    /// until that row has been re-encrypted.
     pub upstream_token_keys: Vec<(String, String)>,
     /// Id of the entry in [`Self::upstream_token_keys`] used for new
     /// encrypts. Stored on each row's `key_id` column so future
@@ -936,36 +927,9 @@ impl Config {
             .ok()
             .filter(|s| !s.trim().is_empty());
 
-        // Parse GATEWAY_EVIDENCE_OUTBOX_TARGETS
-        // once here (dedup + trim + drop empties). Both
-        // build_audit_sink (recorder) and the drain spawn path
-        // in main.rs consume this single parsed value, so the
-        // drain never spawns for a target that wasn't actually
-        // named (and never skips one that was).
-        let evidence_outbox_targets = std::env::var("GATEWAY_EVIDENCE_OUTBOX_TARGETS")
-            .ok()
-            .map(|raw| {
-                let mut seen = std::collections::HashSet::new();
-                let mut deduped = Vec::new();
-                let mut dropped: Vec<String> = Vec::new();
-                for ident in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                    if seen.insert(ident.to_owned()) {
-                        deduped.push(ident.to_owned());
-                    } else {
-                        dropped.push(ident.to_owned());
-                    }
-                }
-                if !dropped.is_empty() {
-                    tracing::warn!(
-                        dropped = ?dropped,
-                        "GATEWAY_EVIDENCE_OUTBOX_TARGETS contains duplicate identifiers; \
-                         dropping repeats (PK on (event_id, target_sink) would otherwise \
-                         roll back the required audit write)",
-                    );
-                }
-                deduped
-            })
-            .unwrap_or_default();
+        let evidence_outbox_targets = parse_evidence_outbox_targets(
+            &std::env::var("GATEWAY_EVIDENCE_OUTBOX_TARGETS").unwrap_or_default(),
+        )?;
 
         let api_keys = ApiKeysConfig::from_env()?;
         if api_keys.is_some() && database_url.is_none() {
@@ -1200,7 +1164,7 @@ impl AsServerConfig {
                 ]
             });
         let (upstream_token_keys, upstream_token_active_id) =
-            load_upstream_token_keyring().context("GATEWAY_UPSTREAM_TOKEN_KEY*")?;
+            load_upstream_token_keyring().context("GATEWAY_UPSTREAM_TOKEN_KEY_<id>")?;
 
         let cimd_allowed_hosts = std::env::var("GATEWAY_AS_CIMD_ALLOWED_HOSTS")
             .ok()
@@ -1287,29 +1251,10 @@ impl AsServerConfig {
     }
 }
 
-/// Load the upstream-token-key keyring from env.
-///
-/// New shape (rotation-friendly):
-/// - `GATEWAY_UPSTREAM_TOKEN_KEY_<ID>=<base64>` for each key.
-/// - `GATEWAY_UPSTREAM_TOKEN_KEY_ACTIVE_ID=<id>` selects the active
-///   id (the one new encrypts use). Optional when exactly one
-///   `_<ID>` key is configured — it defaults to that id.
-///
-/// Legacy shape (backwards compat):
-/// - `GATEWAY_UPSTREAM_TOKEN_KEY=<base64>` alone maps to
-///   `[("v1", <base64>)]` with active = `"v1"`. The migration's
-///   `key_id NOT NULL DEFAULT 'v1'` aligns with this so an
-///   upgrading deployment keeps decrypting existing rows.
-///
-/// Mixing the two shapes is an error — the operator must either
-/// migrate fully to `_<ID>` (and remove the legacy var) or keep
-/// just the legacy var. Silently preferring one would mean a
-/// stale legacy var on disk could lock rows that were re-encrypted
-/// under a new id.
-///
-/// Env var ids are normalised to lowercase: `GATEWAY_UPSTREAM_TOKEN_KEY_V2`
-/// parses to id `v2`. This matches the `'v1'` migration default
-/// without forcing operators to fight shell quoting.
+/// Load named upstream-token encryption keys from the environment.
+/// `GATEWAY_UPSTREAM_TOKEN_KEY_<ID>` supplies each base64-encoded key.
+/// IDs are normalized to lowercase. `GATEWAY_UPSTREAM_TOKEN_KEY_ACTIVE_ID`
+/// selects the writer key and is optional only for a one-key keyring.
 fn load_upstream_token_keyring() -> Result<(Vec<(String, String)>, String)> {
     let mut keyed: Vec<(String, String)> = Vec::new();
     for (k, v) in std::env::vars() {
@@ -1321,27 +1266,13 @@ fn load_upstream_token_keyring() -> Result<(Vec<(String, String)>, String)> {
         }
         keyed.push((rest.to_ascii_lowercase(), v));
     }
-    let legacy = std::env::var("GATEWAY_UPSTREAM_TOKEN_KEY").ok();
     let active_env = std::env::var("GATEWAY_UPSTREAM_TOKEN_KEY_ACTIVE_ID").ok();
-
-    if !keyed.is_empty() && legacy.is_some() {
-        anyhow::bail!(
-            "GATEWAY_UPSTREAM_TOKEN_KEY (legacy single-key) AND \
-             GATEWAY_UPSTREAM_TOKEN_KEY_<id> (multi-key) are both set. Pick one. \
-             The legacy var is treated as id `v1`; remove it once every entry \
-             has been migrated to the `_<id>` shape."
-        );
-    }
-
-    if let Some(b64) = legacy {
-        return Ok((vec![("v1".into(), b64)], "v1".into()));
-    }
 
     if keyed.is_empty() {
         anyhow::bail!(
-            "GATEWAY_AS_ENABLED=true requires GATEWAY_UPSTREAM_TOKEN_KEY \
-             (base64 of 32 bytes) OR a GATEWAY_UPSTREAM_TOKEN_KEY_<id> family \
-             with GATEWAY_UPSTREAM_TOKEN_KEY_ACTIVE_ID set"
+            "GATEWAY_AS_ENABLED=true requires at least one GATEWAY_UPSTREAM_TOKEN_KEY_<id> \
+             containing a base64-encoded 32-byte key; set GATEWAY_UPSTREAM_TOKEN_KEY_ACTIVE_ID \
+             when configuring multiple keys"
         );
     }
 
@@ -2141,7 +2072,6 @@ mod tests {
 
         fn snapshot_env() -> Vec<(String, Option<String>)> {
             [
-                "GATEWAY_UPSTREAM_TOKEN_KEY",
                 "GATEWAY_UPSTREAM_TOKEN_KEY_V1",
                 "GATEWAY_UPSTREAM_TOKEN_KEY_V2",
                 "GATEWAY_UPSTREAM_TOKEN_KEY_V3",
@@ -2163,7 +2093,6 @@ mod tests {
 
         fn clear_env() {
             for k in [
-                "GATEWAY_UPSTREAM_TOKEN_KEY",
                 "GATEWAY_UPSTREAM_TOKEN_KEY_V1",
                 "GATEWAY_UPSTREAM_TOKEN_KEY_V2",
                 "GATEWAY_UPSTREAM_TOKEN_KEY_V3",
@@ -2174,13 +2103,13 @@ mod tests {
         }
 
         #[test]
-        fn legacy_single_key_maps_to_v1_active() {
+        fn named_v1_key_preserves_its_id_and_bytes() {
             let _g = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
             let prev = snapshot_env();
             clear_env();
-            std::env::set_var("GATEWAY_UPSTREAM_TOKEN_KEY", "legacy-bytes");
+            std::env::set_var("GATEWAY_UPSTREAM_TOKEN_KEY_V1", "test-key-bytes");
             let (keys, active) = load_upstream_token_keyring().unwrap();
-            assert_eq!(keys, vec![("v1".into(), "legacy-bytes".into())]);
+            assert_eq!(keys, vec![("v1".into(), "test-key-bytes".into())]);
             assert_eq!(active, "v1");
             restore_env(&prev);
         }
@@ -2253,30 +2182,110 @@ mod tests {
         }
 
         #[test]
-        fn legacy_and_multi_key_simultaneous_is_rejected() {
-            let _g = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-            let prev = snapshot_env();
-            clear_env();
-            std::env::set_var("GATEWAY_UPSTREAM_TOKEN_KEY", "legacy");
-            std::env::set_var("GATEWAY_UPSTREAM_TOKEN_KEY_V1", "k1");
-            let err = load_upstream_token_keyring()
-                .expect_err("ambiguous config (both shapes) must fail loud");
-            assert!(
-                err.to_string().contains("both set"),
-                "error must explain the conflict: {err}",
-            );
-            restore_env(&prev);
-        }
-
-        #[test]
         fn nothing_set_errors_with_actionable_message() {
             let _g = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
             let prev = snapshot_env();
             clear_env();
             let err = load_upstream_token_keyring().expect_err("no key configured must fail loud");
             let msg = err.to_string();
-            assert!(msg.contains("GATEWAY_UPSTREAM_TOKEN_KEY"));
+            assert!(msg.contains("GATEWAY_UPSTREAM_TOKEN_KEY_<id>"));
             restore_env(&prev);
         }
+    }
+}
+
+/// Validate before any recorder can enqueue work for an unsupported exporter.
+fn parse_evidence_outbox_targets(raw: &str) -> anyhow::Result<Vec<String>> {
+    use waygate_storage::{EcsExporter, OcsfExporter, SyslogExporter, WebhookExporter};
+    let supported = [
+        WebhookExporter::TARGET,
+        OcsfExporter::TARGET,
+        EcsExporter::TARGET,
+        SyslogExporter::TARGET,
+    ];
+    let mut targets = Vec::new();
+    for (index, ident) in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .enumerate()
+    {
+        if !supported.contains(&ident) {
+            // A misplaced URL may contain credentials. Only identifier-shaped
+            // values are safe to include in the diagnostic.
+            let label = if ident.len() <= 64
+                && ident
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_:-".contains(&b))
+            {
+                format!("`{ident}`")
+            } else {
+                format!("at position {} (invalid identifier)", index + 1)
+            };
+            anyhow::bail!("GATEWAY_EVIDENCE_OUTBOX_TARGETS has unsupported target {label}; supported targets: {}", supported.join(", "));
+        }
+        if !targets.iter().any(|target| target == ident) {
+            targets.push(ident.to_owned());
+        }
+    }
+    Ok(targets)
+}
+
+#[cfg(test)]
+mod evidence_target_tests {
+    use super::parse_evidence_outbox_targets;
+
+    #[test]
+    fn startup_configuration_rejects_unknown_exporter() {
+        let _guard = super::ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let keys = [
+            "GATEWAY_AUTH_MODE",
+            "GATEWAY_PUBLIC_URL",
+            "GATEWAY_EVIDENCE_OUTBOX_TARGETS",
+        ];
+        let previous = keys.map(std::env::var_os);
+        std::env::set_var(keys[0], "disabled");
+        std::env::set_var(keys[1], "https://gateway.example");
+        std::env::set_var(keys[2], "webhook,s3:cold-storage");
+        let result = super::Config::from_env();
+        for (key, value) in keys.into_iter().zip(previous) {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        let error = match result {
+            Ok(_) => panic!("startup must reject unknown exporters"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("unsupported target `s3:cold-storage`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn supported_targets_are_trimmed_and_deduplicated() {
+        assert_eq!(
+            parse_evidence_outbox_targets("webhook, ocsf,ecs,syslog,webhook").unwrap(),
+            ["webhook", "ocsf", "ecs", "syslog"]
+        );
+        for empty in ["", " , "] {
+            assert!(parse_evidence_outbox_targets(empty).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn unsupported_targets_refuse_the_entire_configuration() {
+        for raw in ["s3:cold-storage", "webhook,s3:cold-storage"] {
+            let error = parse_evidence_outbox_targets(raw).unwrap_err().to_string();
+            assert!(error.contains("s3:cold-storage"));
+            assert!(error.contains("webhook, ocsf, ecs, syslog"));
+        }
+        let error =
+            parse_evidence_outbox_targets("https://user:synthetic-password@example.invalid")
+                .unwrap_err()
+                .to_string();
+        assert!(!error.contains("synthetic-password"));
     }
 }

@@ -2,17 +2,12 @@
 //!
 //! Two layers:
 //!
-//! 1. **Always available** — the Postgres SQLSTATE constants and code
-//!    predicates. The class-23 literals used to be hand-written at ~46
-//!    call sites across ten crates; the constants are now the single
-//!    home (`scripts/check-shared-store-error.sh` enforces it), and a
-//!    store maps them into its own domain error exactly as before.
-//! 2. **Feature `store`** (optional `sqlx` — the `http`-feature pattern)
-//!    — [`StoreError`], the ready-made enum + `From<sqlx::Error>` for
-//!    stores without domain-specific variants. Adopt it in new stores;
-//!    wholesale migration of the ~40 existing enums is deliberately out
-//!    of scope (a shared `AdminResource` REST layer was evaluated and
-//!    rejected; the per-resource handler modules own that surface).
+//! 1. **Always available** — Postgres SQLSTATE constants and predicates.
+//!    Stores map these codes to domain errors; `check-shared-store-error.sh`
+//!    prevents duplicated SQLSTATE literals.
+//! 2. **Feature `store`** — [`StoreError`] and `From<sqlx::Error>` for stores
+//!    without domain-specific error variants. Per-resource handlers own the
+//!    REST error mapping.
 //!
 //! SQLSTATE class 23 (integrity constraint violation), per the Postgres
 //! documentation. Only the codes the workspace actually matches on are

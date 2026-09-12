@@ -11,7 +11,7 @@ Reach for this doc when changing anything under
 Two MCP gateways can call each other on behalf of their users
 without sharing an IdP. Each gateway registers the other as a
 peer (`federated_peers` row: name, issuer URL, JWKS URL,
-trust tier, tenant). When gateway A calls a gateway-B-hosted
+tenant). When gateway A calls a gateway-B-hosted
 upstream that's configured with `tier_c_peer: <peer-id-of-B>`,
 A mints a short-lived JWT signed by A's own identity key,
 audience-claim = B's issuer URL, and stamps it on the outbound
@@ -23,8 +23,8 @@ B chose when it registered A.
 
 No shared IdP. No long-lived static credential. No human in
 the loop on every call. The two sides agree on each other's
-public signing keys (JWKS) and that's the whole trust
-boundary.
+public signing keys (JWKS); local tenant attribution and Cedar policies
+control the resulting authority.
 
 ## Where the pieces live
 
@@ -44,7 +44,7 @@ boundary.
 │                      │                │                      │
 │ federated_peers:     │                │ federated_peers:     │
 │   (B, B.issuer,      │                │   (A, A.issuer,      │
-│    B/jwks.json, full)│                │    A/jwks.json, full)│
+│    B/jwks.json      )│                │    A/jwks.json      )│
 │                      │                │                      │
 │ server manifest:     │   Tier-C       │ PeerJwtValidator     │
 │  tier_c_peer: <B-id> ├──── JWT ──────►│  iss=A.url           │
@@ -74,7 +74,7 @@ following (mirrored, once each):
    `GATEWAY_AS_ENABLED=true` publishes one automatically.)
 2. **Register the other side as a peer.** Either use the
    `/admin/t/<tenant>/federation` dashboard page — admins get
-   inline create / edit / delete forms there (PR-2) — or POST to
+   inline create / edit / delete forms there — or POST to
    `/api/v1/admin/federated_peers` directly. Both paths run the
    same validators, audit, and JWKS-cache invalidation (the
    dashboard handlers reuse the REST `*_peer_core` functions).
@@ -84,15 +84,13 @@ following (mirrored, once each):
    {
      "peer_name": "alice-corp-gateway",
      "issuer": "https://gw.alice-corp.example",
-     "jwks_url": "https://gw.alice-corp.example/.well-known/jwks.json",
-     "trust_tier": "full"
+     "jwks_url": "https://gw.alice-corp.example/.well-known/jwks.json"
    }
    ```
 
    `issuer` MUST be the EXACT byte sequence the peer
    publishes as their `iss` claim (no canonicalization, no
-   trailing slash unless they emit one — see PR #188 r3 high
-   AERB rationale in `validate_issuer`).
+   trailing slash unless they emit one; see `validate_issuer`).
 
 3. **Wait for the first refresh cycle.** The
    `PeerJwksRefresher` walks every registered peer on a
@@ -130,7 +128,7 @@ following (mirrored, once each):
 
 5. **Reload.** `SIGHUP` re-reads manifests; the
    `reload_manifests` path copies `tier_c_peer` through to
-   the live entry (PR #194 r1 medium fix).
+   the live entry.
 
 6. **Make a call.** Have a user on gateway A call
    `bob-llc-tools.lookup_customer`. Gateway A's
@@ -141,22 +139,19 @@ following (mirrored, once each):
    for A's issuer, verifies the signature, and produces a
    PeerAssertion principal in B's tenant.
 
-## Trust tiers
+## Authority model
 
-Two values today; the runtime distinction is currently
-advisory.
+Peers assert the original user's subject within the tenant assigned by the
+local operator. Signature validation authenticates that assertion; Cedar
+policies decide which tools the resulting principal may call. Peer assertions
+cannot grant local administration or SCIM write access.
 
-- **`full`** — peer principals project into the local tenant
-  with their original `sub`. Use when the two gateways are
-  operationally a single trust domain (blue/green, same
-  operator, internal mesh).
-- **`restricted`** — same on-wire behaviour today (recorded
-  in tracing fields, logged on accept). A future PR may wrap
-  the principal under a `peer:<peer_id>`-style sub rewrite
-  so Cedar can authorize per-peer instead of per-user. The
-  storage shape is ready; the wrapper isn't.
+Peer registration and updates do not accept a trust-tier choice. Existing
+`full` and `restricted` stored labels remain readable and are preserved on
+updates, but neither label changes authority. New rows use `full` to satisfy
+the storage schema. The dashboard marks these labels as metadata.
 
-If you need stricter handling today, gate in Cedar:
+For example, restrict peer assertions to a known tool with Cedar:
 
 ```cedar
 forbid (
@@ -170,8 +165,7 @@ unless { resource in Tool::"<a known-safe FQN>" };
 
 ## Invariants
 
-These are the rules the code enforces; they exist because
-each one was a real AERB finding during PR #193 / #194 review.
+These rules preserve peer isolation and prevent authority escalation.
 
 ### Scope strip on peer principals
 
@@ -185,7 +179,7 @@ operators of this gateway — that's the operator's job on
 the OTHER end. Belt-and-suspenders: `waygate-admin::scope::require_scope`
 and `require_admin_extension` also refuse `AuthMethod::PeerAssertion`
 for `Scope::McpAdmin` / `Scope::ScimWrite` before the scope
-check runs. PR #193 r2 high.
+check runs.
 
 ### Ambiguous tenant attribution refused
 
@@ -199,7 +193,7 @@ collects every accepted candidate, builds a
 `BTreeSet<tenant_id>`, and fails-closed with
 `PeerValidationError::Ambiguous` when the set has > 1
 member. Operators have to pick a single tenant
-registration. PR #193 r2 high.
+registration.
 
 ### Cache fence vs in-flight refresh
 
@@ -219,7 +213,7 @@ monotonic generation counter:
 
 A stale fetch is silently discarded (counted as a failure in
 `RefreshSummary`); the next cycle starts clean against the
-new metadata. PR #193 r4 high.
+new metadata.
 
 ### URL userinfo rejected + sanitized on emit
 
@@ -230,7 +224,7 @@ new metadata. PR #193 r4 high.
 the URL through `sanitize_url_for_audit` before formatting,
 so a pre-existing row created before the input-side reject
 (or written by migration / direct SQL) still doesn't leak
-credentials into evidence. PR #193 r3 high + r4 medium.
+credentials into evidence.
 
 ### Body-cap is streaming, not after-the-fact
 
@@ -238,8 +232,7 @@ credentials into evidence. PR #193 r3 high + r4 medium.
 MiB) TWO ways: pre-stream via `Content-Length`, post-stream
 via per-chunk accumulator on `bytes_stream()`. A peer that
 lies about Content-Length (or chunks indefinitely) gets cut
-off at ~one chunk past the cap, never the full body. PR
-#193 r3 high.
+off at ~one chunk past the cap, never the full body.
 
 ### Peer principals carry no raw_token
 
@@ -248,8 +241,7 @@ pool's RFC 8693 exchange path uses `principal.raw_token`
 as the subject token when no stored OAuth session exists;
 allowing a peer JWT to flow through that path would let a
 peer assertion turn into an outbound IdP exchange request,
-expanding scope past inbound verification. PR #193 r4
-medium.
+expanding scope past inbound verification.
 
 ### Outbound `tier_c_peer` fail-closed
 
@@ -264,7 +256,6 @@ mint the peer JWT:
   "Tier-C needs authenticated caller".
 
 Same shape as the existing `tier_a_required` enforcement.
-PR #194 r2 high.
 
 ### `tier_c_peer:` is mutually exclusive with anything else that writes Authorization
 
@@ -278,7 +269,6 @@ Refused at `load_manifests` time:
 The import path (`waygate-server::import_cmd`) calls the
 same `validate_manifest_invariants` so `--import-manifests`
 can't persist a manifest that normal boot would refuse.
-PR #194 r1 high + r2 medium.
 
 ### `tier_c_peer:` round-trips on reload + import
 
@@ -290,7 +280,6 @@ PR #194 r1 high + r2 medium.
   silently downgrade a Tier-C upstream to Tier-B until
   manual catalog edit.
 
-PR #194 r1 medium.
 
 ## Operational notes
 
@@ -309,42 +298,28 @@ PR #194 r1 medium.
   the chain falls through to the next validator. A token
   with no peer match is just "not for me," not an outright
   reject.
-- **Same kid, different keys across tenants.** Permitted by
-  PR #193 r1 medium fix: the validator iterates all
+- **Same kid, different keys across tenants.** The validator iterates all
   candidates that own the kid, tries each key, and accepts
   the first that verifies. Combined with the ambiguity
   check above, multi-tenant kid collisions still
   deterministically resolve to a single tenant.
 
-## What's NOT in scope yet
+## Current limitations
 
-- **Restricted-tier principal wrapping.** Today
-  `trust_tier: restricted` is logged but doesn't change the
-  Principal. A future PR may wrap the sub.
 - **Per-upstream JWKS endpoint for the receiving side.**
   Today the gateway publishes one global JWKS at
-  `/.well-known/jwks.json`. A multi-key federation deployment
-  with per-peer key isolation is future work.
-- **Scope propagation on Tier-C mint.** AERB PR #194 r3
-  medium flagged that the gateway-minted Tier-C JWT carries
+  `/.well-known/jwks.json`; per-peer key isolation is not supported.
+- **Scope propagation on Tier-C mint.** The gateway-minted Tier-C JWT carries
   no `scope` claim; the receiving gateway's `Principal.scopes`
   is therefore empty, so high-risk step-up policies will
-  refuse. Fail-closed by design, but a broader scope-
-  propagation design (deciding what subset of the caller's
-  scopes to forward) is deferred.
-- **Two-gateway end-to-end smoke test in CI.** The unit +
-  integration tests in `crates/waygate-federation/tests/`
-  cover the contracts on each side independently. A real
-  two-gateway loop test belongs in `waygate-test-client` or a
-  docker-compose harness; not shipped.
-
+  refuse. Caller scopes are not forwarded.
 ## See also
 
 - [`docs/agents/identity.md`](identity.md) — the
   `AuthMethod::PeerAssertion` variant + bearer chain
   ordering.
 - [`docs/compliance.md`](../compliance.md) — federation
-  cells for CC6 / CC7 once the smoke test ships.
+  control mapping.
 - `migrations/0033_federated_peers.sql` — schema.
 - `crates/waygate-federation/src/peer_jwt.rs` — `PEER_FORBIDDEN_SCOPE_PREFIXES`
   and the validator's iteration loop are the most

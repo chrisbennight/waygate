@@ -46,10 +46,8 @@
 //!
 //! - **TLS.** Plain TCP only. Operators wanting
 //!   `syslog+tls://` use stunnel / haproxy / a sidecar in
-//!   front of the receiver until a follow-up adds native
-//!   rustls handling.
-//! - **UDP.** TCP only for retry + ordering. Operators on
-//!   UDP-only SIEM stacks have a follow-up here too.
+//!   front of the receiver.
+//! - **UDP.** Unsupported; delivery requires a TCP receiver.
 
 use serde_json::Value;
 use time::format_description::well_known::Iso8601;
@@ -338,7 +336,7 @@ fn _ensure_imports() -> EvidenceCategory {
 }
 
 /// Suppress unused-import lint for serde_json::Value
-/// (referenced in tests / future structured payloads).
+/// for structured payloads.
 #[allow(dead_code)]
 fn _ensure_value_import(_v: Value) {}
 

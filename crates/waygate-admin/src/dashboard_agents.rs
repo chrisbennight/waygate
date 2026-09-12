@@ -17,7 +17,7 @@
 //! ## Safety posture
 //!
 //! - All forms are admin-only by construction (the insufficient-scope gate
-//!   hides every byte of agent data, matching `dashboard_inspection_rules`).
+//!   hides every byte of agent data, matching the administrator-only policy pages).
 //! - The tool allowlist defaults to EMPTY: a new agent can call nothing until
 //!   an operator opts tools in.
 //! - Reads + writes use `principal.tenant`, never the request.

@@ -95,14 +95,9 @@ is asymmetric (`--profile release` → `target/release/`, `--profile dev`
 → `target/debug/`), so the Dockerfile takes both rather than trying to
 derive one from the other.
 
-`BINARY_SUBDIR` was originally named `CARGO_TARGET_DIR`, which collided
-with cargo's actual `CARGO_TARGET_DIR` env var — buildkit propagates
-every Dockerfile `ARG` into RUN-step environments, so cargo saw the
-build-arg as a target-directory override and wrote the binary under
-`/app/release/release/` while the runtime stage's `COPY` read from
-`/app/target/release/`. That mismatch silently dropped the
-`gateway-server` binary on every image build between PR #73 and the
-rename, even though `cargo build` reported "Finished" successfully.
+`BINARY_SUBDIR` selects the profile directory without changing Cargo's
+`CARGO_TARGET_DIR`. Build arguments are exported to Docker build steps, so a
+profile selector must not reuse Cargo's output-directory variable.
 
 Local Compose builds debug to shorten development compilation. Its disposable
 issuer still exercises bearer validation and Cedar enforcement; dashboard
@@ -388,7 +383,7 @@ ranges and fallback defaults are defined by the gateway release.
   timeout in the SDK path this client uses:
   <https://github.com/anthropics/claude-code/issues/52137>
 
-## In the meantime
+## Operational references
 
 - **Env var shortlist:** the [configuration reference](configuration-reference.md).
 - **Healthcheck pattern:**
@@ -402,12 +397,11 @@ ranges and fallback defaults are defined by the gateway release.
   publish releases, with `latest` reserved for stable releases. See the
   [release guide](source-release.md#github-publication). The publish job uses GitHub's short-lived
   `GITHUB_TOKEN` with `packages: write`; it carries no deployment credential.
-  Configure private package visibility and consumer read access separately.
+  Configure registry access for your deployment.
 - **Helper artifacts:**
   [`.github/workflows/release-mcp-files.yml`](../.github/workflows/release-mcp-files.yml)
   verifies builds on PRs and manual dispatches. Explicit `mcp-files-v<version>`
-  tags on merged main commits publish checksummed GitHub release assets. Private release
-  downloads require authenticated repository access.
+  tags on merged main commits publish checksummed GitHub release assets.
 - **Deployment overlay:** keep reverse-proxy labels, networks, secret injection,
   served manifests, and orchestration wiring in a private deployment repository.
 - **Migrations:** [`migrations/`](../migrations/) — applied automatically by

@@ -1,12 +1,8 @@
 //! Sessions page — `/admin/t/{tenant}/sessions`.
 //!
-//! Standalone home for the live OAuth-session inventory that used to be a
-//! sibling section on the API-keys page. Renders the shared
-//! `oauth_clients_section.html` (and its in-place htmx revoke flow) inside
-//! a full dashboard page. The section's view-model, admin gating, and
-//! revoke handler all live in [`crate::oauth_clients`]; this module is a
-//! thin page wrapper. Read/observe surface only — no request hot-path
-//! impact.
+//! Lists live OAuth sessions and renders their revoke controls through
+//! `oauth_clients_section.html`. The view model, administrator checks, and
+//! revoke handler live in [`crate::oauth_clients`].
 
 use std::sync::Arc;
 

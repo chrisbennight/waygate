@@ -1307,12 +1307,6 @@ struct FakeInspectionRulesStore {
 }
 
 impl FakeInspectionRulesStore {
-    fn new() -> Self {
-        Self {
-            rules: Mutex::new(vec![]),
-        }
-    }
-
     fn seeded(rule: InspectionRule) -> Self {
         Self {
             rules: Mutex::new(vec![rule]),
@@ -1321,15 +1315,6 @@ impl FakeInspectionRulesStore {
 
     fn count(&self) -> usize {
         self.rules.lock().unwrap().len()
-    }
-
-    fn get_by_id(&self, id: Uuid) -> Option<InspectionRule> {
-        self.rules
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|r| r.id == id)
-            .cloned()
     }
 }
 
@@ -1661,72 +1646,6 @@ async fn approve_rate_limit_delete_missing_fails_precondition() {
     )
     .await;
     assert_eq!(poll["status"].as_str().unwrap(), "failed");
-}
-
-#[tokio::test]
-async fn approve_executes_inspection_rule_create() {
-    let rules = Arc::new(FakeInspectionRulesStore::new());
-    let app = api_router(
-        state_with_rules(
-            Some(mem_store()),
-            rules.clone() as waygate_dashboard_stores::inspection_rules::SharedRulesStore,
-        )
-        .await,
-    );
-    let body = json!({
-        "action_type": "inspection_rule.create",
-        "params": {
-            "inspector": "pii",
-            "name": "mask-emails",
-            "config": { "pattern": "email" }
-        },
-        "justification": "mask emails in tool output"
-    });
-    let id = propose_as(&app, &body, "alice").await;
-    let v = approve_as(&app, &id, "bob").await;
-    assert_eq!(v["status"].as_str().unwrap(), "executed");
-    assert_eq!(
-        v["execution_result"]["name"].as_str().unwrap(),
-        "mask-emails"
-    );
-    assert_eq!(rules.count(), 1, "rule persisted to the store");
-}
-
-#[tokio::test]
-async fn approve_executes_inspection_rule_update() {
-    let now = OffsetDateTime::now_utc();
-    let rule_id = Uuid::from_u128(0x44);
-    let seed = InspectionRule {
-        id: rule_id,
-        tenant_id: waygate_core::TenantId::default().as_str().to_owned(),
-        inspector: InspectorKind::Secrets,
-        name: "block-keys".into(),
-        config: json!({}),
-        applies_to: json!({}),
-        enabled: true,
-        created_at: now,
-        updated_at: now,
-    };
-    let rules = Arc::new(FakeInspectionRulesStore::seeded(seed));
-    let app = api_router(
-        state_with_rules(
-            Some(mem_store()),
-            rules.clone() as waygate_dashboard_stores::inspection_rules::SharedRulesStore,
-        )
-        .await,
-    );
-    let body = json!({
-        "action_type": "inspection_rule.update",
-        "params": { "id": rule_id, "enabled": false },
-        "justification": "temporarily disable the secrets rule"
-    });
-    let id = propose_as(&app, &body, "alice").await;
-    let v = approve_as(&app, &id, "bob").await;
-    assert_eq!(v["status"].as_str().unwrap(), "executed");
-    assert!(
-        !rules.get_by_id(rule_id).unwrap().enabled,
-        "rule disabled in the store"
-    );
 }
 
 #[tokio::test]
@@ -2392,8 +2311,7 @@ async fn approve_executes_peer_create() {
         "params": {
             "peer_name": "east-gw",
             "issuer": "https://east.example",
-            "jwks_url": "https://east.example/jwks",
-            "trust_tier": "restricted"
+            "jwks_url": "https://east.example/jwks"
         },
         "justification": "federate the east gateway"
     });
@@ -2406,7 +2324,7 @@ async fn approve_executes_peer_create() {
     );
     assert_eq!(
         v["execution_result"]["trust_tier"].as_str().unwrap(),
-        "restricted"
+        "full"
     );
     assert_eq!(peers.count(), 1, "peer persisted");
 }
@@ -2426,16 +2344,16 @@ async fn approve_executes_peer_update() {
     );
     let body = json!({
         "action_type": "peer.update",
-        "params": { "id": peer_id, "trust_tier": "full" },
-        "justification": "promote west-gw to full trust"
+        "params": { "id": peer_id, "peer_name": "renamed-gw" },
+        "justification": "rename west gateway"
     });
     let id = propose_as(&app, &body, "alice").await;
     let v = approve_as(&app, &id, "bob").await;
     assert_eq!(v["status"].as_str().unwrap(), "executed");
     assert_eq!(
         peers.get_by_id(peer_id).unwrap().trust_tier,
-        TrustTier::Full,
-        "trust tier promoted in the store"
+        TrustTier::Restricted,
+        "existing stored label is preserved"
     );
 }
 
@@ -4163,7 +4081,7 @@ async fn peer_update_result_omits_credential_bearing_urls() {
     // with `user:pass@host` userinfo, but a pre-existing row (older, or a
     // migration / DB-level insert) can still carry it. The maker-visible
     // execution_result must NOT echo the issuer / jwks_url, or a maker
-    // proposing an unrelated change (here: only trust_tier) could harvest a
+    // proposing an unrelated change (here: only peer_name) could harvest a
     // credential it never supplied once a human approves the benign change.
     let peer_id = Uuid::from_u128(0x6005);
     let now = OffsetDateTime::now_utc();
@@ -4187,7 +4105,7 @@ async fn peer_update_result_omits_credential_bearing_urls() {
     );
     let body = json!({
         "action_type": "peer.update",
-        "params": { "id": peer_id, "trust_tier": "full" },
+        "params": { "id": peer_id, "peer_name": "renamed-gw" },
         "justification": "promote legacy-gw to full trust"
     });
     let id = propose_as(&app, &body, "alice").await;
@@ -4208,11 +4126,11 @@ async fn peer_update_result_omits_credential_bearing_urls() {
     );
     // The non-sensitive confirmation fields are still present, and the store
     // mutation still happened.
-    assert_eq!(result["peer_name"].as_str().unwrap(), "legacy-gw");
-    assert_eq!(result["trust_tier"].as_str().unwrap(), "full");
+    assert_eq!(result["peer_name"].as_str().unwrap(), "renamed-gw");
+    assert_eq!(result["trust_tier"].as_str().unwrap(), "restricted");
     assert_eq!(
         peers.get_by_id(peer_id).unwrap().trust_tier,
-        TrustTier::Full
+        TrustTier::Restricted
     );
 }
 
@@ -6220,5 +6138,33 @@ async fn stale_publish_and_rollback_baselines_refuse_before_approval_is_consumed
         );
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn custom_inspection_writes_cannot_be_proposed() {
+    let app = api_router(state_with(Some(mem_store())).await);
+    for (action, params) in [
+        (
+            "inspection_rule.create",
+            json!({"inspector": "pii", "name": "custom rule", "config": {}}),
+        ),
+        (
+            "inspection_rule.update",
+            json!({"id": uuid::Uuid::new_v4(), "name": "updated rule"}),
+        ),
+    ] {
+        let response = app.clone().oneshot(post_req(
+            "/api/v1/admin/change_requests",
+            &json!({"action_type": action, "params": params, "justification": "test unsupported rule"}),
+            "alice", &["mcp:propose"],
+        )).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(response).await;
+        assert_eq!(body["error"], "bad_request");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("unknown or non-executable action_type"));
     }
 }

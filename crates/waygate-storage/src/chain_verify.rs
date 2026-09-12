@@ -62,9 +62,7 @@
 //!   `Ok`. Mitigation: every report carries `chain_head`
 //!   (`MAX(chain_seq)` + its `row_hash`); operators can record
 //!   it externally between verifier runs and a regression on
-//!   either field is the detection signal. A real
-//!   Merkle-root attestation that doesn't depend on the same
-//!   DB is a follow-up beyond this slice.
+//!   either field is the detection signal.
 
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -438,11 +436,8 @@ pub struct DeletedUnchainedRow {
 /// is the same computation the main walker does inline;
 /// lifted to a public helper so the adapter can apply it
 /// out-of-band to markers that sit outside the walked
-/// slice. Rounds 6–7: marker payload format evolved from
-/// a flat `deleted_row_hashes: Vec<String>` to
-/// `deleted_rows: Vec<DeletedRow>` carrying
-/// `(prev_hash, row_hash)` pairs for chain-stitched gap
-/// bridging; the recompute helper is unchanged.
+/// slice. Retention markers carry `(prev_hash, row_hash)` pairs for
+/// chain-stitched gap bridging.
 pub fn recompute_row_hash(row: &ChainVerifyRow) -> String {
     let bytes = canonical_audit_bytes_with_ext5(
         row.id,
@@ -1341,7 +1336,7 @@ mod tests {
         assert_eq!(
             p2_buggy_reselect.status,
             ChainVerifyStatus::Mismatch,
-            "the round-2 cursor bug (reselecting the previously walked row) would be detected here as a BrokenLink — keeping this negative pin so a future regression to `>=` fails this test loudly",
+            "reselecting a previously walked row must fail with BrokenLink",
         );
         assert_eq!(
             p2_buggy_reselect

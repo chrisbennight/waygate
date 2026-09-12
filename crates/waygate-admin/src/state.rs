@@ -626,11 +626,6 @@ pub struct DashboardPlane {
     /// exists. Set via [`AdminState::with_activity_saved_views`].
     pub activity_saved_views:
         Capability<Arc<dyn waygate_dashboard_stores::activity_saved_views::ActivitySavedViewStore>>,
-    /// MCP Tasks store backing
-    /// `/api/v1/admin/tasks/*`. Same DB-pool gating as
-    /// the other admin stores — `Some` when a Postgres
-    /// pool exists, `None` ⇒ endpoints 503.
-    pub tasks: Capability<waygate_dashboard_stores::tasks::SharedTaskStore>,
     /// Governed "Try this tool" invocation handle. `Some` ⇒ the
     /// dashboard's per-tool try-it surface routes a real call through the
     /// **same** `authorize → step-up → quota → HITL → audit → redact`
@@ -942,7 +937,6 @@ impl AdminState {
             dashboard: DashboardPlane {
                 playground_scenarios: Capability::absent("playground scenario store not configured"),
                 activity_saved_views: Capability::absent("activity saved-views store not configured"),
-                tasks: Capability::absent("tasks store not configured"),
                 try_invocation: None,
                 overview_change_feed_actions: DEFAULT_OVERVIEW_CHANGE_FEED_ACTIONS
                     .iter()
@@ -1905,20 +1899,6 @@ impl AdminState {
         reader: Option<Arc<dyn crate::param_files::ProposalFileReader>>,
     ) -> Self {
         self.hitl.proposal_files.set(reader);
-        self
-    }
-
-    /// Attach the MCP Tasks store.
-    /// Same pattern as the other admin stores —
-    /// `waygate-server` calls this when a Postgres
-    /// pool exists; absence ⇒ `/api/v1/admin/tasks/*`
-    /// returns 503.
-    #[must_use]
-    pub fn with_tasks_store(
-        mut self,
-        store: Option<waygate_dashboard_stores::tasks::SharedTaskStore>,
-    ) -> Self {
-        self.dashboard.tasks.set(store);
         self
     }
 

@@ -1,4 +1,4 @@
-//! Federated-peer change-executors — split from `change_executor.rs`.
+//! Federated-peer change executors.
 //! Child module: shared helpers (`map_core_error`,
 //! `etag_of`, ...) resolve via `use super::*;`.
 
@@ -33,7 +33,6 @@ impl ActionExecutor for PeerCreateExecutor {
             &req.peer_name,
             &req.issuer,
             &req.jwks_url,
-            req.trust_tier,
         )
         .await
         .map_err(map_core_error)?;
@@ -59,6 +58,7 @@ impl ActionExecutor for PeerCreateExecutor {
 /// [`crate::federated_peers::UpdatePeerRequest`] (unset ⇒ store COALESCE
 /// preserves the current value).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PeerUpdateParams {
     pub(super) id: Uuid,
     #[serde(default)]
@@ -67,8 +67,6 @@ pub(super) struct PeerUpdateParams {
     pub(super) issuer: Option<String>,
     #[serde(default)]
     jwks_url: Option<String>,
-    #[serde(default)]
-    pub(super) trust_tier: Option<TrustTier>,
 }
 
 pub(super) struct PeerUpdateExecutor;
@@ -121,13 +119,9 @@ impl ActionExecutor for PeerUpdateExecutor {
             .map_err(|e| ExecError::BadParams(e.to_string()))?;
         // Validate-before-irreversible: at least one field must change, else
         // the "update" is a no-op masquerading as a mutation.
-        if p.peer_name.is_none()
-            && p.issuer.is_none()
-            && p.jwks_url.is_none()
-            && p.trust_tier.is_none()
-        {
+        if p.peer_name.is_none() && p.issuer.is_none() && p.jwks_url.is_none() {
             return Err(ExecError::BadParams(
-                "at least one of peer_name / issuer / jwks_url / trust_tier is required".into(),
+                "at least one of peer_name / issuer / jwks_url is required".into(),
             ));
         }
         // update_peer_core validates each supplied field and returns NotFound
@@ -140,13 +134,12 @@ impl ActionExecutor for PeerUpdateExecutor {
             p.peer_name.as_deref(),
             p.issuer.as_deref(),
             p.jwks_url.as_deref(),
-            p.trust_tier,
         )
         .await
         .map_err(map_core_error)?;
         // Non-sensitive identifiers ONLY — see peer.create above: the
         // issuer / jwks_url URL fields are omitted so a maker proposing an
-        // unrelated change (e.g. a trust_tier bump) can't harvest a
+        // unrelated change (e.g. a name change) can't harvest a
         // pre-existing credential-bearing URL through execution_result.
         Ok(ExecOutcome::result(serde_json::json!({
             "peer_id": peer.id,

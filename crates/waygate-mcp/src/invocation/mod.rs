@@ -1320,13 +1320,8 @@ impl DefaultInvocationService {
     ///
     /// - `call` always fires (every tool call goes through this
     ///   bucket if a `scope=call` policy exists).
-    /// - `high_risk_call` additionally fires when the tool is
-    ///   `side_effects: true` (the mutating surface). The wire name
-    ///   is historical, but the bucket follows `side_effects` rather than
-    ///   the risk tier, so a destructive tool keeps
-    ///   its rate-limit after a `high -> low + side_effects` re-triage.
-    /// - `cost_bearing` additionally fires when `cost_class` is
-    ///   non-empty in the catalog row.
+    /// - `side_effecting_call` additionally fires when the tool is
+    ///   `side_effects: true`, independently of its risk tier.
     ///
     /// `discovery` is NOT fired here — discovery traffic flows
     /// through `tools/list` / `tools/search` paths which sit
@@ -1359,39 +1354,19 @@ impl DefaultInvocationService {
         // Pass ALL action classes the
         // call falls under in one `check_and_consume` invocation
         // so the service can ROLLBACK across action classes. A
-        // HighRiskCall denial must not burn the broader `call`
+        // SideEffectingCall denial must not burn the broader `call`
         // bucket.
         let mut actions: Vec<waygate_quota::QuotaAction> = vec![waygate_quota::QuotaAction::Call];
-        // The `HighRiskCall` quota bucket fires on `side_effects`, NOT the risk
-        // tier. The mutating surface (any tool that
-        // writes / sends / deletes) is what warrants the stricter quota — a
-        // destructive tool reclassified `high -> low + side_effects` must keep
-        // its rate-limit. The quota action's wire name stays `high_risk_call`
-        // for operator-config compatibility (it now means "side-effecting call").
+        // Calls with side effects consume their additional bucket regardless
+        // of the risk tier assigned to the tool.
         if facts.side_effects {
-            actions.push(waygate_quota::QuotaAction::HighRiskCall);
+            actions.push(waygate_quota::QuotaAction::SideEffectingCall);
         }
-        // `cost_bearing` is intentionally NOT fired:
-        // `ToolFacts` doesn't yet carry a `cost_class` field, so
-        // there's nothing to match on. Policies with
-        // `action='cost_bearing'` can still be created in the
-        // DB (the SQL CHECK accepts the value) but nothing
-        // will hit them until a follow-up adds the field to
-        // ToolFacts + the catalog. Pinned at the migration
-        // CHECK so the wire vocabulary is forward-stable.
 
         let qctx = waygate_quota::QuotaContext {
             tenant_id: principal.tenant.as_str().to_owned(),
             principal_sub: Some(principal.sub.clone()),
-            // `scope=client` is deferred to a follow-up: the
-            // current `Principal` doesn't carry the OAuth
-            // client_id claim through to here. Plumbing it is
-            // a separate cross-crate change (validator +
-            // Principal + Cedar entity); for now `client`-
-            // scoped policies match nothing and silently skip
-            // (the QuotaService treats `None` bucket_key as
-            // "policy doesn't apply" — same shape as a
-            // principal-scoped policy on an anonymous call).
+            // Client-scoped policies are unsupported; callers do not supply an identity.
             client_id: None,
             server: ctx.server.to_owned(),
             fq_tool: fq_tool.clone(),
@@ -2121,7 +2096,7 @@ pub fn evaluate_profile_restrictions(
 ///
 /// `side_effects: true` is load-bearing: operational controls follow the
 /// mutating-surface flag rather than `risk == High`, so this is what
-/// subjects every LLM completion to the `high_risk_call` quota bucket and (under
+/// subjects every LLM completion to the `side_effecting_call` quota bucket and (under
 /// `GATEWAY_AUDIT_MODE=fail_closed`) the fail-closed pre-call audit — i.e. a
 /// billable model call is rate-limitable and gets a durable evidence row before
 /// dispatch. Both controls are opt-in (quota policy / audit mode), so the

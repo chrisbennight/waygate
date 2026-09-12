@@ -7,8 +7,7 @@
 //!
 //! ## Why this crate
 //!
-//! Same shape as `inspection_rules` / `tasks`: a per-feature
-//! crate owning its own trait + types + Pg impl, kept dependency-light so
+//! The store owns its trait, types, and PostgreSQL implementation so
 //! the agent *runtime* (the bounded LLM ↔ tool loop) can hold the store by
 //! handle to read a tenant's enabled agent config without pulling in
 //! admin-only baggage.

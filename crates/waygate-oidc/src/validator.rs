@@ -96,12 +96,8 @@ struct Claims {
     /// function for the 0 / 1 / ≥2 resource-id resolution.
     #[serde(default)]
     aud: Option<serde_json::Value>,
-    /// Tenant id, read from a hardcoded `tenant` claim (an
-    /// operator-configurable claim name via `GATEWAY_TENANT_CLAIM`
-    /// is planned but not implemented). The default tenant covers
-    /// single-tenant deployments, and the literal claim name
-    /// `tenant` covers IdPs that already emit one (Authentik's
-    /// user-profile `tenant` mapping ships off-the-shelf).
+    /// Tenant ID from the literal `tenant` claim. Missing or invalid values
+    /// resolve to the default tenant.
     ///
     /// Typed as a raw JSON value (not `Option<String>`) so an IdP
     /// that emits a non-string `tenant` claim — integer, array,

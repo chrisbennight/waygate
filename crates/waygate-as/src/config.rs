@@ -63,10 +63,7 @@ pub struct AsConfig {
     /// row is missing OR the requested scopes aren't a
     /// subset of the granted ones, the callback 302s
     /// the user to `/oauth/consent?token=…` so they can
-    /// approve or deny. A future per-tenant
-    /// `tenants.require_explicit_consent` column would replace this
-    /// gateway-wide flag; today the flag is binary (every tenant on or
-    /// every tenant off).
+    /// approve or deny. This setting applies to every tenant.
     pub require_explicit_consent: bool,
     /// EMA (ID-JAG) mint TTL. ID-JAGs are short-lived cross-app hand-offs
     /// (~5 min) — shorter than gateway access tokens. Used by the

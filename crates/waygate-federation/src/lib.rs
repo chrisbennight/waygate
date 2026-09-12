@@ -44,10 +44,8 @@ use uuid::Uuid;
 pub mod jwks;
 pub mod peer_jwt;
 
-/// How much identity the peer's assertion is allowed to
-/// project into this gateway's authorization decisions.
-/// Closed enum — typos at insert time fail fast; mirrors
-/// the SQL CHECK in migration 0033.
+/// Stored peer labels accepted by the database constraint.
+/// Neither value alters the principal or grants additional authority.
 #[derive(
     Debug,
     Clone,
@@ -61,20 +59,10 @@ pub mod peer_jwt;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum TrustTier {
-    /// Runtime semantics: the peer's principal is
-    /// propagated as-is into this gateway's authz pipeline
-    /// (the calling user reaches Cedar with their original
-    /// identity, signed by the peer). Use when the two
-    /// gateways are operationally a single trust domain
-    /// (e.g. blue/green or active/active deployments under
-    /// the same operator).
+    /// Stored metadata. Peer identities use the asserted subject and the locally assigned tenant.
     Full,
-    /// Runtime semantics: the peer's identity is
-    /// wrapped under this gateway's tenant scope — Cedar
-    /// sees `peer:<peer_id>` as the principal, not the
-    /// original user. Use when the peer is a separately-
-    /// operated gateway and the operator wants per-peer
-    /// authz decisions rather than per-user.
+    /// Stored metadata with the same authorization behavior as `Full`.
+    /// This value remains readable from existing rows; public inputs do not offer a trust choice.
     Restricted,
 }
 
@@ -103,6 +91,7 @@ pub struct FederatedPeer {
     pub peer_name: String,
     pub issuer: String,
     pub jwks_url: String,
+    /// Stored metadata only; this label does not change peer authority.
     pub trust_tier: TrustTier,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -151,7 +140,7 @@ pub enum PeerError {
 
 /// Hard ceiling on `list_peers` page size — mirrors the
 /// other admin stores (`oauth_consent`, `break_glass_tokens`,
-/// `task_states`, `inspection_rules`).
+/// `inspection_rules`).
 pub use waygate_core::page::MAX_LIST_LIMIT;
 
 #[async_trait]

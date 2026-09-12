@@ -69,7 +69,6 @@ pub mod dashboard_embeddings;
 pub mod dashboard_evidence;
 pub mod dashboard_federation;
 pub mod dashboard_groups;
-pub mod dashboard_inspection_rules;
 pub mod dashboard_llm_credentials;
 pub mod dashboard_llm_models;
 pub mod dashboard_oauth_consent;
@@ -118,7 +117,6 @@ pub mod scope;
 pub mod servers;
 pub mod skill_reviews;
 pub mod state;
-pub mod tasks;
 pub mod tenant_ctx;
 pub mod tenants;
 pub mod upstream_sessions;
@@ -164,7 +162,6 @@ pub fn api_router(state: Arc<AdminState>) -> Router<()> {
         .merge(break_glass::router(state.clone()))
         .merge(change_requests::router(state.clone()))
         .merge(change_requests::admin_router(state.clone()))
-        .merge(tasks::router(state.clone()))
         .merge(codemode_executions::router(state.clone()))
         .merge(inspection_rules::router(state.clone()))
         .merge(federated_peers::router(state.clone()))

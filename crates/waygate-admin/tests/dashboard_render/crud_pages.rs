@@ -236,7 +236,7 @@ pub(crate) async fn federation_create_persists_and_redirects() {
         app,
         FED_CREATE,
         "csrf=dev-csrf&peer_name=acme-prod&issuer=https://peer.example\
-         &jwks_url=https://peer.example/jwks&trust_tier=restricted",
+         &jwks_url=https://peer.example/jwks",
     )
     .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
@@ -248,10 +248,7 @@ pub(crate) async fn federation_create_persists_and_redirects() {
     let peers = store.peers.lock().unwrap();
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].peer_name, "acme-prod");
-    assert_eq!(
-        peers[0].trust_tier,
-        waygate_federation::TrustTier::Restricted
-    );
+    assert_eq!(peers[0].trust_tier, waygate_federation::TrustTier::Full);
 }
 
 #[tokio::test]
@@ -265,7 +262,7 @@ pub(crate) async fn federation_create_rejects_bad_csrf() {
         app,
         FED_CREATE,
         "csrf=WRONG&peer_name=x&issuer=https://peer.example\
-         &jwks_url=https://peer.example/jwks&trust_tier=restricted",
+         &jwks_url=https://peer.example/jwks",
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -283,18 +280,14 @@ pub(crate) async fn federation_create_rejects_bad_trust_tier() {
         state_with_peers_store(store.clone()).await,
         DashboardAuth::Disabled,
     );
-    let (status, loc) = post_form(
+    let (status, _loc) = post_form(
         app,
         FED_CREATE,
         "csrf=dev-csrf&peer_name=x&issuer=https://peer.example\
-         &jwks_url=https://peer.example/jwks&trust_tier=bogus",
+         &jwks_url=https://peer.example/jwks&trust_tier=restricted",
     )
     .await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    assert!(
-        loc.contains("fed_error"),
-        "bad trust tier must redirect with error: {loc}"
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(store.peers.lock().unwrap().len(), 0);
 }
 
@@ -311,7 +304,7 @@ pub(crate) async fn federation_create_rejects_issuer_userinfo() {
         app,
         FED_CREATE,
         "csrf=dev-csrf&peer_name=x&issuer=https://user:pass@peer.example/\
-         &jwks_url=https://peer.example/jwks&trust_tier=restricted",
+         &jwks_url=https://peer.example/jwks",
     )
     .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
@@ -338,14 +331,17 @@ pub(crate) async fn federation_update_persists_and_redirects() {
         app,
         &format!("/federation/peers/{id}/update"),
         "csrf=dev-csrf&peer_name=after&issuer=https://peer.example\
-         &jwks_url=https://peer.example/jwks&trust_tier=full",
+         &jwks_url=https://peer.example/jwks",
     )
     .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert!(!loc.contains("fed_error"), "update should succeed: {loc}");
     let peers = store.peers.lock().unwrap();
     assert_eq!(peers[0].peer_name, "after");
-    assert_eq!(peers[0].trust_tier, waygate_federation::TrustTier::Full);
+    assert_eq!(
+        peers[0].trust_tier,
+        waygate_federation::TrustTier::Restricted
+    );
 }
 
 #[tokio::test]
@@ -890,388 +886,6 @@ pub(crate) async fn tenant_scoped_federation_update_reaches_handler() {
         ))
         .await,
         StatusCode::SEE_OTHER,
-    );
-}
-
-// ---- Inspection-rules page (new, full CRUD) -------------------------------
-
-pub(crate) struct FakeInspectionRulesStore {
-    rules: std::sync::Mutex<Vec<waygate_dashboard_stores::inspection_rules::InspectionRule>>,
-}
-
-impl FakeInspectionRulesStore {
-    fn with(rules: Vec<waygate_dashboard_stores::inspection_rules::InspectionRule>) -> Self {
-        Self {
-            rules: std::sync::Mutex::new(rules),
-        }
-    }
-}
-
-#[async_trait]
-impl waygate_dashboard_stores::inspection_rules::InspectionRulesStore for FakeInspectionRulesStore {
-    async fn insert(
-        &self,
-        rule: waygate_dashboard_stores::inspection_rules::NewInspectionRule<'_>,
-    ) -> Result<
-        waygate_dashboard_stores::inspection_rules::InspectionRule,
-        waygate_dashboard_stores::inspection_rules::RuleError,
-    > {
-        let mut v = self.rules.lock().unwrap();
-        if v.iter().any(|r| {
-            r.tenant_id == rule.tenant_id && r.inspector == rule.inspector && r.name == rule.name
-        }) {
-            return Err(waygate_dashboard_stores::inspection_rules::RuleError::DuplicateName);
-        }
-        let now = OffsetDateTime::now_utc();
-        let stored = waygate_dashboard_stores::inspection_rules::InspectionRule {
-            id: Uuid::now_v7(),
-            tenant_id: rule.tenant_id.to_owned(),
-            inspector: rule.inspector,
-            name: rule.name.to_owned(),
-            config: rule.config.clone(),
-            applies_to: rule.applies_to.clone(),
-            enabled: rule.enabled,
-            created_at: now,
-            updated_at: now,
-        };
-        v.push(stored.clone());
-        Ok(stored)
-    }
-    async fn get(
-        &self,
-        tenant_id: &str,
-        id: Uuid,
-    ) -> Result<
-        Option<waygate_dashboard_stores::inspection_rules::InspectionRule>,
-        waygate_dashboard_stores::inspection_rules::RuleError,
-    > {
-        Ok(self
-            .rules
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|r| r.tenant_id == tenant_id && r.id == id)
-            .cloned())
-    }
-    async fn list(
-        &self,
-        tenant_id: &str,
-        filter: waygate_dashboard_stores::inspection_rules::RuleFilter<'_>,
-        limit: u32,
-        offset: u32,
-    ) -> Result<
-        Vec<waygate_dashboard_stores::inspection_rules::InspectionRule>,
-        waygate_dashboard_stores::inspection_rules::RuleError,
-    > {
-        let v = self.rules.lock().unwrap();
-        let out: Vec<_> = v
-            .iter()
-            .filter(|r| r.tenant_id == tenant_id)
-            .filter(|r| filter.inspector.map(|i| r.inspector == i).unwrap_or(true))
-            .filter(|r| filter.name.map(|n| r.name == n).unwrap_or(true))
-            .filter(|r| filter.enabled.map(|e| r.enabled == e).unwrap_or(true))
-            .skip(offset as usize)
-            .take(limit as usize)
-            .cloned()
-            .collect();
-        Ok(out)
-    }
-    async fn update(
-        &self,
-        tenant_id: &str,
-        id: Uuid,
-        update: waygate_dashboard_stores::inspection_rules::RuleUpdate<'_>,
-    ) -> Result<
-        Option<waygate_dashboard_stores::inspection_rules::InspectionRule>,
-        waygate_dashboard_stores::inspection_rules::RuleError,
-    > {
-        let mut v = self.rules.lock().unwrap();
-        match v
-            .iter_mut()
-            .find(|r| r.tenant_id == tenant_id && r.id == id)
-        {
-            Some(r) => {
-                if let Some(n) = update.name {
-                    r.name = n.to_owned();
-                }
-                if let Some(c) = update.config {
-                    r.config = c.clone();
-                }
-                if let Some(a) = update.applies_to {
-                    r.applies_to = a.clone();
-                }
-                if let Some(e) = update.enabled {
-                    r.enabled = e;
-                }
-                r.updated_at = OffsetDateTime::now_utc();
-                Ok(Some(r.clone()))
-            }
-            None => Ok(None),
-        }
-    }
-    async fn delete(
-        &self,
-        tenant_id: &str,
-        id: Uuid,
-    ) -> Result<bool, waygate_dashboard_stores::inspection_rules::RuleError> {
-        let mut v = self.rules.lock().unwrap();
-        let before = v.len();
-        v.retain(|r| !(r.tenant_id == tenant_id && r.id == id));
-        Ok(v.len() < before)
-    }
-}
-
-pub(crate) fn ir_fixture(
-    id: Uuid,
-    name: &str,
-) -> waygate_dashboard_stores::inspection_rules::InspectionRule {
-    let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-    waygate_dashboard_stores::inspection_rules::InspectionRule {
-        id,
-        tenant_id: "default".into(),
-        inspector: waygate_dashboard_stores::inspection_rules::InspectorKind::Pii,
-        name: name.into(),
-        config: serde_json::json!({"pattern": "x"}),
-        applies_to: serde_json::json!({}),
-        enabled: true,
-        created_at: now,
-        updated_at: now,
-    }
-}
-
-pub(crate) async fn state_with_inspection_store(
-    store: Arc<dyn waygate_dashboard_stores::inspection_rules::InspectionRulesStore>,
-) -> Arc<AdminState> {
-    let pool = Arc::new(UpstreamPool::connect(BTreeMap::new()).await);
-    // Inspection-rule mutations audit via record_required (fail-closed).
-    let evidence: waygate_mcp::audit::SharedEvidence =
-        Arc::new(waygate_mcp::audit::InMemorySink::default());
-    Arc::new(
-        AdminState::new(
-            pool,
-            None,
-            None,
-            evidence,
-            None,
-            None,
-            None,
-            None,
-            "http://127.0.0.1:0".into(),
-        )
-        .with_inspection_rules_store(Some(store)),
-    )
-}
-
-#[tokio::test]
-pub(crate) async fn inspection_rules_admin_rows_render_action_forms() {
-    let id = Uuid::from_u128(0xA1);
-    let store = Arc::new(FakeInspectionRulesStore::with(vec![ir_fixture(id, "seed")]));
-    let app = dashboard_router(
-        state_with_inspection_store(store).await,
-        DashboardAuth::Disabled,
-    );
-    let (status, body) = body_of(app, "/inspection_rules").await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        body.contains("/inspection_rules/create"),
-        "composer missing"
-    );
-    assert!(body.contains("<th>Actions</th>"), "Actions column missing");
-    assert!(
-        body.contains(&format!("/inspection_rules/{id}/update"))
-            && body.contains(&format!("/inspection_rules/{id}/delete")),
-        "per-row edit/delete actions missing",
-    );
-    assert!(
-        !body.contains("POST /api/v1/admin/inspection_rules"),
-        "raw curl instruction must not appear",
-    );
-}
-
-#[tokio::test]
-pub(crate) async fn inspection_rules_create_persists_and_redirects() {
-    let store = Arc::new(FakeInspectionRulesStore::with(vec![]));
-    let app = dashboard_router(
-        state_with_inspection_store(store.clone()).await,
-        DashboardAuth::Disabled,
-    );
-    let (status, loc) = post_form(
-        app,
-        "/inspection_rules/create",
-        "csrf=dev-csrf&inspector=secrets&name=block-keys&config=%7B%22pattern%22%3A%22sk-%22%7D&applies_to=&enabled=on",
-    )
-    .await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    assert!(!loc.contains("ir_error"), "create carried an error: {loc}");
-    let rules = store.rules.lock().unwrap();
-    assert_eq!(rules.len(), 1);
-    assert_eq!(rules[0].name, "block-keys");
-    assert_eq!(
-        rules[0].inspector,
-        waygate_dashboard_stores::inspection_rules::InspectorKind::Secrets
-    );
-    assert_eq!(rules[0].config, serde_json::json!({"pattern": "sk-"}));
-    assert_eq!(rules[0].applies_to, serde_json::json!({}));
-    assert!(rules[0].enabled);
-}
-
-#[tokio::test]
-pub(crate) async fn inspection_rules_create_rejects_missing_csrf() {
-    let store = Arc::new(FakeInspectionRulesStore::with(vec![]));
-    let app = dashboard_router(
-        state_with_inspection_store(store).await,
-        DashboardAuth::Disabled,
-    );
-    let (status, _loc) = post_form(
-        app,
-        "/inspection_rules/create",
-        "inspector=pii&name=x&config=%7B%7D",
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-pub(crate) async fn inspection_rules_create_invalid_json_reports_error() {
-    let store = Arc::new(FakeInspectionRulesStore::with(vec![]));
-    let app = dashboard_router(
-        state_with_inspection_store(store.clone()).await,
-        DashboardAuth::Disabled,
-    );
-    let (status, loc) = post_form(
-        app,
-        "/inspection_rules/create",
-        "csrf=dev-csrf&inspector=pii&name=x&config=not-json",
-    )
-    .await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    assert!(
-        loc.contains("ir_error"),
-        "invalid JSON must redirect with error: {loc}"
-    );
-    assert!(
-        store.rules.lock().unwrap().is_empty(),
-        "invalid rule must not persist",
-    );
-}
-
-#[tokio::test]
-pub(crate) async fn inspection_rules_update_persists_and_redirects() {
-    let id = Uuid::from_u128(0xA2);
-    let store = Arc::new(FakeInspectionRulesStore::with(vec![ir_fixture(id, "seed")]));
-    let app = dashboard_router(
-        state_with_inspection_store(store.clone()).await,
-        DashboardAuth::Disabled,
-    );
-    let (status, loc) = post_form(
-        app,
-        &format!("/inspection_rules/{id}/update"),
-        "csrf=dev-csrf&name=renamed&config=%7B%22pattern%22%3A%22y%22%7D&applies_to=",
-    )
-    .await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    assert!(!loc.contains("ir_error"), "update carried an error: {loc}");
-    let rules = store.rules.lock().unwrap();
-    assert_eq!(rules[0].name, "renamed");
-    assert_eq!(rules[0].config, serde_json::json!({"pattern": "y"}));
-    // Checkbox absent ⇒ disabled (full-replace edit semantics).
-    assert!(
-        !rules[0].enabled,
-        "unchecked enabled box should disable the rule"
-    );
-}
-
-#[tokio::test]
-pub(crate) async fn inspection_rules_delete_removes_and_redirects() {
-    let id = Uuid::from_u128(0xA3);
-    let store = Arc::new(FakeInspectionRulesStore::with(vec![ir_fixture(id, "seed")]));
-    let app = dashboard_router(
-        state_with_inspection_store(store.clone()).await,
-        DashboardAuth::Disabled,
-    );
-    let (status, loc) = post_form(
-        app,
-        &format!("/inspection_rules/{id}/delete"),
-        "csrf=dev-csrf",
-    )
-    .await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    assert!(!loc.contains("ir_error"));
-    assert!(store.rules.lock().unwrap().is_empty(), "rule not deleted");
-}
-
-#[tokio::test]
-pub(crate) async fn inspection_rules_delete_unknown_reports_error() {
-    let store = Arc::new(FakeInspectionRulesStore::with(vec![ir_fixture(
-        Uuid::from_u128(0xA4),
-        "seed",
-    )]));
-    let app = dashboard_router(
-        state_with_inspection_store(store).await,
-        DashboardAuth::Disabled,
-    );
-    let ghost = Uuid::from_u128(0xBEEF);
-    let (status, loc) = post_form(
-        app,
-        &format!("/inspection_rules/{ghost}/delete"),
-        "csrf=dev-csrf",
-    )
-    .await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    assert!(
-        loc.contains("ir_error"),
-        "unknown-id delete must carry an error: {loc}"
-    );
-}
-
-/// New page wired correctly under the canonical `/t/{tenant}` mount from the
-/// start (no dual-mount Path bug — by-name extraction).
-#[tokio::test]
-pub(crate) async fn inspection_rules_tenant_scoped_delete_reaches_handler() {
-    let id = Uuid::from_u128(0xA5);
-    let store = Arc::new(FakeInspectionRulesStore::with(vec![ir_fixture(id, "seed")]));
-    let app = dashboard_router(
-        state_with_inspection_store(store.clone()).await,
-        DashboardAuth::Disabled,
-    );
-    let (status, loc) = post_form(
-        app,
-        &format!("/t/default/inspection_rules/{id}/delete"),
-        "csrf=dev-csrf",
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::SEE_OTHER,
-        "tenant-scoped delete loc={loc}"
-    );
-    assert!(
-        store.rules.lock().unwrap().is_empty(),
-        "rule not deleted on tenant mount"
-    );
-}
-
-/// The delete confirm must be a static inline-JS string — `r.name` must never
-/// be interpolated into it (XSS lesson).
-#[tokio::test]
-pub(crate) async fn inspection_rules_delete_confirm_is_static() {
-    let id = Uuid::from_u128(0xA6);
-    let mut rule = ir_fixture(id, "evil'); alert(1); //");
-    rule.inspector = waygate_dashboard_stores::inspection_rules::InspectorKind::Custom;
-    let store = Arc::new(FakeInspectionRulesStore::with(vec![rule]));
-    let app = dashboard_router(
-        state_with_inspection_store(store).await,
-        DashboardAuth::Disabled,
-    );
-    let (status, body) = body_of(app, "/inspection_rules").await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        body.contains("onsubmit=\"return confirm('Delete this inspection rule?"),
-        "delete confirm must be the static string (no name interpolation)",
-    );
-    assert!(
-        !body.contains("evil'); alert(1)"),
-        "the unescaped quote-breakout form must never render",
     );
 }
 

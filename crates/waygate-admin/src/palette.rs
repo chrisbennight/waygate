@@ -308,12 +308,6 @@ const PAGES: &[(&str, &str, &str, &str)] = &[
         "Per-tenant token-bucket policies (scope / action / capacity)",
     ),
     (
-        "Inspection rules",
-        "/inspection_rules",
-        "shield-check",
-        "Per-tenant response-inspector overrides (PII / secrets / poisoning / custom)",
-    ),
-    (
         "Gateway Agents",
         "/agents",
         "box",
@@ -390,7 +384,7 @@ const PAGES: &[(&str, &str, &str, &str)] = &[
         "Evidence pipeline",
         "/evidence",
         "shield-check",
-        "Evidence pipeline — routing / retention / inspection rules / bundle / chain integrity",
+        "Evidence pipeline — routing / retention / bundle / chain integrity",
     ),
     (
         "Settings",

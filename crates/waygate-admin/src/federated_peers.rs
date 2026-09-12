@@ -5,8 +5,7 @@
 //! this gateway federates with (Tier-C identity
 //! chaining). Every endpoint is behind `mcp:admin` and
 //! tenant-scoped via `principal.tenant` (NOT via anything
-//! in the request) — same shape as `oauth_consent`,
-//! `break_glass`, `tasks`, `inspection_rules`.
+//! in the request).
 //!
 //! Every mutating handler emits an `AdminMutation`
 //! evidence row via `record_required` — config CRUD with
@@ -58,6 +57,7 @@ pub fn router(state: Arc<AdminState>) -> Router<()> {
 // --- DTOs --------------------------------------------------------
 
 #[derive(Debug, Deserialize, ToSchema, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreatePeerRequest {
     /// Operator-friendly label; unique within tenant.
     /// 1–128 chars.
@@ -70,15 +70,14 @@ pub struct CreatePeerRequest {
     /// the runtime layer; storage stays opaque
     /// to keep local-dev / proxy shapes accessible.
     pub jwks_url: String,
-    pub trust_tier: TrustTier,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdatePeerRequest {
     pub peer_name: Option<String>,
     pub issuer: Option<String>,
     pub jwks_url: Option<String>,
-    pub trust_tier: Option<TrustTier>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -90,16 +89,12 @@ pub struct PeerListResponse {
 }
 
 #[derive(Debug, Deserialize, ToSchema, utoipa::IntoParams)]
+#[serde(deny_unknown_fields)]
 pub struct ListQuery {
     #[serde(default)]
     pub peer_name: Option<String>,
     #[serde(default)]
     pub issuer: Option<String>,
-    /// `full` / `restricted`. Unknown values are silently
-    /// dropped (= no trust-tier filter) — same posture as
-    /// the `tasks.rs` / `inspection_rules.rs` filters.
-    #[serde(default)]
-    pub trust_tier: Option<String>,
     #[serde(default = "waygate_core::page::default_list_limit")]
     pub limit: u32,
     #[serde(default)]
@@ -311,7 +306,6 @@ async fn create_peer(
         &body.peer_name,
         &body.issuer,
         &body.jwks_url,
-        body.trust_tier,
     )
     .await?;
     Ok((StatusCode::CREATED, Json(peer)))
@@ -331,7 +325,6 @@ pub(crate) async fn create_peer_core(
     peer_name: &str,
     issuer: &str,
     jwks_url: &str,
-    trust_tier: TrustTier,
 ) -> Result<FederatedPeer, ApiError> {
     let store = state.federation.federated_peers.require()?;
     // Validators return the normalized
@@ -347,7 +340,7 @@ pub(crate) async fn create_peer_core(
             peer_name: &peer_name,
             issuer: &issuer,
             jwks_url: &jwks_url,
-            trust_tier,
+            trust_tier: TrustTier::Full,
         })
         .await
         .map_err(map_store_err)?;
@@ -396,11 +389,10 @@ async fn list_peers(
     let store = state.federation.federated_peers.require()?;
     let tenant_id = actor.tenant.as_str();
     let effective_limit = q.limit.min(MAX_LIST_LIMIT);
-    let trust_tier = q.trust_tier.as_deref().and_then(TrustTier::parse);
     let filter = PeerFilter {
         peer_name: q.peer_name.as_deref(),
         issuer: q.issuer.as_deref(),
-        trust_tier,
+        trust_tier: None,
     };
     let peers = store
         .list(tenant_id, filter, effective_limit, q.offset)
@@ -472,7 +464,6 @@ async fn update_peer(
         body.peer_name.as_deref(),
         body.issuer.as_deref(),
         body.jwks_url.as_deref(),
-        body.trust_tier,
     )
     .await?;
     Ok(Json(peer))
@@ -483,11 +474,10 @@ async fn update_peer(
 /// `store.update` → conditional JWKS-cache invalidation → fail-closed
 /// `AdminMutation` audit. Both the REST `update_peer` handler and the
 /// dashboard's per-row edit form call this. Cache invalidation gates
-/// on whether issuer / jwks_url / trust_tier were SUPPLIED (not a
+/// on whether issuer / jwks_url were SUPPLIED (not a
 /// value diff): re-asserting the same issuer intentionally re-confirms
 /// it on the next refresh. NotFound when the peer
 /// isn't in this tenant.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn update_peer_core(
     state: &Arc<AdminState>,
     tenant_id: &str,
@@ -496,7 +486,6 @@ pub(crate) async fn update_peer_core(
     peer_name: Option<&str>,
     issuer: Option<&str>,
     jwks_url: Option<&str>,
-    trust_tier: Option<TrustTier>,
 ) -> Result<FederatedPeer, ApiError> {
     let store = state.federation.federated_peers.require()?;
     let peer_name = match peer_name {
@@ -519,17 +508,16 @@ pub(crate) async fn update_peer_core(
                 peer_name: peer_name.as_deref(),
                 issuer: issuer.as_deref(),
                 jwks_url: jwks_url.as_deref(),
-                trust_tier,
+                trust_tier: None,
             },
         )
         .await
         .map_err(map_store_err)?
         .ok_or(ApiError::NotFound("federated peer"))?;
-    // Invalidate only when issuer / jwks_url /
-    // trust_tier were supplied. The validated locals are `Some` iff the
+    // Invalidate when issuer or jwks_url were supplied. The validated locals are `Some` iff the
     // caller supplied the field, so they track REQUEST-supplied (not a
     // value diff) — the contract the REST handler pinned.
-    let cache_affected = issuer.is_some() || jwks_url.is_some() || trust_tier.is_some();
+    let cache_affected = issuer.is_some() || jwks_url.is_some();
     if cache_affected {
         invalidate_peer_cache(state, peer.id, tenant_id, "PATCH").await;
     }
@@ -611,7 +599,7 @@ pub(crate) async fn delete_peer_core(
 
 /// Invalidate the in-memory peer
 /// JWKS cache entry for `peer_id` after a successful PATCH
-/// or DELETE so the OLD `issuer` / `jwks_url` / `trust_tier`
+/// or DELETE so the OLD `issuer` / `jwks_url`
 /// can't continue validating peer-asserted JWTs until the
 /// refresher's next cycle. The refresher's `list_all_for_refresh`
 /// scan would notice the change eventually, but for
@@ -656,6 +644,26 @@ mod tests {
     // Pin the URL-shape contract AND the "validators return
     // normalized form" contract for issuer + jwks_url +
     // peer_name so future regressions fail tests.
+
+    #[test]
+    fn peer_inputs_reject_unenforced_authority_choices() {
+        let create = serde_json::json!({
+            "peer_name": "peer", "issuer": "https://peer.example",
+            "jwks_url": "https://peer.example/jwks"
+        });
+        assert!(serde_json::from_value::<CreatePeerRequest>(create.clone()).is_ok());
+        for label in ["restricted", "full"] {
+            let mut body = create.clone();
+            body["trust_tier"] = serde_json::json!(label);
+            assert!(serde_json::from_value::<CreatePeerRequest>(body).is_err());
+            assert!(
+                serde_json::from_value::<UpdatePeerRequest>(serde_json::json!({
+                    "trust_tier": label
+                }))
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn validate_issuer_accepts_https_url() {
@@ -827,8 +835,7 @@ mod tests {
 
     // PATCH and
     // DELETE handlers must evict the in-memory peer JWKS
-    // cache entry so an OLD `issuer` / `jwks_url` /
-    // `trust_tier` can't keep validating peer-asserted JWTs
+    // cache entry so an OLD `issuer` / `jwks_url` cannot validate peer-asserted JWTs
     // after the operator rotated. The trait method itself is
     // covered in `waygate_federation::jwks::tests`; this test
     // pins the wiring (helper actually reads the cache off

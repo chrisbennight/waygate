@@ -6,29 +6,6 @@
 //! operator triaging "Tier-C dispatch is failing for peer X" has to
 //! reach for logs or curl the admin REST surface.
 //!
-//! ## Page layout (server-rendered)
-//!
-//! Two stacked sections, no tabs yet (sub-tabs land when the
-//! federation surface earns the second-screen treatment):
-//!
-//! 1. **Peers** — list of `FederatedPeer` rows for the principal's
-//!    tenant, capped at [`PEER_LIST_LIMIT`]. Per row: peer name,
-//!    issuer, JWKS URL, trust tier chip (full / restricted), and a
-//!    cache chip (warm + key count / cold / no cache). For admins
-//!    (`mcp:admin`), each row carries an inline Edit form + a Delete
-//!    button, and an "Add a federated peer" composer renders below
-//!    the table. These reuse the REST `*_peer_core` functions
-//!    ([`create_peer_core`] / [`update_peer_core`] / [`delete_peer_core`])
-//!    so the HTML and JSON surfaces validate / audit / cache-invalidate
-//!    identically. When the registry has no peers the empty state +
-//!    open composer take the table's place. The forms are CSRF-protected
-//!    and admin-gated server-side; non-admins see the read-only list.
-//! 2. **JWKS cache** — short status panel: "cache wired" vs "cache
-//!    not wired." Per-peer warm/cold + key count appears in the
-//!    Peers table above (we read `PeerJwksCache::get_by_peer_id`
-//!    rather than the impl-only generation counter so the page
-//!    works against any `SharedPeerJwksCache`).
-//!
 //! ## Tenant scoping
 //!
 //! Reads use `principal.tenant`, NOT `tenant_ctx.slug`. Cross-tenant
@@ -49,7 +26,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use uuid::Uuid;
-use waygate_federation::{FederatedPeer, PeerFilter, SharedPeersStore, TrustTier};
+use waygate_federation::{FederatedPeer, PeerFilter, SharedPeersStore};
 use waygate_oidc::Principal;
 
 use crate::auth::CsrfToken;
@@ -199,10 +176,9 @@ async fn federation_page(
 
 // --- Mutating forms (admin-gated + CSRF; reuse the REST cores) -------------
 
-/// Form body for create / edit. Every field is plain text; `trust_tier`
-/// is parsed to the [`TrustTier`] enum in the handler so a bad value
-/// yields a friendly error rather than a 422 from the extractor.
+/// Create and edit fields shared by the federation forms.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PeerForm {
     #[serde(default)]
     csrf: String,
@@ -212,8 +188,6 @@ struct PeerForm {
     issuer: String,
     #[serde(default)]
     jwks_url: String,
-    #[serde(default)]
-    trust_tier: String,
 }
 
 /// Form body for the per-row delete — only the CSRF token.
@@ -238,9 +212,6 @@ async fn create(
         Ok(v) => v,
         Err(resp) => return *resp,
     };
-    let Some(trust_tier) = TrustTier::parse(form.trust_tier.trim()) else {
-        return redirect_with_error(tenant_ctx, "Trust tier must be `full` or `restricted`.");
-    };
     match create_peer_core(
         &state,
         tenant,
@@ -248,7 +219,6 @@ async fn create(
         &form.peer_name,
         &form.issuer,
         &form.jwks_url,
-        trust_tier,
     )
     .await
     {
@@ -259,7 +229,7 @@ async fn create(
 
 /// `POST /federation/peers/{id}/update` — admin-gated + CSRF, reuses
 /// [`update_peer_core`]. The dashboard edit form submits ALL fields, so
-/// every PATCH re-asserts issuer / jwks_url / trust_tier (which
+/// every PATCH re-asserts issuer / jwks_url (which
 /// re-confirms the JWKS cache on the next tick — the intended
 /// full-row-edit semantics).
 async fn update(
@@ -284,9 +254,6 @@ async fn update(
     let Ok(uuid) = Uuid::parse_str(id.trim()) else {
         return redirect_with_error(tenant_ctx, "Invalid peer id.");
     };
-    let Some(trust_tier) = TrustTier::parse(form.trust_tier.trim()) else {
-        return redirect_with_error(tenant_ctx, "Trust tier must be `full` or `restricted`.");
-    };
     match update_peer_core(
         &state,
         tenant,
@@ -295,7 +262,6 @@ async fn update(
         Some(&form.peer_name),
         Some(&form.issuer),
         Some(&form.jwks_url),
-        Some(trust_tier),
     )
     .await
     {

@@ -4,9 +4,8 @@ use super::*;
 
 impl UpstreamPool {
     /// Override the per-call upstream timeout. Pass `None` to disable
-    /// (sessions then live until rmcp's own transport notices the stream
-    /// died — historically: never, because that's the exact bug this
-    /// timeout is here to bound). Default is 300s (5 minutes); the
+    /// (calls then rely on transport closure or caller cancellation).
+    /// Default is 300s (5 minutes); the
     /// `GATEWAY_UPSTREAM_CALL_TIMEOUT_SECONDS` env var in
     /// `waygate-server::config` exposes this knob to operators.
     pub fn with_call_timeout(mut self, timeout: Option<Duration>) -> Self {

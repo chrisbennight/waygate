@@ -29,7 +29,6 @@ use crate::policy_bundles;
 use crate::rate_limit_policies;
 use crate::rbac;
 use crate::servers;
-use crate::tasks;
 use crate::tenants;
 use crate::upstream_sessions;
 
@@ -131,14 +130,10 @@ use crate::upstream_sessions;
         change_requests::list_requests,
         change_requests::approve_request,
         change_requests::deny_request,
-        tasks::list_tasks,
-        tasks::get_task,
         crate::codemode_executions::list_executions,
         crate::codemode_executions::cancel_execution,
         inspection_rules::list_rules,
-        inspection_rules::create_rule,
         inspection_rules::get_rule,
-        inspection_rules::update_rule,
         inspection_rules::delete_rule,
         federated_peers::list_peers,
         federated_peers::create_peer,
@@ -273,12 +268,9 @@ use crate::upstream_sessions;
         change_requests::DenyRequest,
         change_requests::DecisionResponse,
         change_requests::SecretResponse,
-        tasks::TaskListResponse,
-        waygate_dashboard_stores::tasks::Task,
-        waygate_dashboard_stores::tasks::TaskStatus,
-        inspection_rules::CreateRuleRequest,
-        inspection_rules::UpdateRuleRequest,
         inspection_rules::RuleListResponse,
+        inspection_rules::RuleView,
+        inspection_rules::RuleEnforcement,
         waygate_dashboard_stores::inspection_rules::InspectionRule,
         waygate_dashboard_stores::inspection_rules::InspectorKind,
         federated_peers::CreatePeerRequest,
@@ -306,9 +298,8 @@ use crate::upstream_sessions;
         (name = "api_key_profiles", description = "Per-tenant API-key mint profiles bounding scope/ttl/owner/reason"),
         (name = "break_glass", description = "Single-use override tokens that bypass Cedar Deny for incident response"),
         (name = "change_requests", description = "HITL control-plane: an automated caller proposes a privileged change (mcp:propose) and polls its status (CIBA-shaped); a human approves or denies, and execution runs server-side on approval"),
-        (name = "tasks", description = "MCP Tasks primitive — long-running tool call state. Read-only persistence layer; InvocationService write-through and client subscribe are deferred until the spec stabilizes"),
         (name = "codemode_executions", description = "Operator view of in-flight Code Mode executions projected from the execution journal (identity, ownership, state, claim liveness, age — never program content), plus tenant-scoped cancellation"),
-        (name = "inspection_rules", description = "Per-tenant response-inspector rule overrides layered on top of the built-in PII/secrets/poisoning rulesets; admin CRUD only until the runtime consumer lands"),
+        (name = "inspection_rules", description = "Read and delete stored custom rules; these records are not enforced"),
         (name = "federated_peers", description = "Federated gateway peer registry — operator-approved remote MCP gateways this gateway federates with (Tier-C identity chaining), backed by a JWKS fetcher and peer-assertion validator"),
     ),
 )]

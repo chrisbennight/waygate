@@ -270,10 +270,11 @@ fn params_schema_reflects_executor_struct_fields() {
         "break_glass.mint",
         &["issued_to", "reason", "scope_pattern", "ttl_seconds"],
     );
-    assert_props(
-        "peer.create",
-        &["peer_name", "issuer", "jwks_url", "trust_tier"],
-    );
+    assert_props("peer.create", &["peer_name", "issuer", "jwks_url"]);
+    for action in ["peer.create", "peer.update"] {
+        assert!(by_type[action]["properties"].get("trust_tier").is_none());
+        assert_eq!(by_type[action]["additionalProperties"], false);
+    }
     assert_props("upstream.reconnect", &["server", "clear_quarantine"]);
     assert_props("upstream.refresh_catalog", &["server"]);
     assert_props("upstream.quarantine.clear", &["server"]);
@@ -384,8 +385,6 @@ fn registry_resolves_all_standard_non_secret_executors() {
     for action in [
         "rate_limit.create",
         "rate_limit.delete",
-        "inspection_rule.create",
-        "inspection_rule.update",
         "oauth_consent.revoke",
         "group.create_local",
         "group.delete_local",
@@ -673,14 +672,9 @@ fn standard_non_secret_param_shapes_parse() {
         serde_json::from_value(serde_json::json!({ "policy_id": Uuid::nil() })).unwrap();
     assert_eq!(del.policy_id, Uuid::nil());
 
-    let upd: InspectionRuleUpdateParams = serde_json::from_value(serde_json::json!({
-        "id": Uuid::nil(),
-        "enabled": false,
-    }))
-    .unwrap();
-    assert_eq!(upd.id, Uuid::nil());
-    assert_eq!(upd.enabled, Some(false));
-    assert!(upd.name.is_none() && upd.config.is_none() && upd.applies_to.is_none());
+    let r = registry();
+    assert!(r.get("inspection_rule.create").is_none());
+    assert!(r.get("inspection_rule.update").is_none());
 
     let rev: OAuthConsentRevokeParams = serde_json::from_value(serde_json::json!({
         "principal_sub": "user-7",
@@ -953,20 +947,18 @@ fn elevated_tier_param_shapes_parse() {
         "peer_name": "east-gw",
         "issuer": "https://east.example",
         "jwks_url": "https://east.example/jwks",
-        "trust_tier": "restricted",
     }))
     .unwrap();
     assert_eq!(peer_create.peer_name, "east-gw");
-    assert_eq!(peer_create.trust_tier, TrustTier::Restricted);
 
     let peer_update: PeerUpdateParams = serde_json::from_value(serde_json::json!({
         "id": Uuid::nil(),
-        "trust_tier": "full",
+        "peer_name": "updated",
     }))
     .unwrap();
     assert_eq!(peer_update.id, Uuid::nil());
-    assert_eq!(peer_update.trust_tier, Some(TrustTier::Full));
-    assert!(peer_update.peer_name.is_none() && peer_update.issuer.is_none());
+    assert_eq!(peer_update.peer_name.as_deref(), Some("updated"));
+    assert!(peer_update.issuer.is_none());
 
     let role_update: RbacRoleUpdateParams = serde_json::from_value(serde_json::json!({
         "id": Uuid::nil(),
@@ -1057,4 +1049,16 @@ fn requirement_override_is_honored() {
     assert_eq!(req.required_approvals, 2);
     assert_eq!(req.eligible_role, "tenant-admins");
     assert_eq!(req.factors, vec!["mfa".to_string()]);
+}
+
+#[test]
+fn peer_update_params_reject_unenforced_authority_choices() {
+    for label in ["restricted", "full"] {
+        assert!(
+            serde_json::from_value::<PeerUpdateParams>(serde_json::json!({
+                "id": Uuid::nil(), "trust_tier": label
+            }))
+            .is_err()
+        );
+    }
 }

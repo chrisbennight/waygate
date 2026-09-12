@@ -427,7 +427,7 @@ async fn check_file_preparation_quota(
             &context,
             &[
                 waygate_quota::QuotaAction::Call,
-                waygate_quota::QuotaAction::HighRiskCall,
+                waygate_quota::QuotaAction::SideEffectingCall,
             ],
         )
         .await
@@ -895,7 +895,7 @@ mod tests {
                 actions,
                 [
                     waygate_quota::QuotaAction::Call,
-                    waygate_quota::QuotaAction::HighRiskCall,
+                    waygate_quota::QuotaAction::SideEffectingCall,
                 ]
             );
             Err(waygate_quota::QuotaError::RateLimited {

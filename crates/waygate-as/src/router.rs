@@ -66,7 +66,7 @@ pub struct AsState {
     /// id-token validation and before the gateway mints its own
     /// authorization code — records that this CIMD client has been
     /// authorized to act on behalf of this user with these scopes.
-    /// The interactive consent screen and the per-tenant
+    /// The interactive consent screen and the gateway-wide
     /// `require_explicit_consent` flag layer on top of the same
     /// rows. Same `SharedConsentStore` value is also handed to
     /// `waygate-admin` so list + revoke endpoints serve from the

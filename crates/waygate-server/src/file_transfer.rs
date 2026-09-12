@@ -3446,7 +3446,7 @@ mod tests {
                 actions,
                 [
                     waygate_quota::QuotaAction::Call,
-                    waygate_quota::QuotaAction::HighRiskCall,
+                    waygate_quota::QuotaAction::SideEffectingCall,
                 ]
             );
             self.calls.fetch_add(1, Ordering::SeqCst);

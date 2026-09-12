@@ -10,8 +10,7 @@
 //!
 //! Registered actions span a secret-minting tier (`api_key.mint`, its own
 //! channel for the one-time plaintext) and a standard, non-secret tier —
-//! `rate_limit.create` / `.update` / `.delete`, `inspection_rule.create` /
-//! `.update` / `.delete`, `oauth_consent.revoke`, operational upstream
+//! `rate_limit.create` / `.update` / `.delete`, `inspection_rule.delete`, `oauth_consent.revoke`, operational upstream
 //! recovery, fleet config reload, and more — each a thin adapter over the
 //! same `*_core` the direct control/REST handlers call, so
 //! validation, conflict mapping, and the durable audit can't drift between
@@ -30,7 +29,6 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use waygate_changeset::ApprovalRequirement;
-use waygate_federation::TrustTier;
 use waygate_oidc::Principal;
 
 use crate::audit_retention::{clear_retention_core, set_retention_core};
@@ -41,9 +39,7 @@ use crate::config_reload::{reload_config_core, ConfigReloadParams};
 use crate::federated_peers::{
     create_peer_core, delete_peer_core, update_peer_core, CreatePeerRequest,
 };
-use crate::inspection_rules::{
-    create_rule_core, delete_rule_core, update_rule_core, CreateRuleRequest,
-};
+use crate::inspection_rules::delete_rule_core;
 use crate::oauth_consent::revoke_grant_core;
 use crate::policy_bundles::{
     merge_policy_fragment_into_live_set, publish_bundle_core, rollback_bundle_core,
@@ -330,8 +326,6 @@ fn builtin_executors() -> Vec<Box<dyn ActionExecutor>> {
             Box::new(RateLimitUpdateExecutor),
             Box::new(RateLimitCreateExecutor),
             Box::new(RateLimitDeleteExecutor),
-            Box::new(InspectionRuleCreateExecutor),
-            Box::new(InspectionRuleUpdateExecutor),
             Box::new(InspectionRuleDeleteExecutor),
             Box::new(OAuthConsentRevokeExecutor),
             Box::new(PeerCreateExecutor),

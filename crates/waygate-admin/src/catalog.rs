@@ -3,7 +3,7 @@
 //! The governed catalog is the Postgres-backed registry of upstream
 //! MCP servers and their tools (servers, tool versions, risk
 //! classifications, approvals, drift events). It is the durable
-//! successor to the on-disk `servers/*.yaml` manifests. These two
+//! registry populated through governed configuration changes. These two
 //! endpoints expose the operator-facing read surface over it:
 //!
 //! - `GET /api/v1/catalog/servers` — the live upstream servers
@@ -21,8 +21,7 @@
 //! - `POST /api/v1/catalog/servers/{id}/quarantine` — pull a
 //!   server out of dispatch (status `quarantined`).
 //!
-//! All four are gated by `mcp:admin`. The eventual removal of the
-//! on-disk YAML reload path is a separate, later change.
+//! All four are gated by `mcp:admin`.
 
 use std::sync::Arc;
 

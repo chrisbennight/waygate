@@ -324,7 +324,7 @@ fn tool_drift() -> &'static CounterVec {
              in-process observation. Bumped once per drifted tool per \
              observation pass. Tool identity intentionally omitted from \
              labels (cardinality policy); per-tool detail lives in the \
-             tracing event and, in a follow-up slice, catalog_drift_events.",
+             tracing event and CatalogDrift audit events.",
             &["server"],
             registry()
         )
@@ -662,35 +662,6 @@ pub fn record_authz_latency(seconds: f64) {
 /// refused to dispatch" outcome — page on it too.
 pub fn record_break_glass_use(outcome: &str) {
     break_glass_uses().with_label_values(&[outcome]).inc();
-}
-
-fn tasks_status_transitions() -> &'static CounterVec {
-    static M: OnceLock<CounterVec> = OnceLock::new();
-    M.get_or_init(|| {
-        register_counter_vec_with_registry!(
-            "mcp_tasks_total",
-            "MCP Tasks lifecycle. \
-             Each `(status)` value is the cumulative count of \
-             task_states rows that have ENTERED that status \
-             (insert or update_status). Operators page on \
-             `failed > 0` and an unhealthy ratio of \
-             `succeeded / (succeeded+failed+cancelled)`.",
-            &["status"],
-            registry()
-        )
-        .expect("register mcp_tasks_total")
-    })
-}
-
-/// Record one task status entry.
-/// `status` ∈ the snake-case TaskStatus values:
-/// `pending` / `running` / `succeeded` / `failed` /
-/// `cancelled` / `resumable`. Closed set per the
-/// `task_states.status` CHECK constraint.
-pub fn record_task_status(status: &str) {
-    tasks_status_transitions()
-        .with_label_values(&[status])
-        .inc();
 }
 
 fn output_schema_violations() -> &'static CounterVec {

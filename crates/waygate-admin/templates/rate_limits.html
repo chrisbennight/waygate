@@ -14,8 +14,7 @@
    Each policy is a (scope, scope_value, action) tuple with a
    token-bucket (capacity, refill_per_second). The hot-path
    QuotaService consumes tokens against this registry; the
-   admin surface here is read-only — mint / patch / delete via
-   POST/PATCH/DELETE /api/v1/admin/rate_limit_policies/*. #}
+   admin surface supports creation, editing, and deletion. #}
 
 {% if insufficient_scope %}
 <div class="card">
@@ -75,7 +74,6 @@
                     <select name="scope">
                         <option value="tenant">tenant</option>
                         <option value="principal">principal</option>
-                        <option value="client">client</option>
                         <option value="server">server</option>
                         <option value="tool">tool</option>
                     </select>
@@ -86,8 +84,7 @@
                 <label>Action
                     <select name="action">
                         <option value="call">call</option>
-                        <option value="high_risk_call">high_risk_call</option>
-                        <option value="cost_bearing">cost_bearing</option>
+                        <option value="side_effecting_call">side_effecting_call</option>
                         <option value="discovery">discovery</option>
                     </select>
                 </label>
@@ -139,11 +136,16 @@
                         <td>{{ p.name }}</td>
                         <td><span class="chip">{{ p.scope }}</span></td>
                         <td class="mono">{% match p.scope_value %}{% when Some with (v) %}{{ v }}{% when None %}—{% endmatch %}</td>
-                        <td><span class="chip chip--ok">{{ p.action }}</span></td>
+                        <td><span class="chip">{{ p.action }}</span>
+                            {% match p.inactive_reason %}{% when Some with (reason) %}
+                            <span class="chip chip--warn">inactive</span><p class="hint">{{ reason }}</p>
+                            {% when None %}{% endmatch %}
+                        </td>
                         <td class="tabular">{{ p.bucket_capacity }}</td>
                         <td class="mono tabular">{{ p.refill_label }}</td>
                         <td class="mono" title="created {{ p.created_at_abs }}">{{ p.updated_at_abs }}</td>
                         <td class="row-actions">
+                            {% if p.inactive_reason.is_none() %}
                             <details class="disclosure disclosure--link">
                                 <summary>Edit</summary>
                                 <form method="post" action="{{ self.chrome.nav_url(p.update_rel.as_str()) }}">
@@ -159,6 +161,7 @@
                                     </div>
                                 </form>
                             </details>
+                            {% endif %}
                             {# Static confirm string — never interpolate `p.name`
                                into inline JS. Askama HTML-escapes, but the browser
                                HTML-decodes the attribute before the JS parser runs,

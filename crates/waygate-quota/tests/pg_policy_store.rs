@@ -54,12 +54,13 @@ async fn crud_round_trip_against_real_postgres() {
             None,
             10,
             1.0,
-            QuotaAction::Call,
+            QuotaAction::SideEffectingCall,
         )
         .await
         .expect("create");
     assert_eq!(created.tenant_id, tenant);
     assert_eq!(created.scope, QuotaScope::Tenant);
+    assert_eq!(created.action, QuotaAction::SideEffectingCall);
     assert!(created.scope_value.is_none());
 
     let fetched = store
@@ -81,7 +82,7 @@ async fn crud_round_trip_against_real_postgres() {
             None,
             5,
             0.5,
-            QuotaAction::Call,
+            QuotaAction::SideEffectingCall,
         )
         .await;
     assert!(matches!(dup, Err(RateLimitStoreError::Conflict)));
@@ -261,4 +262,63 @@ async fn delete_all_for_tenant_cascades_to_counters() {
         .execute(&pool)
         .await
         .ok();
+}
+
+#[tokio::test]
+async fn unsupported_policies_remain_readable_and_deletable_but_cannot_be_written() {
+    let Ok(url) = env::var("AUDIT_DATABASE_URL") else {
+        eprintln!("skipping pg smoke: AUDIT_DATABASE_URL not set");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("connect");
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("migrate");
+    let tenant = format!("test-quota-unsupported-{}", Uuid::new_v4());
+    sqlx::query("INSERT INTO tenants (id, display_name) VALUES ($1, $1)")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("tenant");
+    let store = PgRateLimitPolicyStore::new(pool.clone());
+    for (scope, value, action) in [
+        (QuotaScope::Client, Some("client-id"), QuotaAction::Call),
+        (QuotaScope::Tenant, None, QuotaAction::CostBearing),
+    ] {
+        assert!(matches!(
+            store
+                .create(&tenant, "unsupported", scope, value, 10, 1.0, action)
+                .await,
+            Err(RateLimitStoreError::InvalidShape(_))
+        ));
+        // Seed a stored record independently of the supported write interface.
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO rate_limit_policies (id, tenant_id, name, scope, scope_value, bucket_capacity, refill_per_second, action) VALUES ($1, $2, 'unsupported', $3, $4, 10, 1.0, $5)")
+            .bind(id).bind(&tenant).bind(scope.as_str()).bind(value).bind(action.as_str()).execute(&pool).await.expect("seed stored policy");
+        let policy = store.get(&tenant, id).await.unwrap().unwrap();
+        assert!(policy.inactive_reason().is_some());
+        assert!(store
+            .list(&tenant)
+            .await
+            .unwrap()
+            .iter()
+            .any(|p| p.id == id && p.inactive_reason().is_some()));
+        assert!(matches!(
+            store.update(&tenant, id, Some(20), Some(2.0)).await,
+            Err(RateLimitStoreError::InvalidShape(_))
+        ));
+        assert_eq!(store.get(&tenant, id).await.unwrap().unwrap(), policy);
+        assert!(store.delete(&tenant, id).await.unwrap());
+        assert!(store.get(&tenant, id).await.unwrap().is_none());
+    }
+    sqlx::query("DELETE FROM tenants WHERE id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
 }

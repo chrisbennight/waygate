@@ -574,7 +574,7 @@ async fn codemode_only_client_allowlist_hides_upstream_declarations() {
         .and_then(|info| info.instructions.clone())
         .expect("compact legacy initialize returns instructions");
     assert!(compact_instructions.contains("codemode.search"));
-    assert!(compact_instructions.contains("codemode.mutate"));
+    assert!(compact_instructions.contains("codemode.execute"));
     let compact_names: Vec<String> = compact_client
         .list_tools(Default::default())
         .await
@@ -585,15 +585,14 @@ async fn codemode_only_client_allowlist_hides_upstream_declarations() {
         .collect();
     assert!(compact_names.contains(&"codemode.execute".to_owned()));
     assert!(compact_names.contains(&"codemode.resume".to_owned()));
-    assert!(compact_names.contains(&"codemode.mutate".to_owned()));
     assert!(
         !compact_names.iter().any(|name| name.starts_with("demo.")),
         "matching client must receive gateway built-ins without upstream declarations: {compact_names:?}"
     );
     let called = compact_client
-        .call_tool(CallToolRequestParams::new("codemode.mutate"))
+        .call_tool(CallToolRequestParams::new("codemode.execute"))
         .await
-        .expect("compact client routes the Code Mode mutation facade");
+        .expect("compact client routes the Code Mode execution facade");
     assert!(
         called
             .content
@@ -1166,8 +1165,8 @@ async fn unknown_protocol_version_is_refused_with_unsupported_protocol_version()
 
 /// Task-capable stub whose `enqueue_task` accepts BOTH `execute` and
 /// `resume` — mirroring Code Mode, whose durable-task contract covers both
-/// even though `task_tool()` names only `execute`. The ordinary mutation
-/// surface is listed and callable but is not task-augmented.
+/// even though `task_tool()` names only `execute`. `execute` also supports
+/// ordinary synchronous calls.
 #[derive(Clone)]
 struct CodeModeTaskStub;
 
@@ -1183,8 +1182,7 @@ impl waygate_mcp::BuiltinTools for CodeModeTaskStub {
             self.describe(),
             vec![
                 Tool::new("codemode.execute", "start a task", schema.clone()),
-                Tool::new("codemode.resume", "resume a task", schema.clone()),
-                Tool::new("codemode.mutate", "run a governed mutation", schema),
+                Tool::new("codemode.resume", "resume a task", schema),
             ],
         )
     }
@@ -1207,13 +1205,6 @@ impl waygate_mcp::BuiltinTools for CodeModeTaskStub {
                     description: "resume a task".into(),
                     risk: RiskTier::Low,
                     side_effects: false,
-                    pii: false,
-                },
-                waygate_mcp::BuiltinToolDescriptor {
-                    name: "mutate".into(),
-                    description: "run a governed mutation".into(),
-                    risk: RiskTier::Medium,
-                    side_effects: true,
                     pii: false,
                 },
             ],
@@ -1239,9 +1230,9 @@ impl waygate_mcp::BuiltinTools for CodeModeTaskStub {
         arguments: Option<rmcp::model::JsonObject>,
         principal: Option<&waygate_oidc::Principal>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if tool != "mutate" || arguments.is_some_and(|arguments| !arguments.is_empty()) {
+        if tool != "execute" || arguments.is_some_and(|arguments| !arguments.is_empty()) {
             return Err(McpError::invalid_params(
-                "mutation routing stub accepts only an empty mutate call",
+                "execution routing stub accepts only an empty execute call",
                 None,
             ));
         }
@@ -1954,9 +1945,6 @@ async fn stateless_codemode_only_client_gets_compact_catalog_and_guidance() {
     assert!(matched_tools
         .iter()
         .any(|tool| tool["name"] == "codemode.execute"));
-    assert!(matched_tools
-        .iter()
-        .any(|tool| tool["name"] == "codemode.mutate"));
     assert!(
         !matched_tools.iter().any(|tool| {
             tool["name"]

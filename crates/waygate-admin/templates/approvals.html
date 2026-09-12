@@ -16,9 +16,7 @@
    with ApprovalRequired. This page is the operator-visible
    projection of the `approval_grants` table. Active grants carry an
    inline Revoke; minting still goes through
-   `/api/v1/admin/approval_grants/*` (the composer is a follow-up);
-   live WebSocket subscription for in-progress blocked invocations
-   is also a follow-up. #}
+   `/api/v1/admin/approval_grants/*`. #}
 
 {% if insufficient_scope %}
 <div class="card">
@@ -78,8 +76,7 @@
                     Nothing is currently pre-authorized for a waiting caller. A
                     grant is minted from the REST surface
                     (<code>/api/v1/admin/approval_grants</code>) bound to the
-                    exact call shape the operator vetted; an in-page composer is
-                    a follow-up.
+                    exact call shape the operator vetted.
                 </p>
             </div>
         {% else %}

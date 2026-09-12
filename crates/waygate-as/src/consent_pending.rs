@@ -1,7 +1,7 @@
 //! Post-callback pre-consent state.
 //!
 //! When the OAuth callback resolves the user's identity
-//! and the per-tenant `require_explicit_consent` flag is
+//! and the gateway-wide `require_explicit_consent` flag is
 //! on (and the user hasn't already granted), the AS
 //! pauses BEFORE minting its own authorization code: it
 //! persists the post-id-token state as a pending row,
@@ -14,11 +14,8 @@
 //! gets DELETEd by `take_transaction` on the FIRST
 //! callback hit. The pending state is what's left AFTER
 //! that delete — different lifecycle, different
-//! columns. Keeping them separate also means the
-//! pending row's existence is itself a signal ("user
-//! is mid-consent, screen is live"), which a future
-//! per-tenant "max concurrent consent screens"
-//! settings can gate on.
+//! columns. A pending row preserves the validated identity and requested
+//! authorization while the user decides whether to grant consent.
 //!
 //! ## CSRF posture
 //!

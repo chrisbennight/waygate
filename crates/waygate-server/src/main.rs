@@ -998,7 +998,6 @@ async fn gateway_main() -> anyhow::Result<()> {
         catalog: catalog.clone(),
         catalog_store: catalog_store.clone(),
         authz: authz_gate.clone(),
-        disclosed_store: Arc::new(waygate_mcp::disclosed::DisclosedStore::new()),
         audit: audit_sink.clone(),
         index: search_index.clone(),
         tool_catalog_epoch: tool_catalog_epoch.clone(),
@@ -1399,7 +1398,6 @@ async fn gateway_main() -> anyhow::Result<()> {
         // final).
         .with_break_glass_store(db_pool.clone().map(build_break_glass_store))
         // MCP Tasks read-only admin store; `None` withholds that surface.
-        .with_tasks_store(db_pool.clone().map(build_tasks_store))
         // Durable Code Mode stores; `None` makes their admin surfaces unavailable.
         .with_codemode_execution_store(mcp_codemode::shared_execution_store(db_pool.clone()))
         .with_skill_distribution(skills.reviewed())
@@ -1961,7 +1959,10 @@ async fn gateway_main() -> anyhow::Result<()> {
             // even if no record_required will ever produce a
             // `webhook` outbox row — and the README's "when
             // `webhook` is in targets" claim is wrong.
-            let webhook_named = cfg.evidence_outbox_targets.iter().any(|t| t == "webhook");
+            let webhook_named = cfg
+                .evidence_outbox_targets
+                .iter()
+                .any(|t| t == waygate_storage::WebhookExporter::TARGET);
             if let (Some(url), true) = (cfg.evidence_webhook_url.as_ref(), webhook_named) {
                 match waygate_storage::WebhookExporter::new(url) {
                     Ok(webhook) => {
@@ -1974,7 +1975,8 @@ async fn gateway_main() -> anyhow::Result<()> {
                             url = %webhook.sanitized_url(),
                             "evidence webhook exporter registered",
                         );
-                        registry.insert("webhook", Arc::new(webhook));
+                        registry
+                            .insert(waygate_storage::WebhookExporter::TARGET, Arc::new(webhook));
                     }
                     Err(e) => {
                         tracing::error!(
@@ -1996,7 +1998,10 @@ async fn gateway_main() -> anyhow::Result<()> {
             // pattern as `webhook` — only registered when both
             // `ocsf` is in OUTBOX_TARGETS AND
             // GATEWAY_EVIDENCE_OCSF_URL is set.
-            let ocsf_named = cfg.evidence_outbox_targets.iter().any(|t| t == "ocsf");
+            let ocsf_named = cfg
+                .evidence_outbox_targets
+                .iter()
+                .any(|t| t == waygate_storage::OcsfExporter::TARGET);
             if let (Some(url), true) = (cfg.evidence_ocsf_url.as_ref(), ocsf_named) {
                 // Pass the AOS-trace toggle through.
                 // Default off; enabled by `GATEWAY_OCSF_AOS_TRACE=true`.
@@ -2010,7 +2015,7 @@ async fn gateway_main() -> anyhow::Result<()> {
                             aos_trace = cfg.evidence_ocsf_aos_trace,
                             "evidence OCSF exporter registered",
                         );
-                        registry.insert("ocsf", Arc::new(ocsf));
+                        registry.insert(waygate_storage::OcsfExporter::TARGET, Arc::new(ocsf));
                     }
                     Err(e) => {
                         tracing::error!(
@@ -2035,7 +2040,10 @@ async fn gateway_main() -> anyhow::Result<()> {
 
             // ECS exporter. Same naming-gated
             // pattern as `webhook` / `ocsf`.
-            let ecs_named = cfg.evidence_outbox_targets.iter().any(|t| t == "ecs");
+            let ecs_named = cfg
+                .evidence_outbox_targets
+                .iter()
+                .any(|t| t == waygate_storage::EcsExporter::TARGET);
             if let (Some(url), true) = (cfg.evidence_ecs_url.as_ref(), ecs_named) {
                 match waygate_storage::EcsExporter::new(url) {
                     Ok(ecs) => {
@@ -2043,7 +2051,7 @@ async fn gateway_main() -> anyhow::Result<()> {
                             url = %ecs.sanitized_url(),
                             "evidence ECS exporter registered",
                         );
-                        registry.insert("ecs", Arc::new(ecs));
+                        registry.insert(waygate_storage::EcsExporter::TARGET, Arc::new(ecs));
                     }
                     Err(e) => {
                         tracing::error!(
@@ -2068,7 +2076,10 @@ async fn gateway_main() -> anyhow::Result<()> {
 
             // Syslog exporter (RFC 5424 / TCP).
             // Same naming-gated pattern as the HTTP exporters.
-            let syslog_named = cfg.evidence_outbox_targets.iter().any(|t| t == "syslog");
+            let syslog_named = cfg
+                .evidence_outbox_targets
+                .iter()
+                .any(|t| t == waygate_storage::SyslogExporter::TARGET);
             if let (Some(target), true) = (cfg.evidence_syslog_target.as_ref(), syslog_named) {
                 match waygate_storage::SyslogExporter::new(
                     target,
@@ -2084,7 +2095,7 @@ async fn gateway_main() -> anyhow::Result<()> {
                             pen = cfg.evidence_syslog_pen,
                             "evidence syslog exporter registered",
                         );
-                        registry.insert("syslog", Arc::new(syslog));
+                        registry.insert(waygate_storage::SyslogExporter::TARGET, Arc::new(syslog));
                     }
                     Err(e) => {
                         tracing::error!(

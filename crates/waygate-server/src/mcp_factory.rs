@@ -10,7 +10,6 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use waygate_mcp::disclosed::DisclosedStore;
 use waygate_mcp::GatewayServer;
 
 use crate::config::CodeModeResultStorage;
@@ -23,10 +22,6 @@ pub(crate) struct McpServerFactory {
     pub catalog: waygate_mcp::SharedCatalog,
     pub catalog_store: Option<waygate_catalog::SharedCatalogStore>,
     pub authz: waygate_mcp::SharedAuthz,
-    /// Transitional, no-op wiring for the former stateless disclosure store.
-    /// The stable 2026 projection never reads or writes it; a follow-up removes
-    /// the obsolete composition surface after this behavior change lands.
-    pub disclosed_store: Arc<DisclosedStore>,
     pub audit: waygate_mcp::SharedEvidence,
     pub index: Option<waygate_mcp::SearchIndex>,
     pub tool_catalog_epoch: waygate_mcp::ToolCatalogEpoch,
@@ -121,7 +116,6 @@ impl McpServerFactory {
                 .with_tool_list_cursor_sealer(self.tool_list_cursor_sealer.clone())
                 .with_skill_catalog(self.skills.clone())
                 .with_reviewed_skills(self.reviewed_skills.clone())
-                .with_disclosed_store(self.disclosed_store.clone())
                 .with_file_download_authorizer(self.native_file_download_authorizer.clone())
                 .with_file_upload_authorizer(self.native_file_upload_authorizer.clone())
                 .with_file_output_processor(self.file_output_processor.clone())

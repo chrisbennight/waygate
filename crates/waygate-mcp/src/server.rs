@@ -45,7 +45,7 @@ use crate::compat::search_tools_v1::{
     self, Mode, OperationDescriptor, OperationsResponse, SearchToolsRequest, SearchToolsResponse,
     TypesResponse,
 };
-use crate::disclosed::{DisclosedStore, DisclosedTools};
+use crate::disclosed::DisclosedTools;
 use crate::discovery::CatalogTool;
 use crate::index::{self, SearchIndex};
 use crate::invocation::DefaultInvocationService;
@@ -75,7 +75,7 @@ const FULL_CATALOG_INSTRUCTIONS: &str =
 const LEGACY_SEARCH_INSTRUCTIONS: &str =
     "Use `<server>.searchTools` to discover tools or schemas; call results as `<server>.<toolName>`.";
 const CODEMODE_ONLY_INSTRUCTIONS: &str =
-    "Use `codemode.search` to discover governed operations and `codemode.describe` for exact schemas. `codemode.execute` can invoke every operation this client is directly authorized to call; `codemode.mutate` is a compatibility alias with the same authority. Upstream tools are not listed directly for this client.";
+    "Use `codemode.search` to discover governed operations and `codemode.describe` for exact schemas. `codemode.execute` can invoke every operation this client is directly authorized to call. Upstream tools are not listed directly for this client.";
 
 /// Audit actions for native MCP resource access. These match the Cedar action
 /// names evaluated by the gate, so Decision Log rows use the same vocabulary
@@ -543,10 +543,6 @@ pub struct GatewayServer {
     /// Per-session isolation is provided by the `StreamableHttpService`
     /// factory, which creates a fresh `GatewayServer` per session.
     disclosed: DisclosedTools,
-    /// Transitional composition seam retained until the obsolete stateless
-    /// store is removed. No 2026 request reads or writes it; legacy clients
-    /// use only [`Self::disclosed`], their session-local record.
-    _disclosed_store: Arc<DisclosedStore>,
     /// When true, legacy-session `tools/list` returns the full upstream
     /// catalog alongside the meta-tools. The 2026 projection is always full.
     eager_tools_list: bool,
@@ -854,7 +850,6 @@ impl GatewayServer {
             authz,
             index: None,
             disclosed: DisclosedTools::new(),
-            _disclosed_store: Arc::new(DisclosedStore::new()),
             eager_tools_list: false,
             eager_tools_clients: Vec::new(),
             client_eager_tools_list: Arc::new(AtomicBool::new(false)),
@@ -1045,15 +1040,6 @@ impl GatewayServer {
     #[must_use]
     pub fn with_codemode_only_tools_clients(mut self, clients: Vec<String>) -> Self {
         self.codemode_only_tools_clients = clients;
-        self
-    }
-
-    /// Retain the former process-wide stateless disclosure-store wiring while
-    /// composition cleanup lands separately. The stable 2026 request path
-    /// deliberately never reads or writes this store.
-    #[must_use]
-    pub fn with_disclosed_store(mut self, store: Arc<DisclosedStore>) -> Self {
-        self._disclosed_store = store;
         self
     }
 
@@ -4764,14 +4750,10 @@ impl ServerHandler for GatewayServer {
 
     // Span name + `mcp.method.name` / `otel.kind` follow the OTel MCP semantic
     // conventions (https://opentelemetry.io/docs/specs/semconv/gen-ai/mcp/).
-    // The pre-semconv `mcp.method` field is retained (dual-emit) because
-    // `docs/compliance.md` cites it as control evidence; drop it in a later
-    // pass once the doc + any dashboards cut over.
     #[tracing::instrument(
         name = "tools/list",
         skip(self, request, ctx),
         fields(
-            mcp.method = "tools/list",
             mcp.method.name = "tools/list",
             otel.kind = "server",
             user.sub = tracing::field::Empty,
@@ -5095,18 +5077,11 @@ impl ServerHandler for GatewayServer {
         result.map(Into::into)
     }
 
-    // semconv span name `tools/call` + `mcp.method.name` / `gen_ai.tool.name`
-    // / `otel.kind`. Pre-semconv `mcp.method` / `mcp.tool` retained (dual-emit)
-    // for the compliance-doc evidence window. `mcp.session.id` is not yet
-    // emitted — rmcp's `RequestContext` doesn't surface the streamable-HTTP
-    // session id cheaply; tracked as the remaining semconv attr.
     #[tracing::instrument(
         name = "tools/call",
         skip(self, request, ctx),
         fields(
-            mcp.method = "tools/call",
             mcp.method.name = "tools/call",
-            mcp.tool = %request.name,
             gen_ai.tool.name = %request.name,
             otel.kind = "server",
             error.type = tracing::field::Empty,

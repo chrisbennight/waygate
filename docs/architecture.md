@@ -1,19 +1,8 @@
-# Architecture — the convergence contract
+# Architecture
 
-> **Status:** normative. This document is the contract every session (agent
-> or human) follows when deciding *where code goes*. It exists because the
-> workspace grew through parallel sessions whose only reference was "the
-> last crate that did this" — which produced 10–30 hand-rolled copies of
-> the same shapes. Rules here are phrased so compliance can be checked
-> mechanically. Facts verified against `main` @ `158297c7` (2026-09-01).
-> The snapshot includes the `waygate-evidence`, `waygate-manifest-types`,
-> upstream-session seam, and `waygate-test-support` extractions; CI enforces
-> §1's dependency direction.
-> update that stamp whenever §1's snapshot is regenerated.
->
-> The README keeps the narrative "what is this project" role. The 13
-> [`docs/agents/*.md`](agents/) deep dives stay the source of truth for
-> their domains — this document owns only the cross-cutting layer.
+This document defines crate ownership, dependency direction, shared abstractions,
+and the request lifecycle. CI enforces the crate map and dependency rules.
+Domain-specific guidance lives in [`docs/agents/`](agents/).
 
 ## §1 Layering rule & dependency direction
 
@@ -26,7 +15,7 @@ The contract:
 > over `AdminState` — itself consumed by nothing but `[dev-dependencies]`).
 > **`waygate-server` is the only composition root.**
 
-Snapshot of intra-workspace edges (from `cargo metadata --no-deps`,
+Intra-workspace dependencies (from `cargo metadata --no-deps`,
 dev-dependencies excluded), grouped bottom-up. A crate may depend on any
 crate in its own or a lower group, never higher — **CI-enforced** by
 `scripts/check-dependency-direction.sh`, which reads the layer assignment
@@ -45,8 +34,8 @@ from §2's crate map (this doc is the source of truth):
   `waygate-llm-dispatch`, `waygate-agent`, `waygate-agent-runtime`,
   `waygate-authz`, `waygate-mcp`, `waygate-transfer`,
   `waygate-storage`, `waygate-as`, `waygate-upstream`.
-- **Composition**: `waygate-admin` (24 intra-workspace deps),
-  `waygate-server` (28; the binary), `waygate-test-support` (dev-only:
+- **Composition**: `waygate-admin`,
+  `waygate-server` (the binary), `waygate-test-support` (dev-only:
   consumed exclusively via `[dev-dependencies]`, which the direction
   tripwire exempts).
 
@@ -60,8 +49,8 @@ its reason, and the condition for removing it.
 One row per workspace member. **CI enforces this table**: a new crate must
 add its row, a deleted crate must remove it
 ([`scripts/check-architecture-doc.sh`](../scripts/check-architecture-doc.sh)).
-The "does not own" column records the boundaries sessions have gotten
-wrong — read it before extending a crate.
+The "does not own" column defines responsibility boundaries. Read it before
+extending a crate.
 
 > **Naming trap:** `waygate-authz` / `waygate-policy` / `waygate-rbac` are
 > three *different* layers — the Cedar **engine**, durable policy **bundle
@@ -74,7 +63,7 @@ wrong — read it before extending a crate.
 | `waygate-core` | Leaf | Shared domain types (tool facts, `RiskTier`, `TenantId`, `InvocationHierarchy`) and the shared foundations of §5: `html`, `fmt`, `page`, `net`, `http_client` (feature `http`) | Business logic; anything needing a heavy dependency |
 | `waygate-telemetry` | Leaf | OTel bootstrap: tracing subscriber, meters, span helpers | Domain types |
 | `waygate-policy` | Leaf | Durable versioned Cedar policy **bundles** (storage + history) | Policy evaluation (`waygate-authz`) |
-| `waygate-manifest-store` | Leaf | Durable versioned upstream-manifest bundles — the history/rollback ledger (stores YAML text) | Manifest parsing/types (`waygate-manifest-types`; adopting typed bundle helpers there is a noted follow-up) |
+| `waygate-manifest-store` | Leaf | Durable versioned upstream-manifest bundles — the history/rollback ledger (stores YAML text) | Manifest parsing/types (`waygate-manifest-types`) |
 | `waygate-llm-providers` | Leaf | Outbound transport to LLM providers: POST a pre-rendered body, return the response or SSE stream | Translation, credentials, orchestration |
 | `waygate-llm-discovery` | Leaf | Fetching a provider's live model list | Catalog persistence (`waygate-storage`) |
 | `waygate-test-client` | Leaf | CLI test client for OAuth-protected MCP gateways (CIMD + loopback callback UX) and the independent streaming file-host proof | Production code paths; production file-transfer authority or storage |
@@ -82,12 +71,12 @@ wrong — read it before extending a crate.
 | `waygate-oidc` | Foundation | OAuth 2.1 **resource-server** primitives: `Principal`, JWT validation, JWKS, session cookies, the shared AEAD envelope (`aead`), the upstream-token keyring (`upstream_crypto`), and the Tier-A upstream-session seam traits/types (`upstream_session`) | The AS role (`waygate-as`); seam *implementations* (`waygate-as`) |
 | `waygate-quota` | Foundation | Per-tenant token-bucket rate limiting (`QuotaService`) | — |
 | `waygate-changeset` | Foundation | The HITL change-request state machine (pending→approved→executed) and the `ActionExecutor` contract | Executor implementations (registered by `waygate-admin`) |
-| `waygate-dashboard-stores` | Foundation | Small per-tenant dashboard-backing stores, one self-contained module each: `tasks` (MCP Tasks persistence), `inspection_rules`, `agent_config`, `activity_saved_views` + `playground_scenarios` (upserts are atomic **JSONB shallow-merge**, pinned by pg tests), `scim_provisioning_log` | The pipelines that consume them (inspector Stage 11, the agent loop, SCIM ingestion); client-facing task endpoints |
+| `waygate-dashboard-stores` | Foundation | Small per-tenant dashboard-backing stores, one self-contained module each: `inspection_rules`, `agent_config`, `activity_saved_views` + `playground_scenarios` (upserts are atomic **JSONB shallow-merge**, pinned by pg tests), `scim_provisioning_log` | Response inspection, agent execution, and SCIM ingestion; stored custom inspection rules are not enforced |
 | `waygate-codemode` | Foundation | Durable Code Mode execution state, fenced worker claims, append-only execution history | MCP wire tools, skill catalog resolution, and runner orchestration (`waygate-server`); client-facing MCP Tasks projection |
 | `waygate-llm-credentials` | Foundation | Inference-plane provider credential management (Infisical-injected env) | Dispatch, translation |
 | `waygate-catalog` | Foundation | Governed catalog of upstream servers/tools/versions/classifications/approvals/drift | Live connections (`waygate-upstream`) |
-| `waygate-evidence` | Domain | Shared audit/evidence types (`AuditEvent`, `EvidenceRecorder`, sinks) and the inference-plane seam traits (`LlmCache`, `LlmUsageRecorder`, `LlmBudgetGate`); `waygate-mcp` re-exports the old paths | Trait implementations (`waygate-storage`) and emission policy (the fifteen-stage invocation pipeline) |
-| `waygate-manifest-types` | Foundation | Upstream-manifest types (`UpstreamManifest`, `Transport`, session/auth/mTLS config), the parse/serialize/load/write helpers, and `validate_manifest_invariants` (the single validation source of truth); `waygate-upstream` re-exports the old paths | Dialing/transports (`waygate-upstream`); bundle persistence (`waygate-manifest-store`) |
+| `waygate-evidence` | Domain | Shared audit/evidence types (`AuditEvent`, `EvidenceRecorder`, sinks) and the inference-plane seam traits (`LlmCache`, `LlmUsageRecorder`, `LlmBudgetGate`) | Trait implementations (`waygate-storage`) and emission policy (the fifteen-stage invocation pipeline) |
+| `waygate-manifest-types` | Foundation | Upstream-manifest types (`UpstreamManifest`, `Transport`, session/auth/mTLS config), the parse/serialize/load/write helpers, and `validate_manifest_invariants` (the single validation source of truth) | Dialing/transports (`waygate-upstream`); bundle persistence (`waygate-manifest-store`) |
 | `waygate-skills` | Foundation | Immutable Agent Skills metadata snapshots, lazy resource-loader seam, validation, optional Code Mode compatibility test hints, content-bound approval identities, durable tenant-scoped distribution review decisions, and last-known-good publication | MCP wire methods (`waygate-mcp`); direct Git access, environment wiring, and refresh orchestration (`waygate-server`); script execution (`waygate-server` Code Mode) |
 | `waygate-apikeys` | Domain | Static `mcpgw_` API keys → `Principal` for headless callers | Session/JWT auth (`waygate-oidc`) |
 | `waygate-rbac` | Domain | Role storage + resolver (roles, assignments, group mappings) | Authorization decisions (`waygate-authz`) |
@@ -203,7 +192,7 @@ entries are keyed by `tool_id`, catalog `schema_hash`, and a canonical
 validator-schema digest; manifest fallback entries use their qualified tool
 identity plus the same schema-value digest. This shares validators across calls
 while bounding total historical versions for the process. The separate digest
-is required because the historical catalog hash covers only the tool name,
+is required because the catalog hash covers only the tool name,
 description, and input schema, not output schema. Compilation failures are
 cached for that exact key and refuse the authorized call before dispatch; they
 never turn response validation into a silent skip. Compilation uses per-key
@@ -325,10 +314,6 @@ Two adjacent planes:
   own Authorization Server (`waygate-as`). See
   [`docs/agents/identity.md`](agents/identity.md).
 
-**Hot-path budget:** intentionally unspecified today — no measured baseline
-exists. Candidate follow-up once telemetry provides one; do not invent
-numbers.
-
 ## §4 State model & reload
 
 Where each kind of state lives and how it changes:
@@ -407,19 +392,17 @@ shared module; CI fails on new local copies where a tripwire exists.
 | `updated_at` bump trigger (`BEFORE UPDATE`) | the generic `touch_updated_at()` function (migration `0071`); new tables `EXECUTE FUNCTION touch_updated_at()`, never a per-table copy | pg pin test `waygate-storage/tests/suite/pg_touch_updated_at.rs` |
 | Admin availability guards ("store not configured" 503s / dashboard cards) and admin feature flags ("surface turned off") | `waygate_admin::capability::{Capability, Feature}` — `require()` for REST guards, `get()`/`enabled()` for render-degraded pages, `off_reason()` for the operator-facing why, `unavailable_msg()` for surfaces with their own error shape (SCIM bodies, `resource_catalog`); the canonical messages live in `AdminState::new` | `check-capability-guards.sh` |
 | Dashboard page chrome (topbar/nav/tenant/theme/CSRF) and tenant-aware URLs | `waygate_admin::chrome::PageChrome` — pages embed `chrome: PageChrome`, templates read `chrome.*` and call `chrome.nav_url(...)`; fragments delegate to `tenant_ctx::nav_url` | `check-page-chrome.sh` |
-| Admin-mutation audit trail (fail-closed `record_required` after a committed admin write) | `waygate_admin::admin_mutation::record_admin_mutation` — never a per-file recorder copy | `check-admin-boilerplate.sh` (ratchet, target 0 copies) |
-| Boot-time env parsing (durations, bool flags, ranged integers; plain string reads stay raw by design) | `waygate_core::env` typed readers — reject-at-boot (never clamp), unset ⇒ documented default, per-var operator hint | `check-env-parsing.sh` (ratchet on raw reads in `waygate-server/src/config.rs`, plus an exact per-file pin table for `GATEWAY_*` reads outside it — new `GATEWAY_*` config goes through `config.rs`) |
+| Admin-mutation audit trail (fail-closed `record_required` after a committed admin write) | `waygate_admin::admin_mutation::record_admin_mutation` — never a per-file recorder copy | `check-admin-boilerplate.sh` (shared implementation plus the distinct change-request recorder) |
+| Boot-time env parsing (durations, bool flags, ranged integers; plain string reads stay raw by design) | `waygate_core::env` typed readers — reject-at-boot (never clamp), unset ⇒ documented default, per-var operator hint | `check-env-parsing.sh` (configuration ownership with explicit component-specific exceptions) |
 | Dependency declarations (a manifest lists only deps the crate's code names; workspace pins with zero users are removed) | pinned `cargo-machete`; macro-only uses get `[package.metadata.cargo-machete] ignored` with a comment naming the macro | `check-unused-deps.sh` (does not cover `[dev-dependencies]`) |
-| Comment & user-visible-string content (comments state the constraint itself; no plan/phase/workstream/PR/review-finding citations — provenance lives in git blame and the forge) | standalone prose; a genuine false positive gets an inline `citation-ok: <why>` marker | `check-no-plan-citations.sh` (scans `crates/`, `scripts/`, `.github/`; exact per-group pins ratcheting to zero; `migrations/` is immutable and `docs/` is out of scan scope) |
+| Comment & user-visible-string content (comments state the constraint itself; no plan/phase/workstream/PR/review-finding citations — provenance lives in git blame and the forge) | standalone prose; a genuine false positive gets an inline `citation-ok: <why>` marker | `check-no-plan-citations.sh` (scans `crates/`, `scripts/`, `.github/`; `migrations/` is immutable and `docs/` is out of scan scope) |
 | Crate map currency | this document, §2 | `check-architecture-doc.sh` |
 | Dependency direction | §1's layer order, assignments from §2 | `check-dependency-direction.sh` |
 | Documentation anchors | repo paths in `.md`/Rust doc comments + relative links resolve | `check-doc-anchors.sh` |
 
 ## §6 Conventions — where new code goes
 
-Today's required shape per recurring task. Where a planned refactor will
-change the shape, that is labelled — check whether it has landed before
-following the old shape.
+Follow these conventions when adding or changing code.
 
 - **New admin resource** — today this touches five places; treat this as a
   checklist, not a license to photocopy a sibling file (check §5 first for
@@ -450,8 +433,7 @@ following the old shape.
   [`docs/agents/mcp-tool-docs.md`](agents/mcp-tool-docs.md) /
   [`docs/agents/authz.md`](agents/authz.md) respectively.
 - **New crate** — justify the boundary first: a one-table crate consumed
-  only by admin/server buys no decoupling (the workspace has eight such
-  micro-crates as evidence). Default to a module in the crate that owns
+  only by admin/server buys no decoupling. Default to a module in the crate that owns
   the domain; reach for a new crate only when it creates a real seam
   (distinct consumers, a distinct dependency footprint, or a layering
   need). If you do add one: place it in the correct §1 group, add its §2
@@ -460,7 +442,7 @@ following the old shape.
 
 ## §7 Anti-patterns
 
-The short list of things that caused this document to exist:
+Avoid these patterns:
 
 - **Don't hand-roll a §5 shape.** If a shape feels shared and isn't in §5,
   add it to `waygate-core` *with a tripwire* rather than making copy #2.
@@ -470,18 +452,11 @@ The short list of things that caused this document to exist:
   module seams (`pool/`, boot/reload helpers around `main.rs`, `invocation/`,
   `change_executor/`, and the dashboard's sibling page routers). New logic
   goes in a focused module wired through those seams, not appended to the
-  orchestration files. `scripts/check-godfile-ratchet.sh` enforces per-file
-  ceilings.
+  orchestration files. Review module responsibilities and dependency direction.
 - **Don't clone a sibling file as a template** without checking §5 and §6
-  — cloning is how one drifted copy became five.
-- **Don't cite plan or review state in comments.** Tokens like
-  "Phase 8 PR8-c", "WS9-B", "AERB #313" reference retired planning ledgers
-  and review rounds a reader cannot resolve; write the constraint itself
-  and let git blame carry the provenance. Domain terms with in-repo
-  definitions (pipeline "Stage 4" per §3, identity "Tier A/B/C") are fine —
-  the test is whether the reference resolves from the repo's docs.
-  `scripts/check-no-plan-citations.sh` pins the per-group token count
-  (exact pins, lowered by each sweep PR until zero).
+  — reuse a shared abstraction when its contract fits.
+- **Don't cite plan or review state in comments.** Internal review identifiers do not explain behavior. State the constraint
+  directly; `scripts/check-no-plan-citations.sh` rejects these citations.
 - **Don't edit shipped migrations** — ever
   ([`docs/agents/migrations.md`](agents/migrations.md)).
 - **Don't consolidate what is already unified.** Audit/identity/approval
@@ -499,6 +474,4 @@ This document rots unless PRs carry it along. A PR must update it when it:
   keeps it single.
 - **retires a §1 debt row** → delete the row in the same PR.
 - **changes the lifecycle, state model, or a layering rule** → the
-  relevant section, and the header's verified-against stamp.
-
-This document describes the tree as it is, plus the labelled deltas above.
+  relevant section.

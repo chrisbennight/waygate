@@ -22,7 +22,7 @@ on sessions. Authorization coverage:
 | DCR (RFC 7591) deferral | Spec demotes DCR to MAY in `2025-11-25` and CIMD is the preferred path; this gateway does not implement DCR. AS metadata omits `registration_endpoint`. | n/a |
 | Step-up via insufficient_scope on 403 (`2025-11-25` MUST shape) | Cedar emits a `StepUpRequired` verdict that serializes as an MCP JSON-RPC error AND, via `crates/waygate-server/src/mcp_http_promote.rs::promote_mcp_errors`, gets promoted to a real HTTP 403 with `WWW-Authenticate: Bearer error="insufficient_scope", scope="...", resource_metadata="..."`. JSON-RPC body still carries the structured data envelope so existing rmcp clients see the same shape; the header is additive for clients that prefer to consume standard HTTP signals. | `crates/waygate-authz/src/gate.rs`, `crates/waygate-server/src/mcp_http_promote.rs` |
 | DNS-rebinding guard on streamable HTTP | rmcp 1.8 `StreamableHttpServerConfig.allowed_hosts` populated from `GATEWAY_MCP_ALLOWED_HOSTS` (or derived from `GATEWAY_PUBLIC_URL`). | `crates/waygate-server/src/boot.rs::resolve_mcp_allowed_hosts` |
-| OAuth 2.1 §10.4 confused-deputy — per-client consent record | `/oauth/callback` UPSERTs an `oauth_consent` row keyed on `(tenant, principal_sub, client_id)` after upstream id-token validation, before the gateway mints its own authorization code. The admin API supplies an audit trail and revocation (`/api/v1/admin/oauth_consent` list/revoke). The interactive consent screen uses the per-tenant `require_explicit_consent` flag on top of the same rows: when the flag is set and no consent row exists (or one was revoked), the gateway renders a consent page instead of minting the code; the user's "Allow" POST UPSERTs the row before the flow continues. | `migrations/0028_oauth_consent.sql`, `migrations/0030_oauth_consent_screen.sql`, `crates/waygate-as/src/consent.rs`, `crates/waygate-as/src/callback.rs`, `crates/waygate-admin/src/oauth_consent.rs` |
+| OAuth 2.1 §10.4 confused-deputy — per-client consent record | `/oauth/callback` UPSERTs an `oauth_consent` row keyed on `(tenant, principal_sub, client_id)` after upstream id-token validation, before the gateway mints its own authorization code. The admin API supplies an audit trail and revocation (`/api/v1/admin/oauth_consent` list/revoke). The interactive consent screen uses the gateway-wide `require_explicit_consent` flag on top of the same rows: when the flag is set and no consent row exists (or one was revoked), the gateway renders a consent page instead of minting the code; the user's "Allow" POST UPSERTs the row before the flow continues. | `migrations/0028_oauth_consent.sql`, `migrations/0030_oauth_consent_screen.sql`, `crates/waygate-as/src/consent.rs`, `crates/waygate-as/src/callback.rs`, `crates/waygate-admin/src/oauth_consent.rs` |
 
 Four authentication paths reach the same `Principal` shape:
 
@@ -54,10 +54,10 @@ Four authentication paths reach the same `Principal` shape:
    peer's issuer is verified against the cached JWKS and produces a
    `Principal` with `auth_method = PeerAssertion` and `tenant` taken
    from the peer record (NOT from the JWT). Peer principals carry
-   `raw_token = None` deliberately (PR #193 r4 medium — prevents the
+   `raw_token = None` deliberately (prevents the
    peer's JWT from becoming the subject of an outbound RFC 8693
    exchange), have `mcp:admin` and `scim:write` scopes stripped at
-   validation (PR #193 r2 high), and refuse cross-tenant ambiguous
+   validation, and refuse cross-tenant ambiguous
    attribution fail-closed when the same peer is registered in
    multiple tenants. Full operator model in
    [`docs/agents/federation.md`](federation.md).
@@ -289,7 +289,7 @@ peer.issuer)`. The JWT is stamped as BOTH:
 
 1. `Authorization: Bearer <jwt>` — the remote gateway's
    `PeerJwtValidator` reads this. Without this header the
-   federation round-trip never works (PR #194 r1 high).
+   federation round-trip never works.
 2. `X-MCP-Identity: <jwt>` — the legacy Tier-B header,
    emitted alongside so upstreams that consume it in mixed
    deployments still see it.
@@ -299,7 +299,7 @@ Both headers carry the SAME JWT; only the placement differs.
 Tier C ALSO refuses dispatch fail-closed when
 `!entry.forwards_identity` (no IdentityIssuer at boot) or
 `principal.is_none()` (auth disabled) — same shape as the
-existing `tier_a_required` enforcement (PR #194 r2 high).
+existing `tier_a_required` enforcement.
 
 Full operator model + setup runbook in
 [`docs/agents/federation.md`](federation.md).

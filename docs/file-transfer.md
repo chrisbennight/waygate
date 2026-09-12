@@ -85,17 +85,6 @@ The compatibility target is the current draft of
 which builds on the `x-mcp-file` annotation proposed by SEP-2356. The draft is
 not merged, so its spellings are isolated in `waygate_mcp::files`.
 
-The proposal's discussion has two temporally distinct parts:
-
-- Through the final author commit on 2026-06-16, the proposal converged on a
-  host-managed HTTPS side channel, stable file values, upload/download
-  authorization requests, digests, and `x-mcp-file` discovery.
-- Reviews on 2026-07-21 and 2026-07-31 raised per-upload constraints, expiry,
-  quotas, chunk completion, garbage collection, digest timing, and abandoned
-  uploads. Those threads have no author reply or later commit and remain
-  unresolved. They inform the production issues; they are not an accepted
-  chunking protocol that this gateway should invent privately.
-
 The native method reads the current protocol's per-request capability metadata
 from `_meta["io.modelcontextprotocol/clientCapabilities"].files`. The SEP
 draft's examples also show `capabilities.files` in the initialization-era
