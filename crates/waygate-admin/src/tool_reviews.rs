@@ -100,7 +100,16 @@ pub(crate) async fn approve_core(
         .observed_tool_contracts(&params.server)
         .await
         .ok_or(ApiError::NotFound("Upstream not configured"))?;
-    if !observed.tools.iter().any(|tool| tool.name == params.tool) {
+    if !state
+        .upstreams
+        .review_contract_is_current(
+            &params.server,
+            &params.tool,
+            manifest.classification_mode,
+            &params.observed_hash,
+        )
+        .await
+    {
         return Err(stale());
     }
     if matches!(

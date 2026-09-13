@@ -193,6 +193,42 @@ impl UpstreamPool {
         Ok(())
     }
 
+    /// Verify the reviewed identity against every connected lane's raw catalog.
+    /// This also detects replacements too large to persist as review evidence.
+    pub async fn review_contract_is_current(
+        &self,
+        server: &str,
+        tool: &str,
+        mode: crate::ClassificationMode,
+        hash: &str,
+    ) -> bool {
+        let Some(entry) = self.entries.load().get(server).cloned() else {
+            return false;
+        };
+        let mut guards = Vec::with_capacity(entry.slots.len());
+        for slot in &entry.slots {
+            guards.push(slot.conn.read().await);
+        }
+        if entry.manifest_snapshot().classification_mode != mode {
+            return false;
+        }
+        let mut connected = false;
+        for conn in guards.iter().filter_map(|guard| guard.as_ref()) {
+            connected = true;
+            let mut found = false;
+            for descriptor in conn.live_tools.iter().filter(|item| item.name == tool) {
+                found = true;
+                if review_contract(descriptor, mode).0 != hash {
+                    return false;
+                }
+            }
+            if !found {
+                return false;
+            }
+        }
+        connected
+    }
+
     pub(super) async fn review_allows(
         &self,
         server: &str,

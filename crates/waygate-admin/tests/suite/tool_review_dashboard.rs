@@ -341,6 +341,26 @@ async fn acceptance_workflow(annotation_mode: bool) {
             .unwrap()
             .unwrap();
         assert!(withdrawn.quarantined);
+        descriptor.write().unwrap().description = Some("x".repeat(262145).into());
+        let response = app.clone().oneshot(submit(&withdrawn)).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "an oversized replacement must invalidate the previous review"
+        );
+        assert!(
+            store
+                .get("default", &server, "search")
+                .await
+                .unwrap()
+                .unwrap()
+                .quarantined
+        );
+        assert!(matches!(
+            pool.resolve_invocation_tool("default", &server, "search")
+                .await,
+            ResolvedInvocationTool::Quarantined { .. }
+        ));
         descriptor.write().unwrap().name = "withdrawn".into();
         let response = app.oneshot(submit(&withdrawn)).await.unwrap();
         assert_eq!(
