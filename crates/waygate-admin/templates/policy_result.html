@@ -1,4 +1,9 @@
 <div id="sim-result" aria-live="polite" class="sim-result">
+    {% if !recipient_domains.is_empty() %}
+        <p class="sim-note">Recipient domains:
+            {% for domain in recipient_domains %}<code>{{ domain }}</code>{% if !loop.last %}, {% endif %}{% endfor %}
+        </p>
+    {% endif %}
     {% if decision == "allow" %}
         <div class="sim-verdict">
             <svg width="20" height="20" aria-hidden="true" class="state-ok"><use href="/admin/static/lucide.svg#check-circle"/></svg>

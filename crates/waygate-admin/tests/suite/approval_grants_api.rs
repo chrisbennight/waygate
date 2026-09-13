@@ -43,6 +43,8 @@ use waygate_core::store::StoreError;
 use waygate_oidc::Principal;
 use waygate_upstream::pool::UpstreamPool;
 
+mod email_policy;
+
 /// In-memory grant store. `resolve_tool` returns a canned Live tool
 /// (or NotFound for the "unknown" test); `create_grant` / `list_grants`
 /// / `revoke_grant` operate on a `Vec<ApprovalGrant>` behind a
@@ -198,9 +200,25 @@ impl waygate_catalog::CatalogStore for GrantFakeCatalog {
     }
     async fn claim_grant<'a>(
         &self,
-        _l: GrantLookup<'a>,
+        lookup: GrantLookup<'a>,
     ) -> Result<Option<ApprovalGrant>, CatalogError> {
-        Ok(None)
+        let mut grants = self.grants.lock().unwrap();
+        let now = OffsetDateTime::now_utc();
+        let grant = grants.iter_mut().find(|grant| {
+            grant.tenant_id == lookup.tenant_id
+                && grant.principal_sub == lookup.principal_sub
+                && grant.principal_issuer.as_deref() == Some(lookup.principal_issuer)
+                && grant.tool_id == lookup.tool_id
+                && grant.argument_hash == lookup.argument_hash
+                && grant.execution_binding.is_none()
+                && lookup.execution_binding.is_none()
+                && grant.consumed_at.is_none()
+                && grant.expires_at > now
+        });
+        Ok(grant.map(|grant| {
+            grant.consumed_at = Some(now);
+            grant.clone()
+        }))
     }
     async fn create_grant<'a>(
         &self,

@@ -157,17 +157,16 @@ not imply endorsement of another project using the Waygate name or mark.
 
 ### Product screenshots
 
-The README uses the [policy review images](images/policy-review-light.png),
-with a [dark variant](images/policy-review-dark.png). Refresh them from the
-actual `/admin/t/default/changes` page, using the existing
-[`replayable_decision_state` fixture](../crates/waygate-admin/tests/dashboard_render/decisions.rs)
-with a pending policy publication, a `forbid(principal, action, resource);`
-draft, a passing deny test, and the recorded allow from
-`replayable_decision_row`. Render through `dashboard_router` with the current
-static assets. Capture at a 1120-pixel viewport width, cropping the top 780
-pixels to include the impact preview and approval controls. Wait for fonts and
-theme transitions before capturing each theme. Keep fixture setup and capture
-tools out of the product images.
+The README uses the [email policy image](images/email-policy-light.png),
+with a [dark variant](images/email-policy-dark.png). Render the actual Policies
+page and simulator through `dashboard_router` with the current assets and the
+[email example](../examples/email-policy/README.md). Use an internal To address
+and an external Bcc address, then run the simulation. Filter the policies to
+`approve-external-email`, expand its Cedar source, and collapse Simulation
+inputs. At a 1440-pixel viewport width, capture the main content beneath the
+top bar, including the rule and approval-required result. Wait for fonts and
+theme transitions before capturing each theme. Keep capture tooling outside
+the product images and repository.
 
 The tool-change review images show `/admin/t/default/servers/tool-changes`
 after a connected MCP server changes its `search` description from

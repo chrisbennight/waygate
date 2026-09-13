@@ -1021,9 +1021,8 @@ fn resource_is_skill(facts: &Facts) -> bool {
 /// [`Facts`] the engine evaluates over. Used by the discovery path
 /// ([`CedarEngine::evaluate`]) and by the gate's `may_call_tool`
 /// compatibility shim; the invocation pipeline instead
-/// builds `Facts` itself and calls `evaluate_facts` directly. Fields the
-/// entity builder doesn't read yet (client, request, most of context)
-/// get placeholder values.
+/// builds `Facts` itself and calls `evaluate_facts` directly. Argument-derived
+/// request facts are absent here because these inputs carry no arguments.
 pub(crate) fn facts_from(principal: &Principal, action: &Action, resource: &ResourceSpec) -> Facts {
     let (
         server,
@@ -1251,18 +1250,43 @@ fn resource_uid(facts: &Facts) -> Result<EntityUid, CedarError> {
     }
 }
 
-/// Build the Cedar request [`Context`] from runtime facts. Surfaces the
-/// requesting OAuth `client_id` (when present) as `context.client_id`,
-/// so policies — notably the EMA `GrantCrossAppAccess` grant in
-/// `40-cross-app-access.cedar` — can gate on which client is acting (the
-/// "is Engineering allowed to use this model against the observability service"
-/// dimension).
-///
-/// Additive: every pre-EMA path leaves `ClientFacts.client_id` as
-/// `None`, yielding an empty context that unchanged policies ignore — so
-/// existing tool-plane evaluations are byte-identical.
+/// Project gateway-owned runtime and request facts into Cedar context.
+/// Recipient facts are omitted when no argument projection exists, so strict
+/// historical replay reports missing inputs rather than guessing recipients.
 fn build_context(facts: &Facts) -> Result<Context, CedarError> {
     let mut pairs: Vec<(String, RestrictedExpression)> = Vec::new();
+    if facts.action.kind == "CallTool" {
+        pairs.push((
+            "discovery".to_owned(),
+            RestrictedExpression::new_bool(
+                facts.request.as_ref().is_some_and(|r| r.discovery_only),
+            ),
+        ));
+    }
+    if let Some(email) = facts
+        .request
+        .as_ref()
+        .and_then(|r| r.email_recipients.as_ref())
+    {
+        let record = RestrictedExpression::new_record([
+            (
+                "valid".to_owned(),
+                RestrictedExpression::new_bool(email.valid),
+            ),
+            (
+                "domains".to_owned(),
+                RestrictedExpression::new_set(
+                    email
+                        .domains
+                        .iter()
+                        .cloned()
+                        .map(RestrictedExpression::new_string),
+                ),
+            ),
+        ])
+        .map_err(|e| CedarError::BuildContext(e.to_string()))?;
+        pairs.push(("email_recipients".to_owned(), record));
+    }
     if let Some(client_id) = facts.client.client_id.as_ref() {
         pairs.push((
             "client_id".to_string(),

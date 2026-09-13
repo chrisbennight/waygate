@@ -188,6 +188,30 @@ fn verdict_label(verdict: &AuthzVerdict) -> &'static str {
 
 #[async_trait]
 impl AuthzGate for CedarGate {
+    async fn may_call_tool(&self, principal: &Principal, facts: &ToolFacts) -> AuthzVerdict {
+        self.may_call_tool_on_channel(
+            principal,
+            facts,
+            waygate_core::InvocationChannelFact::Direct,
+        )
+        .await
+    }
+
+    async fn may_call_tool_on_channel(
+        &self,
+        principal: &Principal,
+        tool: &ToolFacts,
+        channel: waygate_core::InvocationChannelFact,
+    ) -> AuthzVerdict {
+        let mut facts = build_call_facts(principal, tool);
+        facts.context.channel = channel;
+        facts.request = Some(waygate_core::RequestFacts {
+            discovery_only: true,
+            ..Default::default()
+        });
+        self.evaluate_verdict(&facts)
+    }
+
     async fn may_discover_server(&self, principal: &Principal, server: &str) -> bool {
         let resource = ResourceSpec::Server {
             name: server.to_owned(),

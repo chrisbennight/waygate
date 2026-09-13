@@ -500,6 +500,9 @@ pub(crate) struct SimulateForm {
     /// that gate on `principal.auth_method == "api_key"`.
     #[serde(default)]
     auth_method: String,
+    /// Optional JSON object for recipient-aware tool policy simulation.
+    #[serde(default)]
+    arguments: String,
 }
 
 /// HTML `<input type="checkbox">` posts the literal string `"on"` when
@@ -527,6 +530,7 @@ struct PolicyResult {
     /// prefix. Populated by `policies_simulate`.
     tenant_ctx: Option<TenantContext>,
     decision: &'static str,
+    recipient_domains: Vec<String>,
     reasons: Vec<String>,
     /// When `decision == "step_up"`, the scope the caller would need to add
     /// to their session via `/admin/login?step_up_scope=…` before the action
@@ -587,6 +591,20 @@ pub(crate) async fn policies_simulate(
             SIMULATE_UNAVAILABLE,
         )
             .into_response();
+    };
+
+    let arguments = if form.arguments.trim().is_empty() {
+        None
+    } else {
+        match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&form.arguments) {
+            Ok(arguments) => Some(arguments),
+            Err(_) => return (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                "<div id=\"sim-result\" role=\"alert\">Tool arguments must be a JSON object.</div>",
+            )
+                .into_response(),
+        }
     };
 
     // Map the form's `auth_method=oauth|api_key` radio to the runtime
@@ -653,6 +671,14 @@ pub(crate) async fn policies_simulate(
     // fired policy_ids to a different policy set.
     let snap = engine.snapshot_for_tenant(tenant.as_str());
     let mut facts = waygate_authz::simulation_facts(&principal, &action, &resource);
+    let email = waygate_core::EmailRecipients::from_arguments(arguments.as_ref());
+    let recipient_domains = email.domains.iter().cloned().collect();
+    if facts.action.kind == "CallTool" {
+        facts.request = Some(waygate_core::RequestFacts {
+            email_recipients: Some(email),
+            ..Default::default()
+        });
+    }
     // The form's channel select maps onto the same gateway-stamped fact the
     // live pipeline sets, so a codemode dry-run exercises the approval
     // overlay exactly as a real Code Mode dispatch would.
@@ -680,6 +706,7 @@ pub(crate) async fn policies_simulate(
     render(&PolicyResult {
         tenant_ctx: tenant_ctx.map(|Extension(c)| c),
         decision,
+        recipient_domains,
         reasons: result.reasons,
         step_up_scope,
         trace,
