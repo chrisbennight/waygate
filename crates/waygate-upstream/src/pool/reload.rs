@@ -2532,18 +2532,6 @@ impl UpstreamPool {
             for slot in &entry.slots {
                 classification_guards.push(slot.conn.write().await);
             }
-            for conn in classification_guards
-                .iter()
-                .filter_map(|guard| guard.as_ref())
-            {
-                if self
-                    .observe_tool_reviews(entry, name, new_manifest, &conn.live_tools, false)
-                    .await
-                    .is_err()
-                {
-                    tracing::warn!(server = %name, "tool review observation failed during configuration reload");
-                }
-            }
             let (
                 needs_redial,
                 identity_changed,

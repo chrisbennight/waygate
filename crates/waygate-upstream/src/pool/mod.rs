@@ -1889,20 +1889,6 @@ impl UpstreamPool {
                     .live_tools
                     .iter()
                     .find(|tool| tool.name.as_ref() == tool_name);
-                if self
-                    .observe_tool_reviews(
-                        &entry,
-                        server,
-                        &current_manifest,
-                        raw_contract.map(std::slice::from_ref).unwrap_or_default(),
-                        true,
-                    )
-                    .await
-                    .is_err()
-                {
-                    permit.neutral();
-                    return Err(contract_changed_error(server, tool_name));
-                }
                 if !self
                     .review_allows(
                         server,
