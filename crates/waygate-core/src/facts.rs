@@ -201,6 +201,10 @@ pub struct ResourceFacts {
 /// optional because most are tool-specific.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RequestFacts {
+    /// Gateway-owned metadata probe. Never set from tool arguments.
+    pub discovery_only: bool,
+    /// Recipient-domain projection for an explicitly governed email tool.
+    pub email_recipients: Option<crate::EmailRecipients>,
     pub target_domain: Option<String>,
     pub recipient_count: Option<u32>,
     pub destructive: Option<bool>,

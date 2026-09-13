@@ -1154,6 +1154,13 @@ impl DefaultInvocationService {
             // reflect the classification that applied, so this is here for a
             // policy that has to name the operation itself.
             facts.resource.operation = ctx.operation.clone();
+            facts.request = Some(waygate_core::RequestFacts {
+                email_recipients: Some(waygate_core::EmailRecipients::from_arguments(
+                    ctx.arguments.as_ref(),
+                )),
+                argument_hash: waygate_catalog::argument_hash(ctx.arguments.as_ref()),
+                ..Default::default()
+            });
             ctx.pip_facts = Some(facts);
         }
         Ok(())

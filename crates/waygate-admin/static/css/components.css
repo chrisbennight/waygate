@@ -1227,6 +1227,7 @@ td.cell-url { word-break: break-all; max-width: 360px; }
 .sim-form label { display: block; font-size: 13px; color: var(--ink-muted); margin: 10px 0 4px; }
 .sim-form label:first-of-type { margin-top: 4px; }
 .sim-form input,
+.sim-form textarea,
 .sim-form select {
     width: 100%;
     box-sizing: border-box;

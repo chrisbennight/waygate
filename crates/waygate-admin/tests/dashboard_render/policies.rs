@@ -4,6 +4,79 @@
 
 use crate::common::*;
 
+#[tokio::test]
+async fn email_simulator_explains_internal_external_and_invalid_recipients() {
+    let pool = Arc::new(UpstreamPool::connect(BTreeMap::new()).await);
+    let engine = Arc::new(ReloadableCedar::new(
+        CedarEngine::from_source(include_str!(
+            "../../../../examples/email-policy/email.cedar"
+        ))
+        .unwrap(),
+    ));
+    let state = Arc::new(AdminState::new(
+        pool,
+        Some(engine),
+        None,
+        AdminState::null_evidence(),
+        None,
+        None,
+        None,
+        None,
+        "http://127.0.0.1:0".into(),
+    ));
+    let app = dashboard_router(state, DashboardAuth::Disabled);
+    let (status, page) = body_of(app.clone(), "/policies").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("Simulation inputs"));
+    assert!(page.contains("sim-arguments"));
+    for (arguments, expected) in [
+        (r#"{"to":["alice@example.com"]}"#, ">ALLOW<"),
+        (
+            r#"{"to":["alice@example.com"],"bcc":["partner@outside.example"]}"#,
+            ">APPROVAL_REQUIRED<",
+        ),
+        (r#"{"to":["Alice <alice@example.com>"]}"#, ">DENY<"),
+        ("not json", "Tool arguments must be a JSON object."),
+    ] {
+        let form = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs([
+                ("csrf", "dev-csrf"),
+                ("sub", "assistant@example.com"),
+                ("groups", "mail-assistants"),
+                ("action", "call_tool"),
+                ("resource_type", "tool"),
+                ("server", "example-messages"),
+                ("tool", "send"),
+                ("tool_name", "send"),
+                ("side_effects", "on"),
+                ("arguments", arguments),
+            ])
+            .finish();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/policies/simulate")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(form))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains(expected), "{body}");
+        if expected == ">APPROVAL_REQUIRED<" {
+            assert!(body.contains("outside.example"));
+            assert!(body.contains("approve-external-email"));
+        }
+    }
+}
+
 // ---- policies + simulator -------------------------------------------------
 
 #[tokio::test]

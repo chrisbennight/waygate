@@ -17,13 +17,13 @@ you to approve. You control access and can inspect what happened.
 **[Get the latest release](https://github.com/chrisbennight/waygate/releases/latest)**
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/policy-review-dark.png">
-  <img src="docs/images/policy-review-light.png" width="960" alt="A policy change awaiting approval, with validation results and a preview of its effect on recorded tool calls.">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/email-policy-dark.png">
+  <img src="docs/images/email-policy-light.png" width="960" alt="A Cedar policy allows internal email but requires approval for external recipients. The simulator identifies the external domain and the rule that requires approval for this exact message.">
 </picture>
 
-Review an agent's proposed policy change and see its effect on recent calls
-before approving it. Full size: [light](docs/images/policy-review-light.png) ·
-[dark](docs/images/policy-review-dark.png).
+Let your assistant email colleagues freely. An external recipient—even in Bcc—
+requires approval for that exact message. [Try the policy](examples/email-policy/README.md).
+Full size: [light](docs/images/email-policy-light.png) · [dark](docs/images/email-policy-dark.png).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/tool-change-review-dark.png">

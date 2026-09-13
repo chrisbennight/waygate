@@ -120,10 +120,15 @@
             <h2 class="card-title" style="margin-top: 0">Simulator</h2>
 
             {% if cedar_configured %}
+                <div id="sim-result" aria-live="polite">
+                    <p class="sim-note">Run a simulation to see the decision, matching policies, and diagnostics.</p>
+                </div>
+                <details open>
+                <summary>Simulation inputs</summary>
                 <form class="sim-form"
                       hx-post="{{ self.chrome.nav_url("/policies/simulate") }}"
                       hx-target="#sim-result"
-                      hx-swap="outerHTML"
+                      hx-swap="outerHTML show:top"
                       hx-indicator="#sim-spinner">
                     <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
                     <fieldset>
@@ -192,6 +197,14 @@
                     {# Tool catalog for the server/tool typeahead + autofill. #}
                     <script type="application/json" id="sim-tool-catalog">{{ tool_catalog_json|safe }}</script>
 
+                    <fieldset>
+                        <legend>Tool arguments</legend>
+                        <label for="sim-arguments">JSON (optional)</label>
+                        <textarea id="sim-arguments" name="arguments" rows="5" spellcheck="false"
+                                  placeholder='{"to": ["alice@example.com"], "cc": [], "bcc": []}'></textarea>
+                        <p class="sim-note">Email policies inspect every address in To, Cc, and Bcc. Use bare addresses or arrays of bare addresses.</p>
+                    </fieldset>
+
                     <div class="row-actions">
                         <button class="btn btn-primary" type="submit">
                             <span id="sim-spinner" class="htmx-indicator" style="margin-right: 4px">…</span>
@@ -199,10 +212,8 @@
                         </button>
                     </div>
                 </form>
+                </details>
 
-                <div id="sim-result" aria-live="polite">
-                    <p class="sim-note">Run a simulation to see the decision, matching policies, and diagnostics.</p>
-                </div>
             {% else %}
                 <div class="empty">
                     Simulator requires a Cedar engine. Set <code>GATEWAY_POLICIES_DIR</code> and restart.

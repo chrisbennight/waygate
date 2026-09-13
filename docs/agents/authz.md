@@ -112,6 +112,13 @@ See [Upstream MCP servers — Classification authority](upstreams.md#classificat
 
 ## Invocation approval bindings
 
+For a complete recipient-aware example, see
+[Send internally; approve external email](../../examples/email-policy/README.md).
+It uses `context.email_recipients.valid` and `.domains`, derived from all
+explicit To, Cc, and Bcc arguments, with the same parser in the live invocation
+path and dashboard simulator. The example describes the required tool envelope
+contract and the limits of recipient-domain checks.
+
 One-time invocation grants are matched against principal, catalog tool
 identity, expiry, normalized arguments, and the admitted behavior hash. The
 admin API accepts either arguments or their raw canonical digest **plus the
