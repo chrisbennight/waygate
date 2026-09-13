@@ -952,7 +952,7 @@ fn save_banner_ok(version: i32, apply_hint: &'static str) -> Response {
 /// the caller's `apply_hint` says how to apply (reload for classifications,
 /// restart for session/connection-shape). Validate + write-disk-before-
 /// ledger keeps the irreversible step ahead of the bookkeeping.
-async fn patch_and_publish(
+pub(crate) async fn patch_and_publish(
     state: &Arc<AdminState>,
     store: &waygate_manifest_store::SharedManifestStore,
     user_principal: Option<&Principal>,

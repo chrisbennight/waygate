@@ -121,8 +121,9 @@ is needed for a mode flip. Runbook for migrating a connected server to
    every tool reports `match` and `would_quarantine` is empty.
 3. Propose. Keep the capture-to-approval window short: if the upstream
    redeploys in between, admission quarantines the changed tools on
-   publish — recoverable (`reconnect_server` with `clear_quarantine`, then
-   re-preview and re-propose), but avoidable.
+   publish. Re-preview and propose the current hashes; if durable tool-change
+   quarantine is enabled, also review the exact replacement through
+   [tool change review](../guides/security.md#review-an-upstream-tool-change).
 
 Do not combine the mode flip with a connection-shape change (transport,
 protocol, url, command, auth, mTLS, session, or identity settings): publishing a new shape
@@ -188,8 +189,8 @@ reconcile racing a newer dashboard arm cannot silence the newer obligation.
 The dashboard applies the pool BEFORE reconciling — the legacy baseline
 order, since manifest-mode resolution overlays catalog risk unconditionally
 and a catalog-first commit would govern a still-serving legacy contract with
-premature facts. Independent in-process drift
-telemetry still applies at the configured quarantine threshold.
+premature facts. Drift telemetry and the configured quarantine threshold
+also apply; a configured database persists tool-change review decisions.
 Code Mode contracts carry separate hashes for annotations and action metadata,
 so an invocation cannot silently cross a discovery-to-dispatch metadata change.
 The binding runs end to end: the invocation pipeline hands its Stage-1
@@ -204,8 +205,9 @@ the default `per_call` isolation, and the pooled long-lived session under
 `notifications/tools/list_changed`) — and requires the called tool to match
 `approved_behavior_hash` on the session that executes it. That costs one
 extra upstream round-trip per call in either isolation mode; it is the price
-of the exact-hash binding. Manifest mode keeps its unchanged legacy dispatch
-path.
+of the exact-hash binding. Manifest mode retains its existing schema and
+description hash coverage; durable review adds a refusal check when a database
+is configured.
 Annotation-mode authorization facts now DERIVE from the reviewed claims:
 side-effect behavior from the standard hints, sensitivity from the
 input/return classifications, and the approval requirement from
@@ -476,7 +478,9 @@ This document covers:
   operation on the approving replica. Use the governed `config.reload` action
   when every replica must reconcile policy and/or manifests: it rings the
   fleet-wide Postgres doorbell rather than touching only one in-memory pool.
-  These pool controls do not change a durable `mcp_servers.status =
+  These pool controls also leave durable per-tool contract quarantines intact.
+  Use [tool change review](../guides/security.md#review-an-upstream-tool-change)
+  to inspect and accept an exact replacement. They do not change a durable `mcp_servers.status =
   'quarantined'` row. Restore that layer with the distinct governed action
   `catalog.server.unquarantine`; its proposal captures the exact catalog row
   version and approval atomically transitions only `quarantined -> live`.

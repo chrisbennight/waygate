@@ -560,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_drift_state_distinguishes_durable_events_from_live_observations() {
+    fn empty_drift_state_links_to_tool_change_review() {
         let page = CatalogPage {
             chrome: PageChrome {
                 title: "Catalog",
@@ -581,7 +581,8 @@ mod tests {
         };
         let html = page.render().expect("catalog page renders");
         assert!(html.contains("No durable catalog drift events"));
-        assert!(html.contains("Live observation drift is reported separately"));
+        assert!(html.contains("href=\"/admin/servers/tool-changes\""));
+        assert!(html.contains("Review quarantined tool changes"));
         assert!(!html.contains("No drift in the last 30 days"));
     }
 

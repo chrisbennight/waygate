@@ -1,0 +1,45 @@
+{% extends "layout.html" %}
+{% block main %}
+<section class="page-section">
+<header class="page-header"><h1 class="page-title">Tool changes</h1></header>
+<p class="muted">Review an upstream's changed contract before restoring the tool.</p>
+{% match review %}{% when Some with (r) %}
+<div class="card">
+<h2 class="card-title skills-source">{{ r.server }} · {{ r.tool }}</h2>
+{% if r.quarantined %}<p><span class="chip chip--bad">Quarantined</span> Hidden from discovery. Calls blocked.</p>
+{% else %}<p><span class="chip chip--ok">Accepted</span> This contract passed change review. Existing configuration and access policies still apply.</p>{% endif %}
+{% if r.observed_contract.is_null() %}<p>Observed {{ observed_at }}.</p>
+{% else %}<p>Observed {{ observed_at }}. Review the changed contract fields below.</p>{% endif %}
+<details><summary>Contract identity</summary><p class="mono skills-source">{{ r.observed_hash }}</p></details>
+</div>
+{% if r.observed_contract.is_null() %}
+<div class="card"><p>The tool contract exceeds the review storage limit. Its identity and quarantine are retained, but the comparison is unavailable. Reduce the contract upstream and refresh before approval.</p>
+<a class="btn btn-secondary" href="{{ self.chrome.nav_url("/servers/tool-changes") }}">Keep quarantined</a></div>
+{% endif %}
+{% for change in changes %}
+<section class="page-section"><h2 class="section-heading">{{ change.name }}</h2>
+<div class="skills-comparison">
+<section><h3 class="card-title">Previously accepted</h3><pre class="skills-content" tabindex="0">{{ change.before }}</pre></section>
+<section><h3 class="card-title">Observed replacement</h3><pre class="skills-content" tabindex="0">{{ change.after }}</pre></section>
+</div></section>
+{% endfor %}
+{% if r.quarantined && !r.observed_contract.is_null() %}
+<form class="card" method="post" action="{{ self.chrome.nav_url("/servers/tool-changes/approve") }}">
+<input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+<input type="hidden" name="server" value="{{ r.server }}"><input type="hidden" name="tool" value="{{ r.tool }}">
+<input type="hidden" name="generation" value="{{ r.generation }}"><input type="hidden" name="observed_hash" value="{{ r.observed_hash }}">
+<input type="hidden" name="manifest_hash" value="{{ manifest_hash }}">
+<p>Acceptance applies only to this replacement. A newer change requires a new review.</p>
+<a class="btn btn-secondary" href="{{ self.chrome.nav_url("/servers/tool-changes") }}">Keep quarantined</a>
+<button class="btn btn-primary" type="submit">Approve this replacement</button>
+</form>
+{% endif %}
+{% when None %}
+<div class="card"><h2 class="card-title">Awaiting review</h2>
+{% if rows.is_empty() %}<p>No tools are awaiting change review.</p>{% else %}
+<p>Showing up to 50 recent quarantined tools.</p>
+<ul>{% for row in rows %}<li><a href="{{ self.chrome.nav_url(row.url) }}">{{ row.server }} · {{ row.tool }}</a></li>{% endfor %}</ul>
+{% endif %}</div>
+{% endmatch %}
+</section>
+{% endblock %}

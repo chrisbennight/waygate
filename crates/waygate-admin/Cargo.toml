@@ -107,4 +107,4 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # binary needs to name it directly. Production `waygate-admin` deliberately
 # does NOT depend on rmcp (it serialises the result generically), so this
 # stays a dev-only dependency.
-rmcp = { workspace = true }
+rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }

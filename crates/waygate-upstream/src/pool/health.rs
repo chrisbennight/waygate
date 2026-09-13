@@ -262,20 +262,26 @@ impl UpstreamPool {
         Some(out)
     }
 
-    /// Clear all auto-quarantined tools on `server` and
-    /// return the count cleared, or `None` if the upstream is unknown.
-    /// Resets the `mcp_tool_quarantined{server}` gauge to 0. Operators
-    /// run this after addressing the upstream drift root cause; calls
-    /// to those tools resume on the next dispatch. The in-process
-    /// schema baseline is preserved — clearing only removes the BLOCK,
-    /// not the observation history, so a subsequent re-drift still
-    /// fires the alert. To force re-baseline an operator should restart.
+    /// Clear process-local quarantines and return the count released. Durable
+    /// contract reviews remain blocked until their exact replacement is accepted.
+    /// Returns `None` if the upstream is unknown or durable state cannot be read.
+    /// The schema baseline is retained and the gauge reflects remaining blocks.
     pub async fn clear_quarantine(&self, server: &str) -> Option<usize> {
         let entry = self.entries.load().get(server).cloned()?;
+        let durable = match self.tool_reviews.as_ref() {
+            Some(store) => match store
+                .quarantined_names(waygate_core::TenantId::DEFAULT, server)
+                .await
+            {
+                Ok(names) => names,
+                Err(_) => return None,
+            },
+            None => Vec::new(),
+        };
         // Scoped so the guards are provably released before the republish
         // below awaits — a blocking lock must not straddle a suspension.
         // Lanes then quarantine, the order every refusal path uses.
-        let (count, at, served, catalog_change) = {
+        let (count, at, served, catalog_change, remaining) = {
             let mut lanes = Vec::with_capacity(entry.slots.len());
             for slot in &entry.slots {
                 lanes.push(slot.conn.read().await);
@@ -284,9 +290,11 @@ impl UpstreamPool {
                 .quarantined
                 .write()
                 .expect("upstream quarantine lock poisoned");
-            let count = q.len();
+            let before = q.len();
+            q.retain(|name| durable.contains(name));
+            q.extend(durable.iter().cloned());
+            let count = before.saturating_sub(q.len());
             let catalog_change = (count > 0).then(|| self.tool_catalog_epoch.begin_change());
-            q.clear();
             // Sampled while the release is still guaranteed to be what is
             // served. Sampling after the guards drop would let a concurrent
             // reload withhold the tool again in the gap, and the interval in
@@ -294,9 +302,9 @@ impl UpstreamPool {
             // Stamped here, under the guards that make the release visible.
             let at = self.audited_refusals.observe();
             let served = rejected_union(&lanes, &q);
-            (count, at, served, catalog_change)
+            (count, at, served, catalog_change, q.len())
         };
-        waygate_telemetry::metrics::set_tool_quarantined(server, 0);
+        waygate_telemetry::metrics::set_tool_quarantined(server, remaining as i64);
         if count > 0 {
             catalog_change
                 .expect("non-empty quarantine starts a catalog publication")

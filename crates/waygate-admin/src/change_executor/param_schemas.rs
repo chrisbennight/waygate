@@ -14,6 +14,10 @@ use super::*;
 pub(super) fn action_param_schemas() -> Vec<(&'static str, Value)> {
     let schemas = api_key_profiles::append_param_schemas(vec![
         (
+            "tool_contract.approve",
+            params_schema_of::<crate::tool_reviews::ToolReviewParams>(),
+        ),
+        (
             "agent_config.create",
             params_schema_of::<crate::agent_configs::AgentConfigInput>(),
         ),

@@ -19,6 +19,7 @@
     <h3 class="card-title">Action</h3>
     <dl>
         <dt>action</dt><dd>{{ action }}</dd>
+        {% if action == "ToolDrift" %}<dt>Review</dt><dd><a href="{{ review_url }}">Review tool changes</a></dd>{% endif %}
         {% match target %}{% when Some with (t) %}<dt>target</dt><dd>{{ t }}</dd>{% when None %}{% endmatch %}
         {% match category %}{% when Some with (c) %}<dt>category</dt><dd><span class="chip">{{ c }}</span></dd>{% when None %}{% endmatch %}
         {% match server %}{% when Some with (s) %}<dt>server</dt><dd>{{ s }}</dd>{% when None %}{% endmatch %}

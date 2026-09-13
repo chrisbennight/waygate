@@ -91,6 +91,11 @@ hits=$(grep -vE '^(--)?$' "$hits_file" \
     | grep -v '^crates/waygate-admin/src/capability\.rs[:-]' || true)
 
 allowed_patterns=(
+    # These failures occur after the tool-review capability is configured:
+    # a database operation failed or the upstream could not refresh.
+    'crates/waygate-admin/src/tool_reviews\.rs.*Tool review storage is unavailable'
+    'crates/waygate-admin/src/tool_reviews\.rs.*ApiError::ServiceUnavailable\($'
+    'crates/waygate-admin/src/tool_reviews\.rs.*Refresh the upstream successfully before accepting its replacement'
     'crates/waygate-admin/src/api_keys\.rs.*scope catalog check failed'
     'crates/waygate-admin/src/api_keys\.rs.*group catalog check failed'
     # Skill services are configured here; the runtime store call, initial tenant

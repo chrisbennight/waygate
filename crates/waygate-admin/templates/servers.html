@@ -3,6 +3,7 @@
 {% block main %}
 <header class="page-header">
     <h1 class="page-title">Servers</h1>
+    {% if is_admin %}<a class="btn btn-secondary" href="{{ self.chrome.nav_url("/servers/tool-changes") }}">Review tool changes</a>{% endif %}
 </header>
 
 {# Prominent, never-silently-good banner when the on-disk config is
@@ -28,7 +29,7 @@
     change resizes the slot pool and is <strong>rebuilt live</strong> by Reload —
     a restart is needed only if every new-shape dial fails. Operators can also
     <strong>recover</strong> a server in place — re-dial a down upstream or
-    clear a drift quarantine — or <strong>refresh its catalog</strong> to replace
+    clear a drift quarantine when no database is configured — or <strong>refresh its catalog</strong> to replace
     a healthy session after the upstream adds tools. Expand a row (▸) to see its
     resolved connection, identity tier, and tool-risk summary; select a server
     name to browse its tools.
@@ -81,7 +82,7 @@
                 <td class="mono">{{ s.connected_lanes }} / {{ s.total_lanes }}</td>
                 <td><span class="mono">{{ s.last_error_class }}</span><br><span class="muted" title="Last success: {{ s.last_success_at }}">next: {{ s.next_retry_at }}</span></td>
                 <td class="mono">{{ s.published_tool_count }} / {{ s.classified_tool_count }}</td>
-                <td>{% if s.quarantined > 0 %}<span class="chip chip--warn">{{ s.quarantined }} quarantined</span>{% else %}<span class="muted">–</span>{% endif %}</td>
+                <td>{% if s.quarantined > 0 %}{% if is_admin %}<a class="chip chip--warn" href="{{ self.chrome.nav_url("/servers/tool-changes") }}">{{ s.quarantined }} quarantined</a>{% else %}<span class="chip chip--warn">{{ s.quarantined }} quarantined</span>{% endif %}{% else %}<span class="muted">–</span>{% endif %}</td>
                 {# A tool whose advertised output schema had a non-object root
                    is published without an output contract. Flagged on the row
                    because a strict MCP client rejects an ENTIRE tools/list

@@ -955,7 +955,7 @@ impl UpstreamPool {
             return None;
         }
 
-        let before = entry.published_tools().await;
+        let before = entry.published_tools(self.tool_reviews.is_none()).await;
         let manifest = entry.manifest_snapshot();
         let redial = self
             .redial_entry(
@@ -980,9 +980,15 @@ impl UpstreamPool {
             } else {
                 RedialOutcome::Failed
             };
-            (effective, entry.published_tools().await)
+            (
+                effective,
+                entry.published_tools(self.tool_reviews.is_none()).await,
+            )
         } else {
-            (redial, entry.published_tools().await)
+            (
+                redial,
+                entry.published_tools(self.tool_reviews.is_none()).await,
+            )
         };
         let (added, removed, schema_changed) = tool_inventory_diff(&before, &after);
         let session_replaced = matches!(redial, RedialOutcome::Redialed);
@@ -1331,6 +1337,18 @@ impl UpstreamPool {
                 }
                 common_tool_catalog(&catalogs, classification_mode)
             };
+            let review_manifest = entry.manifest_snapshot();
+            if self
+                .observe_tool_reviews(entry, name, &review_manifest, &common_live_tools, false)
+                .await
+                .is_err()
+            {
+                tracing::warn!(server = %name, "catalog refresh refused: tool review storage unavailable");
+                if let Some(claim) = claim {
+                    release_reconnect_claim(name, entry, claim, true);
+                }
+                return;
+            }
             if let Err(error) = self.publish_classifications_to(
                 entry,
                 dialed[publish_index]
@@ -1859,6 +1877,17 @@ impl UpstreamPool {
         // on its next tick.) A concurrent IN-PLACE identity-only reload
         // (`!needs_redial`) also moves these fields, so it too trips the CAS and
         // we defer to it rather than overwrite it.
+        let review_manifest = entry.manifest_snapshot();
+        for conn in dialed.iter().filter_map(Option::as_ref) {
+            if self
+                .observe_tool_reviews(entry, name, &review_manifest, &conn.live_tools, false)
+                .await
+                .is_err()
+            {
+                tracing::warn!(server = %name, "replacement session refused: tool review storage unavailable");
+                return RedialOutcome::Failed;
+            }
+        }
         {
             let mut manifest_guard = entry.manifest.write().expect("manifest lock poisoned");
             if !redial_committed_fields_eq(&manifest_guard, from_shape) {
@@ -2246,11 +2275,11 @@ impl UpstreamPool {
         // drift on a quarantined / unclassified tool still surfaces.
         // Per-upstream — the first slot of a multi-slot publication records
         // the observation so sibling slots do not double-count it.
-        let drift = entry.record_observed_schemas_against(
+        let mut drift = entry.record_observed_schemas_against(
             name,
             &conn.live_tools,
             source,
-            self.quarantine_threshold,
+            self.runtime_quarantine_threshold(),
             classifications,
             classification_mode,
         );
@@ -2267,6 +2296,15 @@ impl UpstreamPool {
         // implementation. Production recording only submits to the bounded
         // chained queue; database latency stays in its workers. Empty on the
         // boot pass and when nothing drifted.
+        if self.tool_reviews.is_some() {
+            let quarantine = entry
+                .quarantined
+                .read()
+                .expect("upstream quarantine lock poisoned");
+            for report in &mut drift {
+                report.quarantined = quarantine.contains(&report.tool);
+            }
+        }
         if !drift.is_empty() {
             if let Some(evidence) = self.evidence.clone() {
                 let server = name.to_string();
@@ -2293,12 +2331,34 @@ impl UpstreamPool {
     async fn detect_drift_on_rebuilt_entry(&self, entry: &UpstreamEntry, name: &str) {
         for slot in &entry.slots {
             if let Some(conn) = slot.conn.read().await.as_ref() {
-                let drift = entry.record_observed_schemas(
+                if self
+                    .observe_tool_reviews(
+                        entry,
+                        name,
+                        &entry.manifest_snapshot(),
+                        &conn.live_tools,
+                        false,
+                    )
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(server = %name, "rebuilt tool review observation failed; admission will refuse unobserved contracts");
+                }
+                let mut drift = entry.record_observed_schemas(
                     name,
                     &conn.live_tools,
                     "rebuild",
-                    self.quarantine_threshold,
+                    self.runtime_quarantine_threshold(),
                 );
+                if self.tool_reviews.is_some() {
+                    let quarantine = entry
+                        .quarantined
+                        .read()
+                        .expect("upstream quarantine lock poisoned");
+                    for report in &mut drift {
+                        report.quarantined = quarantine.contains(&report.tool);
+                    }
+                }
                 if !drift.is_empty() {
                     if let Some(evidence) = self.evidence.clone() {
                         let server = name.to_string();
@@ -2758,8 +2818,7 @@ impl UpstreamPool {
                 if new_entry.any_connected().await {
                     // The fresh entry would otherwise start with an EMPTY drift
                     // quarantine and a fresh schema baseline, silently clearing an
-                    // active quarantine and re-baselining schema history without an
-                    // operator `clear_quarantine` or a process restart.
+                    // active process-local quarantine during a live resize.
                     // Inherit both from the entry it replaces so the dispatch
                     // BLOCK and the observation baseline survive the rebuild; a later
                     // reconnect re-measures drift against the carried baseline.
@@ -2994,8 +3053,10 @@ impl UpstreamPool {
                             }
                             Some(previous) if !Arc::ptr_eq(previous, next_entry) => {
                                 if !tool_catalogs_equal(
-                                    &previous.published_tools().await,
-                                    &next_entry.published_tools().await,
+                                    &previous.published_tools(self.tool_reviews.is_none()).await,
+                                    &next_entry
+                                        .published_tools(self.tool_reviews.is_none())
+                                        .await,
                                 ) {
                                     catalog_changed = true;
                                 }
@@ -3011,7 +3072,10 @@ impl UpstreamPool {
                     let mut index_slices = Vec::new();
                     if catalog_changed && self.index.is_some() {
                         for (name, entry) in next_arc.iter() {
-                            index_slices.push((name.clone(), entry.published_tools().await));
+                            index_slices.push((
+                                name.clone(),
+                                entry.published_tools(self.tool_reviews.is_none()).await,
+                            ));
                         }
                     }
 

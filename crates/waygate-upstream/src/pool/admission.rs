@@ -80,13 +80,15 @@ pub(super) fn dispatch_contract_is_current(
     current_manifest: &crate::UpstreamManifest,
     live_tools: &[Tool],
     tool_name: &str,
+    local_quarantine_authoritative: bool,
 ) -> bool {
     redial_committed_fields_eq(initial_manifest, current_manifest)
-        && !entry
-            .quarantined
-            .read()
-            .expect("upstream quarantine lock poisoned")
-            .contains(tool_name)
+        && (!local_quarantine_authoritative
+            || !entry
+                .quarantined
+                .read()
+                .expect("upstream quarantine lock poisoned")
+                .contains(tool_name))
         && tool_is_admitted_in_catalog(current_manifest, live_tools, tool_name)
 }
 

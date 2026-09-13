@@ -87,6 +87,7 @@ pub mod dashboard_sessions;
 pub mod dashboard_settings;
 pub mod dashboard_skills;
 pub mod dashboard_tenants;
+pub mod dashboard_tool_reviews;
 pub mod dashboard_tools;
 pub mod error;
 pub mod federated_peers;
@@ -119,6 +120,7 @@ pub mod skill_reviews;
 pub mod state;
 pub mod tenant_ctx;
 pub mod tenants;
+pub mod tool_reviews;
 pub mod upstream_sessions;
 
 pub use auth::{CsrfToken, DashboardAuth, DashboardOidcConfig};

@@ -1860,6 +1860,7 @@ fn build_active_filter_chips(
 #[derive(Template)]
 #[template(path = "activity_drawer.html")]
 struct ActivityDrawer {
+    review_url: String,
     ts_abs: String,
     outcome: String,
     action_label_opt: Option<String>,
@@ -2119,6 +2120,7 @@ fn build_compare_fields(a: &AuditRow, b: &AuditRow) -> Vec<CompareField> {
 
 pub(crate) async fn activity_drawer(
     State(state): State<Arc<AdminState>>,
+    tenant: Option<Extension<TenantContext>>,
     user: Option<Extension<Principal>>,
     Path(params): Path<std::collections::HashMap<String, String>>,
 ) -> Response {
@@ -2153,7 +2155,12 @@ pub(crate) async fn activity_drawer(
         .as_deref()
         .zip(row.trace_id.as_deref())
         .map(|(tmpl, tid)| tmpl.replace("{trace_id}", tid));
+    let review_path = match (row.server.as_deref(), row.tool.as_deref()) {
+        (Some(server), Some(tool)) => crate::dashboard_tool_reviews::review_url(server, tool),
+        _ => "/servers/tool-changes".into(),
+    };
     render(&ActivityDrawer {
+        review_url: crate::tenant_ctx::nav_url(tenant.as_ref().map(|Extension(t)| t), &review_path),
         ts_abs: format_ts_abs(row.ts),
         outcome: row.outcome.clone(),
         action_label_opt: Some(action_label(&row)),

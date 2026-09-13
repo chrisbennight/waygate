@@ -136,6 +136,7 @@ impl UpstreamPool {
             &current_manifest,
             &conn.live_tools,
             tool_name,
+            self.tool_reviews.is_none(),
         ) && self
             .admitted_contract_is_current(
                 tenant,

@@ -27,7 +27,7 @@ struct GetActionContextRequest {
     action_type: String,
     /// Action-specific read selector. Validate this object against
     /// `describe_action(action_type).actions[0].context.selector_schema`.
-    /// Omit it for the action's paginated candidate or identifier listing.
+    /// Omit it for the action's bounded candidate or identifier listing.
     #[serde(default)]
     selector: Option<JsonObject>,
 }

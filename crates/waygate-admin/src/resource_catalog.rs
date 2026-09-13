@@ -251,6 +251,15 @@ fn descriptors() -> &'static [ResourceDescriptor] {
                 true,
                 |s, t, f, l, o| Box::pin(list_api_key(s, t, f, l, o)),
             ),
+            descriptor::<
+                crate::tool_reviews::ToolReviewSelector,
+                crate::tool_reviews::ToolReviewCandidate,
+            >(
+                "tool_contract_review",
+                AccessTier::Admin,
+                true,
+                |s, t, f, l, o| Box::pin(list_tool_contract_reviews(s, t, f, l, o)),
+            ),
             descriptor::<EmptyFilter, SkillReviewRow>(
                 "skill_review",
                 AccessTier::Admin,
@@ -389,6 +398,28 @@ struct SkillReviewRow {
     serving_digest: Option<String>,
     /// Tenant-relative dashboard path for reviewing exact content before approval.
     review_path: String,
+}
+
+async fn list_tool_contract_reviews(
+    state: &AdminState,
+    tenant: &str,
+    filters: &Map<String, Value>,
+    limit: u32,
+    offset: u32,
+) -> Result<ReadPage, ReadError> {
+    cap(&state.servers.tool_reviews)?;
+    let selector = parse_filters("tool_contract_review", filters)?;
+    let context = crate::tool_reviews::read_context(state, tenant, selector)
+        .await
+        .map_err(|error| store_err("tool_contract_review", error.detail()))?;
+    Ok(ReadPage {
+        rows: page(context.reviews, offset, limit)
+            .into_iter()
+            .map(to_value)
+            .collect(),
+        limit,
+        offset,
+    })
 }
 
 async fn list_skill_reviews(
@@ -1566,6 +1597,7 @@ mod tests {
                 "scope",
                 "server",
                 "skill_review",
+                "tool_contract_review",
                 "upstream_session",
             ],
             "catalog must be sorted and list exactly the observe-tier + admin-tier resources",
@@ -1579,6 +1611,7 @@ mod tests {
             "confidential_client",
             "oauth_consent",
             "skill_review",
+            "tool_contract_review",
             "upstream_session",
         ];
         let global = ["upstream_session", "confidential_client"];

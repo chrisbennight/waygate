@@ -155,15 +155,10 @@ struct UpstreamEntry {
     /// before installing its replacement session; contention is trivially low
     /// (one short acquire per publish pass).
     observed_schemas: StdMutex<HashMap<String, String>>,
-    /// Tools auto-quarantined by [`record_observed_schemas`]
-    /// when a drift event fires AND the tool meets the pool's
-    /// `quarantine_threshold` (by risk tier OR `side_effects`).
-    /// The dispatch path checks this via
-    /// [`UpstreamEntry::is_quarantined`] before consulting the catalog /
-    /// manifest, so a quarantined tool's calls are refused even when no
-    /// catalog is wired. Cleared on gateway restart (no persistence yet).
-    /// An `RwLock` because the hot path is read-only (every call_tool
-    /// peeks); writes happen only when drift is detected.
+    /// Process-local quarantine decisions when no durable review store is
+    /// attached; otherwise a cache for runtime status and metrics. Durable
+    /// discovery and dispatch read the database so another replica's exact
+    /// acceptance can take effect without a restart.
     quarantined: StdRwLock<HashSet<String>>,
     /// Generation of the most recent reload that applied an IN-PLACE update to
     /// this entry (tool classifications / identity-chaining fields). A reload
@@ -217,19 +212,18 @@ impl UpstreamEntry {
     }
 
     /// The published (manifest-classified) tool view for this upstream,
-    /// from the first connected slot, with auto-quarantined tools
-    /// (auto-quarantined) filtered out so `tools/list` and the admin
-    /// overview don't advertise tools that the dispatch gate would refuse. All
+    /// from the first connected slot. Filter the local quarantine only when
+    /// it is authoritative; callers with durable storage apply its decision. All
     /// connected slots carry identical tool lists, so any one is
     /// representative; empty when all are down.
-    async fn published_tools(&self) -> Vec<Tool> {
+    async fn published_tools(&self, local_quarantine_authoritative: bool) -> Vec<Tool> {
         for slot in &self.slots {
             if let Some(conn) = slot.conn.read().await.as_ref() {
                 let q = self
                     .quarantined
                     .read()
                     .expect("upstream quarantine lock poisoned");
-                if q.is_empty() {
+                if !local_quarantine_authoritative || q.is_empty() {
                     return conn.tools.clone();
                 }
                 return conn
@@ -480,6 +474,7 @@ pub struct UpstreamPool {
     /// [`Self::with_authoritative_catalog`] after its fail-closed boot
     /// reconcile so a miss or error refuses dispatch.
     catalog: Option<waygate_catalog::SharedCatalogStore>,
+    tool_reviews: Option<Arc<waygate_catalog::tool_reviews::PgCatalogStore>>,
     /// Whether the attached catalog is the serving authority rather than a
     /// transitional dual-read aid. The production composition sets this only
     /// after boot has atomically reconciled the accepted manifest generation;
@@ -765,6 +760,7 @@ impl UpstreamPool {
             evidence: None,
             upstream_sessions: None,
             catalog: None,
+            tool_reviews: None,
             catalog_authoritative: false,
             catalog_read_error_generation: AtomicU64::new(0),
             quarantine_threshold: quarantine_threshold_from_env(),
@@ -933,6 +929,7 @@ impl UpstreamPool {
             evidence: None,
             upstream_sessions: None,
             catalog: None,
+            tool_reviews: None,
             catalog_authoritative: false,
             catalog_read_error_generation: AtomicU64::new(0),
             // Disconnected fixtures don't observe live tools so they
@@ -1250,7 +1247,25 @@ impl UpstreamCatalog for UpstreamPool {
 
     async fn list_tools(&self, server: &str) -> Result<Vec<Tool>, McpError> {
         let entry = self.entry(server)?;
-        Ok(entry.published_tools().await)
+        let tools = entry.published_tools(self.tool_reviews.is_none()).await;
+        if self.tool_reviews.is_none() {
+            return Ok(tools);
+        }
+        let mut admitted = Vec::with_capacity(tools.len());
+        for tool in tools {
+            if matches!(
+                self.resolve_invocation_tool(
+                    waygate_core::TenantId::DEFAULT,
+                    server,
+                    tool.name.as_ref()
+                )
+                .await,
+                ResolvedInvocationTool::Ready(_)
+            ) {
+                admitted.push(tool);
+            }
+        }
+        Ok(admitted)
     }
 
     async fn discovery_generation(&self) -> Result<Option<i64>, McpError> {
@@ -1457,11 +1472,9 @@ impl UpstreamCatalog for UpstreamPool {
         server: &str,
         tool_name: &str,
     ) -> ResolvedInvocationTool {
-        // In-process drift quarantine is an authoritative
-        // block. Checked BEFORE the catalog so a drift-quarantined tool
-        // is refused even on deployments without a catalog wired up, and
-        // BEFORE the manifest fallback so an attacker can't recover the
-        // tool by tweaking on-disk classifications.
+        // Without durable review storage, the in-process quarantine is the
+        // authority. With storage, resolve_snapshot_from checks the durable
+        // decision so an acceptance on another replica can take effect.
         // Clone the entry out from under the lock-free `load()` BEFORE the
         // `.await` — an `if let` scrutinee's temporary (the arc-swap guard)
         // would otherwise live across the await, holding the guard over a
@@ -1472,7 +1485,7 @@ impl UpstreamCatalog for UpstreamPool {
         // inside the resolver (published behavior hash == approved hash).
         let manifest = entry.as_ref().map(|entry| entry.manifest_snapshot());
         if let (Some(entry), Some(manifest)) = (entry.as_ref(), manifest.as_ref()) {
-            if entry.is_quarantined(tool_name).await {
+            if self.tool_reviews.is_none() && entry.is_quarantined(tool_name).await {
                 tracing::info!(
                     %tenant, %server, tool = %tool_name,
                     "tool is in-process quarantined (drift-triggered); refusing dispatch",
@@ -1861,6 +1874,7 @@ impl UpstreamPool {
                     &current_manifest,
                     &conn.live_tools,
                     tool_name,
+                    self.tool_reviews.is_none(),
                 ) {
                     permit.neutral();
                     return Err(contract_changed_error(server, tool_name));
@@ -1871,6 +1885,22 @@ impl UpstreamPool {
                 // the current-state admission above while executing claims
                 // the earlier stages never saw. Breaker-neutral: a local
                 // configuration race, not an upstream-health signal.
+                let raw_contract = conn
+                    .live_tools
+                    .iter()
+                    .find(|tool| tool.name.as_ref() == tool_name);
+                if !self
+                    .review_allows(
+                        server,
+                        tool_name,
+                        raw_contract,
+                        current_manifest.classification_mode,
+                    )
+                    .await
+                {
+                    permit.neutral();
+                    return Err(contract_changed_error(server, tool_name));
+                }
                 if let Some(admitted) = admitted {
                     if !self
                         .admitted_contract_is_current(
@@ -1908,6 +1938,7 @@ impl UpstreamPool {
                     timeout: self.call_timeout,
                     server,
                     tool_name,
+                    advertised_tool: raw_contract,
                     trace_id: &trace_id,
                     params,
                     processor,
@@ -1962,6 +1993,7 @@ impl UpstreamPool {
                     &current_manifest,
                     &conn.live_tools,
                     tool_name,
+                    self.tool_reviews.is_none(),
                 ) {
                     permit.neutral();
                     return Err(contract_changed_error(server, tool_name));
@@ -1971,6 +2003,22 @@ impl UpstreamPool {
                 // below runs on this connection while we hold its read lock,
                 // so a mismatch here is the last point the race can be
                 // refused. Breaker-neutral: a local configuration race.
+                let raw_contract = conn
+                    .live_tools
+                    .iter()
+                    .find(|tool| tool.name.as_ref() == tool_name);
+                if !self
+                    .review_allows(
+                        server,
+                        tool_name,
+                        raw_contract,
+                        current_manifest.classification_mode,
+                    )
+                    .await
+                {
+                    permit.neutral();
+                    return Err(contract_changed_error(server, tool_name));
+                }
                 if let Some(admitted) = admitted {
                     if !self
                         .admitted_contract_is_current(
@@ -2048,6 +2096,35 @@ impl UpstreamPool {
                             ));
                         }
                     };
+                    let current_tool = session_tools
+                        .iter()
+                        .find(|tool| tool.name.as_ref() == tool_name);
+                    if self
+                        .observe_tool_reviews(
+                            &entry,
+                            server,
+                            &current_manifest,
+                            current_tool.map(std::slice::from_ref).unwrap_or_default(),
+                            true,
+                        )
+                        .await
+                        .is_err()
+                    {
+                        permit.neutral();
+                        return Err(contract_changed_error(server, tool_name));
+                    }
+                    if !self
+                        .review_allows(
+                            server,
+                            tool_name,
+                            current_tool,
+                            current_manifest.classification_mode,
+                        )
+                        .await
+                    {
+                        permit.neutral();
+                        return Err(contract_changed_error(server, tool_name));
+                    }
                     if !admission::tool_is_admitted_in_catalog(
                         &current_manifest,
                         &session_tools,
@@ -2150,6 +2227,7 @@ mod resources;
 mod schema_admission;
 mod session_identity;
 mod tool_listing;
+mod tool_reviews;
 
 #[cfg(test)]
 use admission::partition_live_tools;

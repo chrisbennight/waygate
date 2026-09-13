@@ -103,6 +103,45 @@ mechanisms. Runtime upstream reconnect/catalog-refresh operations are currently
 gateway-global even though their callers are admin-gated. See the
 [federation contract](../agents/federation.md).
 
+## Review an upstream tool change
+
+With a configured database, set `GATEWAY_QUARANTINE_ON_DRIFT_RISK=all` to
+quarantine changed descriptions and schemas for every classified tool.
+`high` and `medium` restrict automatic quarantine by the existing risk and
+side-effect thresholds; the default `off` observes changes without enabling
+automatic quarantine. This detects a changed contract, not whether its text is
+malicious. Response-content inspection is a separate control.
+
+Open **Servers → Review tool changes**. Select the affected tool to compare
+its previously accepted contract with the observed replacement. **Keep
+quarantined** leaves the block in place. **Approve this replacement** refreshes
+the upstream and accepts only the exact reviewed generation; if it changed
+again, reopen the comparison. Other tools remain available under their existing
+policies. Annotation-mode acceptance also updates the approved behavior hash
+through the existing manifest publication path; configuration reload then
+applies that reviewed hash across replicas.
+
+Changes are observed during catalog refresh and reconnect, including scheduled
+refresh. Annotation mode also verifies the current descriptor before dispatch.
+The first observation establishes the comparison baseline. This workflow does
+not add upstream change-notification handling or inspect a server's internal
+implementation.
+
+Durable review needs `GATEWAY_DATABASE_URL`. The accepted and current contracts
+are bounded to 256 KiB each in storage. Larger contracts retain their exact hash
+and quarantine, but cannot be compared or approved. Reduce the contract upstream
+and refresh to review it; reverting to a previous contract does not clear the
+block. Other tools remain reviewable. Database failures refuse protected admission. Existing quarantines survive restart, reconnect, and the upstream's
+Clear quarantine control. Without a database, the existing process-local
+quarantine remains available, but this durable review screen is unavailable.
+Upstream configuration and its review belong to the default configuration
+tenant; decisions require its administrator session.
+
+For agent proposals, discover `tool_contract.approve` through
+`gateway-admin.describe_action`, read its advertised `get_action_context`, and
+copy the selected review's generation and hashes into the proposal. Human
+approval uses the same exact-replacement checks as the dashboard.
+
 ## Operate the boundary
 
 Policy reload preserves the last valid set on a parse failure. Governed policy

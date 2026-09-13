@@ -271,7 +271,7 @@ pub type SharedCatalogStore = Arc<dyn CatalogStore>;
 /// `Arc`.
 #[derive(Clone)]
 pub struct PgCatalogStore {
-    pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl PgCatalogStore {

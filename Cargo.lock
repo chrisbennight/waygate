@@ -6725,6 +6725,7 @@ dependencies = [
  "waygate-mcp",
  "waygate-oidc",
  "waygate-telemetry",
+ "waygate-test-support",
  "zeroize",
 ]
 

@@ -394,6 +394,8 @@ pub struct ServersPlane {
     /// audit-endpoint pattern. Constructed by `waygate-server`
     /// whenever a Postgres pool exists.
     pub catalog: Capability<SharedCatalogStore>,
+    /// Durable contract review store shared with upstream admission.
+    pub tool_reviews: Capability<Arc<waygate_catalog::PgCatalogStore>>,
     /// Durable server-manifest store. `Some` ⇒ the
     /// `/api/v1/server_manifests` admin endpoints (and the
     /// dashboard editor) serve from the Postgres `server_manifests`
@@ -818,6 +820,7 @@ impl AdminState {
         catalog: Option<SharedCatalogStore>,
         public_url: String,
     ) -> Self {
+        let tool_reviews = upstreams.tool_review_store().cloned();
         Self {
             upstreams,
             evidence,
@@ -893,6 +896,7 @@ impl AdminState {
             },
             servers: ServersPlane {
                 catalog: Capability::new("catalog store not configured", catalog),
+                tool_reviews: Capability::new("Durable tool reviews require a configured database", tool_reviews),
                 manifest_store: Capability::absent("manifest store not configured"),
                 servers_dir: None,
                 manifest_write_lock: Arc::new(tokio::sync::Mutex::new(())),
