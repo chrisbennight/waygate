@@ -128,9 +128,10 @@ not add upstream change-notification handling or inspect a server's internal
 implementation.
 
 Durable review needs `GATEWAY_DATABASE_URL`. The accepted and current contracts
-are bounded to 256 KiB each in storage; an observation that cannot be stored is
-refused for that tool without preventing review of other tools. Database failures refuse protected
-admission. Existing quarantines survive restart, reconnect, and the upstream's
+are bounded to 256 KiB each in storage. Larger contracts retain their exact hash
+and quarantine, but cannot be compared or approved. Reduce the contract upstream
+and refresh to review it; reverting to a previous contract does not clear the
+block. Other tools remain reviewable. Database failures refuse protected admission. Existing quarantines survive restart, reconnect, and the upstream's
 Clear quarantine control. Without a database, the existing process-local
 quarantine remains available, but this durable review screen is unavailable.
 Upstream configuration and its review belong to the default configuration

@@ -62,6 +62,9 @@ struct ReviewPage {
 }
 
 fn changes(review: &waygate_catalog::tool_reviews::ToolReview) -> Vec<FieldChange> {
+    if review.observed_contract.is_null() {
+        return Vec::new();
+    }
     let mut keys = std::collections::BTreeSet::new();
     for value in [&review.approved_contract, &review.observed_contract] {
         if let Some(object) = value.as_object() {

@@ -123,7 +123,7 @@ impl UpstreamPool {
             {
                 continue;
             }
-            let observation = store
+            let changed = store
                 .observe(
                     waygate_core::TenantId::DEFAULT,
                     name,
@@ -132,26 +132,7 @@ impl UpstreamPool {
                     &contract,
                     self.quarantine_threshold.covers(class.risk, side_effects),
                 )
-                .await;
-            let changed = match observation {
-                Ok(changed) => changed,
-                Err(waygate_catalog::CatalogError::Database(error))
-                    if error.as_database_error().is_some_and(|error| {
-                        matches!(
-                            error.constraint(),
-                            Some("tool_contract_reviews_approved_contract_check")
-                                | Some("tool_contract_reviews_observed_contract_check")
-                        )
-                    }) =>
-                {
-                    // A contract that cannot be recorded fails its own
-                    // admission check; it must not prevent a peer's review.
-                    tracing::warn!(server = name, tool = %class.name,
-                            "tool contract exceeds review storage bound");
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
+                .await?;
             if let Some(review) = store
                 .get(waygate_core::TenantId::DEFAULT, name, &class.name)
                 .await?

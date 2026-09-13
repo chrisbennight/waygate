@@ -20,6 +20,7 @@ pub struct ToolReview {
     pub approved_hash: String,
     pub approved_contract: Value,
     pub observed_hash: String,
+    /// JSON null means the observed contract exceeds the comparison storage limit.
     pub observed_contract: Value,
     pub generation: i64,
     pub quarantined: bool,
@@ -91,14 +92,26 @@ impl PgCatalogStore {
             // reconciliation creates their identity. Admission refuses absence.
             return Ok(false);
         };
+        // Use PostgreSQL's representation so the bound matches the table's
+        // constraint, including JSONB whitespace. Retain identity and refusal
+        // even when the comparison itself cannot be stored.
+        let contract: Value = sqlx::query_scalar(
+            "SELECT CASE WHEN octet_length($1::jsonb::text) <= 262144
+             THEN $1::jsonb ELSE 'null'::jsonb END",
+        )
+        .bind(contract)
+        .fetch_one(&mut *tx)
+        .await?;
+        let unavailable = contract.is_null();
         sqlx::query(
             "INSERT INTO tool_contract_reviews
-             (tool_id, approved_hash, approved_contract, observed_hash, observed_contract)
-             VALUES ($1,$2,$3,$2,$3) ON CONFLICT (tool_id) DO NOTHING",
+             (tool_id, approved_hash, approved_contract, observed_hash, observed_contract, quarantined)
+             VALUES ($1,$2,$3,$2,$3,$4) ON CONFLICT (tool_id) DO NOTHING",
         )
         .bind(id)
         .bind(hash)
-        .bind(contract)
+        .bind(&contract)
+        .bind(unavailable)
         .execute(&mut *tx)
         .await?;
         let previous = sqlx::query(
@@ -106,7 +119,7 @@ impl PgCatalogStore {
         ).bind(id).fetch_one(&mut *tx).await?;
         let old: String = previous.get("observed_hash");
         if old != hash {
-            let blocked = previous.get::<bool, _>("quarantined") || block_changes;
+            let blocked = previous.get::<bool, _>("quarantined") || block_changes || unavailable;
             sqlx::query(
                 "UPDATE tool_contract_reviews SET observed_hash=$2, observed_contract=$3,
                  approved_hash=CASE WHEN $4 THEN approved_hash ELSE $2 END,
@@ -179,7 +192,8 @@ impl PgCatalogStore {
              approved_contract=observed_contract,quarantined=false,decided_at=now(),decided_by=$4
              FROM mcp_tools t JOIN mcp_servers s ON s.id=t.server_id
              WHERE r.tool_id=t.id AND r.tool_id=$1 AND r.generation=$2
-             AND r.observed_hash=$3 AND s.tenant_id=$5",
+             AND r.observed_hash=$3 AND s.tenant_id=$5
+             AND r.observed_contract <> 'null'::jsonb",
         )
         .bind(review.tool_id)
         .bind(review.generation)

@@ -14,7 +14,7 @@ async fn quarantine_survives_restart_and_stale_decisions_cannot_release_a_new_co
         transport: "http".into(),
         runtime_target: json!({"url":"http://example.test/mcp"}),
         classification_mode: "manifest".into(),
-        tools: ["search", "status"]
+        tools: ["search", "status", "unobserved"]
             .into_iter()
             .map(|name| ImportTool {
                 name: name.into(),
@@ -111,6 +111,69 @@ async fn quarantine_survives_restart_and_stale_decisions_cannot_release_a_new_co
         !restarted.approve(&review, "operator").await.unwrap(),
         "returning to an old hash cannot revive an old form"
     );
+    let oversized = json!({"description":"x".repeat(262145)});
+    restarted
+        .observe(&tenant, "docs", "unobserved", "oversized", &oversized, true)
+        .await
+        .unwrap();
+    let first = restarted
+        .get(&tenant, "docs", "unobserved")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(first.quarantined);
+    assert!(first.observed_contract.is_null());
+    assert!(!restarted.approve(&first, "operator").await.unwrap());
+    for tool in ["status", "search"] {
+        let prior = restarted.get(&tenant, "docs", tool).await.unwrap().unwrap();
+        restarted
+            .observe(&tenant, "docs", tool, "oversized", &oversized, true)
+            .await
+            .unwrap();
+        let blocked = restarted.get(&tenant, "docs", tool).await.unwrap().unwrap();
+        assert!(blocked.quarantined);
+        assert!(blocked.observed_contract.is_null());
+        assert_eq!(blocked.observed_hash, "oversized");
+        assert!(!restarted.approve(&blocked, "operator").await.unwrap());
+        let after_restart = PgCatalogStore::new(pool.clone());
+        after_restart
+            .observe(&tenant, "docs", tool, "oversized", &oversized, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            after_restart
+                .get(&tenant, "docs", tool)
+                .await
+                .unwrap()
+                .unwrap()
+                .generation,
+            blocked.generation,
+            "repeated oversized observations retain the same generation"
+        );
+        after_restart
+            .observe(
+                &tenant,
+                "docs",
+                tool,
+                &prior.observed_hash,
+                &prior.observed_contract,
+                true,
+            )
+            .await
+            .unwrap();
+        let returned = after_restart
+            .get(&tenant, "docs", tool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            returned.quarantined,
+            "returning to a known contract does not erase an oversized change"
+        );
+        assert!(returned.generation > blocked.generation);
+        assert!(!after_restart.approve(&prior, "operator").await.unwrap());
+        assert!(after_restart.approve(&returned, "operator").await.unwrap());
+    }
 }
 
 #[tokio::test]

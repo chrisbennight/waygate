@@ -89,6 +89,11 @@ pub(crate) async fn approve_core(
     if review.generation != params.generation || review.observed_hash != params.observed_hash {
         return Err(stale());
     }
+    if review.observed_contract.is_null() {
+        return Err(ApiError::Conflict(
+            "The tool contract exceeds the review storage limit. Reduce it upstream and refresh before approval.".into(),
+        ));
+    }
     let manifest = state
         .upstreams
         .manifests()

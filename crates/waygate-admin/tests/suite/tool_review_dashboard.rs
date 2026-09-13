@@ -361,6 +361,46 @@ async fn acceptance_workflow(annotation_mode: bool) {
                 .await,
             ResolvedInvocationTool::Quarantined { .. }
         ));
+        let oversized = store
+            .get("default", &server, "search")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(oversized.observed_contract.is_null());
+        assert!(oversized.generation > withdrawn.generation);
+        let page = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/t/default/servers/tool-changes?server={server}&tool=search"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.status(), StatusCode::OK);
+        let html = to_bytes(page.into_body(), 65536).await.unwrap();
+        let html = std::str::from_utf8(&html).unwrap();
+        assert!(html.contains("comparison is unavailable"));
+        assert!(!html.contains("Approve this replacement"));
+        assert_eq!(
+            app.clone()
+                .oneshot(submit(&oversized))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        descriptor.write().unwrap().description = Some("Another replacement".into());
+        assert_eq!(app.clone().oneshot(submit(&withdrawn)).await.unwrap().status(), StatusCode::CONFLICT,
+            "an intervening oversized contract invalidates the old form even after a return to the same hash");
+        let withdrawn = store
+            .get("default", &server, "search")
+            .await
+            .unwrap()
+            .unwrap();
         descriptor.write().unwrap().name = "withdrawn".into();
         let response = app.oneshot(submit(&withdrawn)).await.unwrap();
         assert_eq!(

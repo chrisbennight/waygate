@@ -8,9 +8,14 @@
 <h2 class="card-title skills-source">{{ r.server }} · {{ r.tool }}</h2>
 {% if r.quarantined %}<p><span class="chip chip--bad">Quarantined</span> Hidden from discovery. Calls blocked.</p>
 {% else %}<p><span class="chip chip--ok">Accepted</span> This contract passed change review. Existing configuration and access policies still apply.</p>{% endif %}
-<p>Observed {{ observed_at }}. Review the changed contract fields below.</p>
+{% if r.observed_contract.is_null() %}<p>Observed {{ observed_at }}.</p>
+{% else %}<p>Observed {{ observed_at }}. Review the changed contract fields below.</p>{% endif %}
 <details><summary>Contract identity</summary><p class="mono skills-source">{{ r.observed_hash }}</p></details>
 </div>
+{% if r.observed_contract.is_null() %}
+<div class="card"><p>The tool contract exceeds the review storage limit. Its identity and quarantine are retained, but the comparison is unavailable. Reduce the contract upstream and refresh before approval.</p>
+<a class="btn btn-secondary" href="{{ self.chrome.nav_url("/servers/tool-changes") }}">Keep quarantined</a></div>
+{% endif %}
 {% for change in changes %}
 <section class="page-section"><h2 class="section-heading">{{ change.name }}</h2>
 <div class="skills-comparison">
@@ -18,7 +23,7 @@
 <section><h3 class="card-title">Observed replacement</h3><pre class="skills-content" tabindex="0">{{ change.after }}</pre></section>
 </div></section>
 {% endfor %}
-{% if r.quarantined %}
+{% if r.quarantined && !r.observed_contract.is_null() %}
 <form class="card" method="post" action="{{ self.chrome.nav_url("/servers/tool-changes/approve") }}">
 <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
 <input type="hidden" name="server" value="{{ r.server }}"><input type="hidden" name="tool" value="{{ r.tool }}">
