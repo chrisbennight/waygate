@@ -1,5 +1,12 @@
 # Release notes
 
+## 1.0.1
+
+- Preserve upstream-declared response schemas in legacy MCP discovery and Code
+  Mode, including nested response types. Catalog schemas retain precedence and
+  existing output-validation behavior is unchanged.
+- Invalidate saved Code Mode bindings when the declared response schema changes.
+
 ## 1.0.0
 
 Initial public release of Waygate.

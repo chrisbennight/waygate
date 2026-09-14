@@ -1170,6 +1170,15 @@ impl InvocationToolSnapshot {
         self.output_schema.as_deref()
     }
 
+    /// Response contract for discovery. An upstream declaration does not
+    /// enable additional gateway output validation for legacy integrations.
+    pub fn described_output_schema(&self) -> Option<Value> {
+        self.output_schema().cloned().or_else(|| {
+            let schema = self.published_definition()?.output_schema.as_ref()?;
+            crate::tool_schema::portable_schema_object(schema.as_ref()).map(Value::Object)
+        })
+    }
+
     /// Standard MCP annotations admitted with this invocation.
     pub fn tool_annotations(&self) -> Option<&Value> {
         self.tool_annotations.as_deref()

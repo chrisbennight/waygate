@@ -220,6 +220,12 @@ miss does not block unrelated hits. When the cache is full, a new miss waits for
 the oldest entry to finish compiling before FIFO eviction rather than splitting
 that in-flight key across two validators.
 
+Discovery and Code Mode expose an upstream's declared response schema when no
+catalog output schema is present. This supplies usable response types for legacy
+manifest integrations without enabling additional gateway output validation.
+A catalog-supplied output schema still takes precedence. Code Mode identities
+include the described schema so a changed declaration invalidates a saved binding.
+
 Input schemas travel in the snapshot and Stage 2 first enforces MCP's required
 object root, then compiles them through the same bounded validator cache. Legacy
 manifest-imported catalog rows carry no schema,
