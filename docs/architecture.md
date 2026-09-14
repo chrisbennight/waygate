@@ -224,7 +224,9 @@ Discovery and Code Mode expose an upstream's declared response schema when no
 catalog output schema is present. This supplies usable response types for legacy
 manifest integrations without enabling additional gateway output validation.
 A catalog-supplied output schema still takes precedence. Code Mode identities
-include the described schema so a changed declaration invalidates a saved binding.
+include the described schema so clients can detect a changed declaration.
+Runtime admission and persisted execution bindings retain their existing governed
+contract identity.
 
 Input schemas travel in the snapshot and Stage 2 first enforces MCP's required
 object root, then compiles them through the same bounded validator cache. Legacy

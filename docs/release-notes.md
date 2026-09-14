@@ -11,7 +11,8 @@
 - Preserve upstream-declared response schemas in legacy MCP discovery and Code
   Mode, including nested response types. Catalog schemas retain precedence and
   existing output-validation behavior is unchanged.
-- Invalidate saved Code Mode bindings when the declared response schema changes.
+- Include declared response schemas in Code Mode discovery identities so clients
+  can detect changes. Runtime admission and saved execution bindings are unchanged.
 
 ## 1.0.0
 
