@@ -5867,7 +5867,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-admin"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "askama",
  "async-trait",
@@ -5921,7 +5921,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-agent"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -5933,7 +5933,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-agent-runtime"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "rmcp",
@@ -5952,7 +5952,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-apikeys"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -5975,7 +5975,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-as"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -6009,7 +6009,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-authz"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "cedar-policy",
@@ -6034,7 +6034,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-catalog"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -6053,7 +6053,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-changeset"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -6069,7 +6069,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-codemode"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -6087,7 +6087,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-core"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "futures",
  "http",
@@ -6106,7 +6106,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-dashboard-stores"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "schemars 1.2.1",
@@ -6124,7 +6124,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-evidence"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -6143,7 +6143,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-federation"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -6171,7 +6171,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-files-helper"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6193,7 +6193,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-invocation"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -6208,7 +6208,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-llm-credentials"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -6225,7 +6225,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-llm-discovery"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "axum",
  "reqwest",
@@ -6239,7 +6239,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-llm-dispatch"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "axum",
  "futures",
@@ -6256,7 +6256,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-llm-providers"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "axum",
  "futures",
@@ -6270,7 +6270,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-llm-translate"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6280,7 +6280,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-manifest-store"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -6296,7 +6296,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-manifest-types"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "schemars 1.2.1",
  "serde",
@@ -6310,7 +6310,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-mcp"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6353,7 +6353,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-oidc"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -6384,7 +6384,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-policy"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -6400,7 +6400,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-quota"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "schemars 1.2.1",
@@ -6417,7 +6417,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-rbac"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "moka",
@@ -6437,7 +6437,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-scim"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "moka",
@@ -6455,7 +6455,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-server"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6524,7 +6524,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-skills"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -6542,7 +6542,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-storage"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -6570,7 +6570,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-telemetry"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "opentelemetry",
@@ -6590,7 +6590,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-tenants"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "moka",
@@ -6609,7 +6609,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-test-client"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -6641,7 +6641,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-test-support"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "sqlx",
@@ -6658,7 +6658,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-transfer"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -6692,7 +6692,7 @@ dependencies = [
 
 [[package]]
 name = "waygate-upstream"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
