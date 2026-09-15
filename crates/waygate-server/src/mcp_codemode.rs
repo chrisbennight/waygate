@@ -5726,7 +5726,8 @@ fn identity(snapshot: &InvocationToolSnapshot) -> SnapshotIdentity {
         .map(waygate_catalog::validator_schema_hash)
         .expect("Code Mode only identifies snapshots with an admitted input schema");
     let output_schema_hash = snapshot
-        .output_schema()
+        .described_output_schema()
+        .as_ref()
         .map(waygate_catalog::validator_schema_hash);
     let tool_annotations_hash = snapshot
         .tool_annotations()
@@ -6372,7 +6373,7 @@ struct DescribeResponse {
     identity: SnapshotIdentity,
     /// Exact admitted JSON Schema for connector input.
     input_schema: Value,
-    /// Exact admitted structured-output schema, when one is governed.
+    /// Response schema supplied by the governed catalog or upstream declaration.
     #[serde(skip_serializing_if = "Option::is_none")]
     output_schema: Option<Value>,
     /// Governance facts admitted with this tool snapshot.
@@ -6764,7 +6765,8 @@ fn connector_contract_with_authorization(
         identity: identity(snapshot),
         input_schema,
         output_schema: snapshot
-            .output_schema()
+            .described_output_schema()
+            .as_ref()
             .and_then(serde_json::Value::as_object)
             .map(|schema| {
                 serde_json::Value::Object(waygate_mcp::retained_delivery::output_schema(schema))
@@ -11904,6 +11906,45 @@ mod tests {
             changed_output["input_schema_hash"],
             changed_input["input_schema_hash"]
         );
+    }
+
+    #[test]
+    fn declared_output_schema_is_discoverable_and_versions_code_mode_identity() {
+        let snapshot = |kind| {
+            let output = json!({"type":"object","properties":{"result":{"type":kind}}});
+            let tool = rmcp::model::Tool::new(
+                "read",
+                "Read a record",
+                Arc::new(json!({"type":"object"}).as_object().unwrap().clone()),
+            )
+            .with_raw_output_schema(Arc::new(output.as_object().unwrap().clone()));
+            InvocationToolSnapshot::catalog(
+                ToolFacts {
+                    server: "records".into(),
+                    name: "read".into(),
+                    risk: RiskTier::Low,
+                    side_effects: false,
+                    pii: false,
+                    requires_approval: false,
+                    requires_approval_known: true,
+                },
+                Uuid::nil(),
+                "classification-only".into(),
+                Some(json!({"type":"object"})),
+                None,
+            )
+            .with_published_definition(Some(tool))
+        };
+        let first = snapshot("string");
+        let second = snapshot("integer");
+        let contract =
+            connector_contract_with_authorization("records", "read", &first, None).unwrap();
+        assert!(contract.output_schema.is_some());
+        assert!(first.output_schema().is_none());
+        let before = serde_json::to_value(identity(&first)).unwrap();
+        let after = serde_json::to_value(identity(&second)).unwrap();
+        assert_ne!(before["output_schema_hash"], after["output_schema_hash"]);
+        assert_eq!(before["catalog_schema_hash"], after["catalog_schema_hash"]);
     }
 
     #[tokio::test]

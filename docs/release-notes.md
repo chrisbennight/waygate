@@ -1,5 +1,19 @@
 # Release notes
 
+## 1.1.0
+
+- Persist review and quarantine of changed upstream tool contracts, with a
+  dashboard workflow for accepting a specific observed contract. The additive
+  `0111_tool_contract_reviews.sql` migration stores the review state.
+- Support recipient-aware email approval policies and document the workflow.
+- Refresh dashboard branding and workflow documentation.
+
+- Preserve upstream-declared response schemas in legacy MCP discovery and Code
+  Mode, including nested response types. Catalog schemas retain precedence and
+  existing output-validation behavior is unchanged.
+- Include declared response schemas in Code Mode discovery identities so clients
+  can detect changes. Runtime admission and saved execution bindings are unchanged.
+
 ## 1.0.0
 
 Initial public release of Waygate.

@@ -129,7 +129,7 @@ impl CatalogTool {
     ) -> Option<Self> {
         let mut definition = snapshot.published_definition()?.clone();
         definition.input_schema = Arc::new(snapshot.input_schema()?.as_object()?.clone());
-        definition.output_schema = match snapshot.output_schema() {
+        definition.output_schema = match snapshot.described_output_schema() {
             Some(schema) => Some(Arc::new(schema.as_object()?.clone())),
             None => None,
         };
@@ -725,6 +725,40 @@ mod tests {
         assert_eq!(record.definition.title, upstream.title);
         assert_eq!(record.definition.input_schema, upstream.input_schema);
         assert_eq!(record.definition.annotations, upstream.annotations);
+    }
+
+    #[test]
+    fn legacy_snapshot_describes_response_without_enabling_validation() {
+        let output = json!({"type":"object","$defs":{"Material":{"type":"object","properties":{"product_name":{"type":"string"}}}},"properties":{"material":{"$ref":"#/$defs/Material"}}});
+        let upstream =
+            tool("search").with_raw_output_schema(Arc::new(output.as_object().unwrap().clone()));
+        let snapshot = InvocationToolSnapshot::catalog(
+            ToolFacts {
+                server: "kagi".into(),
+                name: "search".into(),
+                risk: RiskTier::Low,
+                side_effects: false,
+                pii: false,
+                requires_approval: false,
+                requires_approval_known: true,
+            },
+            uuid::Uuid::nil(),
+            "classification-only".into(),
+            Some(json!({"type":"object"})),
+            None,
+        )
+        .with_published_definition(Some(upstream));
+        assert!(snapshot.output_schema().is_none());
+        let record = CatalogTool::from_upstream_snapshot("kagi", snapshot).unwrap();
+        let declared = json!(record.definition.output_schema.as_deref().unwrap());
+        let validator = jsonschema::validator_for(&declared).unwrap();
+        assert!(validator.is_valid(&json!({"material":{"product_name":"PLA Basic"}})));
+        assert!(!validator.is_valid(&json!({"material":{"product_name":123}})));
+        assert!(record
+            .invocation_snapshot()
+            .unwrap()
+            .output_schema()
+            .is_none());
     }
 
     #[test]
