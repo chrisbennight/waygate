@@ -557,6 +557,8 @@ pub struct GatewayServer {
     /// to clients that can neither accept the full upstream catalog nor refresh
     /// a progressively disclosed direct-tool list.
     codemode_only_tools_clients: Vec<String>,
+    /// Exact client names selecting presentation-only root-composition adaptation.
+    root_composition_clients: Vec<String>,
     /// Set during legacy `initialize` when the session selected the compact
     /// Code Mode-only projection. Stateless requests match their inline client
     /// name independently.
@@ -854,6 +856,7 @@ impl GatewayServer {
             eager_tools_clients: Vec::new(),
             client_eager_tools_list: Arc::new(AtomicBool::new(false)),
             codemode_only_tools_clients: Vec::new(),
+            root_composition_clients: Vec::new(),
             client_codemode_only_tools_list: Arc::new(AtomicBool::new(false)),
             invocation,
             audit,
@@ -1041,6 +1044,21 @@ impl GatewayServer {
     pub fn with_codemode_only_tools_clients(mut self, clients: Vec<String>) -> Self {
         self.codemode_only_tools_clients = clients;
         self
+    }
+
+    /// Opt selected clients into presentation-only root-composition adaptation.
+    /// Client names never affect authorization or invocation validation.
+    #[must_use]
+    pub fn with_root_composition_clients(mut self, clients: Vec<String>) -> Self {
+        self.root_composition_clients = clients;
+        self
+    }
+
+    fn root_composition_active(&self, client: &ClientContext) -> bool {
+        Self::client_name_matches(
+            client.client_name.as_deref(),
+            &self.root_composition_clients,
+        )
     }
 
     fn eager_tools_list_active(&self) -> bool {
@@ -4534,6 +4552,13 @@ impl ServerHandler for GatewayServer {
                 info.instructions.unwrap_or_default()
             ));
         }
+        if self.root_composition_active(&client) {
+            info.instructions = Some(format!(
+                "{} {}",
+                info.instructions.unwrap_or_default(),
+                crate::client_schema::GUIDANCE
+            ));
+        }
         // `tools.listChanged` is advertised to the stateless generation
         // too: `subscriptions/listen` is its delivery channel (1.2
         // stripped the flag here while no such channel existed).
@@ -4595,8 +4620,18 @@ impl ServerHandler for GatewayServer {
                 "enabled per-session eager tool discovery fallback"
             );
         }
+        let compatibility =
+            Self::client_name_matches(Some(client_name), &self.root_composition_clients);
         context.peer.set_peer_info(request);
-        std::future::ready(Ok(self.get_info()))
+        let mut info = self.get_info();
+        if compatibility {
+            info.instructions = Some(format!(
+                "{} {}",
+                info.instructions.unwrap_or_default(),
+                crate::client_schema::GUIDANCE
+            ));
+        }
+        std::future::ready(Ok(info))
     }
 
     async fn list_prompts(
@@ -4815,9 +4850,12 @@ impl ServerHandler for GatewayServer {
                 waygate_telemetry::metrics::ToolListProjection::Stateless2026,
             ),
         };
-        let visible = self
+        let mut visible = self
             .stable_list_visible_tools_with(principal.as_ref(), projection)
             .await?;
+        if self.root_composition_active(&client) {
+            crate::client_schema::adapt_tools(&mut visible);
+        }
         let cursor = request
             .as_ref()
             .and_then(|request| request.cursor.as_deref());

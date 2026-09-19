@@ -153,6 +153,8 @@ pub struct Config {
     /// `GATEWAY_CODEMODE_ONLY_CLIENTS` to a comma-separated list. Client names
     /// are compatibility hints, not an authorization boundary.
     pub codemode_only_tools_clients: Vec<String>,
+    /// Opt-in client names for root-composition schema presentation.
+    pub root_composition_clients: Vec<String>,
     /// When `true`, each SEP #1888 `searchTools` discovery call records a
     /// best-effort `Discovery` audit row so discovery activity appears in
     /// the admin Activity feed (`searchTools` is otherwise unaudited). Off
@@ -728,6 +730,9 @@ impl Config {
         let codemode_capacity = CodeModeCapacityLimits::from_limits(&codemode_limits)?;
         let (eager_tools_clients, codemode_only_tools_clients) =
             client_tool_projection::from_env(eager_tools_list)?;
+        let root_composition_clients = client_tool_projection::normalize_client_names(
+            waygate_core::env::csv_default("GATEWAY_ROOT_COMPOSITION_CLIENTS", &[]),
+        );
 
         let audit_discovery = waygate_core::env::bool_default_off("GATEWAY_AUDIT_DISCOVERY");
 
@@ -969,6 +974,7 @@ impl Config {
             codemode_limits,
             eager_tools_clients,
             codemode_only_tools_clients,
+            root_composition_clients,
             audit_discovery,
             upstream_reconnect_base,
             upstream_reconnect_ceiling,
@@ -1665,6 +1671,7 @@ mod tests {
                 .map(|client| (*client).to_owned())
                 .collect(),
             codemode_only_tools_clients: Vec::new(),
+            root_composition_clients: Vec::new(),
             audit_discovery: false,
             upstream_reconnect_base: Duration::from_secs(60),
             upstream_reconnect_ceiling: Duration::from_secs(900),

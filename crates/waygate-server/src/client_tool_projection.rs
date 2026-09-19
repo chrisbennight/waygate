@@ -40,7 +40,7 @@ pub(crate) fn log_selection(eager_tools_list: bool, eager: &[String], compact: &
 
 /// Normalize a per-client projection allowlist for exact, case-insensitive
 /// matching while preserving the operator's first-seen order.
-fn normalize_client_names(raw: Vec<String>) -> Vec<String> {
+pub(crate) fn normalize_client_names(raw: Vec<String>) -> Vec<String> {
     let mut clients = Vec::new();
     for client in raw {
         let normalized = client.trim().to_ascii_lowercase();

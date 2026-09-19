@@ -70,6 +70,7 @@ pub(crate) struct McpServerFactory {
     pub eager_tools_list: bool,
     pub eager_tools_clients: Vec<String>,
     pub codemode_only_tools_clients: Vec<String>,
+    pub root_composition_clients: Vec<String>,
     pub audit_discovery: bool,
     pub idjag_advertise_ema: bool,
     pub mcp_ping_interval: Option<Duration>,
@@ -109,6 +110,7 @@ impl McpServerFactory {
                 .with_eager_tools_list(self.eager_tools_list)
                 .with_eager_tools_clients(self.eager_tools_clients.clone())
                 .with_codemode_only_tools_clients(self.codemode_only_tools_clients.clone())
+                .with_root_composition_clients(self.root_composition_clients.clone())
                 .with_audit_discovery(self.audit_discovery)
                 .with_ema_capability_advert(self.idjag_advertise_ema)
                 .with_client_ping_interval(self.mcp_ping_interval)

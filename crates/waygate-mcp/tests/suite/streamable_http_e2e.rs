@@ -36,8 +36,12 @@ use waygate_oidc::Principal;
 
 const ALLOWED_HOST: &str = "127.0.0.1";
 
+mod client_schema_compat;
+
 #[derive(Default)]
 struct DemoCatalog {
+    input_schema: Option<Map<String, Value>>,
+    dispatches: Option<Arc<AtomicUsize>>,
     /// When set, `read_resource` returns this upstream freshness hint AND
     /// an upstream-declared `public` cache scope — the exact combination
     /// the gateway must pass through (ttl) and override (scope).
@@ -108,10 +112,12 @@ impl UpstreamCatalog for DemoCatalog {
                 None,
             ));
         }
-        let schema = json!({"type": "object", "properties": {}})
-            .as_object()
-            .cloned()
-            .unwrap();
+        let schema = self.input_schema.clone().unwrap_or_else(|| {
+            json!({"type": "object", "properties": {}})
+                .as_object()
+                .cloned()
+                .unwrap()
+        });
         let names = match &self.tool_names {
             Some(names) => names.read().await.clone(),
             None => vec!["echo".to_string()],
@@ -136,9 +142,27 @@ impl UpstreamCatalog for DemoCatalog {
         _principal: Option<&Principal>,
         _admitted: Option<&waygate_mcp::catalog::InvocationContractIdentity>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(dispatches) = &self.dispatches {
+            dispatches.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(CallToolResult::success(vec![Content::text(format!(
             "called {server}.{tool_name}"
         ))]))
+    }
+
+    async fn resolve_invocation_tool(
+        &self,
+        _tenant: &str,
+        server: &str,
+        tool_name: &str,
+    ) -> waygate_mcp::catalog::ResolvedInvocationTool {
+        waygate_mcp::catalog::ResolvedInvocationTool::Ready(
+            waygate_mcp::catalog::InvocationToolSnapshot::manifest_fallback_with_input_schema(
+                self.tool_facts(server, tool_name),
+                true,
+                self.input_schema.clone().map(Value::Object),
+            ),
+        )
     }
 
     fn tool_facts(&self, server: &str, tool_name: &str) -> ToolFacts {

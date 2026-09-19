@@ -154,6 +154,10 @@ The hot path for one tool call:
    upstreams retain bounded catalog-enumeration fallback for compatibility.
    Resolution always completes before authorization and fails closed on URI
    collisions.
+   An opt-in client schema profile adapts only the authorized `tools/list`
+   copies before pagination. Invocation snapshots and inspection/Code Mode
+   contracts keep the complete constraints; see
+   [client schema compatibility](client-schema-compatibility.md).
 4. **The invocation pipeline** — every per-tool-call hop flows through the
    `InvocationService` trait (`waygate-invocation`); the default MCP-tool
    implementation runs fifteen ordered stages in

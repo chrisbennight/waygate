@@ -21,6 +21,7 @@ pub mod authz;
 pub mod builtin;
 pub mod catalog;
 pub mod catalog_changes;
+pub mod client_schema;
 pub mod compat;
 pub mod disclosed;
 pub mod discovery;
