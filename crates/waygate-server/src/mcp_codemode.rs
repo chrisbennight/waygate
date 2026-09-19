@@ -9421,6 +9421,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conditional_schema_remains_discoverable_and_enforced_through_codemode() {
+        let mut fake = FakeCatalog::with_tools(&[("fixture", "conditional", false)]);
+        let schema = serde_json::from_str::<Value>(include_str!(
+            "../../waygate-mcp/tests/fixtures/client-schema-tools.json"
+        ))
+        .unwrap()[2]["inputSchema"]
+            .clone();
+        fake.replace_input_schema("fixture", "conditional", schema.clone());
+        let tools = code_mode_tools(Arc::new(fake), Arc::new(SelectiveAuthz));
+        let mut principal = reader();
+        principal.scopes.push(Scope::McpInvoke.as_str().to_owned());
+        let described = tools
+            .describe(
+                &principal,
+                DescribeParams {
+                    name: Some("fixture.conditional".to_owned()),
+                    connector: None,
+                    operation: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(structured(&described)["input_schema"], schema);
+        let bindings = tools
+            .execution_bindings(&principal, CodeExecutionProfile::Direct)
+            .await
+            .unwrap();
+        let (admitted, runner, _) = admit_execution_bindings(bindings);
+        let call = admitted.get(&runner[0].call_id).unwrap();
+        for (args, valid) in [
+            (json!({"mode":"large","size":1500000000}), true),
+            (json!({"mode":"small","size":1000000}), true),
+            (json!({"mode":"small","size":1500000000}), false),
+        ] {
+            let result = tools
+                .invoke_connector(
+                    &principal,
+                    call,
+                    args,
+                    test_hierarchy(1),
+                    CodeExecutionProfile::Direct,
+                    None,
+                )
+                .await;
+            if valid {
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(waygate_invocation::InvocationError::InputSchemaViolation { .. })
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn malformed_input_schema_is_absent_from_all_codemode_discovery() {
         let mut fake =
             FakeCatalog::with_tools(&[("email", "read", false), ("email", "malformed", false)]);

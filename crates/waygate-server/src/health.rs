@@ -495,6 +495,7 @@ mod tests {
                 .map(|client| (*client).to_owned())
                 .collect(),
             codemode_only_tools_clients: Vec::new(),
+            root_composition_clients: Vec::new(),
             audit_discovery: false,
             upstream_reconnect_base: std::time::Duration::from_secs(60),
             upstream_reconnect_ceiling: std::time::Duration::from_secs(900),

@@ -1,0 +1,95 @@
+[
+  {
+    "name": "flat_ok",
+    "description": "Flat name argument.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "nested_oneof_ok",
+    "description": "Nested object selection.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "id"
+              ]
+            },
+            {
+              "required": [
+                "slug"
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "target"
+      ]
+    }
+  },
+  {
+    "name": "conditional_dropped",
+    "description": "Size cap depends on mode.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "large"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "size": {
+                "maximum": 2000000000
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "size": {
+                "maximum": 16000000
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+]

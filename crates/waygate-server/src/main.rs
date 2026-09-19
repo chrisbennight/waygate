@@ -1043,6 +1043,7 @@ async fn gateway_main() -> anyhow::Result<()> {
         eager_tools_list,
         eager_tools_clients: eager_tools_clients.clone(),
         codemode_only_tools_clients: codemode_only_tools_clients.clone(),
+        root_composition_clients: cfg.root_composition_clients.clone(),
         audit_discovery,
         idjag_advertise_ema,
         mcp_ping_interval,

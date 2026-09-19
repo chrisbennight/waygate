@@ -512,7 +512,7 @@ fn resource_uri(uri: &Url) -> String {
     resource.into()
 }
 
-fn subschemas(object: &JsonObject) -> impl Iterator<Item = &Value> {
+pub(crate) fn subschemas(object: &JsonObject) -> impl Iterator<Item = &Value> {
     inspector_subschemas(object).map(|(child, _)| child)
 }
 

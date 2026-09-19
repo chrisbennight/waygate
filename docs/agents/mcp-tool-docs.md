@@ -42,6 +42,12 @@ projection never guesses a more specific type and never adds or removes an
 accepted instance. Fixing the source server remains preferred because its
 direct clients need the same portability.
 
+An explicit [client schema compatibility](../client-schema-compatibility.md)
+profile is the exception for `tools/list`: selected clients can receive a broader
+generation schema with the removed constraints documented in the description.
+Inspection, Code Mode, and invocation retain the complete contract. This
+presentation-only adapter must not be applied to admission helpers.
+
 The gateway does not fabricate a schema an upstream omits or invent the target
 of a remote reference. An upstream tool whose `inputSchema` lacks the
 MCP-required object root or depends on an unresolved remote reference is

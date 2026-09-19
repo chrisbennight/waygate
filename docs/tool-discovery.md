@@ -12,6 +12,9 @@ capability:
 2. Pass the returned `source_kind`, `source`, and bare `tool` (as `name`) to
    `gateway-discovery.inspect`. The response contains the exact current MCP
    definition, including input and output schemas and annotations.
+   When an operator enables [client schema compatibility](client-schema-compatibility.md),
+   this remains the authoritative schema; the selected client's `tools/list`
+   declaration can have fewer constraints while retaining the argument shape.
 3. Invoke the returned fully-qualified identity through ordinary MCP
    `tools/call`. Discovery has no generic execute operation and cannot bypass
    the original tool's typed routing, authorization, quota, inspection, or
