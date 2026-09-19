@@ -393,7 +393,7 @@ ranges and fallback defaults are defined by the gateway release.
 - **CI build and publication:**
   [`.github/workflows/image.yml`](../.github/workflows/image.yml) runs source
   checks, database tests, and image smoke before publishing to
-  `ghcr.io/chrisbennight/waygate`. Main builds update `edge`; version tags
+  `ghcr.io/chrisbennight/waygate`. Main builds publish `sha-<full-commit>` images; version tags
   publish releases, with `latest` reserved for stable releases. See the
   [release guide](source-release.md#github-publication). The publish job uses GitHub's short-lived
   `GITHUB_TOKEN` with `packages: write`; it carries no deployment credential.

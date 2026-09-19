@@ -13,7 +13,7 @@ before publication. The trigger determines which registry tags it publishes:
 | Trigger | Publication |
 | --- | --- |
 | Pull request or manual dispatch | None; build and smoke only |
-| Push to `main` | `sha-<full-commit>` and `edge` |
+| Push to `main` | `sha-<full-commit>` only |
 | Push `v<version>` with a prerelease, such as `v0.2.0-rc.1` | Full version only, such as `0.2.0-rc.1` |
 | Push a stable tag, such as `v0.2.0` | Full version; also `latest` if newer than the current stable image |
 
@@ -22,8 +22,9 @@ commit must be reachable from `main`. Versions use semantic versioning without
 build metadata (`+...`), which container tags cannot represent. Helper tags use
 a separate `mcp-files-v` namespace and never trigger gateway image publication.
 
-Use `edge` to follow main and `latest` for the newest stable release.
-Deployments should use the published digest rather than either channel.
+Select an explicit version or full commit tag, then pin its published digest
+for deployment. `latest` identifies the newest stable release; main publication
+does not maintain a moving tag.
 A SHA tag is a source locator, not a promise of byte-for-byte reproducible builds.
 
 The publication job is serialized across main and release runs, including the

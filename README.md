@@ -99,7 +99,8 @@ POSTGRES_PASSWORD=dev docker compose down --volumes
 
 Published container: `ghcr.io/chrisbennight/waygate`. Use a
 [release digest](https://github.com/chrisbennight/waygate/releases/latest) for
-deployment; `latest` follows stable releases and `edge` follows main.
+deployment. Main builds are available by full commit tag (`sha-<commit>`);
+`latest` follows stable releases.
 
 The [documentation](docs/README.md) covers files, models, reusable workflows,
 identity, deployment, and operations. See the [architecture](docs/architecture.md)

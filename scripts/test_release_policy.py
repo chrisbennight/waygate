@@ -164,9 +164,11 @@ class PublishTests(unittest.TestCase):
             self.assertIn('--latest=false', release)
             self.assertEqual('--prerelease' in release, '-' in version)
 
-    def test_main_publishes_edge_but_not_latest_or_a_release(self):
-        commands = []
+    def test_main_publishes_only_verified_commit_image(self):
+        commands, inspected = [], []
+        local = REPO + ':sha-' + SHA
         labels = {'org.opencontainers.image.revision': SHA, publisher.RELEASE_LABEL: ''}
+
         def command(*args):
             commands.append(args)
             if args == ('git', 'rev-parse', 'HEAD'):
@@ -174,27 +176,29 @@ class PublishTests(unittest.TestCase):
             if args[:3] == ('docker', 'image', 'inspect'):
                 return json.dumps(labels)
             return ''
+
+        def remote(ref):
+            inspected.append(ref)
+            if ref != local:
+                raise AssertionError('main publication must not inspect other image tags')
+            return DIGEST, labels
+
         with tempfile.TemporaryDirectory() as directory:
+            summary = Path(directory) / 'summary'
             env = {'GITHUB_EVENT_NAME': 'push', 'GITHUB_REF': 'refs/heads/main',
                    'GITHUB_SHA': SHA, 'GITHUB_REPOSITORY': 'Test/Waygate',
-                   'GATEWAY_IMAGE_PINNED': REPO + ':sha-' + SHA,
-                   'GITHUB_STEP_SUMMARY': str(Path(directory) / 'summary')}
-            for newer_edge in (False, True):
-                commands.clear()
-                def remote(ref):
-                    if ref.endswith(':edge'):
-                        return DIGEST, {'org.opencontainers.image.revision': 'c' * 40}
-                    return DIGEST, labels
-                with patch.dict(os.environ, env), patch.object(publisher, 'run', side_effect=command), \
-                     patch.object(publisher, 'workspace_version', return_value='1.2.3'), \
-                     patch.object(publisher, 'require_merged'), \
-                     patch.object(publisher, 'remote_image', side_effect=remote), \
-                     patch.object(publisher.subprocess, 'run', return_value=subprocess.CompletedProcess([], int(newer_edge))):
-                    publisher.publish()
-                self.assertIn(('docker', 'push', REPO + ':sha-' + SHA), commands)
-                self.assertEqual(('docker', 'push', REPO + ':edge') in commands, not newer_edge)
-                self.assertNotIn(('docker', 'push', REPO + ':latest'), commands)
-                self.assertFalse(any(c[:2] == ('gh', 'release') for c in commands))
+                   'GATEWAY_IMAGE_PINNED': local, 'GITHUB_STEP_SUMMARY': str(summary)}
+            with patch.dict(os.environ, env), patch.object(publisher, 'run', side_effect=command), \
+                 patch.object(publisher, 'workspace_version', return_value='1.2.3'), \
+                 patch.object(publisher, 'require_merged'), \
+                 patch.object(publisher, 'remote_image', side_effect=remote), \
+                 patch.object(publisher.subprocess, 'run', side_effect=AssertionError('unexpected process')):
+                publisher.publish()
+            self.assertEqual([c for c in commands if c[:2] == ('docker', 'push')],
+                             [('docker', 'push', local)])
+            self.assertEqual(inspected, [local])
+            self.assertFalse(any(c[:2] == ('gh', 'release') for c in commands))
+            self.assertIn(REPO + '@' + DIGEST, summary.read_text())
 
     def test_existing_version_and_manual_run_never_publish(self):
         self.exercise_publish('1.2.3', existing=True)

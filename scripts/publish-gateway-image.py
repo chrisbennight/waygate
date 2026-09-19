@@ -74,19 +74,6 @@ def publish():
         raise ValueError('local image provenance does not match the event')
     if kind == 'main':
         digest = push_tag(local, local)
-        # A delayed main run must not roll edge back after a newer run published.
-        current = remote_image(repository + ':edge')
-        if current:
-            previous = current[1].get('org.opencontainers.image.revision', '')
-            if not re.fullmatch('[0-9a-f]{40}', previous):
-                raise ValueError('edge has no valid source revision')
-            result = subprocess.run(['git', 'merge-base', '--is-ancestor', previous, sha])
-            if result.returncode == 1:
-                print('Published source image; edge already points to newer or divergent history.')
-                return
-            result.check_returncode()
-        if push_tag(local, repository + ':edge') != digest:
-            raise RuntimeError('edge digest differs from verified source image')
     else:
         target = repository + ':' + version
         if remote_image(target) is not None:
