@@ -444,26 +444,21 @@ impl AuthorizedCatalog {
                     continue;
                 }
             }
-            let Ok(mut listed) = self.catalog.list_tools(&server).await else {
+            let tenant = principal
+                .map(|principal| principal.tenant.as_str())
+                .unwrap_or(waygate_core::TenantId::DEFAULT);
+            let Ok(resolved) = self.catalog.list_discovery_tools(tenant, &server).await else {
                 continue;
             };
-            listed.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-            for listed_tool in listed {
-                let name = listed_tool.name.as_ref();
+            for resolved in resolved {
+                let ResolvedInvocationTool::Ready(snapshot) = resolved else {
+                    continue;
+                };
+                let name = snapshot.facts().name.as_str();
                 if principal.is_some_and(|principal| profile_blocks_tool(principal, &server, name))
                 {
                     continue;
                 }
-                let tenant = principal
-                    .map(|principal| principal.tenant.as_str())
-                    .unwrap_or(waygate_core::TenantId::DEFAULT);
-                let ResolvedInvocationTool::Ready(snapshot) = self
-                    .catalog
-                    .resolve_discovery_tool(tenant, &server, name)
-                    .await
-                else {
-                    continue;
-                };
                 let authorization = match principal {
                     Some(principal) => {
                         let verdict = match channel {

@@ -146,6 +146,23 @@ mixed snapshot. Standard `tools/list` and gateway discovery cursors also fail
 closed when their authorized view no longer matches, preventing a traversal
 from splicing pages across catalog or policy generations.
 
+## Discovery cost
+
+Listing and search read governed catalog and review decisions in bounded
+groups instead of a serial database round trip for each tool. Definitions and
+classifications are indexed by name within the request. The gateway still
+authorizes each tool for the current caller and rebuilds the eligible view
+before pagination; it does not retain a cross-request authorization cache.
+The request's working set therefore follows the current catalog size, while
+each storage read is bounded. Invocation continues to check current admission
+at the call boundary.
+
+The [discovery diagnostic](testing.md#performance-and-context-measurements)
+measures HTTP listing and the legacy `searchTools` adapter against synthetic
+catalogs and a disposable database. Its elapsed times are local comparison
+evidence, not a production capacity guarantee. The governed search and Code Mode
+surfaces use the same batched authorized catalog reader.
+
 ## Evaluation
 
 Run the deterministic evaluation from the repository root:

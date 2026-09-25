@@ -247,6 +247,25 @@ impl UpstreamPool {
                 return false;
             }
         };
+        self.review_allows_from_state(server, tool, contract, mode, protected, review)
+            .await
+    }
+
+    /// Apply the same decision to a row fetched alone or in a discovery batch.
+    /// A missing protected observation keeps the existing first-observation
+    /// reconciliation path; normal publication has already recorded it.
+    pub(super) async fn review_allows_from_state(
+        &self,
+        server: &str,
+        tool: &str,
+        contract: Option<&Tool>,
+        mode: crate::ClassificationMode,
+        protected: bool,
+        review: Option<(String, bool)>,
+    ) -> bool {
+        let Some(store) = self.tool_reviews.as_ref() else {
+            return true;
+        };
         if !protected && review.is_none() {
             return true;
         }

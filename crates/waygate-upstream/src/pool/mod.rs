@@ -1251,21 +1251,45 @@ impl UpstreamCatalog for UpstreamPool {
         if self.tool_reviews.is_none() {
             return Ok(tools);
         }
-        let mut admitted = Vec::with_capacity(tools.len());
-        for tool in tools {
-            if matches!(
-                self.resolve_invocation_tool(
-                    waygate_core::TenantId::DEFAULT,
-                    server,
-                    tool.name.as_ref()
-                )
-                .await,
-                ResolvedInvocationTool::Ready(_)
-            ) {
-                admitted.push(tool);
-            }
-        }
-        Ok(admitted)
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        let resolved = self
+            .resolve_discovery_batch(waygate_core::TenantId::DEFAULT, server, &names)
+            .await?;
+        Ok(tools
+            .into_iter()
+            .zip(resolved)
+            .filter_map(|(tool, resolved)| {
+                matches!(resolved, ResolvedInvocationTool::Ready(_)).then_some(tool)
+            })
+            .collect())
+    }
+
+    async fn resolve_discovery_tools(
+        &self,
+        tenant: &str,
+        server: &str,
+        tool_names: &[String],
+    ) -> Result<Vec<ResolvedInvocationTool>, McpError> {
+        self.resolve_discovery_batch(tenant, server, tool_names)
+            .await
+    }
+
+    async fn list_discovery_tools(
+        &self,
+        tenant: &str,
+        server: &str,
+    ) -> Result<Vec<ResolvedInvocationTool>, McpError> {
+        let entry = self.entry(server)?;
+        let names = entry
+            .published_tools(self.tool_reviews.is_none())
+            .await
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        self.resolve_discovery_batch(tenant, server, &names).await
     }
 
     async fn discovery_generation(&self) -> Result<Option<i64>, McpError> {
@@ -2213,6 +2237,7 @@ mod admission;
 mod catalog;
 mod configuration;
 mod contract_binding;
+mod discovery;
 mod dispatch;
 mod file_transfers;
 mod freshness;

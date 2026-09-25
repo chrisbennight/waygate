@@ -24,6 +24,207 @@ fn server(tenant: &str) -> ImportServer {
 }
 
 #[tokio::test]
+async fn batched_resolution_preserves_tenant_lifecycle_and_review_decisions_in_bounded_reads() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use waygate_catalog::{CatalogStore, PgCatalogStore, ResolvedTool, TOOL_RESOLUTION_BATCH_SIZE};
+    let Some(setup) = audit_pool_or_skip().await else {
+        return;
+    };
+    let own = format!("batch-own-{}", Uuid::new_v4());
+    let global = format!("batch-global-{}", Uuid::new_v4());
+    let name = format!("batch-{}", Uuid::new_v4());
+    let mut own_server = server(&own);
+    own_server.name = name.clone();
+    let prototype = own_server.tools[0].clone();
+    own_server.tools = (0..TOOL_RESOLUTION_BATCH_SIZE)
+        .map(|i| {
+            let mut tool = prototype.clone();
+            tool.name = format!("tool.{i}");
+            tool
+        })
+        .collect();
+    let names = own_server
+        .tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<Vec<_>>();
+    let mut global_server = server(&global);
+    global_server.name = name.clone();
+    global_server.tools[0].name = names[0].clone();
+    for fixture in [own_server, global_server] {
+        ManifestImporter::new(setup.clone())
+            .import_atomic(&fixture.tenant_id, std::slice::from_ref(&fixture), false)
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE mcp_servers SET visibility='global' WHERE tenant_id=$1 AND name=$2")
+        .bind(&global)
+        .bind(&name)
+        .execute(&setup)
+        .await
+        .unwrap();
+
+    let reads = Arc::new(AtomicUsize::new(0));
+    let on_connect = reads.clone();
+    let on_acquire = reads.clone();
+    let measured = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .min_connections(1)
+        .test_before_acquire(false)
+        .after_connect(move |_, _| {
+            on_connect.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async { Ok(()) })
+        })
+        .before_acquire(move |_, _| {
+            on_acquire.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async { Ok(true) })
+        })
+        .connect(&std::env::var("AUDIT_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let store = PgCatalogStore::new(measured.clone());
+    reads.store(0, Ordering::Relaxed);
+    let batch = store.resolve_tools(&own, &name, &names).await.unwrap();
+    assert_eq!(
+        reads.load(Ordering::Relaxed),
+        1,
+        "a complete batch needs one database statement"
+    );
+    assert_eq!(batch.len(), names.len());
+    for (tool, expected) in batch.iter().zip(&names) {
+        let ResolvedTool::Live(tool) = tool else {
+            panic!("expected approved tool");
+        };
+        assert_eq!(&tool.tool_name, expected);
+    }
+    let own_id = match &batch[0] {
+        ResolvedTool::Live(tool) => tool.tool_id,
+        _ => unreachable!(),
+    };
+    let other = store
+        .resolve_tools("unrelated-tenant", &name, &[names[0].clone()])
+        .await
+        .unwrap();
+    let ResolvedTool::Live(global_tool) = &other[0] else {
+        panic!("global tool is visible");
+    };
+    assert_ne!(
+        own_id, global_tool.tool_id,
+        "the caller's tenant overrides the global server"
+    );
+
+    let requested = vec![
+        "absent".to_owned(),
+        names[1].clone(),
+        names[0].clone(),
+        names[1].clone(),
+    ];
+    let ordered = store.resolve_tools(&own, &name, &requested).await.unwrap();
+    for (tool, expected) in ordered.iter().zip(&requested) {
+        let single = store
+            .resolve_tool(&own, &format!("{name}.{expected}"))
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(tool).unwrap(),
+            serde_json::to_value(single).unwrap()
+        );
+    }
+    reads.store(0, Ordering::Relaxed);
+    assert!(store
+        .resolve_tools(&own, &name, &[])
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .resolve_tools(
+            &own,
+            &name,
+            &vec![names[0].clone(); TOOL_RESOLUTION_BATCH_SIZE + 1]
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        reads.load(Ordering::Relaxed),
+        0,
+        "empty and oversized requests do not query storage"
+    );
+
+    sqlx::query("UPDATE mcp_tool_versions SET approved_at=NULL WHERE tool_id=$1")
+        .bind(own_id)
+        .execute(&setup)
+        .await
+        .unwrap();
+    let pending = store.resolve_tools(&own, &name, &names[..2]).await.unwrap();
+    assert!(matches!(pending[0], ResolvedTool::PendingApproval { .. }));
+    assert!(matches!(pending[1], ResolvedTool::Live(_)));
+
+    let reviews = PgCatalogStore::new(setup.clone());
+    reviews
+        .observe(
+            &own,
+            &name,
+            &names[1],
+            "first",
+            &serde_json::json!({}),
+            true,
+        )
+        .await
+        .unwrap();
+    reviews
+        .observe(
+            &own,
+            &name,
+            &names[1],
+            "changed",
+            &serde_json::json!({}),
+            true,
+        )
+        .await
+        .unwrap();
+    reads.store(0, Ordering::Relaxed);
+    let states = store.review_states(&own, &name, &names).await.unwrap();
+    assert_eq!(
+        reads.load(Ordering::Relaxed),
+        1,
+        "review decisions are read as one batch"
+    );
+    assert_eq!(states.get(&names[1]), Some(&("changed".to_owned(), true)));
+    assert!(
+        !states.contains_key(&names[0]),
+        "unobserved names stay distinct from acceptance"
+    );
+    assert!(store
+        .review_states(&global, &name, &names)
+        .await
+        .unwrap()
+        .is_empty());
+
+    sqlx::query("UPDATE mcp_servers SET status='quarantined' WHERE tenant_id=$1 AND name=$2")
+        .bind(&own)
+        .bind(&name)
+        .execute(&setup)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .resolve_tools(&own, &name, &requested)
+            .await
+            .unwrap()
+            .iter()
+            .all(|tool| matches!(tool, ResolvedTool::Quarantined { .. })),
+        "server quarantine also blocks missing tool rows and never revives the global fallback"
+    );
+    sqlx::query("DELETE FROM mcp_servers WHERE tenant_id=ANY($1)")
+        .bind(&[own, global])
+        .execute(&setup)
+        .await
+        .unwrap();
+    measured.close().await;
+}
+
+#[tokio::test]
 async fn every_served_version_metadata_change_advances_discovery_generation() {
     let Some(pool) = audit_pool_or_skip().await else {
         return;

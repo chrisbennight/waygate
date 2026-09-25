@@ -18,22 +18,30 @@ pub(super) fn manifest_tool_facts(
     server: &str,
     tool_name: &str,
 ) -> ToolFacts {
-    let (risk, side_effects, pii) = manifest
-        .and_then(|m| {
-            let mode = m.classification_mode;
-            m.tools
-                .iter()
-                .find(|t| t.name == tool_name)
-                .map(|c| match mode {
-                    crate::ClassificationMode::Manifest => (c.risk, c.side_effects, c.pii),
-                    // This synchronous fallback cannot see the live annotations
-                    // (bound only in the async resolver), so it stays
-                    // conservatively side-effecting/PII for annotation-native
-                    // tools. Enforcement uses the resolved snapshot; UX
-                    // consumers that need the derived side-effect fact call
-                    // `UpstreamPool::resolved_side_effects` instead.
-                    crate::ClassificationMode::McpAnnotations => (c.risk, true, true),
-                })
+    classification_facts(
+        manifest.map(|m| m.classification_mode).unwrap_or_default(),
+        manifest.and_then(|m| m.tools.iter().find(|t| t.name == tool_name)),
+        server,
+        tool_name,
+    )
+}
+
+fn classification_facts(
+    mode: crate::ClassificationMode,
+    classification: Option<&crate::ToolClassification>,
+    server: &str,
+    tool_name: &str,
+) -> ToolFacts {
+    let (risk, side_effects, pii) = classification
+        .map(|c| match mode {
+            crate::ClassificationMode::Manifest => (c.risk, c.side_effects, c.pii),
+            // This synchronous fallback cannot see the live annotations
+            // (bound only in the async resolver), so it stays
+            // conservatively side-effecting/PII for annotation-native
+            // tools. Enforcement uses the resolved snapshot; UX
+            // consumers that need the derived side-effect fact call
+            // `UpstreamPool::resolved_side_effects` instead.
+            crate::ClassificationMode::McpAnnotations => (c.risk, true, true),
         })
         .unwrap_or((RiskTier::Low, false, false));
     ToolFacts {
@@ -253,49 +261,64 @@ pub(super) fn snapshot_inputs_for(
     tool_name: &str,
     published: schema_admission::PublishedToolContract,
 ) -> SnapshotInputs {
+    snapshot_inputs_for_classification(
+        manifest,
+        manifest.and_then(|m| m.tools.iter().find(|tool| tool.name == tool_name)),
+        server,
+        tool_name,
+        published,
+    )
+}
+
+/// The indexed classification belongs to the supplied immutable manifest.
+pub(super) fn snapshot_inputs_for_classification(
+    manifest: Option<&UpstreamManifest>,
+    manifest_tool: Option<&crate::ToolClassification>,
+    server: &str,
+    tool_name: &str,
+    published: schema_admission::PublishedToolContract,
+) -> SnapshotInputs {
     let annotation_mode = manifest.is_some_and(|m| {
         matches!(
             m.classification_mode,
             crate::ClassificationMode::McpAnnotations
         )
     });
-    let approved_behavior_hash = manifest.and_then(|m| approved_hash_for(m, tool_name));
+    let approved_behavior_hash = manifest_tool
+        .filter(|_| annotation_mode)
+        .and_then(|tool| tool.approved_behavior_hash.clone());
     let approval_mode = manifest.map_or(crate::ApprovalMode::PerCall, |m| m.approval_mode);
     let manifest_version_hash = manifest.and_then(|m| {
         if !matches!(m.classification_mode, crate::ClassificationMode::Manifest) {
             return None;
         }
-        m.tools
-            .iter()
-            .find(|tool| tool.name == tool_name)
-            .map(|tool| {
-                // The refinement is part of the version identity, so the hash
-                // computed here has to see it too — otherwise this fallback
-                // and the importer would disagree about which version a
-                // manifest describes.
-                let operations: Vec<waygate_catalog::ClassifiedOperation<'_>> = tool
-                    .operations
-                    .iter()
-                    .map(|operation| waygate_catalog::ClassifiedOperation {
-                        value: &operation.value,
-                        risk: operation.risk.as_str(),
-                        side_effects: operation.side_effects,
-                        pii: operation.pii,
-                    })
-                    .collect();
-                waygate_catalog::manifest_classification_hash(
-                    &tool.name,
-                    tool.risk.as_str(),
-                    tool.side_effects,
-                    tool.pii,
-                    tool.discriminator.as_deref(),
-                    &operations,
-                )
-            })
+        manifest_tool.map(|tool| {
+            // The refinement is part of the version identity, so the hash
+            // computed here has to see it too — otherwise this fallback
+            // and the importer would disagree about which version a
+            // manifest describes.
+            let operations: Vec<waygate_catalog::ClassifiedOperation<'_>> = tool
+                .operations
+                .iter()
+                .map(|operation| waygate_catalog::ClassifiedOperation {
+                    value: &operation.value,
+                    risk: operation.risk.as_str(),
+                    side_effects: operation.side_effects,
+                    pii: operation.pii,
+                })
+                .collect();
+            waygate_catalog::manifest_classification_hash(
+                &tool.name,
+                tool.risk.as_str(),
+                tool.side_effects,
+                tool.pii,
+                tool.discriminator.as_deref(),
+                &operations,
+            )
+        })
     });
     // Read in every classification mode. Whether a tool dispatches by argument
     // is a property of the tool, not of which authority classifies it.
-    let manifest_tool = manifest.and_then(|m| m.tools.iter().find(|tool| tool.name == tool_name));
     let manifest_discriminator = manifest_tool.and_then(|tool| tool.discriminator.clone());
     let manifest_operations = manifest_tool
         .map(|tool| {
@@ -311,7 +334,12 @@ pub(super) fn snapshot_inputs_for(
         })
         .unwrap_or_default();
     SnapshotInputs {
-        manifest_facts: manifest_tool_facts(manifest, server, tool_name),
+        manifest_facts: classification_facts(
+            manifest.map(|m| m.classification_mode).unwrap_or_default(),
+            manifest_tool,
+            server,
+            tool_name,
+        ),
         annotation_mode,
         approval_mode,
         approved_behavior_hash,
@@ -344,6 +372,15 @@ pub(super) struct SnapshotInputs {
     pub(super) published: schema_admission::PublishedToolContract,
 }
 
+/// Request-local reads, captured before any asynchronous batch lookup. These
+/// never survive a discovery request or replace the invocation-time recheck.
+pub(super) struct DiscoveryReads {
+    pub(super) review_allows: bool,
+    pub(super) catalog:
+        Option<Result<waygate_catalog::ResolvedTool, Arc<waygate_catalog::CatalogError>>>,
+    pub(super) transition: Option<CatalogTransition>,
+}
+
 impl UpstreamPool {
     /// Resolve the governed snapshot for one tool from explicit inputs.
     ///
@@ -367,6 +404,18 @@ impl UpstreamPool {
         tool_name: &str,
         inputs: SnapshotInputs,
     ) -> ResolvedInvocationTool {
+        self.resolve_snapshot_with_reads(tenant, server, tool_name, inputs, None)
+            .await
+    }
+
+    pub(super) async fn resolve_snapshot_with_reads(
+        &self,
+        tenant: &str,
+        server: &str,
+        tool_name: &str,
+        inputs: SnapshotInputs,
+        reads: Option<DiscoveryReads>,
+    ) -> ResolvedInvocationTool {
         let SnapshotInputs {
             manifest_facts,
             annotation_mode,
@@ -382,15 +431,19 @@ impl UpstreamPool {
         } else {
             crate::ClassificationMode::Manifest
         };
-        if !self
-            .review_allows(
-                server,
-                tool_name,
-                published.advertised_definition.as_ref(),
-                mode,
-            )
-            .await
-        {
+        let review_allows = match reads.as_ref() {
+            Some(reads) => reads.review_allows,
+            None => {
+                self.review_allows(
+                    server,
+                    tool_name,
+                    published.advertised_definition.as_ref(),
+                    mode,
+                )
+                .await
+            }
+        };
+        if !review_allows {
             return ResolvedInvocationTool::Quarantined {
                 server: server.to_owned(),
                 tool: tool_name.to_owned(),
@@ -402,7 +455,10 @@ impl UpstreamPool {
         // full-set import succeeds, so only tools crossing that boundary fail
         // closed. Once settled, the catalog remains authoritative and may
         // intentionally override the manifest classification.
-        let catalog_transition = self.catalog_transition_state(server, tool_name);
+        let catalog_transition = reads
+            .as_ref()
+            .map(|reads| reads.transition)
+            .unwrap_or_else(|| self.catalog_transition_state(server, tool_name));
         if catalog_transition.is_some_and(|transition| transition.pending) {
             tracing::warn!(
                 %tenant, %server, tool = %tool_name,
@@ -526,7 +582,12 @@ impl UpstreamPool {
             return ResolvedInvocationTool::Ready(fallback(&mut published, manifest_facts, true));
         };
         let fq = format!("{server}.{tool_name}");
-        let resolved = catalog.resolve_tool(tenant, &fq).await;
+        let resolved = match reads {
+            Some(reads) => reads
+                .catalog
+                .expect("configured catalog has a batch result"),
+            None => catalog.resolve_tool(tenant, &fq).await.map_err(Arc::new),
+        };
         let catalog_transition_after = self.catalog_transition_state(server, tool_name);
         if catalog_transition_after != catalog_transition
             || catalog_transition_after.is_some_and(|transition| transition.pending)
@@ -840,23 +901,6 @@ fn claims_facts(
     facts.pii = claims.protected_data();
     facts.requires_approval = claims.requires_approval(approval_mode);
     Ok((facts, claims.output_sensitive))
-}
-
-/// The manifest's reviewed behavior hash for one tool, when annotation mode
-/// governs the upstream; `None` in manifest mode, where the separate legacy
-/// manifest source-generation hash binds the catalog row instead.
-pub(super) fn approved_hash_for(manifest: &UpstreamManifest, tool_name: &str) -> Option<String> {
-    if !matches!(
-        manifest.classification_mode,
-        crate::ClassificationMode::McpAnnotations
-    ) {
-        return None;
-    }
-    manifest
-        .tools
-        .iter()
-        .find(|tool| tool.name == tool_name)
-        .and_then(|tool| tool.approved_behavior_hash.clone())
 }
 
 pub(super) struct SessionToolsReadError {

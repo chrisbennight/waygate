@@ -142,6 +142,12 @@ The hot path for one tool call:
    authoritative per-tool store failure; sustained instability returns a
    retryable error rather than an incomplete projection. Cursors bind the
    authorized view and reject cross-generation traversal.
+   Discovery reads governed tool and review state in bounded batches and
+   indexes the request's published definitions by name. The same contract
+   resolver supplies invocation and discovery snapshots. Authorization still
+   runs for each principal and tool; no authorized catalog is cached across
+   callers. A page still builds the eligible catalog before pagination, so
+   batching reduces database round trips without claiming constant-time pages.
    Legacy sessions retain the gateway-owned
    `searchTools` compatibility projection; discovered tools are invoked as
    `<server>.<tool>`. Upstream `resources/list` pages and `resources/read`

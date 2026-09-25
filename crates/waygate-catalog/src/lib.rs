@@ -32,7 +32,7 @@ pub use schema_hash::{
     approval_binding_hash, argument_hash, behavior_hash, manifest_classification_hash, schema_hash,
     validator_schema_hash, ClassifiedOperation,
 };
-pub use store::{CatalogStore, PgCatalogStore, SharedCatalogStore};
+pub use store::{CatalogStore, PgCatalogStore, SharedCatalogStore, TOOL_RESOLUTION_BATCH_SIZE};
 pub use types::{
     ApprovalAction, ApprovalGrant, ApprovalGrantExecutionBinding, CatalogError,
     CatalogServerStatus, CatalogServerStatusChange, CatalogServerSummary,
