@@ -788,14 +788,23 @@ pub type SharedInvocation = std::sync::Arc<dyn InvocationService>;
 // stays here (in `waygate-invocation`) so the invocation crate
 // doesn't grow a dep on `waygate-admin`.
 
-/// One operator-actionable HITL event the invocation pipeline
-/// hands to the notifier when an `ApprovalRequired` denial would
-/// be raised. The wire shape on the WebSocket side adds
-/// timestamping + a TTL; this struct is the minimum identifying
-/// payload (tenant + principal + tool + argument hash) so future
-/// notifier implementations don't have to plumb a wider type.
+/// Human-readable consequences and submitted schema fields. Protocol bindings
+/// are kept separately; this summary never contains argument values or hashes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApprovalSummary {
+    pub description: Option<String>,
+    pub affected_fields: Vec<String>,
+}
+
+/// One operator-actionable HITL event the invocation pipeline hands to the
+/// notifier when an `ApprovalRequired` denial would be raised. The WebSocket
+/// representation adds timestamping and a TTL to this request binding and
+/// value-free review summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HitlApprovalNeeded {
+    /// Value-free review information from the admitted tool contract.
+    #[serde(default)]
+    pub summary: ApprovalSummary,
     /// Tenant id the calling principal resolved to. Notifiers MUST
     /// filter their subscribers by this so cross-tenant operator
     /// visibility doesn't leak.

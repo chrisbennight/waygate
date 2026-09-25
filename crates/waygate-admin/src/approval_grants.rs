@@ -224,6 +224,9 @@ pub struct CodeModeApprovalRequestView {
     pub operation: String,
     pub argument_hash: String,
     pub arguments_preview: serde_json::Value,
+    /// Reviewed tool consequences; absent on older captured requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub risk: String,
     pub source_digest: String,
     pub call_id: Uuid,

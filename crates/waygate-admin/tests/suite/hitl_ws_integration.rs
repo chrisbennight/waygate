@@ -193,6 +193,7 @@ async fn admin_subscriber_receives_publish_in_same_tenant() {
     // publish (otherwise the broadcast Drops it on the floor).
     tokio::time::sleep(Duration::from_millis(50)).await;
     hub.notify_approval_needed(HitlApprovalNeeded {
+        summary: Default::default(),
         tenant_id: "acme".into(),
         principal_sub: "user@acme.example".into(),
         principal_issuer: "https://issuer.test".to_owned(),
@@ -234,6 +235,7 @@ async fn subscriber_does_not_receive_events_for_other_tenant() {
 
     // Publish ONE event for tenant globex.
     hub.notify_approval_needed(HitlApprovalNeeded {
+        summary: Default::default(),
         tenant_id: "globex".into(),
         principal_sub: "user@globex.example".into(),
         principal_issuer: "https://issuer.test".to_owned(),

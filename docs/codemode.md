@@ -350,6 +350,22 @@ it, so status carries the checkpoint while the execution waits to be resumed
 and omits it in every other state. An approval-bound wait stores a binding
 rather than a checkpoint and is never reported here.
 
+Pending approval requests include the admitted tool's reviewed description so
+operators can read its consequences and retention limitations. When the reviewed
+input classification is sensitive, `arguments_preview` contains only submitted
+schema field names with explicit redaction markers. It includes no values,
+content fragments, lengths, or per-value hashes. Other inputs retain the ordinary
+credential-redacted preview. The separate protocol binding covers the original
+arguments and reviewed contract; redaction never changes the operation submitted
+upstream. Legacy requests without a captured description remain readable.
+
+Ordinary per-call approval notifications also carry a separate `summary` with
+the admitted description and submitted schema field names. The notification's
+existing protocol bindings remain separate from this value-free operator text.
+The dashboard agent applies the same explicit sensitive-input classification
+before emitting its call and approval events; its dispatch receives the original
+arguments and remains bound to the captured contract.
+
 Start and status share one response shape, so the first poll and every later
 one read identically. All three report lifecycle in the same vocabulary the MCP
 Tasks projection uses, and a detached start routes through the same admission,

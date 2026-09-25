@@ -109,6 +109,8 @@ pub enum AdminApprovalMessage {
     /// authorized.
     #[serde(rename = "approval_needed")]
     ApprovalNeeded {
+        /// Value-free consequences and schema field names for operator review.
+        summary: waygate_invocation::ApprovalSummary,
         tenant_id: String,
         principal_sub: String,
         /// Issuer that minted the requester's `sub`. The operator echoes
@@ -132,6 +134,7 @@ pub enum AdminApprovalMessage {
 impl AdminApprovalMessage {
     fn from_event(event: HitlApprovalNeeded) -> Self {
         Self::ApprovalNeeded {
+            summary: event.summary,
             tenant_id: event.tenant_id,
             principal_sub: event.principal_sub,
             principal_issuer: event.principal_issuer,
@@ -361,6 +364,7 @@ mod tests {
     #[test]
     fn message_tenant_id_returns_inner() {
         let msg = AdminApprovalMessage::ApprovalNeeded {
+            summary: Default::default(),
             tenant_id: "acme".into(),
             principal_sub: "alice".into(),
             principal_issuer: "https://issuer.test".to_owned(),
@@ -379,6 +383,7 @@ mod tests {
         // No subscribers yet; send returns Err which the
         // notifier coerces to a debug-level log + drop.
         hub.notify_approval_needed(HitlApprovalNeeded {
+            summary: Default::default(),
             tenant_id: "acme".into(),
             principal_sub: "alice".into(),
             principal_issuer: "https://issuer.test".to_owned(),
@@ -397,6 +402,7 @@ mod tests {
         assert_eq!(hub.subscriber_count(), 1);
 
         hub.notify_approval_needed(HitlApprovalNeeded {
+            summary: Default::default(),
             tenant_id: "acme".into(),
             principal_sub: "alice".into(),
             principal_issuer: "https://issuer.test".to_owned(),
@@ -430,6 +436,10 @@ mod tests {
         let hub = ApprovalHub::default();
         let mut rx = hub.subscribe_raw();
         hub.notify_approval_needed(HitlApprovalNeeded {
+            summary: waygate_invocation::ApprovalSummary {
+                description: Some("Replace configuration; upstream retention applies.".to_owned()),
+                affected_fields: vec!["contents".to_owned()],
+            },
             tenant_id: "acme".into(),
             principal_sub: "alice".into(),
             principal_issuer: "https://issuer.test".to_owned(),
@@ -443,6 +453,14 @@ mod tests {
         // The `event` tag and the field names are the wire
         // contract — pin them so a future rename breaks tests.
         assert_eq!(json["event"], "approval_needed");
+        assert_eq!(
+            json["summary"]["affected_fields"],
+            serde_json::json!(["contents"])
+        );
+        assert_eq!(
+            json["summary"]["description"],
+            "Replace configuration; upstream retention applies."
+        );
         assert_eq!(json["tenant_id"], "acme");
         assert_eq!(json["principal_sub"], "alice");
         assert_eq!(json["server"], "example-messages");

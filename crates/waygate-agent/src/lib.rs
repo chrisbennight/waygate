@@ -130,6 +130,11 @@ pub struct ToolOutcome {
 /// agent is allowed to call.
 #[async_trait]
 pub trait AgentToolDispatch: Send + Sync {
+    /// Operator-facing projection only. Dispatch receives the original arguments;
+    /// implementations must hide values classified as sensitive input here.
+    fn approval_preview(&self, _name: &str, arguments: &str) -> String {
+        arguments.to_owned()
+    }
     async fn available_tools(&self) -> Result<Vec<AgentTool>, AgentError>;
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<ToolOutcome, AgentError>;
 }

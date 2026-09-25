@@ -2933,7 +2933,7 @@ impl CodeModeTools {
                     status: ExecutionResponseStatus::WaitingForApproval,
                     result: Value::Null,
                     checkpoint: None,
-                    approval: Some(approval),
+                    approval: Some(*approval),
                     connector_calls: calls,
                     result_ref: None,
                     artifacts,
@@ -3142,7 +3142,7 @@ impl CodeModeTools {
                                         },
                                     ) => {
                                         break RunnerProgramOutcome::WaitingForApproval {
-                                            approval,
+                                            approval: Box::new(approval),
                                             calls,
                                             artifacts,
                                         };
@@ -3296,6 +3296,7 @@ impl CodeModeTools {
         self.invoke_connector(
             principal,
             &AdmittedCall {
+                approval_context: None,
                 server: server.to_owned(),
                 tool: tool.to_owned(),
                 contract: ExecutionContract::Upstream {
@@ -3457,6 +3458,7 @@ impl CodeModeTools {
             let public_binding = contract.binding;
             let call_id = runner_call_id(server, &tool.identity.name);
             bindings.push(ExecutionBinding {
+                approval_context: Some(ApprovalContext::from_tool(&tool)),
                 contract: execution_contract,
                 runner: RunnerBinding {
                     connector: public_binding.connector.clone(),
@@ -4565,6 +4567,7 @@ fn admit_execution_bindings(
         admitted_calls.insert(
             call_id,
             AdmittedCall {
+                approval_context: binding.approval_context,
                 server: binding.server,
                 tool: binding.tool,
                 contract: binding.contract,
@@ -5178,7 +5181,14 @@ fn mutation_approval_request(
         connector: admitted.server.clone(),
         operation: admitted.tool.clone(),
         argument_hash: waygate_catalog::argument_hash(arguments.as_object()),
-        arguments_preview: approval_arguments_preview(arguments),
+        arguments_preview: admitted.approval_context.as_ref().map_or_else(
+            || approval_arguments_preview(arguments),
+            |context| context.arguments_preview(arguments),
+        ),
+        description: admitted
+            .approval_context
+            .as_ref()
+            .map(|context| context.description.clone()),
         risk: match admitted.contract.risk() {
             InvocationRisk::Low => Risk::Low,
             InvocationRisk::Medium => Risk::Medium,
@@ -5190,6 +5200,72 @@ fn mutation_approval_request(
         contract: serde_json::to_value(&admitted.contract)
             .expect("invocation contract identity is serializable"),
         prior_effects: 0,
+    }
+}
+
+/// Approval presentation derived from the admitted, reviewed tool definition.
+/// Raw arguments remain inside the invocation boundary; this projection does
+/// not change what is authorized, hashed, or submitted upstream.
+#[derive(Debug, Clone)]
+struct ApprovalContext {
+    description: String,
+    sensitive_input: bool,
+    input_fields: Vec<String>,
+}
+
+impl ApprovalContext {
+    fn from_tool(tool: &CatalogTool) -> Self {
+        let sensitive_input = tool
+            .invocation_snapshot()
+            .and_then(|snapshot| {
+                Some(
+                    waygate_upstream::security_metadata::behavior_claims(
+                        snapshot.tool_annotations()?,
+                        snapshot.action_metadata()?,
+                    )
+                    .map_or(true, |claims| claims.input_sensitive),
+                )
+            })
+            // Legacy aggregate PII can describe output alone. Preserve its
+            // existing credential-redacted preview without inferring that
+            // an effect destination is secret input.
+            .unwrap_or(false);
+        let input_fields = tool
+            .definition
+            .input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .map(|fields| fields.keys().cloned().collect())
+            .unwrap_or_default();
+        Self {
+            description: tool
+                .definition
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .to_owned(),
+            sensitive_input,
+            input_fields,
+        }
+    }
+
+    fn arguments_preview(&self, arguments: &Value) -> Value {
+        if !self.sensitive_input {
+            return approval_arguments_preview(arguments);
+        }
+        // Use schema-owned names, not arbitrary user-controlled object keys.
+        Value::Object(
+            self.input_fields
+                .iter()
+                .filter(|name| arguments.get(name.as_str()).is_some())
+                .map(|name| {
+                    (
+                        name.clone(),
+                        Value::String("[REDACTED:SENSITIVE_INPUT]".to_owned()),
+                    )
+                })
+                .collect(),
+        )
     }
 }
 
@@ -6046,6 +6122,9 @@ struct ArtifactParams {
 
 #[derive(Debug, Serialize)]
 struct ExecutionBinding {
+    // Reconstructed from the same hash-bound catalog definition on resume.
+    #[serde(skip)]
+    approval_context: Option<ApprovalContext>,
     runner: RunnerBinding,
     server: String,
     tool: String,
@@ -6054,6 +6133,7 @@ struct ExecutionBinding {
 
 #[derive(Debug, Clone)]
 struct AdmittedCall {
+    approval_context: Option<ApprovalContext>,
     server: String,
     tool: String,
     contract: ExecutionContract,
@@ -6145,13 +6225,14 @@ struct MutationApprovalRequest {
     operation: String,
     /// Canonical hash of the original arguments consumed by the approval gate.
     argument_hash: String,
-    /// Complete argument preview. Every value covered by `argument_hash` is
-    /// shown in full — effect destinations, payloads, and PII-shaped values
-    /// included — so the approver reviews exactly what the approval would
-    /// authorize; only recognized credential patterns and sensitive key
-    /// names are replaced with explicit labeled markers. Arguments too large
-    /// for exact review are refused before a request is ever created.
+    /// Argument preview with credentials redacted. For classified sensitive
+    /// inputs, only submitted schema field names are shown, with value markers.
+    /// The protocol binding still covers the complete original arguments.
     arguments_preview: Value,
+    /// Reviewed tool description explaining consequences and limitations.
+    /// Absent on approval requests captured before description support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     /// Governed risk classification.
     risk: Risk,
     /// Digest of the exact JavaScript source.
@@ -6331,7 +6412,7 @@ enum RunnerProgramOutcome {
         artifacts: Vec<ArtifactReference>,
     },
     WaitingForApproval {
-        approval: MutationApprovalRequest,
+        approval: Box<MutationApprovalRequest>,
         calls: usize,
         artifacts: Vec<ArtifactReference>,
     },
@@ -10146,6 +10227,7 @@ mod tests {
         let admitted_calls = HashMap::from([(
             call_id.clone(),
             AdmittedCall {
+                approval_context: None,
                 server: "email".to_owned(),
                 tool: "send".to_owned(),
                 contract: upstream_contract(fake.contract_identity("email", "send")),
@@ -10218,6 +10300,7 @@ mod tests {
         let admitted = HashMap::from([(
             runner_call_id("email", "read"),
             AdmittedCall {
+                approval_context: None,
                 server: "email".to_owned(),
                 tool: "read".to_owned(),
                 contract: upstream_contract(fake.contract_identity("email", "read")),
@@ -10233,6 +10316,7 @@ mod tests {
 
     fn execution_binding(catalog: &FakeCatalog, server: &str, tool: &str) -> ExecutionBinding {
         ExecutionBinding {
+            approval_context: None,
             runner: RunnerBinding {
                 connector: server.to_owned(),
                 operation: tool.to_owned(),
@@ -10318,6 +10402,7 @@ mod tests {
         assert_ne!(source_hash, projected_hash);
 
         let binding = || ExecutionBinding {
+            approval_context: None,
             runner: RunnerBinding {
                 connector: "email".to_owned(),
                 operation: "read".to_owned(),
@@ -10536,6 +10621,7 @@ mod tests {
         let admitted_calls = HashMap::from([(
             call_id.clone(),
             AdmittedCall {
+                approval_context: None,
                 server: "email".to_owned(),
                 tool: "send".to_owned(),
                 contract: upstream_contract(fake.contract_identity("email", "send")),
@@ -10626,6 +10712,7 @@ mod tests {
         let admitted_calls = HashMap::from([(
             call_id.clone(),
             AdmittedCall {
+                approval_context: None,
                 server: "email".to_owned(),
                 tool: "send".to_owned(),
                 contract: upstream_contract(fake.contract_identity("email", "send")),
@@ -10710,6 +10797,7 @@ mod tests {
         let admitted_calls = HashMap::from([(
             call_id.clone(),
             AdmittedCall {
+                approval_context: None,
                 server: "email".to_owned(),
                 tool: "send".to_owned(),
                 contract: upstream_contract(fake.contract_identity("email", "send")),
@@ -10802,6 +10890,7 @@ mod tests {
         let admitted_calls = HashMap::from([(
             call_id.clone(),
             AdmittedCall {
+                approval_context: None,
                 server: "email".to_owned(),
                 tool: "send".to_owned(),
                 contract: upstream_contract(fake.contract_identity("email", "send")),
@@ -11024,6 +11113,7 @@ mod tests {
             operation: "send".to_owned(),
             argument_hash: "sha256:new-request".to_owned(),
             arguments_preview: json!({"value": "x"}),
+            description: None,
             risk: Risk::High,
             source_digest: source_digest(source),
             call_id: Uuid::new_v5(&claim.execution_id, &1_u32.to_be_bytes()),
@@ -11095,6 +11185,7 @@ mod tests {
         let admitted_calls = HashMap::from([(
             call_id.clone(),
             AdmittedCall {
+                approval_context: None,
                 server: "email".to_owned(),
                 tool: "send".to_owned(),
                 contract: upstream_contract(fake.contract_identity("email", "send")),
@@ -11179,6 +11270,7 @@ mod tests {
         let admitted_calls = HashMap::from([(
             call_id.clone(),
             AdmittedCall {
+                approval_context: None,
                 server: "email".to_owned(),
                 tool: "send".to_owned(),
                 contract: upstream_contract(fake.contract_identity("email", "send")),
@@ -11250,6 +11342,7 @@ mod tests {
         let admitted_calls = HashMap::from([(
             call_id.clone(),
             AdmittedCall {
+                approval_context: None,
                 server: "email".to_owned(),
                 tool: "send".to_owned(),
                 contract: upstream_contract(fake.contract_identity("email", "send")),
@@ -11349,6 +11442,7 @@ mod tests {
         let admitted_calls = HashMap::from([(
             call_id.clone(),
             AdmittedCall {
+                approval_context: None,
                 server: "email".to_owned(),
                 tool: "send".to_owned(),
                 contract: upstream_contract(fake.contract_identity("email", "send")),
@@ -11549,6 +11643,123 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn aggregate_pii_does_not_hide_ordinary_effect_destinations() {
+        let definition = Tool::new(
+            "email.send",
+            "Send a message",
+            Arc::new(
+                json!({"type": "object", "properties": {"recipient": {"type": "string"}}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        );
+        let tool = CatalogTool::builtin("email", definition, RiskTier::High, true, true);
+        let preview = ApprovalContext::from_tool(&tool).arguments_preview(
+            &json!({"recipient": "recipient@example.test", "password": "synthetic-password"}),
+        );
+        assert_eq!(preview["recipient"], "recipient@example.test");
+        assert_eq!(preview["password"], "[REDACTED:SENSITIVE_FIELD]");
+    }
+
+    #[tokio::test]
+    async fn sensitive_approval_uses_reviewed_consequences_and_field_names_only() {
+        let mut catalog = FakeCatalog::with_tools(&[("komodo", "stacks.compose.write", true)]);
+        let key = ("komodo".to_owned(), "stacks.compose.write".to_owned());
+        let input = json!({"type": "object", "properties": {
+            "selector": {"type": "string"}, "contents": {"type": "string"}
+        }, "required": ["selector", "contents"], "additionalProperties": false});
+        let description = "Replace inline Compose. Komodo may retain submitted values. Deploy separately; reconcile with stacks.compose.read.";
+        let published = Tool::new(
+            "stacks.compose.write",
+            description,
+            Arc::new(input.as_object().unwrap().clone()),
+        );
+        Arc::make_mut(&mut catalog.tools).insert("komodo".to_owned(), vec![published]);
+        Arc::make_mut(&mut catalog.snapshots).insert(
+            key,
+            ResolvedInvocationTool::Ready(InvocationToolSnapshot::catalog_with_annotation_claims(
+                ToolFacts {
+                    server: "komodo".to_owned(),
+                    name: "stacks.compose.write".to_owned(),
+                    risk: RiskTier::High,
+                    side_effects: true,
+                    pii: true,
+                    requires_approval: true,
+                    requires_approval_known: true,
+                },
+                Uuid::new_v4(),
+                "reviewed-compose-contract".to_owned(),
+                false,
+                Some(input),
+                None,
+                Some(json!({"readOnlyHint": false, "destructiveHint": true,
+                    "idempotentHint": false, "openWorldHint": true})),
+                Some(
+                    json!({"inputMetadata": {"destination": "internal", "sensitivity": "sensitive"},
+                    "returnMetadata": {"source": "first-party", "sensitivity": "operational"},
+                    "outcome": "modify", "requiresReview": true}),
+                ),
+            )),
+        );
+        let tools = CodeModeTools::new(
+            Arc::new(catalog),
+            Arc::new(SelectiveAuthz),
+            Arc::new(RecordingInvocation::default()),
+        );
+        let bindings = tools
+            .execution_bindings(&reader(), CodeExecutionProfile::Direct)
+            .await
+            .unwrap();
+        assert_eq!(bindings.len(), 1);
+        let (admitted, _, snapshot) = admit_execution_bindings(bindings);
+        let call = admitted.values().next().unwrap();
+        let arguments = json!({"selector": "private-target", "contents": "opaque-secret-body"});
+        let attempt = RunnerAttempt {
+            principal: &reader(),
+            execution_id: Uuid::now_v7(),
+            claim: None,
+            persist_content: true,
+            profile: CodeExecutionProfile::Direct,
+            source_digest: source_digest("synthetic program"),
+            deadline: None,
+        };
+        let request = mutation_approval_request(&attempt, call, &arguments, test_hierarchy(1));
+        assert_eq!(request.description.as_deref(), Some(description));
+        assert_eq!(
+            request.arguments_preview,
+            json!({"selector": "[REDACTED:SENSITIVE_INPUT]",
+            "contents": "[REDACTED:SENSITIVE_INPUT]"})
+        );
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(!encoded.contains("private-target"));
+        assert!(!encoded.contains("opaque-secret-body"));
+        assert_eq!(
+            request.argument_hash,
+            waygate_catalog::argument_hash(arguments.as_object())
+        );
+        // Presentation is reconstructed from the contract on resume, preserving
+        // compatibility with snapshots captured before summaries were available.
+        let resumed = compatible_resume_bindings(
+            tools
+                .execution_bindings(&reader(), CodeExecutionProfile::Direct)
+                .await
+                .unwrap(),
+            &snapshot,
+        )
+        .unwrap();
+        assert_eq!(
+            resumed[0].approval_context.as_ref().unwrap().description,
+            description
+        );
+        let context = call.approval_context.as_ref().unwrap();
+        assert_eq!(
+            context.arguments_preview(&json!({"untrusted-secret-key": "value"})),
+            json!({})
+        );
+    }
+
     #[tokio::test]
     async fn mutation_broker_pauses_with_exact_redacted_approval_binding() {
         let fake = FakeCatalog::with_tools(&[("email", "send", true)]);
@@ -11556,6 +11767,7 @@ mod tests {
         let admitted_calls = HashMap::from([(
             call_id.clone(),
             AdmittedCall {
+                approval_context: None,
                 server: "email".to_owned(),
                 tool: "send".to_owned(),
                 contract: upstream_contract(fake.contract_identity("email", "send")),
@@ -11702,6 +11914,7 @@ mod tests {
         let admitted_calls = HashMap::from([(
             call_id.clone(),
             AdmittedCall {
+                approval_context: None,
                 server: "email".to_owned(),
                 tool: "read".to_owned(),
                 contract: upstream_contract(fake.contract_identity("email", "read")),
@@ -11824,6 +12037,7 @@ mod tests {
         let admitted_calls = HashMap::from([(
             call_id.clone(),
             AdmittedCall {
+                approval_context: None,
                 server: "email".to_owned(),
                 tool: "read".to_owned(),
                 contract: upstream_contract(fake.contract_identity("email", "read")),

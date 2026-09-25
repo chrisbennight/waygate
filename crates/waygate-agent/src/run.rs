@@ -148,9 +148,10 @@ pub async fn run_agent(
             }
             tool_calls_made += 1;
 
+            let preview = dispatch.approval_preview(&call.name, &call.arguments);
             events.emit(AgentEvent::ToolCall {
                 name: call.name.clone(),
-                arguments: call.arguments.clone(),
+                arguments: preview.clone(),
             });
 
             // Side-effects gate. An unknown tool is treated as side-effecting
@@ -161,7 +162,7 @@ pub async fn run_agent(
                 events.emit(AgentEvent::ApprovalRequested {
                     id: call.id.clone(),
                     name: call.name.clone(),
-                    arguments: call.arguments.clone(),
+                    arguments: preview,
                 });
                 if let ApprovalDecision::Rejected(reason) = approval.authorize(call).await {
                     events.emit(AgentEvent::ApprovalRejected {
@@ -274,12 +275,14 @@ mod tests {
 
     /// A dispatch that offers a fixed tool set and records the calls it gets.
     struct FakeDispatch {
+        preview: Option<String>,
         tools: Vec<AgentTool>,
         calls: Mutex<Vec<(String, String)>>,
     }
     impl FakeDispatch {
         fn new(tools: Vec<AgentTool>) -> Self {
             Self {
+                preview: None,
                 tools,
                 calls: Mutex::new(Vec::new()),
             }
@@ -287,6 +290,9 @@ mod tests {
     }
     #[async_trait]
     impl AgentToolDispatch for FakeDispatch {
+        fn approval_preview(&self, _name: &str, arguments: &str) -> String {
+            self.preview.clone().unwrap_or_else(|| arguments.to_owned())
+        }
         async fn available_tools(&self) -> Result<Vec<AgentTool>, AgentError> {
             Ok(self.tools.clone())
         }
@@ -468,6 +474,46 @@ mod tests {
         // Transcript grew: user, assistant(tooluse), tool(result), assistant(final).
         assert_eq!(transcript.len(), 4);
         assert!(matches!(transcript[2].role, Role::Tool));
+    }
+
+    #[tokio::test]
+    async fn approval_and_call_events_use_safe_preview_while_dispatch_keeps_arguments() {
+        let mut turn = turn_with_tool("c1", "write_tool");
+        turn.tool_calls[0].arguments = r#"{"contents":"synthetic-private-input"}"#.to_owned();
+        let ContentPart::ToolUse { arguments, .. } = &mut turn.assistant.content[0] else {
+            panic!("tool-use turn");
+        };
+        *arguments = turn.tool_calls[0].arguments.clone();
+        let model = ScriptedModel::new(vec![turn, final_turn("done")]);
+        let mut dispatch = FakeDispatch::new(vec![tool("write_tool", true)]);
+        dispatch.preview = Some("Reviewed consequence; contents redacted.".to_owned());
+        let mut events = VecEventSink::default();
+        run_agent(
+            &model,
+            &dispatch,
+            &crate::AllowAllApproval,
+            &cfg(8, 16, None),
+            &mut seed(),
+            &mut events,
+        )
+        .await
+        .unwrap();
+        let previews: Vec<_> = events
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolCall { arguments, .. }
+                | AgentEvent::ApprovalRequested { arguments, .. } => Some(arguments),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(previews.len(), 2);
+        assert!(previews
+            .iter()
+            .all(|preview| preview.as_str() == "Reviewed consequence; contents redacted."));
+        assert!(dispatch.calls.lock().unwrap()[0]
+            .1
+            .contains("synthetic-private-input"));
     }
 
     #[tokio::test]
