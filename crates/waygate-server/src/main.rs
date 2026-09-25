@@ -24,6 +24,7 @@ mod mcp_factory;
 mod mcp_files;
 mod mcp_http_promote;
 mod mcp_observe;
+mod mcp_origin;
 mod mcp_preparse_gate;
 mod process_mode;
 mod reconnect_scheduler;
@@ -1814,10 +1815,16 @@ async fn gateway_main() -> anyhow::Result<()> {
             resolver.clone(),
         ));
     }
-    let protected: Router<()> = protected.layer(axum::middleware::from_fn_with_state(
-        bearer_layer,
-        bearer_middleware,
-    ));
+    let protected: Router<()> = protected
+        .layer(axum::middleware::from_fn_with_state(
+            bearer_layer,
+            bearer_middleware,
+        ))
+        // Origin rejection precedes authentication on every MCP HTTP method.
+        .layer(axum::middleware::from_fn_with_state(
+            cfg.mcp_allowed_origins.clone(),
+            mcp_origin::guard,
+        ));
 
     let dashboard_auth = build_dashboard_auth(&cfg, oidc_http.as_ref()).await?;
     // Attach the same SCIM

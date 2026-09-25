@@ -30,6 +30,7 @@ pub mod files;
 pub mod index;
 pub mod inspection;
 pub mod invocation;
+pub mod origin;
 pub mod ping;
 pub mod protocol;
 pub mod request_meta;

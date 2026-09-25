@@ -124,6 +124,9 @@ pub struct Config {
     /// operator-supplied list verbatim — empty list disables the guard.
     /// Set via `GATEWAY_MCP_ALLOWED_HOSTS` (comma-separated).
     pub mcp_allowed_hosts: Option<Vec<String>>,
+    /// Browser origins allowed on MCP HTTP. Defaults to the public URL origin.
+    /// GATEWAY_MCP_ALLOWED_ORIGINS replaces that default; empty denies browsers.
+    pub mcp_allowed_origins: waygate_mcp::origin::OriginPolicy,
     /// Legacy strict-client escape hatch. When `true`, session `tools/list`
     /// returns the full upstream catalog alongside the `<server>.searchTools`
     /// meta-tools instead of exposing tools only after that session reveals
@@ -717,6 +720,18 @@ impl Config {
                 .collect::<Vec<_>>()
         });
 
+        let configured_origins = match std::env::var("GATEWAY_MCP_ALLOWED_ORIGINS") {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("GATEWAY_MCP_ALLOWED_ORIGINS must contain valid Unicode")
+            }
+        };
+        let mcp_allowed_origins = waygate_mcp::origin::OriginPolicy::from_config(
+            &public_url,
+            configured_origins.as_deref(),
+        )?;
+
         let eager_tools_list = waygate_core::env::bool_default_off("GATEWAY_EAGER_TOOLS_LIST");
         let codemode_result_storage = CodeModeResultStorage::parse(
             std::env::var("GATEWAY_CODEMODE_RESULT_STORAGE")
@@ -968,6 +983,7 @@ impl Config {
             accept_upstream_tokens,
             authentik_additional_issuers,
             mcp_allowed_hosts,
+            mcp_allowed_origins,
             eager_tools_list,
             codemode_result_storage,
             codemode_capacity,
@@ -1662,6 +1678,11 @@ mod tests {
             accept_upstream_tokens: false,
             authentik_additional_issuers: vec![],
             mcp_allowed_hosts: None,
+            mcp_allowed_origins: waygate_mcp::origin::OriginPolicy::from_config(
+                "https://gateway.example",
+                None,
+            )
+            .unwrap(),
             eager_tools_list: false,
             codemode_result_storage: CodeModeResultStorage::Disabled,
             codemode_capacity: CodeModeCapacityLimits::default(),
@@ -1946,6 +1967,50 @@ mod tests {
         match prev_public {
             Some(v) => std::env::set_var("GATEWAY_PUBLIC_URL", v),
             None => std::env::remove_var("GATEWAY_PUBLIC_URL"),
+        }
+    }
+
+    #[test]
+    fn mcp_origin_environment_controls_browser_admission() {
+        let _g = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let names = [
+            "GATEWAY_MCP_ALLOWED_ORIGINS",
+            "GATEWAY_PUBLIC_URL",
+            "GATEWAY_AUTH_MODE",
+        ];
+        let previous = names.map(std::env::var_os);
+        std::env::set_var("GATEWAY_PUBLIC_URL", "https://gateway.example/mcp");
+        std::env::set_var("GATEWAY_AUTH_MODE", "disabled");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "origin",
+            axum::http::HeaderValue::from_static("https://gateway.example"),
+        );
+        std::env::remove_var("GATEWAY_MCP_ALLOWED_ORIGINS");
+        assert!(Config::from_env()
+            .unwrap()
+            .mcp_allowed_origins
+            .allows(&headers));
+        std::env::set_var("GATEWAY_MCP_ALLOWED_ORIGINS", "https://client.example:8443");
+        let policy = Config::from_env().unwrap().mcp_allowed_origins;
+        assert!(!policy.allows(&headers));
+        headers.insert(
+            "origin",
+            axum::http::HeaderValue::from_static("https://client.example:8443"),
+        );
+        assert!(policy.allows(&headers));
+        std::env::set_var("GATEWAY_MCP_ALLOWED_ORIGINS", "");
+        assert!(!Config::from_env()
+            .unwrap()
+            .mcp_allowed_origins
+            .allows(&headers));
+        std::env::set_var("GATEWAY_MCP_ALLOWED_ORIGINS", "https://client.example/path");
+        assert!(Config::from_env().is_err());
+        for (name, value) in names.into_iter().zip(previous) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
         }
     }
 
