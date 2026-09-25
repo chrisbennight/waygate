@@ -36,6 +36,8 @@ pub struct CacheStoreRequest {
     /// the principal into the per-principal key by the implementation.
     pub canonical_request: String,
     pub tenant_id: String,
+    /// Identity-provider issuer, paired with the subject to scope ownership.
+    pub principal_issuer: Option<String>,
     pub principal_sub: Option<String>,
     pub model_alias: String,
     pub model_served: Option<String>,
@@ -59,6 +61,7 @@ pub trait LlmCache: Send + Sync + 'static {
         &self,
         canonical_request: &str,
         tenant_id: &str,
+        principal_issuer: Option<&str>,
         principal_sub: Option<&str>,
     ) -> Option<CachedCompletion>;
 

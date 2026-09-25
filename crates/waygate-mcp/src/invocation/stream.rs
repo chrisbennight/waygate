@@ -273,6 +273,7 @@ impl StreamCacheAgg {
 pub(super) struct StreamCacheTee {
     pub(super) cache: crate::cache::SharedLlmCache,
     pub(super) canonical: String,
+    pub(super) principal_issuer: Option<String>,
     pub(super) ttl: std::time::Duration,
     pub(super) provider: String,
     pub(super) agg: StreamCacheAgg,
@@ -617,6 +618,7 @@ pub(super) fn finalizing_inference_stream(
                                     .put(crate::cache::CacheStoreRequest {
                                         canonical_request: tee.canonical.clone(),
                                         tenant_id: st.tenant_id.clone(),
+                                        principal_issuer: tee.principal_issuer.clone(),
                                         principal_sub: st.principal_sub.clone(),
                                         model_alias: st.model_alias.clone(),
                                         model_served: snapshot.model_served.clone(),

@@ -58,13 +58,20 @@ impl DefaultInvocationService {
     }
 }
 
-/// The `(tenant, principal_sub)` identity for cache scoping — the same shape the
-/// streaming usage close captures. `principal_sub` is part of the cache key, so
-/// this is what makes a cache entry per-principal (no cross-principal reuse).
-fn cache_identity(ctx: &InvocationContext<'_>) -> (String, Option<String>) {
+/// Scope response content by tenant and issuer-qualified subject. The issuer
+/// comes from the authenticated principal, never the inference request.
+fn cache_identity(ctx: &InvocationContext<'_>) -> (String, Option<String>, Option<String>) {
     match ctx.principal {
-        Some(p) => (p.tenant.as_str().to_owned(), Some(p.sub.clone())),
-        None => (waygate_core::TenantId::default().as_str().to_owned(), None),
+        Some(p) => (
+            p.tenant.as_str().to_owned(),
+            Some(p.issuer.clone()),
+            Some(p.sub.clone()),
+        ),
+        None => (
+            waygate_core::TenantId::default().as_str().to_owned(),
+            None,
+            None,
+        ),
     }
 }
 
@@ -252,7 +259,7 @@ impl DefaultInvocationService {
         // current request asked for.
         if let (Some(cache), Some(_ttl)) = (&self.llm_cache, model.cache_ttl) {
             let canonical = cache_canonical(&llm_req);
-            let (tenant_id, principal_sub) = cache_identity(&ctx);
+            let (tenant_id, principal_issuer, principal_sub) = cache_identity(&ctx);
             // R3a: the streaming cache replay (`synthetic_replay_stream`) is
             // chat-shaped, so a streaming Responses request dispatches live rather
             // than be served a mis-shaped replay (a responses-shaped replay is a
@@ -262,7 +269,12 @@ impl DefaultInvocationService {
                 None
             } else {
                 cache
-                    .get(&canonical, &tenant_id, principal_sub.as_deref())
+                    .get(
+                        &canonical,
+                        &tenant_id,
+                        principal_issuer.as_deref(),
+                        principal_sub.as_deref(),
+                    )
                     .await
             };
             if let Some(hit) = hit {
@@ -332,11 +344,12 @@ impl DefaultInvocationService {
                 // produced.
                 if let (Some(cache), Some(ttl)) = (&self.llm_cache, model.cache_ttl) {
                     if !llm_req.stream {
-                        let (tenant_id, principal_sub) = cache_identity(&ctx);
+                        let (tenant_id, principal_issuer, principal_sub) = cache_identity(&ctx);
                         cache
                             .put(crate::cache::CacheStoreRequest {
                                 canonical_request: cache_canonical(&llm_req),
                                 tenant_id,
+                                principal_issuer,
                                 principal_sub,
                                 model_alias: ctx.tool.to_owned(),
                                 model_served: record.model_served.clone(),
@@ -384,6 +397,7 @@ impl DefaultInvocationService {
                     (Some(cache), Some(ttl)) if !ctx.responses_surface => Some(StreamCacheTee {
                         cache: cache.clone(),
                         canonical: cache_canonical(&llm_req),
+                        principal_issuer: ctx.principal.map(|p| p.issuer.clone()),
                         ttl,
                         provider: record_base.provider.as_str().to_owned(),
                         agg: StreamCacheAgg::default(),
@@ -482,9 +496,14 @@ impl DefaultInvocationService {
         // body served back.
         if let (Some(cache), Some(_ttl)) = (&self.llm_cache, model.cache_ttl) {
             let canonical = cache_canonical_embeddings(&emb_req);
-            let (tenant_id, principal_sub) = cache_identity(&ctx);
+            let (tenant_id, principal_issuer, principal_sub) = cache_identity(&ctx);
             if let Some(hit) = cache
-                .get(&canonical, &tenant_id, principal_sub.as_deref())
+                .get(
+                    &canonical,
+                    &tenant_id,
+                    principal_issuer.as_deref(),
+                    principal_sub.as_deref(),
+                )
                 .await
             {
                 ctx.latency_ms = Some(elapsed_ms(started));
@@ -535,11 +554,12 @@ impl DefaultInvocationService {
                 // never fails the response just produced. The provider recorded is
                 // the §7 failover winner, so a later hit attributes to it.
                 if let (Some(cache), Some(ttl)) = (&self.llm_cache, model.cache_ttl) {
-                    let (tenant_id, principal_sub) = cache_identity(&ctx);
+                    let (tenant_id, principal_issuer, principal_sub) = cache_identity(&ctx);
                     cache
                         .put(crate::cache::CacheStoreRequest {
                             canonical_request: cache_canonical_embeddings(&emb_req),
                             tenant_id,
+                            principal_issuer,
                             principal_sub,
                             model_alias: ctx.tool.to_owned(),
                             model_served: record.model_served.clone(),
