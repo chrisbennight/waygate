@@ -58,6 +58,25 @@ supported bounded body internally and return a summary; larger or binary
 responses follow the file route. The retained-resource adapter has a separate
 16 MiB decoded-body admission bound. It is not a multi-gigabyte streaming adapter.
 
+When gateway file storage is enabled, an ordinary successful structured tool
+result larger than 16 KiB in serialized MCP JSON is delivered as a compact file
+reference to authenticated direct clients. Anonymous responses remain inline
+because owner-scoped downloads require an authenticated caller. The JSON file
+contains the complete MCP result, including its original text, structured
+content, and metadata. Download it with
+the helper above when the complete content is needed. Smaller results remain
+inline; trusted Code Mode materialization keeps its existing response budget.
+Existing upstream file attachments and retained-response envelopes keep their
+own delivery rules.
+
+The original response passes inspection and output validation before storage.
+The saved result is owned by the caller and remains restricted to its producing
+tool under credential profiles. Sensitive results use the configured short
+retention period; download authorization enforces expiry. Audit records contain
+file and invocation identifiers, never the saved content. A storage failure
+after a successful mutation reports that the operation succeeded and must not
+be retried.
+
 ## Interoperability and inspection
 
 ### Exercise refusal and recovery

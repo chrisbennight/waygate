@@ -355,6 +355,123 @@ impl DefaultInvocationService {
                 return Ok(Err(InvocationError::Upstream(error)));
             }
         }
+        // Existing retained responses and imported-file batches have their own
+        // delivery contract. Compact only ordinary successful structured output
+        // after its original schema and inspection controls have succeeded.
+        if !retained && prepared_batch.is_none() {
+            result = match result {
+                Ok(output) => self.retain_large_inline_result(ctx, output).await,
+                Err(error) => Err(error),
+            };
+        }
         Ok(result)
+    }
+
+    async fn retain_large_inline_result(
+        &self,
+        ctx: &mut InvocationContext<'_>,
+        output: CallToolResult,
+    ) -> Result<CallToolResult, InvocationError> {
+        let Some(processor) = self.file_output_processor.as_ref() else {
+            return Ok(output);
+        };
+        let Some(threshold) = processor.inline_response_threshold_bytes() else {
+            return Ok(output);
+        };
+        if ctx.response_delivery != waygate_invocation::ResponseDelivery::File
+            || ctx.principal.is_none()
+            || output.is_error == Some(true)
+            || output.structured_content.is_none()
+        {
+            return Ok(output);
+        }
+        let bytes = match serde_json::to_vec(&output) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return Self::inline_delivery_failure(
+                    ctx,
+                    CallToolResult::success(Vec::new()),
+                    rmcp::ErrorData::internal_error("tool response could not be encoded", None),
+                )
+            }
+        };
+        if bytes.len() <= threshold {
+            return Ok(output);
+        }
+        let trust = super::result_trust::parse(&output).ok();
+        let sensitive = trust.map_or(ctx.facts().pii, |trust| trust.sensitive);
+        let mut compact = CallToolResult::success(Vec::new());
+        // Carry only bounded trust labels into the compact envelope. All
+        // original metadata, text and structured data remain in the saved file.
+        compact.meta.get_or_insert_with(Default::default).insert(
+            "io.modelcontextprotocol/trust-annotations".to_owned(),
+            serde_json::json!({"sensitive": sensitive, "untrusted": trust.is_none_or(|trust| trust.untrusted)}),
+        );
+        let prepared = processor
+            .prepare_retained(
+                crate::files::FileOutputContext {
+                    principal: ctx.principal.cloned(),
+                    server: ctx.server.to_owned(),
+                    tool: ctx.tool.to_owned(),
+                    invocation_id: ctx.invocation_id.to_string(),
+                },
+                crate::files::RetainedFileBody {
+                    upstream_uri: format!("gateway-response:{}", ctx.invocation_id),
+                    media_type: "application/json".to_owned(),
+                    bytes,
+                    sensitive: sensitive || ctx.facts().pii,
+                },
+            )
+            .await;
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => return Self::inline_delivery_failure(ctx, compact, error),
+        };
+        crate::retained_delivery::attach(
+            &mut compact,
+            crate::retained_delivery::Delivery::File {
+                operation_status: crate::retained_delivery::OperationStatus::Succeeded,
+                file: prepared.file.clone(),
+            },
+        );
+        compact
+            .content
+            .push(rmcp::model::ContentBlock::resource_link(
+                rmcp::model::Resource::new(prepared.file.uri, "Complete tool result")
+                    .with_mime_type("application/json"),
+            ));
+        let valid = compact
+            .structured_content
+            .as_ref()
+            .is_some_and(|value| crate::retained_delivery::validator().is_valid(value));
+        if !valid {
+            processor.discard(&prepared.batch_id).await;
+            return Self::inline_delivery_failure(
+                ctx,
+                CallToolResult::success(Vec::new()),
+                rmcp::ErrorData::internal_error("retained delivery descriptor is invalid", None),
+            );
+        }
+        if let Err(error) = processor.publish(&prepared.batch_id, 1).await {
+            processor.discard(&prepared.batch_id).await;
+            return Self::inline_delivery_failure(ctx, CallToolResult::success(Vec::new()), error);
+        }
+        Ok(compact)
+    }
+
+    fn inline_delivery_failure(
+        ctx: &mut InvocationContext<'_>,
+        compact: CallToolResult,
+        error: rmcp::ErrorData,
+    ) -> Result<CallToolResult, InvocationError> {
+        if ctx.facts().side_effects {
+            ctx.pending_redactions.clear();
+            Ok(super::retained_response::delivery_failure(
+                compact,
+                "inline_response_delivery_failed",
+            ))
+        } else {
+            Err(InvocationError::Upstream(error))
+        }
     }
 }

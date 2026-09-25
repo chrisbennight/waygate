@@ -1306,6 +1306,10 @@ fn collect_gateway_file_uris(
 
 #[async_trait]
 impl FileOutputProcessor for OutboundFileProcessor {
+    fn inline_response_threshold_bytes(&self) -> Option<usize> {
+        Some(16 * 1024)
+    }
+
     fn retained_response_max_bytes(&self) -> Option<usize> {
         self.max_bytes.and_then(|bytes| usize::try_from(bytes).ok())
     }
@@ -1350,7 +1354,7 @@ impl FileOutputProcessor for OutboundFileProcessor {
                     owner: owner_from_principal(principal),
                     invocation_id: context.invocation_id.clone(),
                     upstream_server: context.server.clone(),
-                    upstream_tool: NATIVE_RESOURCE_FILE_ORIGIN.to_owned(),
+                    upstream_tool: context.tool.clone(),
                     upstream_uri: body.upstream_uri,
                     display_name: None,
                     media_type: Some(body.media_type),
@@ -3286,6 +3290,123 @@ mod tests {
             "printable",
             NATIVE_RESOURCE_FILE_ORIGIN,
         ));
+    }
+
+    #[tokio::test]
+    async fn retained_tool_results_preserve_owner_profile_expiry_and_audit() {
+        let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+            return;
+        };
+        let tenant = format!("inline-result-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query("INSERT INTO tenants (id, display_name) VALUES ($1, $1)")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            GatewayFileStorage::new(pool.clone(), root.path())
+                .await
+                .unwrap(),
+        );
+        let evidence = Arc::new(waygate_mcp::audit::InMemorySink::new());
+        let processor = OutboundFileProcessor::new(
+            Arc::new(UpstreamPool::connect(BTreeMap::new()).await),
+            storage.clone(),
+            evidence.clone(),
+            FileRetention {
+                general: Duration::from_secs(3600),
+                secret: Duration::from_secs(120),
+            },
+            Some(64 * 1024),
+            FileTransferAdmission::new(2),
+            true,
+        )
+        .unwrap();
+        assert_eq!(processor.inline_response_threshold_bytes(), Some(16 * 1024));
+        let mut actor = profile_principal(
+            Some(vec!["fixture".into()]),
+            Some(vec!["fixture.content".into()]),
+        );
+        actor.tenant = waygate_core::TenantId::parse(&tenant).unwrap();
+        let owner = owner_from_principal(&actor);
+        for sensitive in [false, true] {
+            let bytes = b"complete synthetic result content".to_vec();
+            let prepared = processor
+                .prepare_retained(
+                    FileOutputContext {
+                        principal: Some(actor.clone()),
+                        server: "fixture".into(),
+                        tool: "content".into(),
+                        invocation_id: uuid::Uuid::new_v4().to_string(),
+                    },
+                    waygate_mcp::files::RetainedFileBody {
+                        upstream_uri: "gateway-response:synthetic".into(),
+                        media_type: "application/json".into(),
+                        bytes: bytes.clone(),
+                        sensitive,
+                    },
+                )
+                .await
+                .unwrap();
+            let id = parse_gateway_file_uri(&prepared.file.uri).unwrap();
+            assert!(storage.find_ready(&owner, id).await.unwrap().is_none());
+            processor.publish(&prepared.batch_id, 1).await.unwrap();
+            let ready = storage.find_ready(&owner, id).await.unwrap().unwrap();
+            assert_eq!(ready.upstream_tool, "content");
+            assert!(!profile_blocks_file_origin(
+                &actor,
+                &ready.upstream_server,
+                &ready.upstream_tool
+            ));
+            let narrowed = profile_principal(
+                Some(vec!["fixture".into()]),
+                Some(vec!["fixture.other".into()]),
+            );
+            assert!(profile_blocks_file_origin(
+                &narrowed,
+                &ready.upstream_server,
+                &ready.upstream_tool
+            ));
+            assert_eq!(
+                tokio::fs::read(storage.path_for(&ready)).await.unwrap(),
+                bytes
+            );
+            let remaining = ready.expires_at - OffsetDateTime::now_utc();
+            if sensitive {
+                assert!(remaining <= time::Duration::seconds(120));
+            } else {
+                assert!(remaining > time::Duration::minutes(30));
+            }
+            let mut other = owner.clone();
+            other.principal_sub = "another-user".into();
+            assert!(storage.find_ready(&other, id).await.unwrap().is_none());
+            sqlx::query(
+                "UPDATE gateway_files SET expires_at = now() - interval '1 second' WHERE id = $1",
+            )
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            assert!(storage.find_ready(&owner, id).await.unwrap().is_none());
+            processor.discard(&prepared.batch_id).await;
+        }
+        let events = evidence.snapshot().await;
+        let verified: Vec<_> = events
+            .iter()
+            .filter(|event| event.action == "file_transfer.file.verified")
+            .collect();
+        assert_eq!(verified.len(), 2);
+        for event in verified {
+            let target = event.target.as_ref().unwrap();
+            assert!(target.contains("uninspectable"));
+            assert!(!target.contains("complete synthetic result content"));
+        }
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     fn file_backed_resource_with_markers(count: usize) -> ReadResourceResult {
