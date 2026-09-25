@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -149,6 +150,7 @@ pub enum FileStorageError {
 pub struct GatewayFileStorage {
     pool: PgPool,
     root: PathBuf,
+    path_mutations: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl GatewayFileStorage {
@@ -159,7 +161,11 @@ impl GatewayFileStorage {
         builder.mode(0o700);
         builder.create(root.as_ref()).await?;
         let root = tokio::fs::canonicalize(root.as_ref()).await?;
-        Ok(Self { pool, root })
+        Ok(Self {
+            pool,
+            root,
+            path_mutations: Arc::new(tokio::sync::Mutex::new(())),
+        })
     }
 
     pub async fn stage_response(
@@ -278,15 +284,21 @@ impl GatewayFileStorage {
             Ok(())
         })
         .await?;
-        let mut options = tokio::fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        options.mode(0o600);
+        let opening_path = pending_path.clone();
         let mut output = within_upload_progress(&progress, async {
-            options
-                .open(&pending_path)
-                .await
-                .map_err(FileStorageError::Io)
+            mutate_paths(self.path_mutations.clone(), move || {
+                let mut options = std::fs::OpenOptions::new();
+                options.create_new(true).write(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                options.open(opening_path)
+            })
+            .await
+            .map(tokio::fs::File::from_std)
+            .map_err(FileStorageError::Io)
         })
         .await?;
         let mut size = 0_u64;
@@ -373,7 +385,10 @@ impl GatewayFileStorage {
         }
         drop(output);
         within_upload_progress(&progress, async {
-            tokio::fs::rename(&pending_path, &final_path).await?;
+            mutate_paths(self.path_mutations.clone(), move || {
+                std::fs::rename(pending_path, final_path)
+            })
+            .await?;
             sync_directory(&self.root).await?;
             Ok(())
         })
@@ -637,8 +652,13 @@ impl GatewayFileStorage {
         };
         let storage_key: String = row.try_get("storage_key")?;
         validate_storage_key(id, &storage_key)?;
-        remove_if_present(&self.root.join(&storage_key)).await?;
-        remove_if_present(&self.root.join(format!(".{storage_key}.part"))).await?;
+        let pending_path = self.root.join(format!(".{storage_key}.part"));
+        let final_path = self.root.join(&storage_key);
+        mutate_paths(self.path_mutations.clone(), move || {
+            remove_if_present(&pending_path)?;
+            remove_if_present(&final_path)
+        })
+        .await?;
         let deleted = sqlx::query("DELETE FROM gateway_files WHERE id = $1 AND state = 'deleting'")
             .bind(id)
             .execute(&self.pool)
@@ -647,8 +667,24 @@ impl GatewayFileStorage {
     }
 }
 
-async fn remove_if_present(path: &Path) -> Result<(), std::io::Error> {
-    match tokio::fs::remove_file(path).await {
+// A timeout cannot cancel a blocking filesystem syscall. Keep the namespace
+// lock inside the worker so cleanup cannot confirm deletion while a detached
+// create or rename can still leave bytes behind.
+async fn mutate_paths<T: Send + 'static>(
+    lock: Arc<tokio::sync::Mutex<()>>,
+    operation: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> std::io::Result<T> {
+    let guard = lock.lock_owned().await;
+    tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        operation()
+    })
+    .await
+    .expect("file namespace mutation task panicked")
+}
+
+fn remove_if_present(path: &Path) -> Result<(), std::io::Error> {
+    match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
@@ -708,6 +744,54 @@ fn validate_storage_key(id: Uuid, storage_key: &str) -> Result<(), FileStorageEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_path_mutations_finish_before_cleanup_confirms_deletion() {
+        for rename in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let pending = root.path().join("pending");
+            let final_path = root.path().join("final");
+            if rename {
+                std::fs::write(&pending, b"staged bytes").unwrap();
+            }
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            let (started, starting) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let operation = {
+                let lock = lock.clone();
+                let pending = pending.clone();
+                let final_path = final_path.clone();
+                tokio::spawn(async move {
+                    mutate_paths(lock, move || {
+                        started.send(()).unwrap();
+                        released.recv().unwrap();
+                        if rename {
+                            std::fs::rename(pending, final_path)
+                        } else {
+                            std::fs::write(pending, b"late created bytes")
+                        }
+                    })
+                    .await
+                })
+            };
+            starting.await.unwrap();
+            operation.abort();
+            assert!(operation.await.unwrap_err().is_cancelled());
+            let mut cleanup = Box::pin(mutate_paths(lock, {
+                let pending = pending.clone();
+                let final_path = final_path.clone();
+                move || {
+                    remove_if_present(&pending)?;
+                    remove_if_present(&final_path)
+                }
+            }));
+            assert!(futures::poll!(cleanup.as_mut()).is_pending());
+            release.send(()).unwrap();
+            cleanup.await.unwrap();
+            assert!(!pending.exists());
+            assert!(!final_path.exists());
+        }
+    }
 
     #[test]
     fn storage_key_must_be_the_files_own_uuid() {

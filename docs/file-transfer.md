@@ -339,7 +339,9 @@ other staging failures. If finalization is blocked or fails,
 incomplete content remains unavailable: deletion state is retained when it was
 recorded, while abandoned pending files and requests follow their existing
 five-minute inactivity recovery. The sweeper retries cleanup when storage is
-available. Cancellation also leaves incomplete content unavailable until cleanup.
+available. Cleanup waits for any outstanding filesystem creation or rename to
+finish before confirming deletion. Cancellation also leaves incomplete content
+unavailable until cleanup.
 Obtain fresh upload authorization before retrying a failed attempt.
 
 That transaction is the durable boundary: the file, request, and grant are
