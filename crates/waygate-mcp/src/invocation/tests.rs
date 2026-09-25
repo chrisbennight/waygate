@@ -83,27 +83,43 @@ mod retained_response_pipeline_tests {
     use crate::authz::{AllowAllGate, AuthzGate, AuthzVerdict};
     use crate::catalog::UpstreamCatalog;
 
+    type RecordedOrigin = (Option<String>, String, String, bool);
+
     #[derive(Default)]
     struct RetainedFiles {
         body: std::sync::Mutex<Vec<u8>>,
         published: AtomicUsize,
+        discarded: AtomicUsize,
+        threshold: Option<usize>,
+        origins: std::sync::Mutex<Vec<RecordedOrigin>>,
         fail: bool,
+        fail_publish: bool,
     }
 
     #[async_trait::async_trait]
     impl crate::files::FileOutputProcessor for RetainedFiles {
+        fn inline_response_threshold_bytes(&self) -> Option<usize> {
+            self.threshold
+        }
+
         fn retained_response_max_bytes(&self) -> Option<usize> {
             Some(1024 * 1024 * 1024)
         }
 
         async fn prepare_retained(
             &self,
-            _context: crate::files::FileOutputContext,
+            context: crate::files::FileOutputContext,
             body: crate::files::RetainedFileBody,
         ) -> Result<crate::files::PreparedRetainedFile, ErrorData> {
             if self.fail {
                 return Err(ErrorData::internal_error("storage unavailable", None));
             }
+            self.origins.lock().unwrap().push((
+                context.principal.map(|principal| principal.sub),
+                context.server,
+                context.tool,
+                body.sensitive,
+            ));
             *self.body.lock().unwrap() = body.bytes;
             Ok(crate::files::PreparedRetainedFile {
                 file: crate::files::FileValue {
@@ -129,10 +145,15 @@ mod retained_response_pipeline_tests {
             })
         }
         async fn publish(&self, _batch: &str, files: usize) -> Result<(), ErrorData> {
+            if self.fail_publish {
+                return Err(ErrorData::internal_error("publication unavailable", None));
+            }
             self.published.fetch_add(files, Ordering::SeqCst);
             Ok(())
         }
-        async fn discard(&self, _batch: &str) {}
+        async fn discard(&self, _batch: &str) {
+            self.discarded.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     #[tokio::test]
@@ -480,10 +501,176 @@ mod retained_response_pipeline_tests {
         );
     }
 
+    fn large_inline_result() -> CallToolResult {
+        let mut result =
+            CallToolResult::structured(json!({"data": "synthetic-content-".repeat(2048)}));
+        result.meta.get_or_insert_with(Default::default).insert(
+            "io.modelcontextprotocol/trust-annotations".into(),
+            json!({"sensitive": true, "untrusted": true}),
+        );
+        result
+    }
+
+    #[tokio::test]
+    async fn inline_result_budget_preserves_complete_envelope_and_delivery_choice() {
+        use waygate_invocation::ResponseDelivery;
+        let original = large_inline_result();
+        let bytes = serde_json::to_vec(&original).unwrap();
+        for (threshold, delivery, authenticated, retained) in [
+            (Some(16 * 1024), ResponseDelivery::File, true, true),
+            (Some(bytes.len()), ResponseDelivery::File, true, false),
+            (None, ResponseDelivery::File, true, false),
+            (Some(16 * 1024), ResponseDelivery::Materialize, true, false),
+            (Some(16 * 1024), ResponseDelivery::File, false, false),
+        ] {
+            let files = Arc::new(RetainedFiles {
+                threshold,
+                ..Default::default()
+            });
+            let catalog = Arc::new(RetainedCatalog {
+                inline: Some(original.clone()),
+                ..Default::default()
+            });
+            let service = DefaultInvocationService::new(
+                catalog.clone(),
+                Arc::new(AllowAllGate),
+                Arc::new(NullSink),
+            )
+            .with_file_output_processor(Some(files.clone()));
+            let principal = principal_with_profile(None);
+            let InvocationResponse::Unary(result) = service
+                .invoke(
+                    authenticated.then_some(&principal),
+                    InvocationRequest::new("connector", "content").with_response_delivery(delivery),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("unary");
+            };
+            assert_eq!(catalog.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                files.published.load(Ordering::SeqCst),
+                usize::from(retained)
+            );
+            if retained {
+                assert_eq!(*files.body.lock().unwrap(), bytes);
+                assert!(serde_json::to_vec(&result).unwrap().len() < 2048);
+                assert_eq!(
+                    *files.origins.lock().unwrap(),
+                    vec![(
+                        Some(principal.sub.clone()),
+                        "connector".into(),
+                        "content".into(),
+                        true
+                    )]
+                );
+                assert_eq!(
+                    result.meta.as_ref().unwrap()["io.modelcontextprotocol/trust-annotations"],
+                    json!({"sensitive":true,"untrusted":true})
+                );
+                assert_eq!(
+                    result.meta.as_ref().unwrap()[crate::files::RETAINED_DELIVERY_META_KEY]
+                        ["delivery_status"],
+                    "file"
+                );
+            } else {
+                assert_eq!(serde_json::to_vec(&result).unwrap(), bytes);
+                assert!(files.body.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_retention_cannot_bypass_schema_or_response_inspection() {
+        for block_inspection in [false, true] {
+            let files = Arc::new(RetainedFiles {
+                threshold: Some(16 * 1024),
+                ..Default::default()
+            });
+            let catalog = Arc::new(RetainedCatalog {
+                inline: Some(large_inline_result()),
+                output_schema: (!block_inspection)
+                    .then(|| json!({"type":"object","required":["missing"]})),
+                ..Default::default()
+            });
+            let mut service =
+                DefaultInvocationService::new(catalog, Arc::new(AllowAllGate), Arc::new(NullSink))
+                    .with_file_output_processor(Some(files.clone()));
+            if block_inspection {
+                service = service.with_inspectors(vec![Arc::new(RejectAttachment)]);
+            }
+            let principal = principal_with_profile(None);
+            assert!(service
+                .invoke(
+                    Some(&principal),
+                    InvocationRequest::new("connector", "content")
+                )
+                .await
+                .is_err());
+            assert!(files.body.lock().unwrap().is_empty());
+            assert_eq!(files.published.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_storage_failures_never_invite_repeating_an_applied_mutation() {
+        for side_effects in [false, true] {
+            for fail_publish in [false, true] {
+                let files = Arc::new(RetainedFiles {
+                    threshold: Some(16 * 1024),
+                    fail: !fail_publish,
+                    fail_publish,
+                    ..Default::default()
+                });
+                let catalog = Arc::new(RetainedCatalog {
+                    inline: Some(large_inline_result()),
+                    side_effects,
+                    ..Default::default()
+                });
+                let service = DefaultInvocationService::new(
+                    catalog.clone(),
+                    Arc::new(AllowAllGate),
+                    Arc::new(NullSink),
+                )
+                .with_file_output_processor(Some(files.clone()));
+                let principal = principal_with_profile(None);
+                let response = service
+                    .invoke(
+                        Some(&principal),
+                        InvocationRequest::new("connector", "content"),
+                    )
+                    .await;
+                assert_eq!(catalog.calls.load(Ordering::SeqCst), 1);
+                assert_eq!(files.published.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    files.discarded.load(Ordering::SeqCst),
+                    usize::from(fail_publish)
+                );
+                if side_effects {
+                    let InvocationResponse::Unary(result) = response.unwrap() else {
+                        panic!("unary");
+                    };
+                    let delivery =
+                        &result.meta.as_ref().unwrap()[crate::files::RETAINED_DELIVERY_META_KEY];
+                    assert_eq!(delivery["operation_status"], "succeeded");
+                    assert_eq!(delivery["retry_operation"], false);
+                    assert!(!serde_json::to_string(&result)
+                        .unwrap()
+                        .contains("synthetic-content"));
+                } else {
+                    assert!(response.is_err());
+                }
+            }
+        }
+    }
+
     const BODY: &str = "failure here";
 
     struct RetainedCatalog {
         reads: AtomicUsize,
+        calls: AtomicUsize,
+        inline: Option<CallToolResult>,
         declared_bytes: Option<u64>,
         output_schema: Option<serde_json::Value>,
         missing_envelope_field: Option<&'static str>,
@@ -502,6 +689,8 @@ mod retained_response_pipeline_tests {
         fn default() -> Self {
             Self {
                 reads: AtomicUsize::new(0),
+                calls: AtomicUsize::new(0),
+                inline: None,
                 declared_bytes: None,
                 output_schema: None,
                 missing_envelope_field: None,
@@ -771,6 +960,10 @@ mod retained_response_pipeline_tests {
             _principal: Option<&Principal>,
             _admitted: Option<&crate::catalog::InvocationContractIdentity>,
         ) -> Result<CallToolResult, ErrorData> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(result) = &self.inline {
+                return Ok(result.clone());
+            }
             if tool_name == "ordinary" {
                 let mut result =
                     CallToolResult::structured(json!({"_gateway_delivery": "upstream data"}));
@@ -951,6 +1144,8 @@ mod retained_response_pipeline_tests {
         const LARGER_BODY: &str = "failure here grew";
         let catalog = Arc::new(RetainedCatalog {
             reads: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+            inline: None,
             declared_bytes: None,
             output_schema: None,
             missing_envelope_field: None,
@@ -995,6 +1190,8 @@ mod retained_response_pipeline_tests {
     async fn predecode_transport_cap_uses_the_stable_limit_error() {
         let catalog = Arc::new(RetainedCatalog {
             reads: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+            inline: None,
             declared_bytes: None,
             output_schema: None,
             missing_envelope_field: None,
@@ -1039,6 +1236,8 @@ mod retained_response_pipeline_tests {
     async fn failed_recovery_identifies_the_operation_and_resource() {
         let catalog = Arc::new(RetainedCatalog {
             reads: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+            inline: None,
             declared_bytes: None,
             output_schema: None,
             missing_envelope_field: None,
@@ -1130,6 +1329,8 @@ mod retained_response_pipeline_tests {
     async fn side_effecting_call_materializes_the_complete_response() {
         let catalog = Arc::new(RetainedCatalog {
             reads: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+            inline: None,
             declared_bytes: None,
             output_schema: None,
             missing_envelope_field: None,

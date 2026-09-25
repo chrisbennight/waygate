@@ -162,6 +162,12 @@ pub const RETAINED_DELIVERY_META_KEY: &str = "io.cacahuate.mcp-gateway/retained-
 /// final output-schema check succeeds.
 #[async_trait]
 pub trait FileOutputProcessor: Send + Sync + 'static {
+    /// Opt in to retaining larger successful structured results instead of
+    /// putting their complete wire envelope in direct-client model context.
+    fn inline_response_threshold_bytes(&self) -> Option<usize> {
+        None
+    }
+
     fn retained_response_max_bytes(&self) -> Option<usize> {
         None
     }
