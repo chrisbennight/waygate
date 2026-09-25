@@ -946,18 +946,18 @@ impl ChatStreamToResponses {
                 u.insert(resp_key.into(), json!(v));
             }
         }
-        // Detail sub-objects: chat `prompt_tokens_details.cached_tokens` →
-        // `input_tokens_details.cached_tokens`; `completion_tokens_details.
-        // reasoning_tokens` → `output_tokens_details.reasoning_tokens`.
-        if let Some(cached) = chat
-            .get("prompt_tokens_details")
-            .and_then(|d| d.get("cached_tokens"))
-            .and_then(Value::as_u64)
-        {
-            u.insert(
-                "input_tokens_details".into(),
-                json!({"cached_tokens": cached}),
-            );
+        let mut input_details = serde_json::Map::new();
+        for key in ["cached_tokens", "cache_write_tokens"] {
+            if let Some(count) = chat
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get(key))
+                .and_then(Value::as_u64)
+            {
+                input_details.insert(key.into(), json!(count));
+            }
+        }
+        if !input_details.is_empty() {
+            u.insert("input_tokens_details".into(), Value::Object(input_details));
         }
         if let Some(reasoning) = chat
             .get("completion_tokens_details")
@@ -1267,6 +1267,170 @@ mod tests {
         )
     }
 
+    #[test]
+    fn provider_accounting_matches_unary_streaming_and_client_totals() {
+        use crate::response::*;
+        use crate::response_canonical::*;
+        for (read, written) in [(0_u64, 0_u64), (400, 0), (1000, 0), (400, 200)] {
+            for protocol in [
+                UpstreamProtocol::OpenAiChat,
+                UpstreamProtocol::OpenAiResponses,
+                UpstreamProtocol::AnthropicMessages,
+                UpstreamProtocol::Gemini,
+            ] {
+                if protocol == UpstreamProtocol::Gemini && written != 0 {
+                    continue;
+                }
+                let mut record = base();
+                record.upstream_protocol = protocol;
+                let (unary, frames, canonical) = match protocol {
+                    UpstreamProtocol::OpenAiChat => {
+                        let response = json!({"usage": {
+                            "prompt_tokens": 1000, "completion_tokens": 50, "total_tokens": 1050,
+                            "prompt_tokens_details": {"cached_tokens": read, "cache_write_tokens": written},
+                            "completion_tokens_details": {"reasoning_tokens": 20}
+                        }});
+                        (
+                            extract_openai_chat(record.clone(), &response),
+                            vec![response.clone()],
+                            openai_chat_to_canonical_response(&response),
+                        )
+                    }
+                    UpstreamProtocol::OpenAiResponses => {
+                        let response = json!({"status": "completed", "usage": {
+                            "input_tokens": 1000, "output_tokens": 50, "total_tokens": 1050,
+                            "input_tokens_details": {"cached_tokens": read, "cache_write_tokens": written},
+                            "output_tokens_details": {"reasoning_tokens": 20}
+                        }});
+                        (
+                            extract_openai_responses(record.clone(), &response),
+                            vec![json!({"type": "response.completed", "response": response})],
+                            openai_responses_to_canonical_response(&response),
+                        )
+                    }
+                    UpstreamProtocol::AnthropicMessages => {
+                        let response = json!({"usage": {
+                            "input_tokens": 1000 - read - written, "output_tokens": 50,
+                            "cache_read_input_tokens": read, "cache_creation_input_tokens": written
+                        }});
+                        let frames = vec![
+                            json!({"type": "message_start", "message": response}),
+                            json!({"type": "message_delta", "usage": {"output_tokens": 50}}),
+                        ];
+                        (
+                            extract_anthropic_messages(record.clone(), &response),
+                            frames,
+                            anthropic_to_canonical_response(&response),
+                        )
+                    }
+                    UpstreamProtocol::Gemini => {
+                        let response = json!({"usageMetadata": {
+                            "promptTokenCount": 1000, "candidatesTokenCount": 30,
+                            "thoughtsTokenCount": 20, "cachedContentTokenCount": read,
+                            "totalTokenCount": 1050
+                        }});
+                        (
+                            extract_gemini(record.clone(), &response),
+                            vec![response.clone()],
+                            gemini_to_canonical_response(&response),
+                        )
+                    }
+                };
+                let mut streamed = StreamTranslator::for_record(record);
+                for frame in frames {
+                    streamed.push(&frame.to_string());
+                }
+                assert_eq!(
+                    streamed.snapshot().usage,
+                    unary.usage,
+                    "{protocol:?}, read={read}, write={written}"
+                );
+                assert_eq!(unary.usage.input, Some(1000));
+                assert_eq!(unary.usage.output, Some(50));
+                assert_eq!(unary.usage.cached_read, Some(read));
+                if protocol != UpstreamProtocol::Gemini {
+                    assert_eq!(unary.usage.cache_write, Some(written));
+                }
+                let client = canonical_response_to_responses(&canonical);
+                assert_eq!(client["usage"]["input_tokens"], 1000);
+                assert_eq!(client["usage"]["output_tokens"], 50);
+                assert_eq!(client["usage"]["total_tokens"], 1050);
+                if protocol != UpstreamProtocol::Gemini {
+                    assert_eq!(
+                        client["usage"]["input_tokens_details"]["cache_write_tokens"],
+                        written
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn absent_usage_and_missing_primary_counts_remain_unknown_for_every_protocol() {
+        use crate::response::*;
+        for (protocol, response, frame) in [
+            (
+                UpstreamProtocol::OpenAiChat,
+                json!({"usage": {}}),
+                json!({"usage": {}}),
+            ),
+            (
+                UpstreamProtocol::OpenAiResponses,
+                json!({"usage": {}}),
+                json!({"type": "response.completed", "response": {"usage": {}}}),
+            ),
+            (
+                UpstreamProtocol::AnthropicMessages,
+                json!({"usage": {}}),
+                json!({"type": "message_start", "message": {"usage": {}}}),
+            ),
+            (
+                UpstreamProtocol::Gemini,
+                json!({"usageMetadata": {}}),
+                json!({"usageMetadata": {}}),
+            ),
+        ] {
+            let mut record = base();
+            record.upstream_protocol = protocol;
+            let unary = match protocol {
+                UpstreamProtocol::OpenAiChat => extract_openai_chat(record.clone(), &response),
+                UpstreamProtocol::OpenAiResponses => {
+                    extract_openai_responses(record.clone(), &response)
+                }
+                UpstreamProtocol::AnthropicMessages => {
+                    extract_anthropic_messages(record.clone(), &response)
+                }
+                UpstreamProtocol::Gemini => extract_gemini(record.clone(), &response),
+            };
+            let mut streamed = StreamTranslator::for_record(record);
+            streamed.push(&frame.to_string());
+            assert_eq!(streamed.snapshot().usage, unary.usage);
+            assert_eq!(unary.usage, crate::TokenUsage::default());
+        }
+        assert_eq!(
+            anthropic_token_usage_from(&json!({"cache_read_input_tokens": 10})).input,
+            None
+        );
+        assert_eq!(
+            gemini_token_usage_from(&json!({"thoughtsTokenCount": 10})).output,
+            None
+        );
+        assert_eq!(
+            anthropic_token_usage_from(
+                &json!({"input_tokens": u64::MAX, "cache_read_input_tokens": 1})
+            )
+            .input,
+            None
+        );
+        assert_eq!(
+            gemini_token_usage_from(
+                &json!({"candidatesTokenCount": u64::MAX, "thoughtsTokenCount": 1})
+            )
+            .output,
+            None
+        );
+    }
+
     /// A representative stream: a role chunk (with identity + null usage),
     /// content deltas, a finish chunk, then the terminal usage chunk and
     /// `[DONE]`. The aggregator folds identity, finish reason, and usage.
@@ -1426,7 +1590,7 @@ mod tests {
         assert_eq!(rec.upstream_protocol, UpstreamProtocol::AnthropicMessages);
         assert_eq!(rec.model_served.as_deref(), Some("claude-served-x"));
         assert_eq!(rec.upstream_request_id.as_deref(), Some("msg_1"));
-        assert_eq!(rec.usage.input, Some(12));
+        assert_eq!(rec.usage.input, Some(16));
         assert_eq!(rec.usage.cached_read, Some(4));
         assert_eq!(rec.usage.output, Some(7));
         assert_eq!(rec.finish_reason, Some(FinishReason::Stop));
@@ -1908,7 +2072,7 @@ mod tests {
             .push(&json!({"id":"c1","model":"m","choices":[{"delta":{},"finish_reason":"stop"}]}));
         let _ = lift.push(&json!({"id":"c1","model":"m","choices":[],"usage":{
             "prompt_tokens":10,"completion_tokens":5,"total_tokens":15,
-            "prompt_tokens_details":{"cached_tokens":4},
+            "prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":3},
             "completion_tokens_details":{"reasoning_tokens":2}
         }}));
         let fin = lift.finish(None);
@@ -1917,6 +2081,7 @@ mod tests {
         assert_eq!(usage["output_tokens"], 5);
         assert_eq!(usage["total_tokens"], 15);
         assert_eq!(usage["input_tokens_details"]["cached_tokens"], 4);
+        assert_eq!(usage["input_tokens_details"]["cache_write_tokens"], 3);
         assert_eq!(usage["output_tokens_details"]["reasoning_tokens"], 2);
     }
 }

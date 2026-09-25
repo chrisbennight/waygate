@@ -36,7 +36,9 @@ pub struct LlmUsageRow {
     /// What the upstream actually ran; may differ from the alias.
     pub model_served: Option<String>,
     pub inbound_surface: String,
+    /// Inclusive input total; cached reads and cache creation are subsets.
     pub input_tokens: Option<u64>,
+    /// Inclusive output total; reasoning is a subset. Embeddings have zero output.
     pub output_tokens: Option<u64>,
     pub cached_read_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,

@@ -64,7 +64,9 @@ pub(crate) fn token_usage_from(usage: &Value) -> TokenUsage {
         cached_read: usage
             .get("prompt_tokens_details")
             .and_then(|d| u64_field(d, "cached_tokens")),
-        cache_write: None,
+        cache_write: usage
+            .get("prompt_tokens_details")
+            .and_then(|d| u64_field(d, "cache_write_tokens")),
         reasoning: usage
             .get("completion_tokens_details")
             .and_then(|d| u64_field(d, "reasoning_tokens")),
@@ -80,9 +82,9 @@ pub(crate) fn token_usage_from(usage: &Value) -> TokenUsage {
 ///
 /// Token-semantics note: Anthropic's `input_tokens` is the **non-cached** prompt
 /// count, with cache reads/writes reported separately — unlike OpenAI's
-/// `prompt_tokens`, which is the total *including* cached. Each canonical field
-/// maps directly from its corresponding provider field (no summing /
-/// fabrication); cost prices the classes separately (design §4.2).
+/// `prompt_tokens`, which is the total *including* cached. Canonical input sums
+/// the reported ordinary, cached-read and cache-creation counts. Cache fields
+/// remain subsets of that total, so budgets count the input exactly once.
 pub fn extract_anthropic_messages(mut base: InferenceRecord, response: &Value) -> InferenceRecord {
     base.upstream_protocol = UpstreamProtocol::AnthropicMessages;
     base.model_served = str_field(response, "model");
@@ -127,18 +129,36 @@ fn is_structured_output_emulation(response: &Value) -> bool {
         })
 }
 
-/// Parse an Anthropic `usage` object into canonical [`TokenUsage`]. Each field
-/// maps directly from the corresponding Anthropic field; Anthropic reports no
+/// Parse an Anthropic `usage` object into canonical [`TokenUsage`]. Input includes
+/// the separately reported cache reads and creation; Anthropic reports no
 /// separate reasoning-token count (extended-thinking tokens fold into
 /// `output_tokens`), so `reasoning` stays `None`.
 pub(crate) fn anthropic_token_usage_from(usage: &Value) -> TokenUsage {
     TokenUsage {
-        input: u64_field(usage, "input_tokens"),
+        input: add_reported_subsets(
+            u64_field(usage, "input_tokens"),
+            [
+                u64_field(usage, "cache_read_input_tokens"),
+                u64_field(usage, "cache_creation_input_tokens"),
+            ],
+        ),
         output: u64_field(usage, "output_tokens"),
         cached_read: u64_field(usage, "cache_read_input_tokens"),
         cache_write: u64_field(usage, "cache_creation_input_tokens"),
         reasoning: None,
     }
+}
+
+/// Add separately reported classes without inventing a missing primary count
+/// or wrapping an invalid provider total. Omitted optional subsets add nothing.
+fn add_reported_subsets<const N: usize>(
+    primary: Option<u64>,
+    subsets: [Option<u64>; N],
+) -> Option<u64> {
+    subsets
+        .into_iter()
+        .flatten()
+        .try_fold(primary?, u64::checked_add)
 }
 
 /// Map an Anthropic `stop_reason` to the canonical [`FinishReason`].
@@ -241,11 +261,12 @@ pub fn anthropic_response_to_openai_chat(resp: &Value) -> Value {
         }]),
     );
     if let Some(usage) = resp.get("usage") {
-        let prompt = u64_field(usage, "input_tokens");
-        let completion = u64_field(usage, "output_tokens");
+        let normalized = anthropic_token_usage_from(usage);
+        let prompt = normalized.input;
+        let completion = normalized.output;
         if prompt.is_some() || completion.is_some() {
             let total = match (prompt, completion) {
-                (Some(p), Some(c)) => Some(p + c),
+                (Some(p), Some(c)) => p.checked_add(c),
                 _ => None,
             };
             obj.insert(
@@ -352,7 +373,10 @@ pub fn extract_gemini(mut base: InferenceRecord, response: &Value) -> InferenceR
 pub(crate) fn gemini_token_usage_from(um: &Value) -> TokenUsage {
     TokenUsage {
         input: u64_field(um, "promptTokenCount"),
-        output: u64_field(um, "candidatesTokenCount"),
+        output: add_reported_subsets(
+            u64_field(um, "candidatesTokenCount"),
+            [u64_field(um, "thoughtsTokenCount")],
+        ),
         cached_read: u64_field(um, "cachedContentTokenCount"),
         cache_write: None,
         reasoning: u64_field(um, "thoughtsTokenCount"),
@@ -426,11 +450,12 @@ pub fn gemini_response_to_openai_chat(resp: &Value) -> Value {
         }]),
     );
     if let Some(um) = resp.get("usageMetadata") {
-        let prompt = u64_field(um, "promptTokenCount");
-        let completion = u64_field(um, "candidatesTokenCount");
+        let normalized = gemini_token_usage_from(um);
+        let prompt = normalized.input;
+        let completion = normalized.output;
         if prompt.is_some() || completion.is_some() {
             let total = u64_field(um, "totalTokenCount").or(match (prompt, completion) {
-                (Some(p), Some(c)) => Some(p + c),
+                (Some(p), Some(c)) => p.checked_add(c),
                 _ => None,
             });
             obj.insert(
@@ -537,8 +562,8 @@ pub fn extract_openai_responses(mut base: InferenceRecord, response: &Value) -> 
 /// Parse an OpenAI Responses `usage` object into canonical [`TokenUsage`]. Shared
 /// by the unary extractor and the streaming translator so both agree on one
 /// token-accounting contract. Cache reads are under `input_tokens_details`;
-/// reasoning tokens under `output_tokens_details`; Responses reports no separate
-/// cache-write count.
+/// reasoning tokens under `output_tokens_details`. Reported cache reads and
+/// cache writes are subsets of input; reasoning is a subset of output.
 pub(crate) fn responses_token_usage_from(usage: &Value) -> TokenUsage {
     TokenUsage {
         input: u64_field(usage, "input_tokens"),
@@ -546,7 +571,9 @@ pub(crate) fn responses_token_usage_from(usage: &Value) -> TokenUsage {
         cached_read: usage
             .get("input_tokens_details")
             .and_then(|d| u64_field(d, "cached_tokens")),
-        cache_write: None,
+        cache_write: usage
+            .get("input_tokens_details")
+            .and_then(|d| u64_field(d, "cache_write_tokens")),
         reasoning: usage
             .get("output_tokens_details")
             .and_then(|d| u64_field(d, "reasoning_tokens")),
@@ -847,8 +874,8 @@ mod tests {
         assert_eq!(rec.upstream_request_id.as_deref(), Some("msg_123"));
         // No system_fingerprint in Anthropic responses.
         assert_eq!(rec.system_fingerprint, None);
-        // Each class mapped directly from its Anthropic field (no summing).
-        assert_eq!(rec.usage.input, Some(12));
+        // Ordinary input, cache reads and creation each contribute once.
+        assert_eq!(rec.usage.input, Some(20));
         assert_eq!(rec.usage.output, Some(7));
         assert_eq!(rec.usage.cached_read, Some(5));
         assert_eq!(rec.usage.cache_write, Some(3));
@@ -965,7 +992,7 @@ mod tests {
         assert_eq!(rec.model_served.as_deref(), Some("gemini-served-x"));
         assert_eq!(rec.upstream_request_id.as_deref(), Some("resp_1"));
         assert_eq!(rec.usage.input, Some(11));
-        assert_eq!(rec.usage.output, Some(6));
+        assert_eq!(rec.usage.output, Some(9));
         assert_eq!(rec.usage.cached_read, Some(4));
         assert_eq!(rec.usage.reasoning, Some(3));
         assert_eq!(rec.provider_prompt_cache, Some(true));

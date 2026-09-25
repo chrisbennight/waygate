@@ -188,10 +188,10 @@ struct InferenceRecord {
     upstream_protocol: UpstreamProto, // OpenAiResponses | AnthropicMessages | Gemini | OpenAiChat
 
     // tokens (Option = provider did not report this class)
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
+    input_tokens: Option<u64>,       // inclusive of cache reads and creation
+    output_tokens: Option<u64>,      // inclusive of reasoning
     cached_read_tokens: Option<u64>,  // prompt-cache hits (Anthropic/OpenAI/Gemini)
-    cache_write_tokens: Option<u64>,  // cache creation (Anthropic)
+    cache_write_tokens: Option<u64>,  // input subset used for cache creation
     reasoning_tokens: Option<u64>,    // thinking/reasoning (o-series, Gemini thoughts)
 
     // outcome
@@ -207,7 +207,8 @@ struct InferenceRecord {
     // cost (Option = no costing configured / unknown)
     input_cost: Option<Decimal>,
     output_cost: Option<Decimal>,
-    cached_cost: Option<Decimal>,
+    cached_read_cost: Option<Decimal>,
+    cache_write_cost: Option<Decimal>,
     total_cost: Option<Decimal>,
     cost_source: CostSource,          // ProviderReported | ComputedFromCatalog | Unknown
 
@@ -221,11 +222,33 @@ struct InferenceRecord {
 }
 ```
 
-**Cost attribution decision:** cost and budget debit use **`model_served`** (what was actually
-billed), not `model_requested`. When OpenRouter or a provider returns a provider-reported cost,
-`cost_source = ProviderReported` and that value is authoritative; otherwise cost is computed
-from the `llm_models` costing for `model_served` (`ComputedFromCatalog`), or `Unknown` if no
-costing is configured (tokens still recorded; cost-based budgets skip; token budgets apply).
+**Cost attribution:** the usage sink looks up catalog rates for **`model_served`**
+and the resolved provider. If the served model is unreported, it uses the requested
+alias. Provider-reported cost is a reserved source and is not currently extracted.
+Ordinary input is the inclusive input total minus reported cache-read and
+cache-creation subsets. Each class is priced once at its configured rate.
+For example, 1,000 input tokens including 400 cached tokens, with synthetic rates
+of 2 per million ordinary tokens and 0.5 per million cached tokens, cost 0.0014
+when output is zero. Reasoning is already part of output and is not added again.
+
+A missing primary usage count, an inconsistent cache subset, or a missing rate
+for positive usage leaves `total_cost` NULL and `cost_source` `unknown`.
+Known line items remain available in `input_cost`, `output_cost`,
+`cached_read_cost`, and `cache_write_cost`, but their subtotal is not presented as an
+exact call cost. A reported zero needs no rate. Omitted optional cache subsets
+remain unreported and add no separate charge. Catalog costs cover the recorded
+token classes; they do not include provider storage or other non-token fees.
+
+New ledger rows carry `accounting_version = 2`. Existing rows and writes from
+older binaries retain version 1, with the new cache-cost columns left NULL:
+their historical counts and costs are preserved,
+not retrospectively recomputed. The ledger lacks the original wire protocol and
+historical rate snapshots needed to repair every old row reliably. Analyses
+requiring normalized counts and complete costs should select version 2.
+Rolling budgets continue to include historical rows using their recorded values
+until those rows leave the window, so a window spanning the upgrade can retain
+the earlier accounting errors. Missing cost remains excluded from cost totals;
+missing usage is not evidence that a request was free.
 
 ### 4.3 Per-provider extraction mapping (the translator contract)
 
@@ -235,10 +258,10 @@ costing is configured (tokens still recorded; cost-based budgets skip; token bud
 | Field | OpenAI Responses | Anthropic Messages | Gemini generateContent | OpenRouter (OpenAI Chat) |
 |---|---|---|---|---|
 | model_served | `response.model` | `message.model` | `modelVersion` | `model` |
-| input_tokens | `usage.input_tokens` | `usage.input_tokens` | `usageMetadata.promptTokenCount` | `usage.prompt_tokens` |
-| output_tokens | `usage.output_tokens` | `usage.output_tokens` | `usageMetadata.candidatesTokenCount` | `usage.completion_tokens` |
+| input_tokens | `usage.input_tokens` | `usage.input_tokens` + reported cache reads + reported cache creation | `usageMetadata.promptTokenCount` | `usage.prompt_tokens` |
+| output_tokens | `usage.output_tokens` | `usage.output_tokens` | `usageMetadata.candidatesTokenCount` + reported `thoughtsTokenCount` | `usage.completion_tokens` |
 | cached_read_tokens | `usage.input_tokens_details.cached_tokens` | `usage.cache_read_input_tokens` | `usageMetadata.cachedContentTokenCount` | `usage.prompt_tokens_details.cached_tokens` |
-| cache_write_tokens | — | `usage.cache_creation_input_tokens` | — | — |
+| cache_write_tokens | `usage.input_tokens_details.cache_write_tokens`, when reported | `usage.cache_creation_input_tokens` | — | `usage.prompt_tokens_details.cache_write_tokens`, when reported |
 | reasoning_tokens | `usage.output_tokens_details.reasoning_tokens` | — | `usageMetadata.thoughtsTokenCount` | `usage.completion_tokens_details.reasoning_tokens` |
 | finish_reason | `response.status` + `incomplete_details.reason` | `stop_reason` | `candidates[].finishReason` | `choices[].finish_reason` |
 | upstream_request_id | `response.id` | `message.id` | `responseId` (where present) | `id` |
@@ -254,8 +277,16 @@ costing is configured (tokens still recorded; cost-based budgets skip; token bud
   cumulative `output_tokens`; finalize at `message_stop`.
 - **Gemini:** `usageMetadata` arrives on the final SSE chunk (cumulative).
 
-> **Contract:** the gateway always opts into usage-in-stream where the provider supports it,
-> so a streaming `InferenceRecord` is never missing token counts (required for I3 budgets).
+The gateway requests streaming usage where supported and uses the same accounting
+parsers for unary and streamed responses. A provider can still omit usage or end
+early; missing primary counts stay unknown rather than becoming zero.
+
+Provider semantics are grounded in the [OpenAI prompt-cache accounting guide](https://developers.openai.com/api/docs/guides/prompt-caching#monitor-cache-performance),
+the [Anthropic cache usage breakdown](https://platform.claude.com/docs/en/build-with-claude/prompt-caching),
+and [Gemini usage metadata](https://ai.google.dev/api/generate-content#UsageMetadata).
+Anthropic input excludes cache reads and creation; OpenAI and Gemini input already
+include cache reads. Gemini reports thoughts separately from response candidates;
+OpenAI and Anthropic output already include their reasoning tokens.
 
 ### 4.4 Streaming translation (`StreamTranslator`)
 
@@ -395,8 +426,9 @@ machinery (§7), the unified pipeline gates (§5), `InferenceRecord`/usage, and 
   authentication failures become 502. Provider error bodies are omitted from
   embedding client and audit diagnostics.
 - **Usage/cost** reuse `InferenceRecord`: embeddings report `{prompt_tokens, total_tokens}`,
-  so only the **input** token class is populated (`output = None`, no finish reason). The
-  existing catalog `compute_cost` prices the input class with no change.
+  so only the **input** token class is populated (`output = None`, no finish reason).
+  When input usage is reported, the usage ledger records zero completion tokens
+  because embeddings generate no completion; their input can then be priced alone.
 - **Operation discriminator.** The resolved model carries
   `LlmOperation { Chat, Embeddings, Images }`. Embeddings use env config
   `kind: embeddings` and catalog `upstream_api = embeddings`; images use
@@ -700,8 +732,11 @@ rolling/daily/weekly/monthly. Cost weighting comes from the `llm_models` costing
   after completion or stream close; the next request reads that ledger.
 - **Overrun:** no hard bound. Concurrent admitted calls and dropped best-effort usage writes
   can exceed the configured budget because there is no reservation or fail-closed debit.
-- Cost-based budgets are skipped (not failed) when `cost_source = Unknown`; token budgets
-  still apply.
+- Cost-based budgets sum known total costs. Unknown costs are excluded rather
+  than treated as a priced free call. Token budgets sum inclusive input and
+  output, counting cache reads, creation and reasoning once. Unknown primary
+  counts are excluded. These remain lagging gates over recorded usage and do
+  not become hard spending limits when reporting is incomplete.
 
 ---
 

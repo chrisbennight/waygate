@@ -205,8 +205,9 @@ pub fn render_openai_embeddings(req: &EmbeddingsRequest, model: &str) -> Value {
 /// model / surface). Embeddings report usage as `{prompt_tokens, total_tokens}`
 /// — an input-token class only, no output/completion — and the served model as
 /// `model`; there is no finish reason (an embeddings call does not "stop"), so it
-/// stays `None`. Cost then prices the input class alone via the existing
-/// catalog costing. Missing fields stay `None` — never fabricated.
+/// stays `None`. The usage-ledger projection records zero completion tokens
+/// when input is known, so catalog costing prices that input alone. Missing
+/// provider fields stay `None` here.
 ///
 /// `base.upstream_protocol` is left untouched: it names a *chat* protocol (it
 /// selects the streaming chat translator), which an embeddings call never uses,
@@ -403,8 +404,8 @@ mod tests {
         let rec = extract_openai_embeddings(base_record(), &resp);
         assert_eq!(rec.model_served.as_deref(), Some("text-embedding-3-small"));
         assert_eq!(rec.usage.input, Some(8));
-        // Embeddings have no output/completion class — it stays None so cost
-        // prices the input class alone.
+        // The provider metadata omits output; the usage-ledger projection knows
+        // embeddings have no completion tokens and supplies its applicable zero.
         assert_eq!(rec.usage.output, None);
         assert_eq!(rec.usage.cached_read, None);
         assert_eq!(rec.usage.reasoning, None);

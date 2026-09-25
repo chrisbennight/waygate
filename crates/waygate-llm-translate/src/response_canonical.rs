@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::outbound::STRUCTURED_OUTPUT_TOOL_NAME;
-use crate::response::{str_field, u64_field};
+use crate::response::{anthropic_token_usage_from, gemini_token_usage_from, str_field, u64_field};
 
 /// A provider's response, folded into the canonical (Responses-superset) shape.
 /// Identity fields are `None` when the provider omitted them — never fabricated.
@@ -139,7 +139,24 @@ pub struct Usage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_read: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<u64>,
+}
+
+impl From<crate::TokenUsage> for Usage {
+    fn from(tokens: crate::TokenUsage) -> Self {
+        Self {
+            input: tokens.input,
+            output: tokens.output,
+            total: tokens
+                .input
+                .and_then(|input| input.checked_add(tokens.output?)),
+            cached_read: tokens.cached_read,
+            cache_write: tokens.cache_write,
+            reasoning: tokens.reasoning,
+        }
+    }
 }
 
 impl CanonicalResponse {
@@ -344,16 +361,9 @@ pub fn anthropic_to_canonical_response(resp: &Value) -> CanonicalResponse {
         status,
         refusal,
         output,
-        usage: resp.get("usage").map(|u| Usage {
-            input: u64_field(u, "input_tokens"),
-            output: u64_field(u, "output_tokens"),
-            total: match (u64_field(u, "input_tokens"), u64_field(u, "output_tokens")) {
-                (Some(p), Some(c)) => Some(p + c),
-                _ => None,
-            },
-            cached_read: u64_field(u, "cache_read_input_tokens"),
-            reasoning: None,
-        }),
+        usage: resp
+            .get("usage")
+            .map(|u| anthropic_token_usage_from(u).into()),
         // Empty: Anthropic is *translated*, not round-tripped — its native
         // top-level fields have no place in a Responses-shaped egress body.
         extra: Map::new(),
@@ -450,20 +460,9 @@ pub fn gemini_to_canonical_response(resp: &Value) -> CanonicalResponse {
         refusal,
         output,
         usage: resp.get("usageMetadata").map(|um| {
-            let input = u64_field(um, "promptTokenCount");
-            let output = u64_field(um, "candidatesTokenCount");
-            Usage {
-                input,
-                output,
-                // Gemini reports `totalTokenCount`; fall back to the sum (matching
-                // the legacy translator) only when it is absent and both are known.
-                total: u64_field(um, "totalTokenCount").or(match (input, output) {
-                    (Some(p), Some(c)) => Some(p + c),
-                    _ => None,
-                }),
-                cached_read: u64_field(um, "cachedContentTokenCount"),
-                reasoning: u64_field(um, "thoughtsTokenCount"),
-            }
+            let mut usage = Usage::from(gemini_token_usage_from(um));
+            usage.total = u64_field(um, "totalTokenCount").or(usage.total);
+            usage
         }),
         // Empty: Gemini is *translated*, not round-tripped (see the Anthropic fold).
         extra: Map::new(),
@@ -530,6 +529,9 @@ pub fn openai_responses_to_canonical_response(resp: &Value) -> CanonicalResponse
                 cached_read: u
                     .get("input_tokens_details")
                     .and_then(|d| u64_field(d, "cached_tokens")),
+                cache_write: u
+                    .get("input_tokens_details")
+                    .and_then(|d| u64_field(d, "cache_write_tokens")),
                 reasoning: u
                     .get("output_tokens_details")
                     .and_then(|d| u64_field(d, "reasoning_tokens")),
@@ -758,8 +760,15 @@ fn usage_to_responses(u: &Usage) -> Value {
     if let Some(t) = u.total {
         usage.insert("total_tokens".into(), json!(t));
     }
+    let mut input_details = Map::new();
     if let Some(c) = u.cached_read {
-        usage.insert("input_tokens_details".into(), json!({ "cached_tokens": c }));
+        input_details.insert("cached_tokens".into(), json!(c));
+    }
+    if let Some(c) = u.cache_write {
+        input_details.insert("cache_write_tokens".into(), json!(c));
+    }
+    if !input_details.is_empty() {
+        usage.insert("input_tokens_details".into(), Value::Object(input_details));
     }
     if let Some(r) = u.reasoning {
         usage.insert(
@@ -854,6 +863,9 @@ pub fn openai_chat_to_canonical_response(resp: &Value) -> CanonicalResponse {
             cached_read: u
                 .get("prompt_tokens_details")
                 .and_then(|d| u64_field(d, "cached_tokens")),
+            cache_write: u
+                .get("prompt_tokens_details")
+                .and_then(|d| u64_field(d, "cache_write_tokens")),
             reasoning: u
                 .get("completion_tokens_details")
                 .and_then(|d| u64_field(d, "reasoning_tokens")),

@@ -146,6 +146,9 @@ pub async fn check_llm_budget(
     for b in &budgets {
         // Sum recorded usage over THIS budget's rolling window and scope. A
         // wildcard (NULL) scope column sums across all principals / models.
+        // Current writers store inclusive input/output totals, so adding cache
+        // or reasoning subsets here would count those tokens twice. Legacy
+        // accounting_version=1 rows retain their original historical counts.
         let row = sqlx::query(
             r#"
             SELECT

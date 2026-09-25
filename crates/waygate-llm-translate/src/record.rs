@@ -50,14 +50,16 @@ impl FinishReason {
 /// from a reported zero — important for budget accounting.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
+    /// Total input, including cache reads and cache creation exactly once.
     pub input: Option<u64>,
+    /// Total generated output, including any reported reasoning subset.
     pub output: Option<u64>,
     /// Prompt-cache read hits (Anthropic `cache_read_input_tokens`,
     /// OpenAI/Gemini cached prompt tokens).
     pub cached_read: Option<u64>,
-    /// Prompt-cache creation (Anthropic `cache_creation_input_tokens`).
+    /// Input subset used for prompt-cache creation.
     pub cache_write: Option<u64>,
-    /// Reasoning / "thinking" tokens (o-series, Gemini thoughts).
+    /// Output subset used for reasoning / "thinking" (o-series, Gemini thoughts).
     pub reasoning: Option<u64>,
 }
 
