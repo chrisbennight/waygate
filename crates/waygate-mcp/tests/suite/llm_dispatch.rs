@@ -2409,6 +2409,57 @@ async fn embeddings_cache_is_per_principal() {
 mod images;
 
 #[tokio::test]
+async fn oversized_embeddings_explain_the_limit_without_exposing_the_backend_body() {
+    async fn oversized() -> Response {
+        let chunk = axum::body::Bytes::from(vec![b' '; 64 * 1024]);
+        let count = waygate_llm_providers::MAX_EMBEDDING_RESPONSE_BYTES / chunk.len() + 1;
+        Response::builder()
+            .status(200)
+            .body(Body::from_stream(futures::stream::iter(
+                (0..count).map(move |_| Ok::<_, std::io::Error>(chunk.clone())),
+            )))
+            .unwrap()
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/embeddings", post(oversized)),
+        )
+        .await
+        .unwrap();
+    });
+    let mut model = embeddings_resolver(addr).resolve("llm", "embed-x").unwrap();
+    model.route.embeddings_no_auth = true;
+    model.route.credential_label.clear();
+    let resolver = Arc::new(StaticModelResolver::new().with_model("llm", "embed-x", model));
+    let dispatcher = LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), store());
+    let service = DefaultInvocationService::new(
+        Arc::new(FakeCatalog),
+        Arc::new(AllowAllGate),
+        Arc::new(RecordingSink::default()),
+    )
+    .with_llm(dispatcher, resolver);
+    let error = service
+        .invoke(
+            Some(&principal()),
+            InvocationRequest::new("llm", "embed-x")
+                .with_arguments(Some(embeddings_args()))
+                .with_embeddings_surface(true),
+        )
+        .await
+        .unwrap_err();
+    server.abort();
+    let InvocationError::Upstream(error) = error else {
+        panic!("expected upstream error")
+    };
+    assert!(error.message.contains("byte limit"));
+    assert!(error.message.contains("embedding batch"));
+    assert_eq!(error.data.as_ref().unwrap()["embedding_http_status"], 502);
+}
+
+#[tokio::test]
 async fn private_embeddings_keep_authorization_and_safe_backend_error_metadata() {
     let cap = Arc::new(Mutex::new(Captured::default()));
     async fn overloaded(State(cap): State<Arc<Mutex<Captured>>>, headers: HeaderMap) -> Response {

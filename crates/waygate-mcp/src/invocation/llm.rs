@@ -596,7 +596,10 @@ impl DefaultInvocationService {
             }
             Err(e) => {
                 let status = e.provider_status().unwrap_or(502);
-                let reason = format!("embedding backend request failed ({status})");
+                let reason = e
+                    .provider_protocol_message()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("embedding backend request failed ({status})"));
                 let err = InvocationError::Upstream(ErrorData::internal_error(
                     reason.clone(),
                     Some(serde_json::json!({

@@ -140,6 +140,14 @@ pub enum DispatchError {
 }
 
 impl DispatchError {
+    /// Gateway-generated protocol guidance, never a provider response body.
+    pub fn provider_protocol_message(&self) -> Option<&str> {
+        match self {
+            Self::Provider(ProviderError::Protocol(message)) => Some(message),
+            _ => None,
+        }
+    }
+
     /// Bounded retry advice that can be forwarded without exposing provider bodies.
     pub fn provider_retry_after_seconds(&self) -> Option<u64> {
         retry_after_of(self).map(|duration| duration.as_secs().min(300))
