@@ -3339,9 +3339,7 @@ impl GatewayServer {
             std::collections::BTreeMap::new();
         if full_projection {
             for server in self.catalog.list_servers().await {
-                if let Ok(tools) = self.catalog.list_tools(&server).await {
-                    by_server.insert(server, tools.iter().map(|t| t.name.to_string()).collect());
-                }
+                by_server.insert(server, Vec::new());
             }
         } else {
             let ToolProjection::SessionDisclosed(disclosed) = projection else {
@@ -3373,33 +3371,30 @@ impl GatewayServer {
                     continue;
                 }
             }
-            let Ok(upstream_tools) = self.catalog.list_tools(&server).await else {
+            let tenant = principal
+                .map(|p| p.tenant.as_str())
+                .unwrap_or(waygate_core::TenantId::DEFAULT);
+            let resolved = if full_projection {
+                self.catalog.list_discovery_tools(tenant, &server).await
+            } else {
+                self.catalog
+                    .resolve_discovery_tools(tenant, &server, &wanted)
+                    .await
+            };
+            let Ok(resolved) = resolved else {
                 continue;
             };
-            for tool_name in &wanted {
-                let Some(t) = upstream_tools.iter().find(|t| t.name == *tool_name) else {
+            for resolved in resolved {
+                let ResolvedInvocationTool::Ready(snapshot) = resolved else {
                     continue;
                 };
                 if let Some(p) = principal {
                     // Skip per-tool
                     // when the profile pins allowed_tools.
-                    if profile_blocks_tool(p, &server, &t.name) {
+                    if profile_blocks_tool(p, &server, &snapshot.facts().name) {
                         continue;
                     }
                 }
-                let tenant = principal
-                    .map(|p| p.tenant.as_str())
-                    .unwrap_or(waygate_core::TenantId::DEFAULT);
-                // A quarantined/retired server's tools are hidden from
-                // discovery (and refused at dispatch); only an admitted snapshot is
-                // listable.
-                let ResolvedInvocationTool::Ready(snapshot) = self
-                    .catalog
-                    .resolve_discovery_tool(tenant, &server, tool_name)
-                    .await
-                else {
-                    continue;
-                };
                 let facts = snapshot.facts();
                 if let Some(p) = principal {
                     // `is_discoverable()` mirrors searchTools: step-up tools
@@ -3489,6 +3484,17 @@ impl GatewayServer {
         principal: Option<&Principal>,
         disclosed: Option<&DisclosedTools>,
     ) -> Result<CallToolResult, McpError> {
+        let durable_before = self.catalog.discovery_generation().await?;
+        let errors_before = self.catalog.discovery_error_generation();
+        let local_generation = match self.tool_catalog_epoch.as_ref() {
+            Some(epoch) => Some(epoch.stable_generation().ok_or_else(|| {
+                McpError::internal_error(
+                    "the governed tool catalog is changing; retry the search",
+                    Some(json!({"error":"catalog_changing", "retryable":true})),
+                )
+            })?),
+            None => None,
+        };
         let query = req
             .filters
             .as_ref()
@@ -3584,17 +3590,22 @@ impl GatewayServer {
         let tenant = principal
             .map(|p| p.tenant.as_str())
             .unwrap_or(waygate_core::TenantId::DEFAULT);
-        for t in tools
-            .iter()
+        let tools: Vec<_> = tools
+            .into_iter()
             .filter(|t| index::matches_non_query(t, req.filters.as_ref()))
-        {
+            .collect();
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        let resolved = self
+            .catalog
+            .resolve_discovery_tools(tenant, server, &names)
+            .await?;
+        for (t, resolved) in tools.iter().zip(resolved) {
             // Quarantined/retired servers' tools are hidden from search
             // results (and refused at dispatch); only an admitted snapshot is listable.
-            let ResolvedInvocationTool::Ready(snapshot) = self
-                .catalog
-                .resolve_discovery_tool(tenant, server, &t.name)
-                .await
-            else {
+            let ResolvedInvocationTool::Ready(snapshot) = resolved else {
                 continue;
             };
             let facts = snapshot.facts();
@@ -3636,6 +3647,20 @@ impl GatewayServer {
             matched.push(tool_to_descriptor(&record));
         }
 
+        let durable_after = self.catalog.discovery_generation().await?;
+        if !catalog_projection_is_stable(
+            self.tool_catalog_epoch.as_ref(),
+            local_generation,
+            durable_before,
+            durable_after,
+            errors_before,
+            self.catalog.discovery_error_generation(),
+        ) {
+            return Err(McpError::internal_error(
+                "the governed tool catalog changed or became unavailable during search; retry the request",
+                Some(json!({"error":"catalog_changing", "retryable":true})),
+            ));
+        }
         let (operations, next_cursor) = index::paginate(matched, req.cursor.as_deref(), req.limit);
 
         // Record each operation surfaced in this response as disclosed for the

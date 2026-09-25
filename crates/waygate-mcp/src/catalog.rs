@@ -526,6 +526,38 @@ pub trait UpstreamCatalog: Send + Sync + 'static {
         ))
     }
 
+    /// Resolve names in request order without sharing authorization decisions
+    /// across callers. Production catalogs batch their durable reads; static
+    /// catalogs retain the single-tool compatibility behavior.
+    async fn resolve_discovery_tools(
+        &self,
+        tenant: &str,
+        server: &str,
+        tool_names: &[String],
+    ) -> Result<Vec<ResolvedInvocationTool>, McpError> {
+        let mut out = Vec::with_capacity(tool_names.len());
+        for name in tool_names {
+            out.push(self.resolve_discovery_tool(tenant, server, name).await);
+        }
+        Ok(out)
+    }
+
+    /// Resolve the published inventory for one caller tenant. The results
+    /// still require per-principal authorization at the discovery surface.
+    async fn list_discovery_tools(
+        &self,
+        tenant: &str,
+        server: &str,
+    ) -> Result<Vec<ResolvedInvocationTool>, McpError> {
+        let names = self
+            .list_tools(server)
+            .await?
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        self.resolve_discovery_tools(tenant, server, &names).await
+    }
+
     /// Resolve one tool for discovery with its definition and governance facts
     /// bound into the same snapshot.
     ///

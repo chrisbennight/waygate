@@ -161,7 +161,7 @@ pub(super) fn partition_live_tools(
     (kept, unclassified, ghosts)
 }
 
-fn tool_is_admitted(
+pub(super) fn tool_is_admitted(
     classification: Option<&crate::ToolClassification>,
     mode: crate::ClassificationMode,
     tool: &Tool,

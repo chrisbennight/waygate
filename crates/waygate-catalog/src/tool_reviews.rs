@@ -38,6 +38,38 @@ impl PgCatalogStore {
         Ok(sqlx::query_as("SELECT r.observed_hash,r.quarantined FROM tool_contract_reviews r JOIN mcp_tools t ON t.id=r.tool_id JOIN mcp_servers s ON s.id=t.server_id WHERE s.tenant_id=$1 AND s.name=$2 AND t.name=$3")
             .bind(tenant).bind(server).bind(tool).fetch_optional(&self.pool).await?)
     }
+    /// Read only admission decisions for a bounded discovery batch. Missing
+    /// names have no recorded observation; comparison payloads stay in storage.
+    pub async fn review_states(
+        &self,
+        tenant: &str,
+        server: &str,
+        names: &[String],
+    ) -> Result<std::collections::HashMap<String, (String, bool)>, CatalogError> {
+        if names.len() > crate::TOOL_RESOLUTION_BATCH_SIZE {
+            return Err(CatalogError::InvalidInput(
+                "tool review batch exceeds 256 names".into(),
+            ));
+        }
+        if names.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let rows: Vec<(String, String, bool)> = sqlx::query_as(
+            "SELECT t.name,r.observed_hash,r.quarantined FROM tool_contract_reviews r
+             JOIN mcp_tools t ON t.id=r.tool_id JOIN mcp_servers s ON s.id=t.server_id
+             WHERE s.tenant_id=$1 AND s.name=$2 AND t.name=ANY($3)",
+        )
+        .bind(tenant)
+        .bind(server)
+        .bind(names)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, hash, quarantined)| (name, (hash, quarantined)))
+            .collect())
+    }
+
     pub async fn quarantined_names(
         &self,
         tenant: &str,

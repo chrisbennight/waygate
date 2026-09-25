@@ -1,8 +1,8 @@
 //! `CatalogStore` trait + Postgres impl.
 //!
-//! The trait stays narrow: the per-call hot path uses
-//! [`CatalogStore::resolve_tool`] only; admin endpoints use the
-//! other methods. Anything that would need a join across many
+//! Invocation uses [`CatalogStore::resolve_tool`]; discovery uses bounded
+//! [`CatalogStore::resolve_tools`] reads with the same admission semantics.
+//! Admin endpoints use the governance methods. Anything that needs a join across many
 //! tables (e.g. a "full catalog dump for backup") lives on the
 //! Pg impl directly, not on the trait.
 
@@ -19,6 +19,9 @@ use crate::types::{
     CatalogServerTransitionTarget, DriftEvent, DriftObservation, DriftSeverity, GrantLifecycle,
     ResolvedTool,
 };
+
+/// Maximum number of named tools fetched by one discovery storage read.
+pub const TOOL_RESOLUTION_BATCH_SIZE: usize = 256;
 
 /// Decoupled store surface so callers don't reach for the
 /// Postgres pool directly. Tests implement an in-memory variant;
@@ -71,6 +74,30 @@ pub trait CatalogStore: Send + Sync + 'static {
         principal_tenant: &str,
         fq_name: &str,
     ) -> Result<ResolvedTool, CatalogError>;
+
+    /// Resolve a bounded group from one server, in the requested order. Each
+    /// result has exactly the same tenant, lifecycle, and approval semantics as
+    /// `resolve_tool`. The PostgreSQL implementation uses one statement.
+    async fn resolve_tools(
+        &self,
+        principal_tenant: &str,
+        server: &str,
+        tool_names: &[String],
+    ) -> Result<Vec<ResolvedTool>, CatalogError> {
+        if tool_names.len() > TOOL_RESOLUTION_BATCH_SIZE {
+            return Err(CatalogError::InvalidInput(
+                "tool resolution batch exceeds 256 names".into(),
+            ));
+        }
+        let mut resolved = Vec::with_capacity(tool_names.len());
+        for name in tool_names {
+            resolved.push(
+                self.resolve_tool(principal_tenant, &format!("{server}.{name}"))
+                    .await?,
+            );
+        }
+        Ok(resolved)
+    }
 
     /// Resolve one currently-live catalog tool by immutable id within the
     /// caller tenant's visibility. Used when a durable approval request already
@@ -386,6 +413,27 @@ impl CatalogStore for PgCatalogStore {
         let Some((server, tool)) = fq_name.split_once('.') else {
             return Ok(ResolvedTool::NotFound);
         };
+        Ok(self
+            .resolve_tools(principal_tenant, server, &[tool.to_owned()])
+            .await?
+            .pop()
+            .expect("one result per requested tool"))
+    }
+
+    async fn resolve_tools(
+        &self,
+        principal_tenant: &str,
+        server: &str,
+        tool_names: &[String],
+    ) -> Result<Vec<ResolvedTool>, CatalogError> {
+        if tool_names.len() > TOOL_RESOLUTION_BATCH_SIZE {
+            return Err(CatalogError::InvalidInput(
+                "tool resolution batch exceeds 256 names".into(),
+            ));
+        }
+        if tool_names.is_empty() {
+            return Ok(Vec::new());
+        }
         // Single roundtrip joining mcp_servers + mcp_tools +
         // mcp_tool_versions (latest approved) +
         // tool_classifications.
@@ -402,9 +450,11 @@ impl CatalogStore for PgCatalogStore {
         // 2. `v.approved_at DESC NULLS LAST` — among rows for the
         //    chosen server, the most-recently-*approved* schema
         //    (rollback-correct, not most-recently-observed).
-        let row = sqlx::query(
+        let rows = sqlx::query(
             r#"
-            SELECT
+            SELECT requested.name AS requested_tool, resolved.*
+            FROM unnest($3::text[]) WITH ORDINALITY AS requested(name, position)
+            LEFT JOIN LATERAL (SELECT
                 t.id              AS tool_id,
                 t.server_id       AS server_id,
                 t.name            AS tool_name,
@@ -449,7 +499,7 @@ impl CatalogStore for PgCatalogStore {
               FROM mcp_servers s
          LEFT JOIN mcp_tools t
                 ON t.server_id = s.id
-               AND t.name = $3
+               AND t.name = requested.name
          LEFT JOIN mcp_tool_versions v
                 ON v.tool_id = t.id
                AND v.approved_at IS NOT NULL
@@ -459,12 +509,14 @@ impl CatalogStore for PgCatalogStore {
                AND s.name = $2
              ORDER BY (s.tenant_id = $1) DESC, v.approved_at DESC NULLS LAST
              LIMIT 1
+            ) resolved ON true
+            ORDER BY requested.position
             "#,
         )
         .bind(principal_tenant)
         .bind(server)
-        .bind(tool)
-        .fetch_optional(&self.pool)
+        .bind(tool_names)
+        .fetch_all(&self.pool)
         .await
         .map_err(CatalogError::Database)?;
 
@@ -475,49 +527,52 @@ impl CatalogStore for PgCatalogStore {
         // server status is checked BELOW independent of whether the
         // specific tool row exists, so a quarantined server with an
         // un-imported tool is still blocked.
-        let Some(row) = row else {
-            return Ok(ResolvedTool::NotFound);
-        };
+        rows.into_iter()
+            .map(|row| {
+                let Some(server_status) = row.get::<Option<String>, _>("server_status") else {
+                    return Ok(ResolvedTool::NotFound);
+                };
 
-        let server_status: String = row.get("server_status");
-        let server_name: String = row.get("server_name");
-        // `tool_name` is NULL when the server matched but the tool row
-        // is absent (LEFT JOIN miss); fall back to the requested name
-        // so the returned variant still names the tool.
-        let tool_name: String = row
-            .get::<Option<String>, _>("tool_name")
-            .unwrap_or_else(|| tool.to_owned());
-        let tool_id: Option<Uuid> = row.get("tool_id");
-        let schema_hash: Option<String> = row.get("schema_hash");
-        let risk: Option<String> = row.get("risk");
+                let server_name: String = row.get("server_name");
+                // `tool_name` is NULL when the server matched but the tool row
+                // is absent (LEFT JOIN miss); fall back to the requested name
+                // so the returned variant still names the tool.
+                let tool_name: String = row
+                    .get::<Option<String>, _>("tool_name")
+                    .unwrap_or_else(|| row.get("requested_tool"));
+                let tool_id: Option<Uuid> = row.get("tool_id");
+                let schema_hash: Option<String> = row.get("schema_hash");
+                let risk: Option<String> = row.get("risk");
 
-        // The status-vs-tool-presence ordering lives in a pure helper
-        // so it's unit-testable without a live Postgres: a
-        // quarantined server with an un-imported tool must still
-        // block, not fall through to NotFound → manifest fallback.
-        match classify_row(
-            &server_status,
-            tool_id.is_some(),
-            schema_hash.is_some(),
-            risk.is_some(),
-        ) {
-            RowClass::Quarantined => {
-                return Ok(ResolvedTool::Quarantined {
-                    server_name,
-                    tool_name,
-                })
-            }
-            RowClass::NotFound => return Ok(ResolvedTool::NotFound),
-            RowClass::PendingApproval => {
-                return Ok(ResolvedTool::PendingApproval {
-                    server_name,
-                    tool_name,
-                })
-            }
-            RowClass::Live => {}
-        }
+                // The status-vs-tool-presence ordering lives in a pure helper
+                // so it's unit-testable without a live Postgres: a
+                // quarantined server with an un-imported tool must still
+                // block, not fall through to NotFound → manifest fallback.
+                match classify_row(
+                    &server_status,
+                    tool_id.is_some(),
+                    schema_hash.is_some(),
+                    risk.is_some(),
+                ) {
+                    RowClass::Quarantined => {
+                        return Ok(ResolvedTool::Quarantined {
+                            server_name,
+                            tool_name,
+                        })
+                    }
+                    RowClass::NotFound => return Ok(ResolvedTool::NotFound),
+                    RowClass::PendingApproval => {
+                        return Ok(ResolvedTool::PendingApproval {
+                            server_name,
+                            tool_name,
+                        })
+                    }
+                    RowClass::Live => {}
+                }
 
-        Ok(ResolvedTool::Live(Box::new(live_tool_definition(&row))))
+                Ok(ResolvedTool::Live(Box::new(live_tool_definition(&row))))
+            })
+            .collect()
     }
 
     async fn resolve_live_tool_id(

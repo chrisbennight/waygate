@@ -10,7 +10,7 @@ use waygate_mcp::protocol::RiskTier;
 
 use super::{DriftReport, QuarantineThreshold};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct PublishedToolContract {
     /// Exact normalized definition captured from the same connection snapshot
     /// as the contract fields below.
@@ -81,9 +81,13 @@ pub(super) fn admit_input_schema(
 
 pub(super) fn contract_for_tool(tools: &[Tool], tool_name: &str) -> Option<PublishedToolContract> {
     let tool = tools.iter().find(|tool| tool.name.as_ref() == tool_name)?;
+    Some(contract_from_tool(tool))
+}
+
+pub(super) fn contract_from_tool(tool: &Tool) -> PublishedToolContract {
     let (tool_annotations, action_metadata) = crate::security_metadata::hash_components(tool);
     let behavior_hash = Some(crate::security_metadata::behavior_hash(tool));
-    Some(PublishedToolContract {
+    PublishedToolContract {
         definition: Some(tool.clone()),
         advertised_definition: Some(tool.clone()),
         behavior_hash,
@@ -94,7 +98,7 @@ pub(super) fn contract_for_tool(tools: &[Tool], tool_name: &str) -> Option<Publi
             .map(|schema| Value::Object((**schema).clone())),
         tool_annotations,
         action_metadata,
-    })
+    }
 }
 
 impl UpstreamEntry {
