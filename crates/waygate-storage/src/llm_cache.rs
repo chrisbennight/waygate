@@ -41,23 +41,26 @@ pub struct CacheEntry {
     pub ttl: Duration,
 }
 
-/// Compute the per-principal cache key (design §9): a BLAKE3 hash over the
-/// canonical request JSON PLUS the principal identity (tenant + subject). The
-/// principal is part of the hashed input, so a request from one principal can
-/// never produce the same key as another's — the cache's no-cross-principal
-/// guarantee is structural, not a runtime check.
+/// Compute the cache key from the canonical request and full principal identity
+/// (tenant, issuer, subject). Subjects are local to their identity provider;
+/// identical subjects from different issuers must not share response content.
 ///
-/// The three inputs are serialized as a JSON array before hashing so their
-/// boundaries are unambiguous: serde escapes each element, so distinct
-/// `(tenant, principal, request)` triples can never serialize to the same bytes
-/// (no separator-collision forging a different framing).
+/// JSON framing preserves field boundaries. The version separates these keys
+/// from older entries whose owner omitted the issuer; those entries must miss.
 pub fn cache_key(
     canonical_request_json: &str,
     tenant_id: &str,
+    principal_issuer: Option<&str>,
     principal_sub: Option<&str>,
 ) -> String {
-    let framed = serde_json::to_vec(&(tenant_id, principal_sub, canonical_request_json))
-        .expect("serializing cache-key inputs (strings) cannot fail");
+    let framed = serde_json::to_vec(&(
+        "waygate-llm-cache-v2",
+        tenant_id,
+        principal_issuer,
+        principal_sub,
+        canonical_request_json,
+    ))
+    .expect("serializing cache-key inputs (strings) cannot fail");
     blake3::hash(&framed).to_hex().to_string()
 }
 
@@ -264,9 +267,15 @@ impl waygate_evidence::cache::LlmCache for PgLlmCache {
         &self,
         canonical_request: &str,
         tenant_id: &str,
+        principal_issuer: Option<&str>,
         principal_sub: Option<&str>,
     ) -> Option<waygate_evidence::cache::CachedCompletion> {
-        let key = cache_key(canonical_request, tenant_id, principal_sub);
+        let key = cache_key(
+            canonical_request,
+            tenant_id,
+            principal_issuer,
+            principal_sub,
+        );
         match get_cached(&self.pool, &key).await {
             Ok(Some(c)) => Some(waygate_evidence::cache::CachedCompletion {
                 model_served: c.model_served,
@@ -285,6 +294,7 @@ impl waygate_evidence::cache::LlmCache for PgLlmCache {
         let key = cache_key(
             &entry.canonical_request,
             &entry.tenant_id,
+            entry.principal_issuer.as_deref(),
             entry.principal_sub.as_deref(),
         );
         let row = CacheEntry {
@@ -326,10 +336,10 @@ mod tests {
     #[test]
     fn cache_key_is_per_principal_and_deterministic() {
         let req = r#"{"model":"alias","messages":[{"role":"user","content":"hi"}]}"#;
-        let alice_1 = cache_key(req, "default", Some("alice"));
-        let alice_2 = cache_key(req, "default", Some("alice"));
-        let bob = cache_key(req, "default", Some("bob"));
-        let anon = cache_key(req, "default", None);
+        let alice_1 = cache_key(req, "default", Some("issuer-a"), Some("alice"));
+        let alice_2 = cache_key(req, "default", Some("issuer-a"), Some("alice"));
+        let bob = cache_key(req, "default", Some("issuer-a"), Some("bob"));
+        let anon = cache_key(req, "default", None, None);
 
         // Deterministic for identical inputs.
         assert_eq!(alice_1, alice_2);
@@ -338,13 +348,28 @@ mod tests {
         assert_ne!(alice_1, bob);
         assert_ne!(alice_1, anon);
         // A different tenant is also a different key.
-        assert_ne!(alice_1, cache_key(req, "other", Some("alice")));
+        assert_ne!(
+            alice_1,
+            cache_key(req, "other", Some("issuer-a"), Some("alice"))
+        );
+        assert_ne!(
+            alice_1,
+            cache_key(req, "default", Some("issuer-b"), Some("alice"))
+        );
+        // The former key can be present on disk but must not be looked up.
+        let legacy = serde_json::to_vec(&("default", Some("alice"), req)).unwrap();
+        assert_ne!(alice_1, blake3::hash(&legacy).to_hex().to_string());
+        assert_ne!(
+            cache_key(req, "default", Some("issuer:a"), Some("b")),
+            cache_key(req, "default", Some("issuer"), Some("a:b")),
+        );
         // A different request → a different key.
         assert_ne!(
             alice_1,
             cache_key(
                 r#"{"model":"alias","messages":[]}"#,
                 "default",
+                Some("issuer-a"),
                 Some("alice")
             )
         );

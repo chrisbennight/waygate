@@ -1575,7 +1575,7 @@ async fn unknown_model_on_the_llm_namespace_is_rejected_not_routed_to_mcp() {
 
 /// In-memory mock of the pipeline's [`waygate_mcp::cache::LlmCache`], keyed
 /// EXACTLY as the real per-principal store: `(canonical_request, tenant,
-/// principal_sub)`. It records get/put counts so a test can prove a hit skipped
+/// principal_issuer, principal_sub)`. It records get/put counts so a test can prove a hit skipped
 /// the provider and a miss stored the completion. This is an interaction fake,
 /// not a canned echo — the pipeline still computes the canonical request and the
 /// per-principal key and decides hit/miss; the test asserts the resulting
@@ -1585,7 +1585,7 @@ struct MockCache {
     #[allow(clippy::type_complexity)]
     store: Mutex<
         std::collections::HashMap<
-            (String, String, Option<String>),
+            (String, String, Option<String>, Option<String>),
             waygate_mcp::cache::CachedCompletion,
         >,
     >,
@@ -1614,6 +1614,7 @@ impl waygate_mcp::cache::LlmCache for MockCache {
         &self,
         canonical_request: &str,
         tenant_id: &str,
+        principal_issuer: Option<&str>,
         principal_sub: Option<&str>,
     ) -> Option<waygate_mcp::cache::CachedCompletion> {
         self.gets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1623,6 +1624,7 @@ impl waygate_mcp::cache::LlmCache for MockCache {
             .get(&(
                 canonical_request.to_string(),
                 tenant_id.to_string(),
+                principal_issuer.map(str::to_string),
                 principal_sub.map(str::to_string),
             ))
             .cloned()
@@ -1634,6 +1636,7 @@ impl waygate_mcp::cache::LlmCache for MockCache {
             (
                 entry.canonical_request,
                 entry.tenant_id,
+                entry.principal_issuer,
                 entry.principal_sub,
             ),
             waygate_mcp::cache::CachedCompletion {
@@ -1805,6 +1808,24 @@ async fn cache_is_scoped_per_principal_no_cross_principal_hit() {
         2,
         "bob's miss stores his own per-principal entry"
     );
+    let mut other_issuer = principal_named("alice");
+    other_issuer.issuer = "https://other-issuer.example".into();
+    let mut other_tenant = principal_named("alice");
+    other_tenant.tenant = waygate_core::TenantId::parse("other-tenant").unwrap();
+    for caller in [other_issuer, other_tenant] {
+        for expected_dispatch in [true, false] {
+            cap.lock().unwrap().called = false;
+            let request = InvocationRequest::new("llm", "gpt-x").with_arguments(Some(chat_args()));
+            svc.invoke(Some(&caller), request)
+                .await
+                .expect("invoke isolated identity");
+            assert_eq!(
+                cap.lock().unwrap().called,
+                expected_dispatch,
+                "a distinct identity first misses, then reuses its own response"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -2012,9 +2033,23 @@ async fn streaming_miss_tees_completion_into_cache_then_a_second_call_hits() {
     assert_eq!(content, "Hello", "the replay reconstructs the teed content");
     assert!(saw_done, "the replayed stream ends with a terminal [DONE]");
 
+    let mut other_issuer = principal();
+    other_issuer.issuer = "https://other-issuer.example".into();
+    let request = InvocationRequest::new("llm", "gpt-x").with_arguments(Some(stream_args()));
+    let mut stream = match svc.invoke(Some(&other_issuer), request).await.unwrap() {
+        InvocationResponse::Stream(stream) => stream,
+        other => panic!("expected Stream, got {other:?}"),
+    };
+    while stream.next().await.is_some() {}
+    assert_eq!(
+        cache.puts(),
+        2,
+        "another issuer must receive a live response and store its own entry"
+    );
+
     // Usage ledger: the miss is a real streamed call, the hit is flagged.
     let rows = usage.rows.lock().unwrap();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 3);
     assert!(
         !rows[0].gateway_cache_hit,
         "the streamed miss is a real call"
@@ -2023,6 +2058,7 @@ async fn streaming_miss_tees_completion_into_cache_then_a_second_call_hits() {
         rows[1].gateway_cache_hit,
         "the replay is a flagged cache hit"
     );
+    assert!(!rows[2].gateway_cache_hit);
 }
 
 // ---- Embeddings pipeline branch ---------------------------------------------
@@ -2359,6 +2395,15 @@ async fn embeddings_cache_is_per_principal() {
         "a different principal must not hit Alice's cached embedding"
     );
     assert_eq!(cache.puts(), 2, "each principal stored its own entry");
+    let mut other_issuer = principal_named("alice");
+    other_issuer.issuer = "https://other-issuer.example".into();
+    for expected_dispatch in [true, false] {
+        cap.lock().unwrap().called = false;
+        svc.invoke(Some(&other_issuer), mk())
+            .await
+            .expect("issuer-scoped embedding");
+        assert_eq!(cap.lock().unwrap().called, expected_dispatch);
+    }
 }
 
 mod images;

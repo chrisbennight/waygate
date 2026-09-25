@@ -17,6 +17,73 @@ use waygate_storage::{
 };
 
 #[tokio::test]
+async fn provider_cache_isolates_issuers_and_never_reuses_legacy_entries() {
+    use waygate_evidence::cache::{CacheStoreRequest, LlmCache};
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("cache-issuer-test-{}", Uuid::now_v7());
+    let request = r#"{"model":"alias","messages":[]}"#;
+    let cache = waygate_storage::PgLlmCache::new(pool.clone());
+    let legacy_key = blake3::hash(&serde_json::to_vec(&(&tenant, Some("alice"), request)).unwrap())
+        .to_hex()
+        .to_string();
+    put_cached(
+        &pool,
+        &CacheEntry {
+            cache_key: legacy_key,
+            tenant_id: tenant.clone(),
+            principal_sub: Some("alice".into()),
+            model_alias: "alias".into(),
+            model_served: None,
+            provider: "openrouter".into(),
+            response_body: json!({"content": "ambiguous legacy owner"}),
+            ttl: Duration::from_secs(3600),
+        },
+    )
+    .await
+    .unwrap();
+    for issuer in ["issuer-a", "issuer-b"] {
+        assert!(cache
+            .get(request, &tenant, Some(issuer), Some("alice"))
+            .await
+            .is_none());
+    }
+    let body = json!({"content": "issuer-a response"});
+    cache
+        .put(CacheStoreRequest {
+            canonical_request: request.into(),
+            tenant_id: tenant.clone(),
+            principal_issuer: Some("issuer-a".into()),
+            principal_sub: Some("alice".into()),
+            model_alias: "alias".into(),
+            model_served: None,
+            provider: "openrouter".into(),
+            body: body.clone(),
+            ttl: Duration::from_secs(3600),
+        })
+        .await;
+    assert_eq!(
+        cache
+            .get(request, &tenant, Some("issuer-a"), Some("alice"))
+            .await
+            .unwrap()
+            .body,
+        body
+    );
+    assert!(cache
+        .get(request, &tenant, Some("issuer-b"), Some("alice"))
+        .await
+        .is_none());
+    assert!(cache.get(request, &tenant, None, None).await.is_none());
+    sqlx::query("DELETE FROM llm_cache WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn cache_round_trips_is_per_principal_and_respects_ttl() {
     let Ok(url) = env::var("AUDIT_DATABASE_URL") else {
         eprintln!("skipping llm_cache test: AUDIT_DATABASE_URL not set");
@@ -31,7 +98,7 @@ async fn cache_round_trips_is_per_principal_and_respects_ttl() {
     let tenant = format!("cache-test-{}", Uuid::now_v7());
 
     let req = r#"{"model":"alias","messages":[{"role":"user","content":"hi"}]}"#;
-    let alice_key = cache_key(req, &tenant, Some("alice"));
+    let alice_key = cache_key(req, &tenant, Some("issuer-a"), Some("alice"));
     let body = json!({
         "object": "chat.completion",
         "model": "served-x",
@@ -72,7 +139,7 @@ async fn cache_round_trips_is_per_principal_and_respects_ttl() {
 
     // Bob's key for the SAME request differs → a cross-principal MISS. This is
     // the security guarantee: bob can never be served alice's completion.
-    let bob_key = cache_key(req, &tenant, Some("bob"));
+    let bob_key = cache_key(req, &tenant, Some("issuer-a"), Some("bob"));
     assert_ne!(alice_key, bob_key);
     assert!(
         get_cached(&pool, &bob_key).await.expect("get").is_none(),
@@ -81,7 +148,7 @@ async fn cache_round_trips_is_per_principal_and_respects_ttl() {
 
     // A zero-TTL entry is already expired → never served (the read filters on
     // expires_at, so an expired-but-unswept row is invisible).
-    let exp_key = cache_key(req, &tenant, Some("ephemeral"));
+    let exp_key = cache_key(req, &tenant, Some("issuer-a"), Some("ephemeral"));
     put_cached(
         &pool,
         &CacheEntry {
@@ -125,7 +192,7 @@ async fn ttl_sweep_reclaims_expired_rows_and_spares_fresh_ones() {
 
     let body = json!({"object": "chat.completion", "choices": []});
     let mk = |sub: &str, ttl: Duration| CacheEntry {
-        cache_key: cache_key(sub, &tenant, Some(sub)),
+        cache_key: cache_key(sub, &tenant, Some("issuer-a"), Some(sub)),
         tenant_id: tenant.clone(),
         principal_sub: Some(sub.to_string()),
         model_alias: "alias".into(),
@@ -136,7 +203,7 @@ async fn ttl_sweep_reclaims_expired_rows_and_spares_fresh_ones() {
     };
 
     // One already-expired row (ttl 0) and one fresh row (ttl 1h).
-    let fresh_key = cache_key("fresh", &tenant, Some("fresh"));
+    let fresh_key = cache_key("fresh", &tenant, Some("issuer-a"), Some("fresh"));
     put_cached(&pool, &mk("expired", Duration::from_secs(0)))
         .await
         .expect("put expired");
@@ -206,7 +273,7 @@ async fn tenant_cap_evicts_oldest_beyond_max() {
             put_cached(
                 &pool,
                 &CacheEntry {
-                    cache_key: cache_key(sub, &tenant, Some(sub)),
+                    cache_key: cache_key(sub, &tenant, Some("issuer-a"), Some(sub)),
                     tenant_id: tenant.clone(),
                     principal_sub: Some(sub.to_string()),
                     model_alias: "alias".into(),
@@ -234,9 +301,9 @@ async fn tenant_cap_evicts_oldest_beyond_max() {
         "exactly the one over-cap (oldest) row is evicted"
     );
 
-    let k1 = cache_key("k1", &tenant, Some("k1"));
-    let k2 = cache_key("k2", &tenant, Some("k2"));
-    let k3 = cache_key("k3", &tenant, Some("k3"));
+    let k1 = cache_key("k1", &tenant, Some("issuer-a"), Some("k1"));
+    let k2 = cache_key("k2", &tenant, Some("issuer-a"), Some("k2"));
+    let k3 = cache_key("k3", &tenant, Some("issuer-a"), Some("k3"));
     assert!(
         get_cached(&pool, &k1).await.expect("get").is_none(),
         "the oldest entry is evicted by the cap"

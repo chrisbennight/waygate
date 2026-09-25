@@ -682,11 +682,16 @@ rolling/daily/weekly/monthly. Cost weighting comes from the `llm_models` costing
 
 ## 9. Caching
 
-- **Key:** BLAKE3 over the canonical request **plus the principal** — exact-match cache
+- **Key:** BLAKE3 over the canonical request **plus tenant, identity-provider issuer,
+  and subject** — exact-match cache
   entries are **per-principal scoped**, so one user's completion is never served to another
   (security invariant; strictly stronger than tenant isolation). The key is
   **transport-agnostic** (it normalizes `stream`), so a unary call and a streaming call for the
   same content share one entry, served in whichever transport the request asked for.
+  The key format is versioned: entries written before issuer scoping are never
+  reused after upgrading. They expire and are swept normally; no database
+  migration or manual purge is required. Cache lookups still follow current
+  authorization and budget checks.
 - **Default off — two-key arming.** Caching requires BOTH `GATEWAY_LLM_CACHE_ENABLED=true`
   (system-level; default off, since this is the one place the gateway stores response *content*)
   AND a per-model `cache_ttl_ms` (the per-alias opt-in + the entry's TTL). Either unset ⇒ the
