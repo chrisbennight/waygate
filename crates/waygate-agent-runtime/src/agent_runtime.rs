@@ -640,16 +640,18 @@ impl AgentToolDispatch for UpstreamAgentDispatch {
 fn call_result_to_outcome(v: &Value) -> ToolOutcome {
     let is_error = v.get("isError").and_then(Value::as_bool).unwrap_or(false);
     let mut text = String::new();
+    let mut has_text = false;
     if let Some(parts) = v.get("content").and_then(Value::as_array) {
         for part in parts {
             if part.get("type").and_then(Value::as_str) == Some("text") {
                 if let Some(t) = part.get("text").and_then(Value::as_str) {
+                    has_text = true;
                     text.push_str(t);
                 }
             }
         }
     }
-    let content = if text.is_empty() {
+    let content = if !has_text {
         v.get("structuredContent")
             .filter(|value| !value.is_null())
             .or_else(|| v.get("content"))
@@ -875,6 +877,15 @@ mod tests {
             "Capture the machine result in the trusted runtime."
         );
         assert!(!protected.content.contains("not-model-content"));
+        for is_error in [false, true] {
+            let empty = super::call_result_to_outcome(&serde_json::json!({
+                "structuredContent": {"synthetic_private_value": "not-model-content"},
+                "content": [{"type": "text", "text": ""}],
+                "isError": is_error
+            }));
+            assert_eq!(empty.content, "");
+            assert_eq!(empty.is_error, is_error);
+        }
         let legacy = super::call_result_to_outcome(&serde_json::json!({
             "content": [{"type":"text", "text":"legacy"}, {"type":"text", "text":" result"}]
         }));
