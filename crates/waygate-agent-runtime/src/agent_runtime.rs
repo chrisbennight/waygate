@@ -338,6 +338,7 @@ fn canonical_tools_to_openai(tools: &[CanonicalTool]) -> Vec<Value> {
 /// and the model-facing definition.
 #[derive(Debug, Clone)]
 struct ResolvedTool {
+    sensitive_input: bool,
     /// Sanitized, model-facing function name (`^[A-Za-z0-9_-]{1,64}$`).
     model_name: String,
     server: String,
@@ -414,6 +415,7 @@ impl UpstreamAgentDispatch {
                     let model_name = sanitize_tool_name(fq, &mut taken);
                     let description = (!rt.description.is_empty()).then(|| rt.description.clone());
                     tools.push(ResolvedTool {
+                        sensitive_input: false,
                         model_name: model_name.clone(),
                         server: server.to_owned(),
                         tool: tool.to_owned(),
@@ -436,35 +438,26 @@ impl UpstreamAgentDispatch {
                 }
                 continue;
             }
-            let listed = match pool.list_tools(server).await {
-                Ok(t) => t,
-                Err(_) => {
-                    tracing::warn!(server = %server, "agent allowlist: server unknown/unavailable; skipping its tools");
-                    continue;
-                }
-            };
-            let Some(rmcp_tool) = listed.iter().find(|t| t.name.as_ref() == tool) else {
-                tracing::warn!(entry = %fq, "agent allowlist: tool not published by upstream; skipping");
+            // Description, sensitivity, schemas and dispatch identity come from
+            // one admitted snapshot, so a reload cannot mix review generations.
+            let waygate_mcp::catalog::ResolvedInvocationTool::Ready(snapshot) = pool
+                .resolve_invocation_tool(principal.tenant.as_str(), server, tool)
+                .await
+            else {
                 continue;
             };
-
-            // Resolve the contract identity the same way invocation does
-            // (operator manifest in manifest mode, reviewed claims in annotation
-            // mode) rather than the synchronous conservative fallback, so an
-            // annotation-native read is not presented as a mutation and routed
-            // through the approval gate in chat. Capturing the whole identity —
-            // not just the side-effect bit — lets the later call PIN it, so a
-            // contract that flips read-only to side-effecting after the approval
-            // decision is refused at execution instead of running unconfirmed.
-            let expected_contract = pool
-                .resolved_contract_identity(principal.tenant.as_str(), server, tool)
-                .await;
-            // A tool that will not resolve (None) is treated as side-effecting
-            // so chat routes it through the approval gate; invocation refuses it
-            // regardless.
-            let side_effects = expected_contract
-                .as_ref()
-                .is_none_or(|contract| contract.side_effects);
+            let Some(rmcp_tool) = snapshot.published_definition() else {
+                continue;
+            };
+            let sensitive_input = snapshot
+                .tool_annotations()
+                .zip(snapshot.action_metadata())
+                .is_some_and(|(annotations, metadata)| {
+                    waygate_upstream::security_metadata::behavior_claims(annotations, metadata)
+                        .map_or(true, |claims| claims.input_sensitive)
+                });
+            let side_effects = snapshot.facts().side_effects;
+            let expected_contract = Some(snapshot.contract_identity());
             let model_name = sanitize_tool_name(fq, &mut taken);
             let parameters = Value::Object((*rmcp_tool.input_schema).clone());
             let definition = CanonicalTool {
@@ -474,6 +467,7 @@ impl UpstreamAgentDispatch {
                 strict: None,
             };
             tools.push(ResolvedTool {
+                sensitive_input,
                 model_name,
                 server: server.to_owned(),
                 tool: tool.to_owned(),
@@ -496,6 +490,32 @@ impl UpstreamAgentDispatch {
 
 #[async_trait]
 impl AgentToolDispatch for UpstreamAgentDispatch {
+    fn approval_preview(&self, name: &str, arguments: &str) -> String {
+        let Some(tool) = self.tools.iter().find(|tool| tool.model_name == name) else {
+            return "Tool is not available for dispatch.".to_owned();
+        };
+        if !tool.sensitive_input {
+            return arguments.to_owned();
+        }
+        let parsed = serde_json::from_str::<Value>(arguments).ok();
+        let fields: Vec<_> = tool
+            .definition
+            .parameters
+            .get("properties")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|fields| fields.keys())
+            .filter(|name| {
+                parsed
+                    .as_ref()
+                    .is_some_and(|value| value.get(name.as_str()).is_some())
+            })
+            .collect();
+        json!({"description": tool.definition.description, "affected_fields": fields,
+            "input": "[REDACTED:SENSITIVE_INPUT]"})
+        .to_string()
+    }
+
     async fn available_tools(&self) -> Result<Vec<AgentTool>, AgentError> {
         Ok(self
             .tools
@@ -613,23 +633,28 @@ impl AgentToolDispatch for UpstreamAgentDispatch {
 /// Flatten a serialized MCP `CallToolResult` (its rmcp wire JSON) to the text
 /// fed back to the model. The caller serializes the result generically so this
 /// crate never names the `rmcp` wire type in production (mirrors the dashboard
-/// try-it path); here we read its `isError` flag and concatenate `content[]`
-/// text parts, falling back to a JSON dump when there are none (e.g. an
-/// image-only result).
+/// try-it path). Prefer an explicit text rendering: some tools intentionally
+/// keep sensitive machine fields out of that model-facing representation.
+/// Structured-only results remain usable, and a compatibility copy is never
+/// appended. Error status is independent of the representation selected.
 fn call_result_to_outcome(v: &Value) -> ToolOutcome {
     let is_error = v.get("isError").and_then(Value::as_bool).unwrap_or(false);
     let mut text = String::new();
+    let mut has_text = false;
     if let Some(parts) = v.get("content").and_then(Value::as_array) {
         for part in parts {
             if part.get("type").and_then(Value::as_str) == Some("text") {
                 if let Some(t) = part.get("text").and_then(Value::as_str) {
+                    has_text = true;
                     text.push_str(t);
                 }
             }
         }
     }
-    let content = if text.is_empty() {
-        v.get("content")
+    let content = if !has_text {
+        v.get("structuredContent")
+            .filter(|value| !value.is_null())
+            .or_else(|| v.get("content"))
             .map(|c| c.to_string())
             .unwrap_or_else(|| "(empty tool result)".to_owned())
     } else {
@@ -825,6 +850,48 @@ fn sanitize_tool_name(fq: &str, taken: &mut HashSet<String>) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn structured_tool_results_have_one_authoritative_representation() {
+        let payload = serde_json::json!({"contents": "synthetic-content", "complete": true});
+        for compatibility in [
+            serde_json::json!([]),
+            serde_json::json!([
+                {"type": "text", "text": payload.to_string()}
+            ]),
+        ] {
+            for is_error in [false, true] {
+                let outcome = super::call_result_to_outcome(&serde_json::json!({
+                    "structuredContent": payload, "content": compatibility, "isError": is_error
+                }));
+                assert_eq!(outcome.content, payload.to_string());
+                assert_eq!(outcome.is_error, is_error);
+            }
+        }
+        let protected = super::call_result_to_outcome(&serde_json::json!({
+            "structuredContent": {"synthetic_private_value": "not-model-content"},
+            "content": [{"type": "text", "text": "Capture the machine result in the trusted runtime."}]
+        }));
+        assert_eq!(
+            protected.content,
+            "Capture the machine result in the trusted runtime."
+        );
+        assert!(!protected.content.contains("not-model-content"));
+        for is_error in [false, true] {
+            let empty = super::call_result_to_outcome(&serde_json::json!({
+                "structuredContent": {"synthetic_private_value": "not-model-content"},
+                "content": [{"type": "text", "text": ""}],
+                "isError": is_error
+            }));
+            assert_eq!(empty.content, "");
+            assert_eq!(empty.is_error, is_error);
+        }
+        let legacy = super::call_result_to_outcome(&serde_json::json!({
+            "content": [{"type":"text", "text":"legacy"}, {"type":"text", "text":" result"}]
+        }));
+        assert_eq!(legacy.content, "legacy result");
+        assert!(!legacy.is_error);
+    }
     use super::*;
     use crate::chat_approvals::ChatApprovalRegistry;
     use rmcp::model::{CallToolResult, ContentBlock as Content};
@@ -946,6 +1013,7 @@ mod tests {
 
     fn resolved(model_name: &str, server: &str, tool: &str, side_effects: bool) -> ResolvedTool {
         ResolvedTool {
+            sensitive_input: false,
             model_name: model_name.to_owned(),
             server: server.to_owned(),
             tool: tool.to_owned(),
@@ -1157,6 +1225,46 @@ mod tests {
         let model = OpenAiAgentModel::new(inv, principal("a"), "m", "agent:x", None);
         let err = model.complete(&[], &[]).await.unwrap_err();
         assert!(matches!(err, AgentError::Model(m) if m.contains("rate limited")));
+    }
+
+    #[test]
+    fn chat_approval_preview_hides_sensitive_values_but_keeps_consequences() {
+        let mut tool = resolved("compose_write", "example-operations", "compose.write", true);
+        tool.sensitive_input = true;
+        tool.definition.description = Some(
+            "Replace inline configuration; upstream retention applies; deploy separately."
+                .to_owned(),
+        );
+        tool.definition.parameters = json!({"type": "object", "properties": {
+            "selector": {"type": "string"}, "contents": {"type": "string"}
+        }});
+        let dispatch = dispatch_with(
+            vec![tool],
+            FakeInvocation::unary(CallToolResult::success(vec![])),
+        );
+        let arguments = json!({"selector": "private-target", "contents": "opaque-secret",
+            "untrusted-key": "value"})
+        .to_string();
+        let preview = dispatch.approval_preview("compose_write", &arguments);
+        let view: Value = serde_json::from_str(&preview).unwrap();
+        let mut fields: Vec<_> = view["affected_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|field| field.as_str().unwrap())
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(fields, ["contents", "selector"]);
+        assert!(view["description"]
+            .as_str()
+            .unwrap()
+            .contains("deploy separately"));
+        for hidden in ["private-target", "opaque-secret", "untrusted-key"] {
+            assert!(!preview.contains(hidden));
+        }
+        assert!(!dispatch
+            .approval_preview("unavailable", &arguments)
+            .contains("opaque-secret"));
     }
 
     #[tokio::test]

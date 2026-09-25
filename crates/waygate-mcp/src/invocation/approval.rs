@@ -243,6 +243,30 @@ impl DefaultInvocationService {
                 // of whether anyone receives the event.
                 if let Some(notifier) = self.hitl_notifier.as_ref() {
                     notifier.notify_approval_needed(waygate_invocation::HitlApprovalNeeded {
+                        summary: waygate_invocation::ApprovalSummary {
+                            description: ctx
+                                .tool_snapshot()
+                                .published_definition()
+                                .and_then(|tool| tool.description.as_deref())
+                                .map(str::to_owned),
+                            affected_fields: ctx
+                                .tool_snapshot()
+                                .input_schema()
+                                .and_then(|schema| schema.get("properties"))
+                                .and_then(serde_json::Value::as_object)
+                                .map(|fields| {
+                                    fields
+                                        .keys()
+                                        .filter(|name| {
+                                            ctx.arguments.as_ref().is_some_and(|arguments| {
+                                                arguments.contains_key(name.as_str())
+                                            })
+                                        })
+                                        .cloned()
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                        },
                         tenant_id: tenant.to_owned(),
                         principal_sub: principal.sub.clone(),
                         principal_issuer: principal.issuer.clone(),

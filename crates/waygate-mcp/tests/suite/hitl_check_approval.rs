@@ -282,18 +282,25 @@ impl UpstreamCatalog for FakeUpstream {
         tool_name: &str,
     ) -> ResolvedInvocationTool {
         let facts = self.tool_facts(server, tool_name);
+        let input = serde_json::json!({"type": "object", "properties": {
+            "selector": {"type": "string"}, "contents": {"type": "string"}
+        }});
         let snapshot = if self.requires_approval_known {
             InvocationToolSnapshot::catalog(
                 facts,
                 Uuid::from_u128(1),
                 "h".into(),
-                Some(serde_json::json!({"type": "object"})),
+                Some(input.clone()),
                 None,
             )
         } else {
             InvocationToolSnapshot::manifest_fallback(facts, false)
         };
-        ResolvedInvocationTool::Ready(snapshot)
+        ResolvedInvocationTool::Ready(snapshot.with_published_definition(Some(rmcp::model::Tool::new(
+            tool_name.to_owned(),
+            "Replace desired configuration. Upstream may retain submitted values. Deploy separately.",
+            Arc::new(input.as_object().unwrap().clone()),
+        ))))
     }
 }
 
@@ -1133,4 +1140,72 @@ async fn grant_claim_carries_the_callers_issuer() {
         Some("test"),
         "the claim lookup must carry the calling principal's issuer",
     );
+}
+
+#[derive(Default)]
+struct SummaryNotifier(Mutex<Vec<waygate_invocation::HitlApprovalNeeded>>);
+
+impl waygate_invocation::HitlNotifier for SummaryNotifier {
+    fn notify_approval_needed(&self, event: waygate_invocation::HitlApprovalNeeded) {
+        self.0.lock().unwrap().push(event);
+    }
+}
+
+#[tokio::test]
+async fn direct_approval_summary_uses_admitted_description_and_schema_fields_without_values() {
+    let dispatched = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let upstream = Arc::new(FakeUpstream {
+        requires_approval: true,
+        requires_approval_known: true,
+        dispatched: dispatched.clone(),
+        approval_gated_seen: None,
+    });
+    let catalog_store: SharedCatalogStore = Arc::new(FakeCatalog {
+        tool_id: Uuid::from_u128(1),
+        server_id: Uuid::from_u128(2),
+        claim_outcome: ClaimOutcome::NotFound,
+        seen_issuer: Mutex::new(None),
+    });
+    let notifier = Arc::new(SummaryNotifier::default());
+    let service =
+        DefaultInvocationService::new(upstream, Arc::new(AllowAllGate), Arc::new(NullSink))
+            .with_catalog_store(Some(catalog_store))
+            .with_hitl_notifier(Some(notifier.clone()));
+    let arguments =
+        serde_json::json!({"selector": "synthetic-target", "contents": "synthetic-secret",
+        "user-controlled-field-name": "opaque"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let result = service
+        .invoke(
+            Some(&principal("fixture-reader")),
+            InvocationRequest::new("example-messages", "send").with_arguments(Some(arguments)),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(InvocationError::ApprovalRequired {
+            satisfiable: true,
+            ..
+        })
+    ));
+    assert!(!dispatched.load(std::sync::atomic::Ordering::SeqCst));
+    let events = notifier.0.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].summary.description.as_deref(),
+        Some("Replace desired configuration. Upstream may retain submitted values. Deploy separately."));
+    let mut fields = events[0].summary.affected_fields.clone();
+    fields.sort_unstable();
+    assert_eq!(fields, ["contents", "selector"]);
+    let rendered = serde_json::to_string(&events[0].summary).unwrap();
+    for forbidden in [
+        "synthetic-secret",
+        "synthetic-target",
+        "opaque",
+        "user-controlled-field-name",
+        events[0].argument_hash.as_str(),
+    ] {
+        assert!(!rendered.contains(forbidden));
+    }
 }
