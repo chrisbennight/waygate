@@ -420,7 +420,7 @@ fn chat_args() -> Map<String, Value> {
 /// Loopback Anthropic Messages SSE provider: the event sequence Anthropic streams.
 async fn anthropic_stream_provider_handler() -> Response {
     let sse = concat!(
-        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-served-x\",\"usage\":{\"input_tokens\":5}}}\n\n",
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-served-x\",\"usage\":{\"input_tokens\":2,\"cache_read_input_tokens\":1,\"cache_creation_input_tokens\":2}}}\n\n",
         "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"He\"}}\n\n",
         "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"llo\"}}\n\n",
         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
@@ -666,6 +666,14 @@ async fn responses_surface_streaming_translates_anthropic_to_responses_events() 
     assert_eq!(last.event["response"]["usage"]["input_tokens"], 5);
     assert_eq!(last.event["response"]["usage"]["output_tokens"], 2);
     assert_eq!(last.event["response"]["usage"]["total_tokens"], 7);
+    assert_eq!(
+        last.event["response"]["usage"]["input_tokens_details"]["cached_tokens"],
+        1
+    );
+    assert_eq!(
+        last.event["response"]["usage"]["input_tokens_details"]["cache_write_tokens"],
+        2
+    );
     // Audited exactly once, at stream close.
     assert_eq!(sink.best_effort.lock().unwrap().len(), 1);
 }

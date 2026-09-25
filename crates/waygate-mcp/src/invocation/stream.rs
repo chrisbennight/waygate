@@ -306,7 +306,10 @@ fn chat_usage_from_record(
     record: &waygate_llm_translate::InferenceRecord,
 ) -> Option<serde_json::Value> {
     let u = &record.usage;
-    if u.input.is_none() && u.output.is_none() {
+    if [u.input, u.output, u.cached_read, u.cache_write, u.reasoning]
+        .iter()
+        .all(Option::is_none)
+    {
         return None;
     }
     let mut m = serde_json::Map::new();
@@ -319,10 +322,17 @@ fn chat_usage_from_record(
     if let (Some(i), Some(o)) = (u.input, u.output) {
         m.insert("total_tokens".into(), serde_json::Value::from(i + o));
     }
+    let mut input_details = serde_json::Map::new();
     if let Some(c) = u.cached_read {
+        input_details.insert("cached_tokens".into(), serde_json::Value::from(c));
+    }
+    if let Some(w) = u.cache_write {
+        input_details.insert("cache_write_tokens".into(), serde_json::Value::from(w));
+    }
+    if !input_details.is_empty() {
         m.insert(
             "prompt_tokens_details".into(),
-            serde_json::json!({ "cached_tokens": c }),
+            serde_json::Value::Object(input_details),
         );
     }
     if let Some(r) = u.reasoning {

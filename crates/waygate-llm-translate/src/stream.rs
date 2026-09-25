@@ -946,18 +946,18 @@ impl ChatStreamToResponses {
                 u.insert(resp_key.into(), json!(v));
             }
         }
-        // Detail sub-objects: chat `prompt_tokens_details.cached_tokens` →
-        // `input_tokens_details.cached_tokens`; `completion_tokens_details.
-        // reasoning_tokens` → `output_tokens_details.reasoning_tokens`.
-        if let Some(cached) = chat
-            .get("prompt_tokens_details")
-            .and_then(|d| d.get("cached_tokens"))
-            .and_then(Value::as_u64)
-        {
-            u.insert(
-                "input_tokens_details".into(),
-                json!({"cached_tokens": cached}),
-            );
+        let mut input_details = serde_json::Map::new();
+        for key in ["cached_tokens", "cache_write_tokens"] {
+            if let Some(count) = chat
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get(key))
+                .and_then(Value::as_u64)
+            {
+                input_details.insert(key.into(), json!(count));
+            }
+        }
+        if !input_details.is_empty() {
+            u.insert("input_tokens_details".into(), Value::Object(input_details));
         }
         if let Some(reasoning) = chat
             .get("completion_tokens_details")
@@ -2072,7 +2072,7 @@ mod tests {
             .push(&json!({"id":"c1","model":"m","choices":[{"delta":{},"finish_reason":"stop"}]}));
         let _ = lift.push(&json!({"id":"c1","model":"m","choices":[],"usage":{
             "prompt_tokens":10,"completion_tokens":5,"total_tokens":15,
-            "prompt_tokens_details":{"cached_tokens":4},
+            "prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":3},
             "completion_tokens_details":{"reasoning_tokens":2}
         }}));
         let fin = lift.finish(None);
@@ -2081,6 +2081,7 @@ mod tests {
         assert_eq!(usage["output_tokens"], 5);
         assert_eq!(usage["total_tokens"], 15);
         assert_eq!(usage["input_tokens_details"]["cached_tokens"], 4);
+        assert_eq!(usage["input_tokens_details"]["cache_write_tokens"], 3);
         assert_eq!(usage["output_tokens_details"]["reasoning_tokens"], 2);
     }
 }

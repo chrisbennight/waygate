@@ -60,6 +60,7 @@ async fn insert_llm_usage_roundtrip() {
         output_cost: Some(Decimal::from_str("0.0006").unwrap()),
         total_cost: Some(Decimal::from_str("0.0015").unwrap()),
         source: CostSource::ComputedFromCatalog,
+        ..Default::default()
     };
     insert_llm_usage(&pool, &row, &cost).await.expect("insert");
 
@@ -152,7 +153,7 @@ async fn sink_prices_a_call_from_the_catalog() {
     .await
     .expect("seed model");
     sqlx::query(
-        "UPDATE llm_models SET input_cost_per_mtok = 2, cached_read_cost_per_mtok = 0.5 \
+        "UPDATE llm_models SET input_cost_per_mtok = 2, cached_read_cost_per_mtok = 0.5, cache_write_cost_per_mtok = 0.75 \
            WHERE tenant_id = $1 AND alias = 'gpt-x'",
     )
     .bind(&tenant)
@@ -161,7 +162,7 @@ async fn sink_prices_a_call_from_the_catalog() {
     .expect("set rates");
 
     let sink = PgLlmUsageSink::new(pool.clone());
-    sink.record_usage(LlmUsageRow {
+    let row = LlmUsageRow {
         tenant_id: tenant.clone(),
         principal_sub: Some("alice".into()),
         model_alias: "gpt-x".into(),
@@ -178,8 +179,8 @@ async fn sink_prices_a_call_from_the_catalog() {
         refusal: false,
         latency_ms: Some(10),
         gateway_cache_hit: false,
-    })
-    .await;
+    };
+    sink.record_usage(row.clone()).await;
 
     let got = sqlx::query("SELECT total_cost, cost_source FROM llm_usage WHERE tenant_id = $1")
         .bind(&tenant)
@@ -192,6 +193,37 @@ async fn sink_prices_a_call_from_the_catalog() {
     // Synthetic rates: 600 ordinary at 2/M + 400 cached at 0.5/M.
     assert_eq!(total_cost, Some(Decimal::from_str("0.0014").unwrap()));
     assert_eq!(cost_source.as_deref(), Some("computed_from_catalog"));
+
+    for (cached, written, ordinary_cost, cached_cost, write_cost) in [
+        (1000, 0, "0", "0.0005", "0"),
+        (400, 200, "0.0008", "0.0002", "0.00015"),
+    ] {
+        sqlx::query("DELETE FROM llm_usage WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut partial = row.clone();
+        partial.output_tokens = None;
+        partial.cached_read_tokens = Some(cached);
+        partial.cache_write_tokens = Some(written);
+        sink.record_usage(partial).await;
+        let persisted = sqlx::query("SELECT input_cost, output_cost, cached_read_cost, cache_write_cost, total_cost, cost_source FROM llm_usage WHERE tenant_id = $1")
+            .bind(&tenant).fetch_one(&pool).await.unwrap();
+        for (column, expected) in [
+            ("input_cost", ordinary_cost),
+            ("cached_read_cost", cached_cost),
+            ("cache_write_cost", write_cost),
+        ] {
+            assert_eq!(
+                persisted.get::<Option<Decimal>, _>(column),
+                Some(Decimal::from_str(expected).unwrap())
+            );
+        }
+        assert_eq!(persisted.get::<Option<Decimal>, _>("output_cost"), None);
+        assert_eq!(persisted.get::<Option<Decimal>, _>("total_cost"), None);
+        assert_eq!(persisted.get::<String, _>("cost_source"), "unknown");
+    }
 
     sqlx::query("DELETE FROM llm_usage WHERE tenant_id = $1")
         .bind(&tenant)

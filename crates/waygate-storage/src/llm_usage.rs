@@ -53,6 +53,8 @@ impl CostSource {
 pub struct CostBreakdown {
     pub input_cost: Option<Decimal>,
     pub output_cost: Option<Decimal>,
+    pub cached_read_cost: Option<Decimal>,
+    pub cache_write_cost: Option<Decimal>,
     pub total_cost: Option<Decimal>,
     pub source: CostSource,
 }
@@ -62,8 +64,8 @@ pub struct CostBreakdown {
 /// needs a rate; a reported zero costs zero even without a configured rate.
 ///
 /// `total_cost` sums every priced class (input, output, cached-read,
-/// cache-write); cached/cache-write costs fold into the total (the ledger has
-/// no separate columns for them). Input is inclusive: subtract reported cache
+/// cache-write), retaining each known component in the ledger even when the
+/// exact total is unknown. Input is inclusive: subtract reported cache
 /// subsets before pricing ordinary input. Missing primary counts, inconsistent
 /// subsets, or a missing rate for positive usage leave the total unknown.
 /// There is no provider-reported path yet.
@@ -102,6 +104,8 @@ pub fn compute_cost(
     CostBreakdown {
         input_cost,
         output_cost,
+        cached_read_cost: cached_cost,
+        cache_write_cost: write_cost,
         total_cost,
         source,
     }
@@ -217,9 +221,9 @@ where
              inbound_surface, input_tokens, output_tokens, cached_read_tokens,
              cache_write_tokens, reasoning_tokens, finish_reason, refusal, latency_ms,
              input_cost, output_cost, total_cost, cost_source, gateway_cache_hit,
-             accounting_version)
+             accounting_version, cached_read_cost, cache_write_cost)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                $16, $17, $18, $19, $20, 2)
+                $16, $17, $18, $19, $20, 2, $21, $22)
         "#,
     )
     .bind(Uuid::now_v7())
@@ -242,6 +246,8 @@ where
     .bind(cost.total_cost)
     .bind(cost.source.as_str())
     .bind(row.gateway_cache_hit)
+    .bind(cost.cached_read_cost)
+    .bind(cost.cache_write_cost)
     .execute(executor)
     .await
     .map(|_| ())

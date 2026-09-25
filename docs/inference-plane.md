@@ -207,7 +207,8 @@ struct InferenceRecord {
     // cost (Option = no costing configured / unknown)
     input_cost: Option<Decimal>,
     output_cost: Option<Decimal>,
-    cached_cost: Option<Decimal>,
+    cached_read_cost: Option<Decimal>,
+    cache_write_cost: Option<Decimal>,
     total_cost: Option<Decimal>,
     cost_source: CostSource,          // ProviderReported | ComputedFromCatalog | Unknown
 
@@ -232,13 +233,15 @@ when output is zero. Reasoning is already part of output and is not added again.
 
 A missing primary usage count, an inconsistent cache subset, or a missing rate
 for positive usage leaves `total_cost` NULL and `cost_source` `unknown`.
-Known line items remain available, but their subtotal is not presented as an
+Known line items remain available in `input_cost`, `output_cost`,
+`cached_read_cost`, and `cache_write_cost`, but their subtotal is not presented as an
 exact call cost. A reported zero needs no rate. Omitted optional cache subsets
 remain unreported and add no separate charge. Catalog costs cover the recorded
 token classes; they do not include provider storage or other non-token fees.
 
 New ledger rows carry `accounting_version = 2`. Existing rows and writes from
-older binaries retain version 1: their historical counts and costs are preserved,
+older binaries retain version 1, with the new cache-cost columns left NULL:
+their historical counts and costs are preserved,
 not retrospectively recomputed. The ledger lacks the original wire protocol and
 historical rate snapshots needed to repair every old row reliably. Analyses
 requiring normalized counts and complete costs should select version 2.
