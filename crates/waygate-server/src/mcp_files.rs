@@ -76,12 +76,15 @@ impl GatewayFileTools {
         input: PrepareUploadInput,
     ) -> Result<CallToolResult, McpError> {
         enforce_upload_preparation_profile(principal)?;
-        let _permit = self.admission.try_enter().map_err(|_| {
-            file_transfer_failure(
-                FileTransferReason::TemporarilyUnavailable,
-                "file transfer capacity is currently full; retry later",
-            )
-        })?;
+        let _permit = self
+            .admission
+            .try_enter_for(&crate::file_transfer::owner_from_principal(principal))
+            .map_err(|_| {
+                file_transfer_failure(
+                    FileTransferReason::TemporarilyUnavailable,
+                    "file transfer capacity is currently full; retry later",
+                )
+            })?;
         let max_bytes = self.max_bytes.unwrap_or(i64::MAX as u64);
         if input.size.is_some_and(|size| size > max_bytes) {
             return Err(invalid_file_request(
@@ -157,17 +160,13 @@ impl GatewayFileTools {
         input: PrepareDownloadInput,
     ) -> Result<CallToolResult, McpError> {
         let file_id = parse_file_uri(&input.uri)?;
-        let _permit = self.admission.try_enter().map_err(|_| {
+        let owner = crate::file_transfer::owner_from_principal(principal);
+        let _permit = self.admission.try_enter_for(&owner).map_err(|_| {
             file_transfer_failure(
                 FileTransferReason::TemporarilyUnavailable,
                 "file transfer capacity is currently full; retry later",
             )
         })?;
-        let owner = GatewayFileOwner {
-            tenant_id: principal.tenant.clone(),
-            principal_sub: principal.sub.clone(),
-            principal_issuer: principal.issuer.clone(),
-        };
         let file = self
             .storage
             .find_ready(&owner, file_id)

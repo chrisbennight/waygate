@@ -323,6 +323,27 @@ matches any declared size and digest. The transfer request and stored file are
 then completed and published in one database transaction. An interrupted,
 mismatched, or uncommitted upload never becomes a ready file.
 
+A client upload must deliver at least 64 KiB or finish within each 30-second
+progress window. Empty chunks and smaller accumulated amounts do not extend
+the window. Each 64 KiB of progress starts a new window; a large burst does not
+bank time for a later stall. The window begins before storage setup and also
+bounds final storage writes after the body ends. An upload can run for as long
+as it keeps making progress within its authorized byte limit. Once byte staging
+finishes, admission is released before durable authority publication, which
+retains its existing completion and uncertainty rules. A stalled upload releases its
+transfer slot when the progress deadline expires. Other staging failures also
+release their slot before cleanup. The gateway then allows up to five seconds
+to record failure and remove the partial file before returning HTTP 408 with
+`upload_progress_timeout` for a stall, or HTTP 400 with `invalid_upload` for
+other staging failures. If finalization is blocked or fails,
+incomplete content remains unavailable: deletion state is retained when it was
+recorded, while abandoned pending files and requests follow their existing
+five-minute inactivity recovery. The sweeper retries cleanup when storage is
+available. Cleanup waits for any outstanding filesystem creation or rename to
+finish before confirming deletion. Cancellation also leaves incomplete content
+unavailable until cleanup.
+Obtain fresh upload authorization before retrying a failed attempt.
+
 That transaction is the durable boundary: the file, request, and grant are
 either all pending or all completed. If the database loses the commit
 acknowledgement, the gateway checks the joined state before answering. If that
@@ -663,8 +684,17 @@ the volume filled, and the concurrency limit below bounds simultaneous streams
 rather than bytes, so a single call was enough. Raise the value if the
 deployment genuinely moves larger files; there is deliberately no setting for
 "unlimited". `GATEWAY_FILE_TRANSFER_CONCURRENCY` limits simultaneous inbound and
-outbound file streams separately from normal MCP calls and defaults to 8. None
-of these settings buffer a complete file or set a total transfer timeout.
+outbound file streams separately from normal MCP calls and defaults to 8. These
+limits apply within each gateway process. One owner, identified by tenant,
+issuer, and subject, can use at most half the configured slots rounded up.
+With the default, one owner can use four slots, leaving capacity for other
+owners. A configured global limit of one still permits one transfer. Admission
+fails immediately when either limit is full; there is no waiting queue.
+Owner exhaustion returns HTTP 503 with `owner_transfer_capacity_exhausted` on
+the byte endpoint. That authorized attempt is failed, so obtain fresh transfer
+authorization before retrying after capacity becomes available. Outbound MCP
+transfers report temporary unavailability through the existing transfer error.
+None of these settings buffer a complete file or set a total transfer timeout.
 
 ## Elicited files across MRTR retries
 

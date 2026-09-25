@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -11,8 +12,45 @@ use waygate_core::TenantId;
 
 pub const PENDING_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const PENDING_UPLOAD_RETENTION: time::Duration = time::Duration::minutes(5);
+pub const UPLOAD_PROGRESS_WINDOW: Duration = Duration::from_secs(30);
+pub const UPLOAD_PROGRESS_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+struct UploadProgress {
+    deadline: tokio::time::Instant,
+    remaining: usize,
+}
+
+impl UploadProgress {
+    fn new() -> Self {
+        Self {
+            deadline: tokio::time::Instant::now() + UPLOAD_PROGRESS_WINDOW,
+            remaining: UPLOAD_PROGRESS_BYTES,
+        }
+    }
+
+    fn record(&mut self, bytes: usize) {
+        if bytes >= self.remaining {
+            self.deadline = tokio::time::Instant::now() + UPLOAD_PROGRESS_WINDOW;
+            self.remaining = UPLOAD_PROGRESS_BYTES;
+        } else {
+            self.remaining -= bytes;
+        }
+    }
+}
+
+async fn within_upload_progress<T>(
+    progress: &Option<UploadProgress>,
+    operation: impl std::future::Future<Output = Result<T, FileStorageError>>,
+) -> Result<T, FileStorageError> {
+    match progress {
+        Some(progress) => tokio::time::timeout_at(progress.deadline, operation)
+            .await
+            .map_err(|_| FileStorageError::UploadStalled)?,
+        None => operation.await,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GatewayFileOwner {
     pub tenant_id: TenantId,
     pub principal_sub: String,
@@ -104,12 +142,15 @@ pub enum FileStorageError {
     BatchUnavailable,
     #[error("staged file is no longer available")]
     FileUnavailable,
+    #[error("upload made insufficient progress; send at least 64 KiB or finish within 30 seconds")]
+    UploadStalled,
 }
 
 #[derive(Clone)]
 pub struct GatewayFileStorage {
     pool: PgPool,
     root: PathBuf,
+    path_mutations: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl GatewayFileStorage {
@@ -120,7 +161,11 @@ impl GatewayFileStorage {
         builder.mode(0o700);
         builder.create(root.as_ref()).await?;
         let root = tokio::fs::canonicalize(root.as_ref()).await?;
-        Ok(Self { pool, root })
+        Ok(Self {
+            pool,
+            root,
+            path_mutations: Arc::new(tokio::sync::Mutex::new(())),
+        })
     }
 
     pub async fn stage_response(
@@ -135,8 +180,14 @@ impl GatewayFileStorage {
         let body = response
             .bytes_stream()
             .map(|chunk| chunk.map_err(|error| error.without_url()));
-        self.stage_stream(Uuid::new_v4(), new_file, body, pending_retention)
-            .await
+        let id = Uuid::new_v4();
+        let result = self
+            .stage_stream(id, new_file, body, pending_retention, false)
+            .await;
+        if result.is_err() {
+            self.cleanup_failed_file(id).await;
+        }
+        result
     }
 
     /// Import an already recovered body through the same private staging lifecycle.
@@ -147,13 +198,22 @@ impl GatewayFileStorage {
     ) -> Result<StoredGatewayFile, FileStorageError> {
         let retention = new_file.retention;
         let body = futures::stream::iter([Ok::<_, FileStorageError>(bytes::Bytes::from(bytes))]);
-        self.stage_stream(Uuid::new_v4(), new_file, body, retention)
-            .await
+        let id = Uuid::new_v4();
+        let result = self
+            .stage_stream(id, new_file, body, retention, false)
+            .await;
+        if result.is_err() {
+            self.cleanup_failed_file(id).await;
+        }
+        result
     }
 
     /// Stage a caller upload under the gateway file identifier minted before
     /// the body arrived. The row remains pending until the transfer authority
     /// confirms completion and the HTTP handler publishes its one-file batch.
+    /// A failed upload returns before cleanup, allowing its caller to release
+    /// transfer admission first. Pending content remains unavailable and can
+    /// be reclaimed by explicit cleanup or the inactivity sweeper.
     pub async fn stage_upload<S, E>(
         &self,
         id: Uuid,
@@ -164,7 +224,7 @@ impl GatewayFileStorage {
         S: futures::Stream<Item = Result<bytes::Bytes, E>> + Unpin,
         E: Into<FileStorageError>,
     {
-        self.stage_stream(id, new_file, stream, PENDING_UPLOAD_RETENTION)
+        self.stage_stream(id, new_file, stream, PENDING_UPLOAD_RETENTION, true)
             .await
     }
 
@@ -174,12 +234,14 @@ impl GatewayFileStorage {
         new_file: NewGatewayFile,
         mut stream: S,
         pending_retention: time::Duration,
+        check_upload_progress: bool,
     ) -> Result<StoredGatewayFile, FileStorageError>
     where
         S: futures::Stream<Item = Result<bytes::Bytes, E>> + Unpin,
         E: Into<FileStorageError>,
     {
         let storage_key = id.to_string();
+        let mut progress = check_upload_progress.then(UploadProgress::new);
         let pending_path = self.root.join(format!(".{storage_key}.part"));
         let final_path = self.root.join(&storage_key);
         // A pending row must outlive the gap to its first batch renewal even
@@ -191,8 +253,9 @@ impl GatewayFileStorage {
             time::Duration::seconds((2 * PENDING_HEARTBEAT_INTERVAL).as_secs() as i64);
         let pending_retention = pending_retention.max(pending_floor);
         let initial_expires_at = OffsetDateTime::now_utc() + pending_retention;
-        sqlx::query(
-            r#"
+        within_upload_progress(&progress, async {
+            sqlx::query(
+                r#"
             INSERT INTO gateway_files (
                 id, batch_id, tenant_id, principal_sub, principal_issuer, invocation_id,
                 upstream_server, upstream_tool, upstream_uri, storage_key, display_name,
@@ -200,43 +263,62 @@ impl GatewayFileStorage {
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             "#,
-        )
-        .bind(id)
-        .bind(new_file.batch_id)
-        .bind(new_file.owner.tenant_id.as_str())
-        .bind(&new_file.owner.principal_sub)
-        .bind(&new_file.owner.principal_issuer)
-        .bind(&new_file.invocation_id)
-        .bind(&new_file.upstream_server)
-        .bind(&new_file.upstream_tool)
-        .bind(&new_file.upstream_uri)
-        .bind(&storage_key)
-        .bind(&new_file.display_name)
-        .bind(&new_file.media_type)
-        .bind(new_file.inspection_status.as_str())
-        .bind(initial_expires_at)
-        .bind(new_file.retention.whole_seconds().max(1))
-        .execute(&self.pool)
+            )
+            .bind(id)
+            .bind(new_file.batch_id)
+            .bind(new_file.owner.tenant_id.as_str())
+            .bind(&new_file.owner.principal_sub)
+            .bind(&new_file.owner.principal_issuer)
+            .bind(&new_file.invocation_id)
+            .bind(&new_file.upstream_server)
+            .bind(&new_file.upstream_tool)
+            .bind(&new_file.upstream_uri)
+            .bind(&storage_key)
+            .bind(&new_file.display_name)
+            .bind(&new_file.media_type)
+            .bind(new_file.inspection_status.as_str())
+            .bind(initial_expires_at)
+            .bind(new_file.retention.whole_seconds().max(1))
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
         .await?;
-        let mut options = tokio::fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let output = options.open(&pending_path).await;
-        let mut output = match output {
-            Ok(output) => output,
-            Err(error) => {
-                self.cleanup_failed_file(id).await;
-                return Err(error.into());
-            }
-        };
+        let opening_path = pending_path.clone();
+        let mut output = within_upload_progress(&progress, async {
+            mutate_paths(self.path_mutations.clone(), move || {
+                let mut options = std::fs::OpenOptions::new();
+                options.create_new(true).write(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                options.open(opening_path)
+            })
+            .await
+            .map(tokio::fs::File::from_std)
+            .map_err(FileStorageError::Io)
+        })
+        .await?;
         let mut size = 0_u64;
         let mut digest = Sha256::new();
         let mut heartbeat = tokio::time::interval(PENDING_HEARTBEAT_INTERVAL);
         heartbeat.tick().await;
         let write_result: Result<(), FileStorageError> = async {
             loop {
+                let deadline = progress.as_ref().map(|progress| progress.deadline);
                 tokio::select! {
+                    biased;
+                    _ = async {
+                        match deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending().await,
+                        }
+                    } => return Err(FileStorageError::UploadStalled),
+                    _ = heartbeat.tick() => {
+                        within_upload_progress(&progress, self.heartbeat_pending_batch(new_file.batch_id, id)).await?;
+                    }
                     chunk = stream.next() => {
                         let Some(chunk) = chunk else {
                             break;
@@ -257,21 +339,24 @@ impl GatewayFileStorage {
                         if new_file.max_bytes.is_some_and(|limit| size > limit) {
                             return Err(FileStorageError::TooLarge);
                         }
+                        if let Some(progress) = progress.as_mut() {
+                            progress.record(chunk.len());
+                        }
                         digest.update(&chunk);
-                        output.write_all(&chunk).await?;
-                    }
-                    _ = heartbeat.tick() => {
-                        self.heartbeat_pending_batch(new_file.batch_id, id).await?;
+                        within_upload_progress(&progress, async {
+                            output.write_all(&chunk).await.map_err(FileStorageError::Io)
+                        }).await?;
                     }
                 }
             }
-            output.flush().await?;
+            within_upload_progress(&progress, async {
+                output.flush().await.map_err(FileStorageError::Io)
+            }).await?;
             Ok(())
         }
         .await;
         if let Err(error) = write_result {
             drop(output);
-            self.cleanup_failed_file(id).await;
             return Err(error);
         }
         if new_file
@@ -279,7 +364,6 @@ impl GatewayFileStorage {
             .is_some_and(|expected| expected != size)
         {
             drop(output);
-            self.cleanup_failed_file(id).await;
             return Err(FileStorageError::SizeMismatch);
         }
         let sha256 = digest.finalize().to_vec();
@@ -289,51 +373,47 @@ impl GatewayFileStorage {
             .is_some_and(|expected| expected != sha256.as_slice())
         {
             drop(output);
-            self.cleanup_failed_file(id).await;
             return Err(FileStorageError::DigestMismatch);
         }
-        if let Err(error) = output.sync_all().await {
+        if let Err(error) = within_upload_progress(&progress, async {
+            output.sync_all().await.map_err(FileStorageError::Io)
+        })
+        .await
+        {
             drop(output);
-            self.cleanup_failed_file(id).await;
-            return Err(error.into());
+            return Err(error);
         }
         drop(output);
-        if let Err(error) = tokio::fs::rename(&pending_path, &final_path).await {
-            self.cleanup_failed_file(id).await;
-            return Err(error.into());
-        }
-        if let Err(error) = sync_directory(&self.root).await {
-            self.cleanup_failed_file(id).await;
-            return Err(error.into());
-        }
+        within_upload_progress(&progress, async {
+            mutate_paths(self.path_mutations.clone(), move || {
+                std::fs::rename(pending_path, final_path)
+            })
+            .await?;
+            sync_directory(&self.root).await?;
+            Ok(())
+        })
+        .await?;
 
         let size_i64 = match i64::try_from(size) {
             Ok(size) => size,
-            Err(_) => {
-                self.cleanup_failed_file(id).await;
-                return Err(FileStorageError::TooLarge);
-            }
+            Err(_) => return Err(FileStorageError::TooLarge),
         };
         let expires_at = OffsetDateTime::now_utc() + pending_retention;
-        let update = sqlx::query(
-            "UPDATE gateway_files SET size_bytes = $2, sha256_digest = $3, expires_at = $4 \
+        let updated = within_upload_progress(&progress, async {
+            sqlx::query(
+                "UPDATE gateway_files SET size_bytes = $2, sha256_digest = $3, expires_at = $4 \
              WHERE id = $1 AND state = 'pending'",
-        )
-        .bind(id)
-        .bind(size_i64)
-        .bind(&sha256)
-        .bind(expires_at)
-        .execute(&self.pool)
-        .await;
-        let updated = match update {
-            Ok(updated) => updated,
-            Err(error) => {
-                self.cleanup_failed_file(id).await;
-                return Err(FileStorageError::Database(error));
-            }
-        };
+            )
+            .bind(id)
+            .bind(size_i64)
+            .bind(&sha256)
+            .bind(expires_at)
+            .execute(&self.pool)
+            .await
+            .map_err(FileStorageError::Database)
+        })
+        .await?;
         if updated.rows_affected() != 1 {
-            self.cleanup_failed_file(id).await;
             return Err(FileStorageError::FileUnavailable);
         }
 
@@ -523,7 +603,7 @@ impl GatewayFileStorage {
         self.remove_marked(limit).await
     }
 
-    async fn cleanup_failed_file(&self, id: Uuid) {
+    pub(crate) async fn cleanup_failed_file(&self, id: Uuid) {
         if let Err(error) = sqlx::query(
             "UPDATE gateway_files SET state = 'deleting' WHERE id = $1 AND state = 'pending'",
         )
@@ -572,8 +652,13 @@ impl GatewayFileStorage {
         };
         let storage_key: String = row.try_get("storage_key")?;
         validate_storage_key(id, &storage_key)?;
-        remove_if_present(&self.root.join(&storage_key)).await?;
-        remove_if_present(&self.root.join(format!(".{storage_key}.part"))).await?;
+        let pending_path = self.root.join(format!(".{storage_key}.part"));
+        let final_path = self.root.join(&storage_key);
+        mutate_paths(self.path_mutations.clone(), move || {
+            remove_if_present(&pending_path)?;
+            remove_if_present(&final_path)
+        })
+        .await?;
         let deleted = sqlx::query("DELETE FROM gateway_files WHERE id = $1 AND state = 'deleting'")
             .bind(id)
             .execute(&self.pool)
@@ -582,8 +667,24 @@ impl GatewayFileStorage {
     }
 }
 
-async fn remove_if_present(path: &Path) -> Result<(), std::io::Error> {
-    match tokio::fs::remove_file(path).await {
+// A timeout cannot cancel a blocking filesystem syscall. Keep the namespace
+// lock inside the worker so cleanup cannot confirm deletion while a detached
+// create or rename can still leave bytes behind.
+async fn mutate_paths<T: Send + 'static>(
+    lock: Arc<tokio::sync::Mutex<()>>,
+    operation: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> std::io::Result<T> {
+    let guard = lock.lock_owned().await;
+    tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        operation()
+    })
+    .await
+    .expect("file namespace mutation task panicked")
+}
+
+fn remove_if_present(path: &Path) -> Result<(), std::io::Error> {
+    match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
@@ -644,11 +745,97 @@ fn validate_storage_key(id: Uuid, storage_key: &str) -> Result<(), FileStorageEr
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn cancelled_path_mutations_finish_before_cleanup_confirms_deletion() {
+        for rename in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let pending = root.path().join("pending");
+            let final_path = root.path().join("final");
+            if rename {
+                std::fs::write(&pending, b"staged bytes").unwrap();
+            }
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            let (started, starting) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let operation = {
+                let lock = lock.clone();
+                let pending = pending.clone();
+                let final_path = final_path.clone();
+                tokio::spawn(async move {
+                    mutate_paths(lock, move || {
+                        started.send(()).unwrap();
+                        released.recv().unwrap();
+                        if rename {
+                            std::fs::rename(pending, final_path)
+                        } else {
+                            std::fs::write(pending, b"late created bytes")
+                        }
+                    })
+                    .await
+                })
+            };
+            starting.await.unwrap();
+            operation.abort();
+            assert!(operation.await.unwrap_err().is_cancelled());
+            let mut cleanup = Box::pin(mutate_paths(lock, {
+                let pending = pending.clone();
+                let final_path = final_path.clone();
+                move || {
+                    remove_if_present(&pending)?;
+                    remove_if_present(&final_path)
+                }
+            }));
+            assert!(futures::poll!(cleanup.as_mut()).is_pending());
+            release.send(()).unwrap();
+            cleanup.await.unwrap();
+            assert!(!pending.exists());
+            assert!(!final_path.exists());
+        }
+    }
+
     #[test]
     fn storage_key_must_be_the_files_own_uuid() {
         let id = Uuid::new_v4();
         validate_storage_key(id, &id.to_string()).expect("matching key");
         assert!(validate_storage_key(id, "../outside").is_err());
         assert!(validate_storage_key(id, &Uuid::new_v4().to_string()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod upload_progress_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn empty_and_small_chunks_do_not_extend_the_progress_deadline() {
+        let mut progress = UploadProgress::new();
+        let first_deadline = progress.deadline;
+        tokio::time::advance(Duration::from_secs(20)).await;
+        progress.record(0);
+        progress.record(UPLOAD_PROGRESS_BYTES - 1);
+        assert_eq!(progress.deadline, first_deadline);
+        progress.record(1);
+        assert_eq!(
+            progress.deadline,
+            tokio::time::Instant::now() + UPLOAD_PROGRESS_WINDOW
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_storage_or_heartbeat_work_obeys_the_same_deadline() {
+        let progress = Some(UploadProgress::new());
+        let result: Result<(), FileStorageError> =
+            within_upload_progress(&progress, std::future::pending()).await;
+        assert!(matches!(result, Err(FileStorageError::UploadStalled)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progressing_uploads_have_no_total_duration_limit() {
+        let mut progress = UploadProgress::new();
+        for _ in 0..100 {
+            tokio::time::advance(Duration::from_secs(20)).await;
+            assert!(tokio::time::Instant::now() < progress.deadline);
+            progress.record(UPLOAD_PROGRESS_BYTES);
+        }
     }
 }

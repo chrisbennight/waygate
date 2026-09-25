@@ -4,7 +4,8 @@
 //! returned only over this direct HTTPS exchange after the helper proves it
 //! owns the temporary key bound to the grant.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
@@ -31,6 +32,7 @@ pub const FILE_DOWNLOAD_PATH: &str = "/file-transfers/content";
 pub const FILE_UPLOAD_PATH: &str = "/file-transfers/content";
 const EXCHANGE_BODY_LIMIT: usize = 1_024;
 const ACTIVE_TRANSFER_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+const FAILED_UPLOAD_FINALIZATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const CLIENT_UPLOAD_SOURCE_TOOL: &str = "prepare_upload";
 
 #[derive(Clone)]
@@ -61,15 +63,74 @@ struct UploadState {
 /// non-blocking so a full transfer pool does not turn ordinary requests into
 /// an unbounded queue.
 #[derive(Clone)]
-pub struct FileTransferAdmission(Arc<Semaphore>);
+pub struct FileTransferAdmission {
+    global: Arc<Semaphore>,
+    owners: Arc<Mutex<HashMap<GatewayFileOwner, usize>>>,
+    per_owner: usize,
+}
+
+/// Holds global and owner admission until the byte transfer actually ends.
+pub struct FileTransferPermit {
+    _global: OwnedSemaphorePermit,
+    owners: Arc<Mutex<HashMap<GatewayFileOwner, usize>>>,
+    owner: GatewayFileOwner,
+}
+
+impl Drop for FileTransferPermit {
+    fn drop(&mut self) {
+        let mut owners = self
+            .owners
+            .lock()
+            .expect("transfer owner admission poisoned");
+        let count = owners.get_mut(&self.owner).expect("admitted owner exists");
+        *count -= 1;
+        if *count == 0 {
+            owners.remove(&self.owner);
+        }
+    }
+}
 
 impl FileTransferAdmission {
     pub fn new(max_concurrent_transfers: usize) -> Self {
-        Self(Arc::new(Semaphore::new(max_concurrent_transfers.max(1))))
+        let capacity = max_concurrent_transfers.max(1);
+        Self {
+            global: Arc::new(Semaphore::new(capacity)),
+            owners: Arc::new(Mutex::new(HashMap::new())),
+            per_owner: capacity.div_ceil(2),
+        }
     }
 
     pub fn try_enter(&self) -> Result<OwnedSemaphorePermit, TryAcquireError> {
-        self.0.clone().try_acquire_owned()
+        self.global.clone().try_acquire_owned()
+    }
+
+    pub fn try_enter_for(
+        &self,
+        owner: &GatewayFileOwner,
+    ) -> Result<FileTransferPermit, TryAcquireError> {
+        self.assign_owner(self.try_enter()?, owner)
+    }
+
+    /// Called after transfer authentication identifies the owner. The global
+    /// permit already bounds unauthenticated work and the owner map's size.
+    fn assign_owner(
+        &self,
+        global: OwnedSemaphorePermit,
+        owner: &GatewayFileOwner,
+    ) -> Result<FileTransferPermit, TryAcquireError> {
+        let mut owners = self
+            .owners
+            .lock()
+            .expect("transfer owner admission poisoned");
+        if owners.get(owner).copied().unwrap_or(0) >= self.per_owner {
+            return Err(TryAcquireError::NoPermits);
+        }
+        *owners.entry(owner.clone()).or_default() += 1;
+        Ok(FileTransferPermit {
+            _global: global,
+            owners: self.owners.clone(),
+            owner: owner.clone(),
+        })
     }
 }
 
@@ -123,7 +184,7 @@ async fn upload(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let Ok(_permit) = state.admission.try_enter() else {
+    let Ok(permit) = state.admission.try_enter() else {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
     };
     let Some(credential) = transfer_credential(&headers) else {
@@ -189,6 +250,13 @@ async fn upload(
         principal_sub: authorized.grant.owner.principal_sub.clone(),
         principal_issuer: authorized.grant.owner.principal_issuer.clone(),
     };
+    let Ok(_permit) = state.admission.assign_owner(permit, &owner) else {
+        fail_authorized_request(&state.authority, &authorized).await;
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "owner_transfer_capacity_exhausted",
+        );
+    };
     let expected_sha256 = authorized
         .grant
         .expected_digest
@@ -232,11 +300,30 @@ async fn upload(
         Ok(staged) => staged,
         Err(error) => {
             tracing::warn!(%file_id, error = %error, "file upload could not be staged");
-            fail_authorized_request(&state.authority, &authorized).await;
+            heartbeat.abort();
+            drop(_permit);
+            // Admission is already free. Bound settlement too, so blocked
+            // storage cannot hold the HTTP response indefinitely. Pending
+            // requests and files retain their existing inactivity recovery.
+            if tokio::time::timeout(FAILED_UPLOAD_FINALIZATION_TIMEOUT, async {
+                fail_authorized_request(&state.authority, &authorized).await;
+                state.storage.cleanup_failed_file(file_id).await;
+            })
+            .await
+            .is_err()
+            {
+                tracing::warn!(%file_id, grant_id = %authorized.grant.id, "failed upload finalization timed out; pending state will be swept");
+            }
+            if matches!(error, crate::FileStorageError::UploadStalled) {
+                return error_response(StatusCode::REQUEST_TIMEOUT, "upload_progress_timeout");
+            }
             return error_response(StatusCode::BAD_REQUEST, "invalid_upload");
         }
     };
     heartbeat.abort();
+    // Byte staging is finished; durable publication keeps its own completion
+    // and uncertainty rules without occupying a streaming transfer slot.
+    drop(_permit);
     if let Err(error) = state
         .authority
         .complete_upload(
@@ -351,6 +438,13 @@ async fn download(State(state): State<DownloadState>, headers: HeaderMap) -> Res
         principal_sub: authorized.grant.owner.principal_sub.clone(),
         principal_issuer: authorized.grant.owner.principal_issuer.clone(),
     };
+    let Ok(permit) = state.admission.assign_owner(permit, &owner) else {
+        fail_authorized_request(&state.authority, &authorized).await;
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "owner_transfer_capacity_exhausted",
+        );
+    };
     let file = match state.storage.find_ready(&owner, file_id).await {
         Ok(Some(file)) => file,
         Ok(None) => {
@@ -433,7 +527,7 @@ fn download_stream(
     reader: ReaderStream<tokio::fs::File>,
     authority: Arc<TransferAuthority>,
     authorized: AuthorizedTransferRequest,
-    permit: OwnedSemaphorePermit,
+    permit: FileTransferPermit,
 ) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> {
     let heartbeat_task = spawn_transfer_heartbeat(authority.clone(), authorized.clone());
     futures::stream::unfold(
@@ -538,7 +632,7 @@ struct ActiveDownload {
     size: u64,
     digest: Sha256,
     heartbeat_task: tokio::task::JoinHandle<()>,
-    _permit: OwnedSemaphorePermit,
+    _permit: FileTransferPermit,
     finished: bool,
 }
 
@@ -842,6 +936,46 @@ mod tests {
         assert!(admission.clone().try_enter().is_err());
         drop(first);
         assert!(admission.try_enter().is_ok());
+    }
+
+    #[test]
+    fn one_owner_cannot_take_all_transfer_slots_and_release_recovers_capacity() {
+        let admission = FileTransferAdmission::new(4);
+        let owner = GatewayFileOwner {
+            tenant_id: waygate_core::TenantId::default(),
+            principal_issuer: "issuer-a".into(),
+            principal_sub: "same-subject".into(),
+        };
+        let first = admission.try_enter_for(&owner).unwrap();
+        let second = admission.clone().try_enter_for(&owner).unwrap();
+        assert!(admission.try_enter_for(&owner).is_err());
+        // Equal subjects at different issuers are different owners.
+        let other = GatewayFileOwner {
+            principal_issuer: "issuer-b".into(),
+            ..owner.clone()
+        };
+        let third = admission.try_enter_for(&other).unwrap();
+        let fourth = admission.try_enter_for(&other).unwrap();
+        assert!(admission.try_enter().is_err());
+        drop(first);
+        let replacement = admission.try_enter_for(&owner).unwrap();
+        drop((second, third, fourth, replacement));
+        assert!(admission.owners.lock().unwrap().is_empty());
+        assert_eq!(admission.global.available_permits(), 4);
+    }
+
+    #[test]
+    fn rejected_owner_assignment_returns_global_slot() {
+        let admission = FileTransferAdmission::new(2);
+        let owner = GatewayFileOwner {
+            tenant_id: waygate_core::TenantId::default(),
+            principal_issuer: "issuer".into(),
+            principal_sub: "user".into(),
+        };
+        let _first = admission.try_enter_for(&owner).unwrap();
+        let authenticated = admission.try_enter().unwrap();
+        assert!(admission.assign_owner(authenticated, &owner).is_err());
+        assert_eq!(admission.global.available_permits(), 1);
     }
 
     #[test]
