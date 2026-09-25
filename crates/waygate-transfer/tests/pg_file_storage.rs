@@ -1280,12 +1280,29 @@ async fn stalled_uploads_release_capacity_while_other_owners_and_progressing_upl
         .unwrap()
         .is_some());
     drop(other_permit);
+    // Keep cleanup blocked after the deadline. Staging must still return and
+    // release admission before this transaction lets the file row be changed.
+    let mut locked = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM gateway_files WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_one(&mut *locked)
+        .await
+        .unwrap();
     advance_upload_clock(31).await;
     assert!(matches!(
         first.await.unwrap(),
         Err(waygate_transfer::FileStorageError::UploadStalled)
     ));
     assert!(admission.try_enter_for(&owner).is_ok());
+    assert!(storage.find_ready(&owner, id).await.unwrap().is_none());
+    let state: String = sqlx::query_scalar("SELECT state FROM gateway_files WHERE id = $1")
+        .bind(id)
+        .fetch_one(&mut *locked)
+        .await
+        .unwrap();
+    assert_eq!(state, "pending", "blocked cleanup must not imply deletion");
+    locked.rollback().await.unwrap();
+    storage.discard_batch(id).await.unwrap();
     assert!(!root.path().join(format!(".{id}.part")).exists());
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM gateway_files WHERE id = $1")

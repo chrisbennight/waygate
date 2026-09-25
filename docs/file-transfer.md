@@ -327,11 +327,14 @@ A client upload must deliver at least 64 KiB or finish within each 30-second
 progress window. Empty chunks and smaller accumulated amounts do not extend
 the window. Each 64 KiB of progress starts a new window; a large burst does not
 bank time for a later stall. An upload can run for as long as it keeps making
-progress within its authorized byte limit. A stalled upload returns HTTP 408
-with `upload_progress_timeout`, fails the transfer attempt, and removes its
-partial file. If removal fails, the file remains unavailable and marked for
-cleanup so the sweeper can retry. Cancellation also leaves incomplete content
-unavailable; abandoned pending content is removed after its retention expires.
+progress within its authorized byte limit. A stalled upload releases its
+transfer slot when the progress deadline expires. The gateway then allows up
+to five seconds to record failure and remove the partial file before returning
+HTTP 408 with `upload_progress_timeout`. If finalization is blocked or fails,
+incomplete content remains unavailable: deletion state is retained when it was
+recorded, while abandoned pending files and requests follow their existing
+five-minute inactivity recovery. The sweeper retries cleanup when storage is
+available. Cancellation also leaves incomplete content unavailable until cleanup.
 Obtain fresh upload authorization before retrying a failed attempt.
 
 That transaction is the durable boundary: the file, request, and grant are

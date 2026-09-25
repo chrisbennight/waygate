@@ -193,6 +193,9 @@ impl GatewayFileStorage {
     /// Stage a caller upload under the gateway file identifier minted before
     /// the body arrived. The row remains pending until the transfer authority
     /// confirms completion and the HTTP handler publishes its one-file batch.
+    /// A stalled upload returns before cleanup, allowing its caller to release
+    /// transfer admission first. Pending content remains unavailable and can
+    /// be reclaimed by explicit cleanup or the inactivity sweeper.
     pub async fn stage_upload<S, E>(
         &self,
         id: Uuid,
@@ -327,7 +330,11 @@ impl GatewayFileStorage {
         .await;
         if let Err(error) = write_result {
             drop(output);
-            self.cleanup_failed_file(id).await;
+            // A blocked cleanup must not keep the caller's transfer permit
+            // after the progress deadline. Pending uploads cannot be served.
+            if !matches!(error, FileStorageError::UploadStalled) {
+                self.cleanup_failed_file(id).await;
+            }
             return Err(error);
         }
         if new_file
@@ -579,7 +586,7 @@ impl GatewayFileStorage {
         self.remove_marked(limit).await
     }
 
-    async fn cleanup_failed_file(&self, id: Uuid) {
+    pub(crate) async fn cleanup_failed_file(&self, id: Uuid) {
         if let Err(error) = sqlx::query(
             "UPDATE gateway_files SET state = 'deleting' WHERE id = $1 AND state = 'pending'",
         )
