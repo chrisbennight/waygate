@@ -10,18 +10,19 @@
 //!    validating for up to `cache_ttl` past its actual expiry. The
 //!    cache-hit `touch_usage` fixes the dashboard sparkline undercounting
 //!    repeated hits inside the cache window.
-//! 3. On miss, look up live rows by prefix. Always run argon2id verify —
-//!    even on "no rows" (against a fixed dummy hash) — so a timing
+//! 3. On miss, admit only bounded work and look up live rows by prefix.
+//!    Run argon2id on a blocking worker, including for unknown prefixes
+//!    (against a fixed dummy hash), so a timing
 //!    attacker can't distinguish "unknown prefix" from "wrong secret".
 //! 4. On verified match: build the [`Principal`], cache it with the row's
 //!    `expires_at`, and spawn a fire-and-forget `touch_usage`.
 //!
 //! Errors:
-//! * All failures map to [`ValidationError`] variants tagged as client
+//! * Invalid credentials map to [`ValidationError`] variants tagged as client
 //!   errors so the middleware's validator chain falls through to the next
 //!   one and ultimately produces a 401 — not a 503 — when no validator
 //!   accepts the token.
-//! * Genuine DB outages surface as [`ValidationError::Infra`]: those
+//! * Capacity exhaustion and DB outages surface as [`ValidationError::Infra`]: those
 //!   are *infra* errors and the middleware surfaces them as 503.
 
 use std::collections::HashMap;
@@ -31,11 +32,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moka::future::Cache;
 use time::OffsetDateTime;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use waygate_oidc::{AuthMethod, HeaderValidator, Principal, ValidationError};
 
-use crate::store::{ApiKeyStore, StoreError};
+use crate::store::{ApiKeyRow, ApiKeyStore, StoreError};
 use crate::token::{self, ParsedToken, TokenError};
 
 /// Runtime configuration for the validator.
@@ -152,10 +154,15 @@ struct UsageDelta {
 /// hour-bucketed, so nothing downstream needs per-request write latency.
 const USAGE_FLUSH_DEBOUNCE: Duration = Duration::from_secs(5);
 
+/// Bound cold authentication, including database lookups and queued or running
+/// blocking work. Saturation is rejected immediately rather than growing a queue.
+const MAX_CONCURRENT_VERIFICATIONS: usize = 4;
+
 pub struct ApiKeyValidator {
     store: ApiKeyStore,
     cache: Cache<String, CachedEntry>,
     config: ValidatorConfig,
+    verification_capacity: Arc<Semaphore>,
     /// When set, the validator resolves the matched api_keys
     /// row's profile and stamps the
     /// invocation-time restrictions on the Principal. `None` ⇒
@@ -189,6 +196,7 @@ impl ApiKeyValidator {
             store,
             cache,
             config,
+            verification_capacity: Arc::new(Semaphore::new(MAX_CONCURRENT_VERIFICATIONS)),
             profile_store: None,
             usage: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -208,6 +216,7 @@ impl ApiKeyValidator {
             store: arc.store.clone(),
             cache: arc.cache.clone(),
             config: arc.config.clone(),
+            verification_capacity: Arc::clone(&arc.verification_capacity),
             profile_store: arc.profile_store.clone(),
             // Share the accrual map rather than starting a fresh one, so any
             // usage already pending a flush survives the rebuild.
@@ -217,6 +226,7 @@ impl ApiKeyValidator {
             store: inner.store,
             cache: inner.cache,
             config: inner.config,
+            verification_capacity: inner.verification_capacity,
             profile_store: store,
             usage: inner.usage,
         })
@@ -289,34 +299,36 @@ impl ApiKeyValidator {
         &self,
         parsed: ParsedToken<'_>,
     ) -> Result<Option<CachedEntry>, ValidationError> {
+        let permit = self
+            .verification_capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                ValidationError::Infra(
+                    "API-key authentication capacity exhausted; retry with backoff".into(),
+                )
+            })?;
         let rows = self
             .store
             .lookup_by_prefix(parsed.prefix)
             .await
             .map_err(infra_error)?;
 
-        if rows.is_empty() {
-            // No rows: still run an argon2 verify against a fixed dummy
-            // hash so timing analysis can't distinguish "unknown prefix"
-            // from "wrong secret". Discard the result.
-            let _ = token::verify_secret(parsed.secret_remainder, dummy_hash());
-            return Ok(None);
-        }
-
-        for row in rows {
-            match token::verify_secret(parsed.secret_remainder, &row.key_hash) {
-                Ok(true) => {
-                    // Route the row's `tenant_id` into
-                    // `Principal.tenant`. Falls back to
-                    // `TenantId::default()` if the stored value
-                    // doesn't parse (operator-injected garbage
-                    // in the DB; should never happen in practice
-                    // since the mint path validates). The fallback
-                    // logs at WARN so a corrupt row gets noticed
-                    // without rejecting the entire request — the
-                    // default-tenant landing is at least no worse
-                    // than a single-tenant deployment.
-                    let tenant = waygate_core::TenantId::parse(&row.tenant_id).unwrap_or_else(
+        let secret = parsed.secret_remainder.to_owned();
+        let (verified, _permit) =
+            run_verification(permit, move || verify_rows(rows, &secret)).await?;
+        if let Some(row) = verified {
+            // Route the row's `tenant_id` into
+            // `Principal.tenant`. Falls back to
+            // `TenantId::default()` if the stored value
+            // doesn't parse (operator-injected garbage
+            // in the DB; should never happen in practice
+            // since the mint path validates). The fallback
+            // logs at WARN so a corrupt row gets noticed
+            // without rejecting the entire request — the
+            // default-tenant landing is at least no worse
+            // than a single-tenant deployment.
+            let tenant = waygate_core::TenantId::parse(&row.tenant_id).unwrap_or_else(
                         |e| {
                             tracing::warn!(
                                 row_id = %row.id,
@@ -327,93 +339,121 @@ impl ApiKeyValidator {
                             waygate_core::TenantId::default()
                         },
                     );
-                    // Resolve profile restrictions onto
-                    // the principal so the invocation gate
-                    // doesn't need a per-call store lookup.
-                    // Returns Ok(None) when:
-                    //   - the row has no profile_id (legacy
-                    //     mint path)
-                    //   - the profile store isn't wired
-                    //   - the profile no longer exists (FK
-                    //     SET NULL on delete should make this
-                    //     unreachable, but defensively the
-                    //     missing-profile case is treated as
-                    //     "no restrictions" rather than fail-
-                    //     closed; the operator who deleted the
-                    //     profile already had the chance to
-                    //     revoke affected keys, and profile
-                    //     DELETE flushes the validator cache so
-                    //     cached entries can't keep enforcing
-                    //     the deleted restrictions)
-                    //
-                    // A resolved profile is always carried, even when it has
-                    // no server/tool allowlist. The identity still matters to
-                    // downstream authorization records because the profile
-                    // may constrain scopes, TTL, owner, or reason at mint
-                    // time.
-                    //
-                    // Returns Err on a transient store failure
-                    // (DB connection drop, query error). Those
-                    // MUST fail closed — mapping them to None
-                    // would let a transient profile_store hiccup
-                    // turn a profiled key into an unrestricted
-                    // principal cached for the full cache_ttl
-                    // window (default 60s), bypassing
-                    // allowed_servers/allowed_tools. Surface
-                    // as ValidationError::Infra so the bearer
-                    // middleware returns 503 and the cache
-                    // stays uninfected.
-                    let restrictions = resolve_profile_restrictions(
-                        self.profile_store.as_deref(),
-                        &row.tenant_id,
-                        row.profile_id,
-                    )
-                    .await
-                    .map_err(|e| {
-                        ValidationError::Infra(format!(
-                            "api_keys profile resolution failed (failing closed to avoid \
+            // Resolve profile restrictions onto
+            // the principal so the invocation gate
+            // doesn't need a per-call store lookup.
+            // Returns Ok(None) when:
+            //   - the row has no profile_id (legacy
+            //     mint path)
+            //   - the profile store isn't wired
+            //   - the profile no longer exists (FK
+            //     SET NULL on delete should make this
+            //     unreachable, but defensively the
+            //     missing-profile case is treated as
+            //     "no restrictions" rather than fail-
+            //     closed; the operator who deleted the
+            //     profile already had the chance to
+            //     revoke affected keys, and profile
+            //     DELETE flushes the validator cache so
+            //     cached entries can't keep enforcing
+            //     the deleted restrictions)
+            //
+            // A resolved profile is always carried, even when it has
+            // no server/tool allowlist. The identity still matters to
+            // downstream authorization records because the profile
+            // may constrain scopes, TTL, owner, or reason at mint
+            // time.
+            //
+            // Returns Err on a transient store failure
+            // (DB connection drop, query error). Those
+            // MUST fail closed — mapping them to None
+            // would let a transient profile_store hiccup
+            // turn a profiled key into an unrestricted
+            // principal cached for the full cache_ttl
+            // window (default 60s), bypassing
+            // allowed_servers/allowed_tools. Surface
+            // as ValidationError::Infra so the bearer
+            // middleware returns 503 and the cache
+            // stays uninfected.
+            let restrictions = resolve_profile_restrictions(
+                self.profile_store.as_deref(),
+                &row.tenant_id,
+                row.profile_id,
+            )
+            .await
+            .map_err(|e| {
+                ValidationError::Infra(format!(
+                    "api_keys profile resolution failed (failing closed to avoid \
                              routing profiled key as unrestricted): {e}"
-                        ))
-                    })?;
-                    let principal = Principal {
-                        sub: row.sub,
-                        email: row.email,
-                        groups: row.groups,
-                        issuer: self.config.issuer_label.clone(),
-                        scopes: row.scopes,
-                        tenant,
-                        auth_method: AuthMethod::ApiKey,
-                        // API keys are not OAuth tokens — never offer them
-                        // to RFC 8693 exchange paths.
-                        raw_token: None,
-                        // SCIM attrs are filled by the optional
-                        // PrincipalEnricher in BearerLayer after
-                        // this validator returns (when configured).
-                        roles: vec![],
-                        scim: None,
-                        enrichment_blocked: None,
-                        api_key_profile_restrictions: restrictions,
-                    };
-                    return Ok(Some(CachedEntry {
-                        principal,
-                        expires_at: row.expires_at,
-                        key_id: row.id,
-                    }));
-                }
-                Ok(false) => continue,
-                Err(e) => {
-                    // Corrupt hash in the DB — log and treat as "no match"
-                    // so other rows with the same prefix still get checked.
-                    tracing::error!(
-                        api_key.id = %row.id,
-                        error = %e,
-                        "api_keys: stored hash is unparseable",
-                    );
-                }
-            }
+                ))
+            })?;
+            let principal = Principal {
+                sub: row.sub,
+                email: row.email,
+                groups: row.groups,
+                issuer: self.config.issuer_label.clone(),
+                scopes: row.scopes,
+                tenant,
+                auth_method: AuthMethod::ApiKey,
+                // API keys are not OAuth tokens — never offer them
+                // to RFC 8693 exchange paths.
+                raw_token: None,
+                // SCIM attrs are filled by the optional
+                // PrincipalEnricher in BearerLayer after
+                // this validator returns (when configured).
+                roles: vec![],
+                scim: None,
+                enrichment_blocked: None,
+                api_key_profile_restrictions: restrictions,
+            };
+            let entry = CachedEntry {
+                principal,
+                expires_at: row.expires_at,
+                key_id: row.id,
+            };
+            // Verification can wait for a blocking worker. Recheck
+            // expiry before this result can authenticate or be cached.
+            return Ok((!entry_expired(&entry)).then_some(entry));
         }
         Ok(None)
     }
+}
+
+/// Admission moves with the worker result back to the caller, which retains it
+/// through profile resolution. Cancelling the caller cannot free capacity while
+/// its non-abortable hashing still runs.
+async fn run_verification<T: Send + 'static>(
+    permit: OwnedSemaphorePermit,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<(T, OwnedSemaphorePermit), ValidationError> {
+    match tokio::task::spawn_blocking(move || (work(), permit)).await {
+        Ok(result) => Ok(result),
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(_) => Err(ValidationError::Infra(
+            "API-key verification interrupted".into(),
+        )),
+    }
+}
+
+fn verify_rows(rows: Vec<ApiKeyRow>, secret: &str) -> Option<ApiKeyRow> {
+    if rows.is_empty() {
+        // Dummy initialization and verification both stay off async workers.
+        // Unknown prefixes receive the same expensive check as wrong secrets.
+        let _ = token::verify_secret(secret, dummy_hash());
+        return None;
+    }
+    for row in rows {
+        match token::verify_secret(secret, &row.key_hash) {
+            Ok(true) => return Some(row),
+            Ok(false) => continue,
+            Err(error) => tracing::error!(
+                api_key.id = %row.id,
+                error = %error,
+                "api_keys: stored hash is unparseable",
+            ),
+        }
+    }
+    None
 }
 
 #[async_trait]
@@ -750,6 +790,184 @@ mod resolve_profile_restrictions_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn validator_without_database() -> Arc<ApiKeyValidator> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
+        ApiKeyValidator::new(ApiKeyStore::new(pool), ValidatorConfig::default())
+    }
+
+    #[tokio::test]
+    async fn saturated_verification_refuses_cold_requests_before_database_access() {
+        let validator = validator_without_database();
+        let _capacity = validator
+            .verification_capacity
+            .clone()
+            .try_acquire_many_owned(MAX_CONCURRENT_VERIFICATIONS as u32)
+            .unwrap();
+        for character in ['A', 'B'] {
+            let header = format!(
+                "Bearer mcpgw_{}",
+                character.to_string().repeat(token::SECRET_LEN)
+            );
+            let error = validator.validate_header(&header).await.unwrap_err();
+            assert!(
+                matches!(&error, ValidationError::Infra(message) if message.contains("capacity exhausted"))
+            );
+            assert!(!error.is_client_error());
+        }
+        let error = validator
+            .validate_header("Bearer mcpgw_bad-shape")
+            .await
+            .unwrap_err();
+        assert!(
+            error.is_client_error(),
+            "malformed input needs no hashing capacity"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuilt_validators_share_verification_capacity() {
+        let original = validator_without_database();
+        let rebuilt = original.clone().with_profile_store(None);
+        let _capacity = original
+            .verification_capacity
+            .clone()
+            .try_acquire_many_owned(MAX_CONCURRENT_VERIFICATIONS as u32)
+            .unwrap();
+        assert!(rebuilt
+            .verification_capacity
+            .clone()
+            .try_acquire_owned()
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn valid_cached_keys_continue_during_overload_and_expired_keys_are_refused() {
+        let validator = validator_without_database();
+        let _capacity = validator
+            .verification_capacity
+            .clone()
+            .try_acquire_many_owned(MAX_CONCURRENT_VERIFICATIONS as u32)
+            .unwrap();
+        let token = format!("mcpgw_{}", "A".repeat(token::SECRET_LEN));
+        let entry = CachedEntry {
+            principal: Principal {
+                sub: "cached user".into(),
+                email: None,
+                groups: vec![],
+                issuer: "api-key".into(),
+                scopes: vec![],
+                tenant: waygate_core::TenantId::default(),
+                auth_method: AuthMethod::ApiKey,
+                raw_token: None,
+                roles: vec![],
+                scim: None,
+                enrichment_blocked: None,
+                api_key_profile_restrictions: None,
+            },
+            expires_at: None,
+            key_id: Uuid::new_v4(),
+        };
+        validator.cache.insert(token.clone(), entry.clone()).await;
+        let header = format!("Bearer {token}");
+        assert_eq!(
+            validator.validate_header(&header).await.unwrap().sub,
+            "cached user"
+        );
+        validator
+            .cache
+            .insert(
+                token,
+                CachedEntry {
+                    expires_at: Some(OffsetDateTime::UNIX_EPOCH),
+                    ..entry
+                },
+            )
+            .await;
+        assert!(validator
+            .validate_header(&header)
+            .await
+            .unwrap_err()
+            .is_client_error());
+    }
+
+    #[tokio::test]
+    async fn blocking_work_allows_async_progress_and_keeps_capacity_after_cancellation() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = capacity.clone().try_acquire_owned().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let caller = tokio::spawn(run_verification(permit, move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+        started_rx.await.unwrap();
+        // This runs on the sole async worker while verification is blocked.
+        assert_eq!(tokio::spawn(async { 42 }).await.unwrap(), 42);
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        let prematurely_admitted = capacity.clone().try_acquire_owned();
+        release_tx.send(()).unwrap();
+        assert!(
+            prematurely_admitted.is_err(),
+            "cancelled hashing still owns capacity"
+        );
+        let permit = capacity.clone().acquire_owned().await.unwrap();
+        assert_eq!(run_verification(permit, || 7).await.unwrap().0, 7);
+        assert_eq!(capacity.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn worker_panics_propagate_and_release_capacity() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = capacity.clone().try_acquire_owned().unwrap();
+        let caller = tokio::spawn(run_verification(permit, || panic!("test worker panic")));
+        assert!(caller.await.unwrap_err().is_panic());
+        assert_eq!(capacity.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn blocking_verification_preserves_matches_wrong_secrets_and_unknown_keys() {
+        let minted = token::mint().unwrap();
+        let secret = ParsedToken::parse(&minted.display)
+            .unwrap()
+            .secret_remainder
+            .to_owned();
+        let row = ApiKeyRow {
+            id: Uuid::new_v4(),
+            key_prefix: minted.key_prefix,
+            key_hash: minted.key_hash,
+            name: "verification test".into(),
+            sub: "test".into(),
+            tenant_id: waygate_core::TenantId::DEFAULT.into(),
+            email: None,
+            groups: vec![],
+            scopes: vec![],
+            created_by: "test".into(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            last_used_at: None,
+            expires_at: None,
+            revoked_at: None,
+            profile_id: None,
+            owner: None,
+            reason: None,
+            rotation_due_at: None,
+        };
+        let expected_id = row.id;
+        let capacity = Arc::new(Semaphore::new(1));
+        for (rows, supplied, expected) in [
+            (vec![row.clone()], secret.clone(), Some(expected_id)),
+            (vec![row], "wrong secret".to_owned(), None),
+            (vec![], secret, None),
+        ] {
+            let permit = capacity.clone().try_acquire_owned().unwrap();
+            let result = run_verification(permit, move || verify_rows(rows, &supplied))
+                .await
+                .unwrap();
+            assert_eq!(result.0.map(|row| row.id), expected);
+        }
+    }
 
     fn bucket(hour_offset: i64) -> OffsetDateTime {
         crate::store::hour_bucket(
