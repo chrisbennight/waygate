@@ -30,8 +30,8 @@ pub enum CostSource {
     ProviderReported,
     /// Computed here as rate x tokens from the `llm_models` catalog costing.
     ComputedFromCatalog,
-    /// No costing configured for the model (or the model row was absent):
-    /// tokens are recorded, cost is left NULL, cost budgets skip.
+    /// Usage or pricing is incomplete (or the model row was absent):
+    /// tokens and known line items remain recorded; the exact total is NULL.
     #[default]
     Unknown,
 }
@@ -47,8 +47,8 @@ impl CostSource {
 }
 
 /// The computed cost for one call. `None` line items = that class had no rate
-/// and/or no token count. `total_cost` is `None` only when no class could be
-/// priced at all.
+/// and/or no token count. `total_cost` is present only when all applicable
+/// classes can be priced; a partial subtotal is never presented as exact.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CostBreakdown {
     pub input_cost: Option<Decimal>,
@@ -58,13 +58,14 @@ pub struct CostBreakdown {
 }
 
 /// Compute a call's cost from the model's catalog rates and the call's token
-/// counts: `cost(class) = rate_per_mtok x tokens / 1_000_000`. A class is
-/// priced only when BOTH its rate and its token count are present.
+/// counts: `cost(class) = rate_per_mtok x tokens / 1_000_000`. Positive usage
+/// needs a rate; a reported zero costs zero even without a configured rate.
 ///
 /// `total_cost` sums every priced class (input, output, cached-read,
 /// cache-write); cached/cache-write costs fold into the total (the ledger has
-/// no separate columns for them). `source` is `ComputedFromCatalog` when the
-/// model carries ANY rate, else `Unknown` (tokens still recorded, cost NULL).
+/// no separate columns for them). Input is inclusive: subtract reported cache
+/// subsets before pricing ordinary input. Missing primary counts, inconsistent
+/// subsets, or a missing rate for positive usage leave the total unknown.
 /// There is no provider-reported path yet.
 pub fn compute_cost(
     model: &LlmModelRow,
@@ -76,27 +77,23 @@ pub fn compute_cost(
     let million = Decimal::from(1_000_000u64);
     let line = |rate: Option<Decimal>, tokens: Option<u64>| -> Option<Decimal> {
         match (rate, tokens) {
+            (_, Some(0)) => Some(Decimal::ZERO),
             (Some(r), Some(t)) => Some(r * Decimal::from(t) / million),
             _ => None,
         }
     };
-    let input_cost = line(model.input_cost_per_mtok, input_tokens);
+    let cached = cached_read_tokens.unwrap_or(0);
+    let written = cache_write_tokens.unwrap_or(0);
+    let ordinary_input =
+        input_tokens.and_then(|total| total.checked_sub(cached)?.checked_sub(written));
+    let input_cost = line(model.input_cost_per_mtok, ordinary_input);
     let output_cost = line(model.output_cost_per_mtok, output_tokens);
-    let cached_cost = line(model.cached_read_cost_per_mtok, cached_read_tokens);
-    let write_cost = line(model.cache_write_cost_per_mtok, cache_write_tokens);
+    let cached_cost = line(model.cached_read_cost_per_mtok, Some(cached));
+    let write_cost = line(model.cache_write_cost_per_mtok, Some(written));
 
     let parts = [input_cost, output_cost, cached_cost, write_cost];
-    let total_cost = if parts.iter().any(Option::is_some) {
-        Some(parts.into_iter().flatten().sum::<Decimal>())
-    } else {
-        None
-    };
-
-    let any_rate = model.input_cost_per_mtok.is_some()
-        || model.output_cost_per_mtok.is_some()
-        || model.cached_read_cost_per_mtok.is_some()
-        || model.cache_write_cost_per_mtok.is_some();
-    let source = if any_rate {
+    let total_cost = parts.into_iter().sum::<Option<Decimal>>();
+    let source = if total_cost.is_some() {
         CostSource::ComputedFromCatalog
     } else {
         CostSource::Unknown
@@ -219,9 +216,10 @@ where
             (id, tenant_id, principal_sub, model_alias, provider, model_served,
              inbound_surface, input_tokens, output_tokens, cached_read_tokens,
              cache_write_tokens, reasoning_tokens, finish_reason, refusal, latency_ms,
-             input_cost, output_cost, total_cost, cost_source, gateway_cache_hit)
+             input_cost, output_cost, total_cost, cost_source, gateway_cache_hit,
+             accounting_version)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                $16, $17, $18, $19, $20)
+                $16, $17, $18, $19, $20, 2)
         "#,
     )
     .bind(Uuid::now_v7())
@@ -305,12 +303,58 @@ mod tests {
     fn missing_token_class_is_not_priced_but_others_are() {
         use std::str::FromStr;
         // Output rate set but the provider did not report output tokens →
-        // output_cost is None; input still prices and the source is computed.
+        // output_cost is None; input still prices but the total is unknown.
         let m = model_with_rates(Some("2"), Some("8"));
         let c = compute_cost(&m, Some(1_000_000), None, None, None);
         assert_eq!(c.input_cost, Some(Decimal::from_str("2").unwrap()));
         assert_eq!(c.output_cost, None);
-        assert_eq!(c.total_cost, Some(Decimal::from_str("2").unwrap()));
-        assert_eq!(c.source, CostSource::ComputedFromCatalog);
+        assert_eq!(c.total_cost, None);
+        assert_eq!(c.source, CostSource::Unknown);
+    }
+
+    #[test]
+    fn cache_reads_and_creation_replace_ordinary_input_pricing() {
+        use std::str::FromStr;
+        let mut model = model_with_rates(Some("2"), None);
+        model.cached_read_cost_per_mtok = Some(Decimal::from_str("0.5").unwrap());
+        model.cache_write_cost_per_mtok = Some(Decimal::from_str("2.5").unwrap());
+        for (read, written, expected) in [
+            (0, 0, "0.002"),
+            (400, 0, "0.0014"),
+            (1000, 0, "0.0005"),
+            (400, 200, "0.0015"),
+        ] {
+            let cost = compute_cost(&model, Some(1000), Some(0), Some(read), Some(written));
+            assert_eq!(cost.total_cost, Some(Decimal::from_str(expected).unwrap()));
+            assert_eq!(cost.source, CostSource::ComputedFromCatalog);
+        }
+    }
+
+    #[test]
+    fn partial_pricing_or_invalid_counts_never_produce_an_exact_total() {
+        let mut model = model_with_rates(Some("2"), Some("8"));
+        for (input, output, cached, written) in [
+            (Some(1000), Some(10), Some(400), None),
+            (Some(1000), Some(10), None, Some(100)),
+            (None, Some(10), None, None),
+            (Some(1000), None, None, None),
+            (None, None, None, None),
+        ] {
+            let cost = compute_cost(&model, input, output, cached, written);
+            assert_eq!(cost.total_cost, None);
+            assert_eq!(cost.source, CostSource::Unknown);
+        }
+        model.cached_read_cost_per_mtok = Some(Decimal::ONE);
+        model.cache_write_cost_per_mtok = Some(Decimal::ONE);
+        for (cached, written) in [(1001, 0), (600, 500), (u64::MAX, u64::MAX)] {
+            let cost = compute_cost(&model, Some(1000), Some(10), Some(cached), Some(written));
+            assert_eq!(cost.total_cost, None);
+        }
+        let zero = compute_cost(&model_with_rates(None, None), Some(0), Some(0), None, None);
+        assert_eq!(
+            zero.total_cost,
+            Some(Decimal::ZERO),
+            "known zero usage is free"
+        );
     }
 }

@@ -4792,9 +4792,32 @@ mod tests {
     }
 
     async fn upstream_file_round_trip(scheme: TransferScheme) {
-        let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        use sqlx::{migrate::MigrateDatabase, ConnectOptions};
+        let Some(parent) = waygate_test_support::pg::audit_pool_or_skip().await else {
             return;
         };
+        // The sweeper scans the entire database. Each independent byte root
+        // therefore needs its own database, including concurrent round trips.
+        let database_name = format!("waygate_round_trip_{}", uuid::Uuid::new_v4().simple());
+        let options = parent
+            .connect_options()
+            .as_ref()
+            .clone()
+            .database(&database_name);
+        let database_url = options.to_url_lossy().to_string();
+        sqlx::Postgres::create_database(&database_url)
+            .await
+            .expect("create round-trip database");
+        parent.close().await;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .expect("connect round-trip database");
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("migrate round-trip database");
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let tenant = format!("file-output-{}", uuid::Uuid::new_v4().simple());
         sqlx::query("INSERT INTO tenants (id, display_name) VALUES ($1, $1)")
@@ -5649,9 +5672,6 @@ mod tests {
                 .expect("tenant delete keeps a file cleanup record");
         assert_eq!(deletion, ("deleting".to_owned(), None));
         assert!(stored_paths.iter().all(|path| path.exists()));
-        // The sweep is storage-global: concurrent suites sharing the database
-        // may contribute their own expired rows to the count, so the exact
-        // cleanup guarantee for this batch is the path and row assertions.
         assert!(storage.sweep_expired(10).await.expect("sweep files") >= 2);
         assert!(stored_paths.iter().all(|path| !path.exists()));
         let retained_rows: i64 =
@@ -5661,5 +5681,9 @@ mod tests {
                 .await
                 .expect("count deleted file row");
         assert_eq!(retained_rows, 0);
+        pool.close().await;
+        sqlx::Postgres::drop_database(&database_url)
+            .await
+            .expect("remove round-trip database");
     }
 }

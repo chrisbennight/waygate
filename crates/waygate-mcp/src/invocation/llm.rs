@@ -149,7 +149,15 @@ pub(super) fn build_usage_row(
         model_served: record.model_served.clone(),
         inbound_surface: record.inbound_surface.as_str().to_owned(),
         input_tokens: u.input,
-        output_tokens: u.output,
+        // Embeddings do not generate completion tokens. The protocol omits
+        // that class, but a reported input count can still be priced completely.
+        output_tokens: if record.inbound_surface == waygate_llm_translate::Surface::Embeddings
+            && u.input.is_some()
+        {
+            Some(0)
+        } else {
+            u.output
+        },
         cached_read_tokens: u.cached_read,
         cache_write_tokens: u.cache_write,
         reasoning_tokens: u.reasoning,

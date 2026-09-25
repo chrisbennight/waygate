@@ -58,6 +58,52 @@ fn usage(tenant: &str, principal_sub: &str, alias: &str, input: u64, output: u64
 }
 
 #[tokio::test]
+async fn normalized_cached_and_reasoning_usage_counts_once_in_token_budgets() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("budget-inclusive-{}", Uuid::now_v7());
+    for provider in ["anthropic", "google", "openai", "openrouter"] {
+        let mut recorded = usage(&tenant, provider, "model", 1000, 50);
+        recorded.provider = provider.into();
+        recorded.cached_read_tokens = Some(400);
+        recorded.cache_write_tokens = Some(200);
+        recorded.reasoning_tokens = Some(20);
+        insert_llm_usage(&pool, &recorded, &CostBreakdown::default())
+            .await
+            .unwrap();
+        let mut limit = budget(&tenant, Some(provider), Some("model"), 3600, Some(1051));
+        upsert_llm_budget(&pool, &limit).await.unwrap();
+        assert!(
+            check_llm_budget(&pool, &tenant, Some(provider), "model")
+                .await
+                .unwrap()
+                .is_none(),
+            "cache and reasoning subsets must not be added twice"
+        );
+        limit.max_total_tokens = Some(1050);
+        upsert_llm_budget(&pool, &limit).await.unwrap();
+        assert_eq!(
+            check_llm_budget(&pool, &tenant, Some(provider), "model")
+                .await
+                .unwrap()
+                .map(|v| v.dimension),
+            Some(BudgetDimension::Tokens)
+        );
+    }
+    sqlx::query("DELETE FROM llm_usage WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM llm_budgets WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn budget_rejects_when_recorded_usage_meets_the_limit() {
     let Ok(url) = env::var("AUDIT_DATABASE_URL") else {
         eprintln!("skipping llm_budget test: AUDIT_DATABASE_URL not set");

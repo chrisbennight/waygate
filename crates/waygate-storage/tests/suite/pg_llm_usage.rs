@@ -65,7 +65,7 @@ async fn insert_llm_usage_roundtrip() {
 
     let got = sqlx::query(
         "SELECT model_alias, provider, model_served, input_tokens, output_tokens, \
-                finish_reason, refusal, latency_ms, total_cost, cost_source \
+                finish_reason, refusal, latency_ms, total_cost, cost_source, accounting_version \
            FROM llm_usage WHERE tenant_id = $1",
     )
     .bind(&tenant)
@@ -94,6 +94,12 @@ async fn insert_llm_usage_roundtrip() {
     assert_eq!(latency_ms, Some(42));
     assert_eq!(total_cost, Some(Decimal::from_str("0.0015").unwrap()));
     assert_eq!(cost_source.as_deref(), Some("computed_from_catalog"));
+    assert_eq!(got.get::<i16, _>("accounting_version"), 2);
+    // Old binaries omit the new column during rolling upgrades. They must not
+    // be mislabeled as following the current token and cost contract.
+    let legacy: i16 = sqlx::query_scalar("INSERT INTO llm_usage (id, tenant_id, model_alias, provider, inbound_surface) VALUES ($1, $2, 'legacy', 'openrouter', 'chat_completions') RETURNING accounting_version")
+        .bind(Uuid::now_v7()).bind(&tenant).fetch_one(&pool).await.unwrap();
+    assert_eq!(legacy, 1);
 
     sqlx::query("DELETE FROM llm_usage WHERE tenant_id = $1")
         .bind(&tenant)
@@ -146,7 +152,7 @@ async fn sink_prices_a_call_from_the_catalog() {
     .await
     .expect("seed model");
     sqlx::query(
-        "UPDATE llm_models SET input_cost_per_mtok = 3, output_cost_per_mtok = 6 \
+        "UPDATE llm_models SET input_cost_per_mtok = 2, cached_read_cost_per_mtok = 0.5 \
            WHERE tenant_id = $1 AND alias = 'gpt-x'",
     )
     .bind(&tenant)
@@ -163,9 +169,9 @@ async fn sink_prices_a_call_from_the_catalog() {
         provider_account_id: None,
         model_served: Some("served-x".into()),
         inbound_surface: "chat_completions".into(),
-        input_tokens: Some(1_000_000),
-        output_tokens: Some(500_000),
-        cached_read_tokens: None,
+        input_tokens: Some(1000),
+        output_tokens: Some(0),
+        cached_read_tokens: Some(400),
         cache_write_tokens: None,
         reasoning_tokens: None,
         finish_reason: Some("stop".into()),
@@ -183,8 +189,8 @@ async fn sink_prices_a_call_from_the_catalog() {
     let total_cost: Option<Decimal> = got.get("total_cost");
     let cost_source: Option<String> = got.get("cost_source");
 
-    // 1_000_000 * $3/Mtok + 500_000 * $6/Mtok = 3 + 3 = 6.
-    assert_eq!(total_cost, Some(Decimal::from_str("6").unwrap()));
+    // Synthetic rates: 600 ordinary at 2/M + 400 cached at 0.5/M.
+    assert_eq!(total_cost, Some(Decimal::from_str("0.0014").unwrap()));
     assert_eq!(cost_source.as_deref(), Some("computed_from_catalog"));
 
     sqlx::query("DELETE FROM llm_usage WHERE tenant_id = $1")
@@ -379,15 +385,21 @@ async fn sink_prices_by_the_calls_provider_when_upstream_name_collides() {
     })
     .await;
 
-    let total_cost: Option<Decimal> =
-        sqlx::query("SELECT total_cost FROM llm_usage WHERE tenant_id = $1")
-            .bind(&tenant)
-            .fetch_one(&pool)
-            .await
-            .expect("select")
-            .get("total_cost");
-    // Priced with openai's $100/Mtok, NOT openrouter's $3.
-    assert_eq!(total_cost, Some(Decimal::from_str("100").unwrap()));
+    let cost = sqlx::query(
+        "SELECT input_cost, total_cost, cost_source FROM llm_usage WHERE tenant_id = $1",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .expect("select");
+    // The known input component uses this provider's rate. Missing output
+    // prevents that component from being mislabeled as a complete call cost.
+    assert_eq!(
+        cost.get::<Option<Decimal>, _>("input_cost"),
+        Some(Decimal::from_str("100").unwrap())
+    );
+    assert_eq!(cost.get::<Option<Decimal>, _>("total_cost"), None);
+    assert_eq!(cost.get::<String, _>("cost_source"), "unknown");
 
     sqlx::query("DELETE FROM llm_usage WHERE tenant_id = $1")
         .bind(&tenant)

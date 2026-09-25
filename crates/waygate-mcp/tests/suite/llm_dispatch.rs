@@ -2194,7 +2194,7 @@ async fn recognized_embeddings_model_returns_unary_value_through_the_pipeline() 
     assert_eq!(urows.len(), 1, "one usage row");
     assert_eq!(urows[0].inbound_surface, "embeddings");
     assert_eq!(urows[0].input_tokens, Some(5));
-    assert_eq!(urows[0].output_tokens, None);
+    assert_eq!(urows[0].output_tokens, Some(0));
     assert_eq!(urows[0].model_alias, "embed-x");
 }
 
