@@ -661,6 +661,31 @@ two fields at parse time, and is mutually exclusive with them.
 
 ---
 
+### Response resource limits
+
+Unary chat and Responses calls accept at most 8 MiB of decoded HTTP body;
+embedding responses accept at most 32 MiB. The byte count applies while reading,
+including chunked responses without a declared length. An oversized response is
+refused with an actionable error and is not retried against another provider.
+Reduce the requested output or embedding batch to fit. Existing image response
+limits and their single-attempt transport remain in force.
+
+Chat, Responses, and embedding processing share capacity for eight active calls
+per gateway process, including cache reads and response finalization. Admission
+has no waiting queue: excess calls receive a retryable capacity error before
+provider contact (HTTP 503 on the inference routes). A stream holds its place
+until it completes or is cancelled. MCP session creation and dispatcher clones
+share the same capacity. These limits are fixed defaults, not environment settings.
+They bound admitted processing; decoded JSON and HTTP delivery have additional
+memory overhead, so they are not an exact process-memory ceiling.
+
+Optional stream caching considers at most 1 MiB of cumulative serialized output
+chunks, including text, metadata, usage, and choices. Exceeding that budget, or
+seeing content the cache cannot faithfully replay, discards accumulated content
+and disables caching for the remainder of that stream. The live response still
+reaches the client; no partial completion is stored. Existing SSE frame limits
+and timeouts continue to govern delivery independently.
+
 ## 8. Quota & budgets
 
 Formalizes I3. Dimensions: requests, `input_tokens`, `output_tokens`, `cached_read_tokens`

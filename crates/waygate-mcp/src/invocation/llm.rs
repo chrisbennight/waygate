@@ -3,14 +3,31 @@
 //! the fifteen-stage pipeline.
 
 use super::stream::{
-    decision_inputs, finalizing_inference_stream, synthetic_replay_stream, StreamCacheAgg,
-    StreamCacheTee, StreamFinalize,
+    decision_inputs, finalizing_inference_stream, hold_response_capacity, synthetic_replay_stream,
+    StreamCacheAgg, StreamCacheTee, StreamFinalize,
 };
 use super::*;
 
 mod images;
 
 impl DefaultInvocationService {
+    async fn admit_llm_response(
+        &self,
+        ctx: &InvocationContext<'_>,
+        dispatcher: &LlmDispatcher,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, InvocationError> {
+        if let Some(permit) = dispatcher.try_admit_response() {
+            return Ok(permit);
+        }
+        let message = "inference response capacity exhausted; retry with backoff";
+        self.record_llm_outcome(ctx, AuditOutcome::ExecutionError, Some(message.into()))
+            .await;
+        Err(InvocationError::Upstream(ErrorData::internal_error(
+            message,
+            Some(serde_json::json!({"kind": "inference_capacity_exhausted", "retryable": true})),
+        )))
+    }
+
     pub(super) async fn invoke_model(
         &self,
         ctx: InvocationContext<'_>,
@@ -243,6 +260,7 @@ impl DefaultInvocationService {
         // request-rate quota). Before record_pre_call + dispatch (I2).
         self.check_llm_budget(&ctx).await?;
         self.check_approval(&mut ctx).await?;
+        let response_capacity = self.admit_llm_response(&ctx, dispatcher).await?;
         self.record_pre_call(&mut ctx).await?;
 
         let started = std::time::Instant::now();
@@ -311,8 +329,9 @@ impl DefaultInvocationService {
                 // streamed request gets the stored body re-emitted as a synthetic
                 // OpenAI SSE chunk stream; a unary request gets it verbatim.
                 if llm_req.stream {
-                    return Ok(InvocationResponse::Stream(synthetic_replay_stream(
-                        hit.body,
+                    return Ok(InvocationResponse::Stream(hold_response_capacity(
+                        synthetic_replay_stream(hit.body),
+                        response_capacity,
                     )));
                 }
                 return Ok(InvocationResponse::UnaryValue(hit.body));
@@ -420,7 +439,10 @@ impl DefaultInvocationService {
                         responses_surface,
                     },
                 );
-                Ok(InvocationResponse::Stream(stream))
+                Ok(InvocationResponse::Stream(hold_response_capacity(
+                    stream,
+                    response_capacity,
+                )))
             }
             Err(e) => {
                 let reason = e.to_string();
@@ -484,6 +506,7 @@ impl DefaultInvocationService {
         self.check_quota(&mut ctx).await?;
         self.check_llm_budget(&ctx).await?;
         self.check_approval(&mut ctx).await?;
+        let _response_capacity = self.admit_llm_response(&ctx, dispatcher).await?;
         self.record_pre_call(&mut ctx).await?;
 
         let started = std::time::Instant::now();
@@ -573,7 +596,10 @@ impl DefaultInvocationService {
             }
             Err(e) => {
                 let status = e.provider_status().unwrap_or(502);
-                let reason = format!("embedding backend request failed ({status})");
+                let reason = e
+                    .provider_protocol_message()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("embedding backend request failed ({status})"));
                 let err = InvocationError::Upstream(ErrorData::internal_error(
                     reason.clone(),
                     Some(serde_json::json!({

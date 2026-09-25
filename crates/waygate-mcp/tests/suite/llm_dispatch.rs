@@ -2409,6 +2409,57 @@ async fn embeddings_cache_is_per_principal() {
 mod images;
 
 #[tokio::test]
+async fn oversized_embeddings_explain_the_limit_without_exposing_the_backend_body() {
+    async fn oversized() -> Response {
+        let chunk = axum::body::Bytes::from(vec![b' '; 64 * 1024]);
+        let count = waygate_llm_providers::MAX_EMBEDDING_RESPONSE_BYTES / chunk.len() + 1;
+        Response::builder()
+            .status(200)
+            .body(Body::from_stream(futures::stream::iter(
+                (0..count).map(move |_| Ok::<_, std::io::Error>(chunk.clone())),
+            )))
+            .unwrap()
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/embeddings", post(oversized)),
+        )
+        .await
+        .unwrap();
+    });
+    let mut model = embeddings_resolver(addr).resolve("llm", "embed-x").unwrap();
+    model.route.embeddings_no_auth = true;
+    model.route.credential_label.clear();
+    let resolver = Arc::new(StaticModelResolver::new().with_model("llm", "embed-x", model));
+    let dispatcher = LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), store());
+    let service = DefaultInvocationService::new(
+        Arc::new(FakeCatalog),
+        Arc::new(AllowAllGate),
+        Arc::new(RecordingSink::default()),
+    )
+    .with_llm(dispatcher, resolver);
+    let error = service
+        .invoke(
+            Some(&principal()),
+            InvocationRequest::new("llm", "embed-x")
+                .with_arguments(Some(embeddings_args()))
+                .with_embeddings_surface(true),
+        )
+        .await
+        .unwrap_err();
+    server.abort();
+    let InvocationError::Upstream(error) = error else {
+        panic!("expected upstream error")
+    };
+    assert!(error.message.contains("byte limit"));
+    assert!(error.message.contains("embedding batch"));
+    assert_eq!(error.data.as_ref().unwrap()["embedding_http_status"], 502);
+}
+
+#[tokio::test]
 async fn private_embeddings_keep_authorization_and_safe_backend_error_metadata() {
     let cap = Arc::new(Mutex::new(Captured::default()));
     async fn overloaded(State(cap): State<Arc<Mutex<Captured>>>, headers: HeaderMap) -> Response {
@@ -2560,4 +2611,92 @@ async fn dispatch_failure_labels_use_the_authorized_catalog_alias() {
             .expect("catalog metric");
         assert!(line.ends_with(" 2"), "{line}");
     }
+}
+
+#[tokio::test]
+async fn response_capacity_refuses_before_provider_contact_and_recovers() {
+    let cap = Arc::new(Mutex::new(Captured::default()));
+    let addr = spawn_provider(cap.clone()).await;
+    let dispatcher = LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), store());
+    let svc = DefaultInvocationService::new(
+        Arc::new(FakeCatalog),
+        Arc::new(AllowAllGate),
+        Arc::new(RecordingSink::default()),
+    )
+    .with_llm(dispatcher.clone(), resolver(addr));
+    let permits: Vec<_> = (0..waygate_llm_dispatch::MAX_CONCURRENT_RESPONSES)
+        .map(|_| dispatcher.try_admit_response().unwrap())
+        .collect();
+    let request = || InvocationRequest::new("llm", "gpt-x").with_arguments(Some(chat_args()));
+    let error = svc.invoke(None, request()).await.unwrap_err();
+    assert!(
+        matches!(error, InvocationError::Upstream(error) if error.data.as_ref().unwrap()["kind"] == "inference_capacity_exhausted")
+    );
+    assert!(!cap.lock().unwrap().called);
+    drop(permits);
+    assert!(matches!(
+        svc.invoke(None, request()).await.unwrap(),
+        InvocationResponse::UnaryValue(_)
+    ));
+    assert!(cap.lock().unwrap().called);
+    let recovered: Vec<_> = (0..waygate_llm_dispatch::MAX_CONCURRENT_RESPONSES)
+        .map(|_| dispatcher.try_admit_response().unwrap())
+        .collect();
+    drop(recovered);
+}
+
+#[tokio::test]
+async fn oversized_stream_cache_does_not_interrupt_delivery_or_store_partial_content() {
+    use futures::StreamExt;
+    let app = Router::new().route("/chat/completions", post(|| async {
+        let chunks = (0..20).map(|_| Ok::<_, std::io::Error>(format!("data: {}\n\n", json!({
+            "choices":[{"index":0,"delta":{"content":"x".repeat(64 * 1024)}}]
+        })))).chain([
+            Ok("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n".to_owned()),
+            Ok("data: [DONE]\n\n".to_owned()),
+        ]);
+        Response::builder().header("content-type", "text/event-stream")
+            .body(Body::from_stream(futures::stream::iter(chunks))).unwrap()
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let cache = Arc::new(MockCache::default());
+    let dispatcher = LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), store());
+    let svc = DefaultInvocationService::new(
+        Arc::new(FakeCatalog),
+        Arc::new(AllowAllGate),
+        Arc::new(RecordingSink::default()),
+    )
+    .with_llm(dispatcher.clone(), caching_resolver(addr))
+    .with_llm_cache(cache.clone() as waygate_mcp::cache::SharedLlmCache);
+    let mut args = chat_args();
+    args.insert("stream".into(), json!(true));
+    let response = svc
+        .invoke(
+            Some(&principal()),
+            InvocationRequest::new("llm", "gpt-x").with_arguments(Some(args)),
+        )
+        .await
+        .unwrap();
+    let InvocationResponse::Stream(mut stream) = response else {
+        panic!("expected stream")
+    };
+    let mut delivered = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        delivered += chunk.event["choices"][0]["delta"]["content"]
+            .as_str()
+            .map(str::len)
+            .unwrap_or(0);
+    }
+    assert_eq!(delivered, 20 * 64 * 1024);
+    assert_eq!(cache.puts(), 0);
+    let permits: Vec<_> = (0..waygate_llm_dispatch::MAX_CONCURRENT_RESPONSES)
+        .map(|_| dispatcher.try_admit_response().unwrap())
+        .collect();
+    drop(permits);
+    server.abort();
 }

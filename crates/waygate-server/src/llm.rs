@@ -1222,6 +1222,16 @@ fn invocation_error_response(e: InvocationError) -> Response {
             if error
                 .data
                 .as_ref()
+                .and_then(|data| data.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                == Some("inference_capacity_exhausted") =>
+        {
+            error_response(StatusCode::SERVICE_UNAVAILABLE, "api_error", &error.message)
+        }
+        InvocationError::Upstream(error)
+            if error
+                .data
+                .as_ref()
                 .and_then(|d| d.get("image_http_status"))
                 .is_some() =>
         {
@@ -1330,6 +1340,18 @@ fn error_response(status: StatusCode, err_type: &str, message: &str) -> Response
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_capacity_exhaustion_is_retryable_service_unavailability() {
+        let error = InvocationError::Upstream(rmcp::ErrorData::internal_error(
+            "inference response capacity exhausted; retry with backoff",
+            Some(serde_json::json!({"kind": "inference_capacity_exhausted", "retryable": true})),
+        ));
+        assert_eq!(
+            invocation_error_response(error).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 
     #[test]
     fn codex_ua_fallback_version_matches_the_discovery_default() {

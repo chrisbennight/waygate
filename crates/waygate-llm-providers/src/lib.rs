@@ -54,11 +54,10 @@ pub enum ProviderError {
     /// A 2xx unary response whose body was not valid JSON.
     #[error("invalid JSON response body: {0}")]
     Decode(String),
-    /// The streamed response violated the SSE protocol — e.g. a single event
-    /// exceeded the buffer cap without a frame terminator (an oversized or
-    /// unterminated event), which is bounded so a hostile/buggy provider cannot
-    /// grow memory without limit.
-    #[error("stream protocol violation: {0}")]
+    /// The provider response violated the transport contract, including unary
+    /// body limits or an oversized or unterminated SSE event. These failures
+    /// are not retried against another credential.
+    #[error("provider response protocol violation: {0}")]
     Protocol(String),
 }
 
@@ -225,6 +224,11 @@ pub struct ProviderRequest {
 /// size, so a hostile/huge error body is never fully buffered.
 const MAX_ERROR_BODY: usize = 2048;
 
+/// Maximum decoded HTTP body for a unary chat or Responses call.
+pub const MAX_CHAT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+/// Embedding batches carry larger numeric arrays than ordinary chat responses.
+pub const MAX_EMBEDDING_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
 /// Outbound HTTP+SSE client to LLM providers. Cheap to clone (wraps a
 /// connection-pooling `reqwest::Client`s); construct once and share.
 #[derive(Clone)]
@@ -280,7 +284,17 @@ impl ProviderClient {
     /// (body snippet bounded); on success returns [`ProviderResponse::Unary`]
     /// or [`ProviderResponse::Stream`] per `req.stream`.
     pub async fn send(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        self.send_inner(req, None, &self.http).await
+        self.send_with_limit(req, MAX_CHAT_RESPONSE_BYTES).await
+    }
+
+    /// Use an operation-specific unary body limit with the standard transport.
+    /// Streaming responses retain the SSE parser's per-event limit.
+    pub async fn send_with_limit(
+        &self,
+        req: ProviderRequest,
+        max_bytes: usize,
+    ) -> Result<ProviderResponse, ProviderError> {
+        self.send_inner(req, max_bytes, &self.http).await
     }
 
     /// Send a unary request with a hard response byte limit. Reads stop at the
@@ -300,13 +314,13 @@ impl ProviderClient {
         let http = self.single_attempt_http.as_ref().ok_or_else(|| {
             ProviderError::Protocol("single-attempt image transport is not configured".into())
         })?;
-        self.send_inner(req, Some(max_bytes), http).await
+        self.send_inner(req, max_bytes, http).await
     }
 
     async fn send_inner(
         &self,
         req: ProviderRequest,
-        max_bytes: Option<usize>,
+        max_bytes: usize,
         http: &reqwest::Client,
     ) -> Result<ProviderResponse, ProviderError> {
         let url = format!(
@@ -390,27 +404,21 @@ impl ProviderClient {
 
         if req.stream {
             Ok(ProviderResponse::Stream(sse::into_event_stream(resp)))
-        } else if let Some(limit) = max_bytes {
+        } else {
             let mut stream = resp.bytes_stream();
             let mut bytes = Vec::new();
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk
                     .map_err(|_| ProviderError::Transport("response body interrupted".into()))?;
-                if chunk.len() > limit.saturating_sub(bytes.len()) {
-                    return Err(ProviderError::Protocol(
-                        "provider response exceeds byte limit".into(),
-                    ));
+                if chunk.len() > max_bytes.saturating_sub(bytes.len()) {
+                    return Err(ProviderError::Protocol(format!(
+                        "provider response exceeds {max_bytes}-byte limit; request a smaller response or embedding batch"
+                    )));
                 }
                 bytes.extend_from_slice(&chunk);
             }
             let value = serde_json::from_slice(&bytes)
                 .map_err(|_| ProviderError::Decode("invalid provider JSON response".into()))?;
-            Ok(ProviderResponse::Unary(value))
-        } else {
-            let value = resp
-                .json::<Value>()
-                .await
-                .map_err(|e| ProviderError::Decode(e.to_string()))?;
             Ok(ProviderResponse::Unary(value))
         }
     }
