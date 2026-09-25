@@ -53,6 +53,12 @@ cancellation, retry, and transaction tests remain required. Convert an excluded
 check to explicit synchronization or an injected clock before returning it to
 required CI; preserving its name alone does not preserve its contract.
 
+The upload progress and cleanup regressions create disposable databases using
+the configured `AUDIT_DATABASE_URL` connection. The test role needs permission
+to create and drop databases, as provided by CI. Each test keeps its metadata
+and temporary byte directory isolated because file sweepers operate across
+tenants. These tests report a skip when the database URL is unset.
+
 ## Performance and context measurements
 
 Run `cargo bench -p waygate-mcp --bench validator_cache --locked` to compare

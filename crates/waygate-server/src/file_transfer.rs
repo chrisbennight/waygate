@@ -443,12 +443,15 @@ impl OutboundFileProcessor {
         budget: Option<u64>,
         upstream_file: FileValue,
     ) -> Result<(FileValue, uuid::Uuid, u64), McpError> {
-        let _permit = self.admission.try_enter().map_err(|_| {
-            file_transfer_failure(
-                FileTransferReason::TemporarilyUnavailable,
-                "file transfer capacity is currently full; retry later",
-            )
-        })?;
+        let _permit = self
+            .admission
+            .try_enter_for(&owner_from_principal(principal))
+            .map_err(|_| {
+                file_transfer_failure(
+                    FileTransferReason::TemporarilyUnavailable,
+                    "file transfer capacity is currently full; retry later",
+                )
+            })?;
         let authorized = self
             .catalog
             .authorize_file_download(
@@ -766,12 +769,15 @@ impl OutboundFileProcessor {
         principal: &Principal,
         delivery: PreparedFileDelivery,
     ) -> Result<(), McpError> {
-        let _permit = self.admission.try_enter().map_err(|_| {
-            file_transfer_failure(
-                FileTransferReason::TemporarilyUnavailable,
-                "file transfer capacity is currently full; retry later",
-            )
-        })?;
+        let _permit = self
+            .admission
+            .try_enter_for(&owner_from_principal(principal))
+            .map_err(|_| {
+                file_transfer_failure(
+                    FileTransferReason::TemporarilyUnavailable,
+                    "file transfer capacity is currently full; retry later",
+                )
+            })?;
         let http = self
             .client_for_transfer(&delivery.url, &delivery.network)
             .await?;
@@ -1315,12 +1321,15 @@ impl FileOutputProcessor for OutboundFileProcessor {
                 "retained response files require an authenticated caller",
             )
         })?;
-        let _permit = self.admission.try_enter().map_err(|_| {
-            file_transfer_failure(
-                FileTransferReason::TemporarilyUnavailable,
-                "file transfer capacity is currently full",
-            )
-        })?;
+        let _permit = self
+            .admission
+            .try_enter_for(&owner_from_principal(principal))
+            .map_err(|_| {
+                file_transfer_failure(
+                    FileTransferReason::TemporarilyUnavailable,
+                    "file transfer capacity is currently full",
+                )
+            })?;
         let batch_id = uuid::Uuid::new_v4();
         let retention = if body.sensitive {
             self.retention.secret
@@ -1790,12 +1799,15 @@ impl FileDownloadAuthorizer for NativeFileAuthorizer {
             )
         })?;
         let file_id = parse_gateway_file_uri(&params.uri)?;
-        let _permit = self.admission.try_enter().map_err(|_| {
-            file_transfer_failure(
-                FileTransferReason::TemporarilyUnavailable,
-                "file transfer capacity is currently full; retry later",
-            )
-        })?;
+        let _permit = self
+            .admission
+            .try_enter_for(&owner_from_principal(principal))
+            .map_err(|_| {
+                file_transfer_failure(
+                    FileTransferReason::TemporarilyUnavailable,
+                    "file transfer capacity is currently full; retry later",
+                )
+            })?;
         let owner = owner_from_principal(principal);
         let file = self
             .storage
@@ -3034,7 +3046,7 @@ fn descriptor_headers(
     Ok(result)
 }
 
-fn owner_from_principal(principal: &Principal) -> GatewayFileOwner {
+pub(crate) fn owner_from_principal(principal: &Principal) -> GatewayFileOwner {
     GatewayFileOwner {
         tenant_id: principal.tenant.clone(),
         principal_sub: principal.sub.clone(),

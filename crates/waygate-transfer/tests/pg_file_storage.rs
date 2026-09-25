@@ -963,3 +963,500 @@ async fn published_retention_follows_each_files_own_class() {
         .expect("remove test tenant");
     server.abort();
 }
+
+type ControlledUpload<S> = (
+    S,
+    mpsc::Sender<Result<Bytes, std::io::Error>>,
+    tokio::sync::watch::Receiver<Option<usize>>,
+);
+
+fn controlled_upload_stream(
+) -> ControlledUpload<impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Unpin> {
+    let (sender, mut receiver) = mpsc::channel(1);
+    let (observed, progress) = tokio::sync::watch::channel(None);
+    let mut received = 0;
+    let stream = futures::stream::poll_fn(move |cx| {
+        // A subsequent poll proves the previous chunk finished staging.
+        observed.send_replace(Some(received));
+        let next = receiver.poll_recv(cx);
+        if matches!(&next, std::task::Poll::Ready(Some(_))) {
+            received += 1;
+        }
+        next
+    });
+    (stream, sender, progress)
+}
+
+async fn wait_upload_reads(
+    progress: &mut tokio::sync::watch::Receiver<Option<usize>>,
+    count: usize,
+) {
+    loop {
+        if progress
+            .borrow_and_update()
+            .is_some_and(|seen| seen >= count)
+        {
+            return;
+        }
+        progress.changed().await.unwrap();
+    }
+}
+
+async fn advance_upload_clock(seconds: u64) {
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(seconds)).await;
+    tokio::time::resume();
+}
+
+// Sweepers act across tenants. A test with its own byte directory must also own
+// its database, so another test cannot delete its metadata from a different root.
+struct UploadTestDatabase {
+    pool: sqlx::PgPool,
+    url: String,
+}
+
+impl UploadTestDatabase {
+    async fn new() -> Option<Self> {
+        use sqlx::{migrate::MigrateDatabase, ConnectOptions};
+        let parent = waygate_test_support::pg::audit_pool_or_skip().await?;
+        let name = format!("waygate_upload_test_{}", Uuid::new_v4().simple());
+        let options = parent.connect_options().as_ref().clone().database(&name);
+        let url = options.to_url_lossy().to_string();
+        sqlx::Postgres::create_database(&url)
+            .await
+            .expect("create isolated upload test database");
+        parent.close().await;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .expect("connect isolated upload test database");
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("migrate isolated upload test database");
+        Some(Self { pool, url })
+    }
+
+    async fn close(self) {
+        use sqlx::migrate::MigrateDatabase;
+        self.pool.close().await;
+        sqlx::Postgres::drop_database(&self.url)
+            .await
+            .expect("remove isolated upload test database");
+    }
+}
+
+#[tokio::test]
+async fn upload_endpoint_reports_stalls_and_owner_exhaustion_without_publishing_partial_files() {
+    let Some(database) = UploadTestDatabase::new().await else {
+        return;
+    };
+    let pool = database.pool.clone();
+    let tenant = format!("upload-endpoint-{}", Uuid::new_v4().simple());
+    sqlx::query("INSERT INTO tenants (id, display_name) VALUES ($1, $1)")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(
+        GatewayFileStorage::new(pool.clone(), root.path())
+            .await
+            .unwrap(),
+    );
+    let authority = Arc::new(TransferAuthority::new(
+        Arc::new(PgTransferStore::new(pool.clone())),
+        Arc::new(InMemorySink::new()),
+        DpopVerifier::new(Duration::minutes(5), Duration::seconds(30)).unwrap(),
+    ));
+    let actor = principal(&tenant);
+    let admission = waygate_transfer::FileTransferAdmission::new(2);
+    let app = file_transfer_router(
+        authority.clone(),
+        storage.clone(),
+        "https://gateway.example",
+        admission.clone(),
+        Duration::minutes(5),
+    );
+    let (stream, sender, mut progress) = controlled_upload_stream();
+    let mut stream = Some(stream);
+    let mut pending = None;
+    let mut grants = Vec::new();
+    let mut ids = Vec::new();
+    for attempt in 0..3 {
+        let mut caller = actor.clone();
+        if attempt == 2 {
+            caller.sub = "other-owner".into();
+        }
+        let file_id = Uuid::new_v4();
+        ids.push(file_id);
+        let file_uri = format!("mcp-file://gateway/{file_id}");
+        let now = OffsetDateTime::now_utc();
+        let issued = authority
+            .issue_native_upload_credential(
+                &caller,
+                NewTransferGrant {
+                    invocation_id: "progress-endpoint".into(),
+                    file_uri: file_uri.clone(),
+                    direction: TransferDirection::Upload,
+                    source: TransferEndpoint::client(NATIVE_MCP_CLIENT_REFERENCE).unwrap(),
+                    destination: TransferEndpoint::upstream("gateway", file_uri).unwrap(),
+                    helper_jkt: String::new(),
+                    max_bytes: 1024 * 1024,
+                    expected_size: None,
+                    media_type: None,
+                    expected_digest: None,
+                    max_requests: 1,
+                    expires_at: now + Duration::minutes(5),
+                    credential_ttl: Duration::minutes(2),
+                },
+                now,
+            )
+            .await
+            .unwrap();
+        grants.push(issued.grant.id);
+        let body = if attempt == 0 {
+            Body::from_stream(stream.take().unwrap())
+        } else {
+            Body::from("complete content")
+        };
+        let request = axum::http::Request::builder()
+            .method("PUT")
+            .uri(FILE_UPLOAD_PATH)
+            .header(
+                "authorization",
+                format!("Bearer {}", issued.credential.expose()),
+            )
+            .body(body)
+            .unwrap();
+        if attempt == 0 {
+            pending = Some(tokio::spawn(app.clone().oneshot(request)));
+            wait_upload_reads(&mut progress, 0).await;
+            sender
+                .send(Ok(Bytes::from_static(b"partial")))
+                .await
+                .unwrap();
+            wait_upload_reads(&mut progress, 1).await;
+        } else {
+            let response = app.clone().oneshot(request).await.unwrap();
+            if attempt == 1 {
+                assert_eq!(
+                    response.status(),
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                );
+                let body = axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"],
+                    "owner_transfer_capacity_exhausted"
+                );
+            } else {
+                assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
+                let owner = GatewayFileOwner {
+                    tenant_id: caller.tenant,
+                    principal_sub: caller.sub,
+                    principal_issuer: caller.issuer,
+                };
+                assert!(storage.find_ready(&owner, file_id).await.unwrap().is_some());
+            }
+        }
+    }
+    advance_upload_clock(31).await;
+    let response = pending.unwrap().await.unwrap().unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::REQUEST_TIMEOUT);
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"],
+        "upload_progress_timeout"
+    );
+    for id in &ids[..2] {
+        assert!(!root.path().join(format!(".{id}.part")).exists());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM gateway_files WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    for grant in &grants[..2] {
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM file_transfer_requests WHERE grant_id = $1")
+                .bind(grant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "failed");
+    }
+    let owner = GatewayFileOwner {
+        tenant_id: actor.tenant,
+        principal_sub: actor.sub,
+        principal_issuer: actor.issuer,
+    };
+    assert!(admission.try_enter_for(&owner).is_ok());
+    sqlx::query("DELETE FROM tenants WHERE id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    storage.sweep_expired(100).await.unwrap();
+    database.close().await;
+}
+
+#[tokio::test]
+async fn stalled_uploads_release_capacity_while_other_owners_and_progressing_uploads_work() {
+    let Some(database) = UploadTestDatabase::new().await else {
+        return;
+    };
+    let pool = database.pool.clone();
+    let tenant = format!("upload-progress-{}", Uuid::new_v4().simple());
+    sqlx::query("INSERT INTO tenants (id, display_name) VALUES ($1, $1)")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(
+        GatewayFileStorage::new(pool.clone(), root.path())
+            .await
+            .unwrap(),
+    );
+    let owner = GatewayFileOwner {
+        tenant_id: TenantId::parse(&tenant).unwrap(),
+        principal_sub: "upload-user".into(),
+        principal_issuer: "issuer".into(),
+    };
+    let new_file = |id, owner: GatewayFileOwner| NewGatewayFile {
+        batch_id: id,
+        owner,
+        invocation_id: "progress-test".into(),
+        upstream_server: "gateway-files".into(),
+        upstream_tool: "prepare_upload".into(),
+        upstream_uri: "fixture".into(),
+        display_name: None,
+        media_type: None,
+        expected_size: None,
+        expected_sha256: None,
+        max_bytes: Some(1024 * 1024),
+        inspection_status: FileInspectionStatus::Uninspectable,
+        retention: Duration::hours(1),
+    };
+    let admission = waygate_transfer::FileTransferAdmission::new(2);
+    let id = Uuid::new_v4();
+    let (stream, _sender, mut progress) = controlled_upload_stream();
+    let first = {
+        let storage = storage.clone();
+        let file = new_file(id, owner.clone());
+        let permit = admission.try_enter_for(&owner).unwrap();
+        tokio::spawn(async move {
+            let _permit = permit;
+            storage.stage_upload(id, file, stream).await
+        })
+    };
+    wait_upload_reads(&mut progress, 0).await;
+    assert!(admission.try_enter_for(&owner).is_err());
+    let other_owner = GatewayFileOwner {
+        principal_sub: "other-user".into(),
+        ..owner.clone()
+    };
+    let other_id = Uuid::new_v4();
+    let other_permit = admission.try_enter_for(&other_owner).unwrap();
+    let other = storage
+        .stage_bytes(
+            new_file(other_id, other_owner.clone()),
+            b"other user completes".to_vec(),
+        )
+        .await
+        .unwrap();
+    storage.publish_batch(other_id, 1).await.unwrap();
+    assert!(storage
+        .find_ready(&other_owner, other.id)
+        .await
+        .unwrap()
+        .is_some());
+    drop(other_permit);
+    advance_upload_clock(31).await;
+    assert!(matches!(
+        first.await.unwrap(),
+        Err(waygate_transfer::FileStorageError::UploadStalled)
+    ));
+    assert!(admission.try_enter_for(&owner).is_ok());
+    assert!(!root.path().join(format!(".{id}.part")).exists());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM gateway_files WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    // The same storage accepts a transfer lasting longer than one progress window.
+    let id = Uuid::new_v4();
+    let (stream, sender, mut progress) = controlled_upload_stream();
+    let progressing = {
+        let storage = storage.clone();
+        let file = new_file(id, owner.clone());
+        let permit = admission.try_enter_for(&owner).unwrap();
+        tokio::spawn(async move {
+            let _permit = permit;
+            storage.stage_upload(id, file, stream).await
+        })
+    };
+    wait_upload_reads(&mut progress, 0).await;
+    for count in 1..=3 {
+        advance_upload_clock(20).await;
+        sender
+            .send(Ok(Bytes::from(vec![
+                b'x';
+                waygate_transfer::UPLOAD_PROGRESS_BYTES
+            ])))
+            .await
+            .unwrap();
+        wait_upload_reads(&mut progress, count).await;
+    }
+    drop(sender);
+    let staged = progressing.await.unwrap().unwrap();
+    assert_eq!(
+        staged.size,
+        (3 * waygate_transfer::UPLOAD_PROGRESS_BYTES) as u64
+    );
+    assert!(
+        storage.find_ready(&owner, id).await.unwrap().is_none(),
+        "staged content still requires authority publication"
+    );
+    assert!(admission.try_enter_for(&owner).is_ok());
+    storage.discard_batch(id).await.unwrap();
+    storage.discard_batch(other_id).await.unwrap();
+    sqlx::query("DELETE FROM tenants WHERE id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    database.close().await;
+}
+
+#[tokio::test]
+async fn cancelled_uploads_are_not_transferable_and_failed_cleanup_is_retried_truthfully() {
+    let Some(database) = UploadTestDatabase::new().await else {
+        return;
+    };
+    let pool = database.pool.clone();
+    let tenant = format!("upload-cleanup-{}", Uuid::new_v4().simple());
+    sqlx::query("INSERT INTO tenants (id, display_name) VALUES ($1, $1)")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(
+        GatewayFileStorage::new(pool.clone(), root.path())
+            .await
+            .unwrap(),
+    );
+    let owner = GatewayFileOwner {
+        tenant_id: TenantId::parse(&tenant).unwrap(),
+        principal_sub: "user".into(),
+        principal_issuer: "issuer".into(),
+    };
+    let new_file = |id| NewGatewayFile {
+        batch_id: id,
+        owner: owner.clone(),
+        invocation_id: "cleanup-test".into(),
+        upstream_server: "gateway-files".into(),
+        upstream_tool: "prepare_upload".into(),
+        upstream_uri: "fixture".into(),
+        display_name: None,
+        media_type: None,
+        expected_size: None,
+        expected_sha256: None,
+        max_bytes: Some(1024),
+        inspection_status: FileInspectionStatus::Uninspectable,
+        retention: Duration::hours(1),
+    };
+    let admission = waygate_transfer::FileTransferAdmission::new(2);
+    let id = Uuid::new_v4();
+    let (stream, sender, mut progress) = controlled_upload_stream();
+    let task = {
+        let storage = storage.clone();
+        let file = new_file(id);
+        let permit = admission.try_enter_for(&owner).unwrap();
+        tokio::spawn(async move {
+            let _permit = permit;
+            storage.stage_upload(id, file, stream).await
+        })
+    };
+    wait_upload_reads(&mut progress, 0).await;
+    sender
+        .send(Ok(Bytes::from_static(b"partial")))
+        .await
+        .unwrap();
+    wait_upload_reads(&mut progress, 1).await;
+    task.abort();
+    assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+    assert!(admission.try_enter_for(&owner).is_ok());
+    assert!(storage.find_ready(&owner, id).await.unwrap().is_none());
+    // Partial uploads expire from inactivity. Reinsert this isolated fixture
+    // row with its original fields and an old activity timestamp: an ordinary
+    // UPDATE deliberately refreshes updated_at through the storage trigger.
+    sqlx::query(
+        r#"
+        WITH cancelled AS (
+            DELETE FROM gateway_files WHERE id = $1 RETURNING *
+        )
+        INSERT INTO gateway_files
+        SELECT (jsonb_populate_record(NULL::gateway_files,
+                    to_jsonb(cancelled) || jsonb_build_object(
+                        'updated_at', now() - INTERVAL '10 minutes'))).*
+          FROM cancelled
+        "#,
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    storage.sweep_expired(100).await.unwrap();
+    assert!(!root.path().join(format!(".{id}.part")).exists());
+
+    let failed_id = Uuid::new_v4();
+    let blocked_path = root.path().join(format!(".{failed_id}.part"));
+    tokio::fs::create_dir(&blocked_path).await.unwrap();
+    let stream = futures::stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"data"))]);
+    assert!(storage
+        .stage_upload(failed_id, new_file(failed_id), stream)
+        .await
+        .is_err());
+    let state: String = sqlx::query_scalar("SELECT state FROM gateway_files WHERE id = $1")
+        .bind(failed_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "deleting");
+    assert!(blocked_path.exists());
+    assert!(storage
+        .find_ready(&owner, failed_id)
+        .await
+        .unwrap()
+        .is_none());
+    tokio::fs::remove_dir(&blocked_path).await.unwrap();
+    storage.sweep_expired(100).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM gateway_files WHERE id = $1")
+            .bind(failed_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    sqlx::query("DELETE FROM tenants WHERE id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    database.close().await;
+}

@@ -11,8 +11,45 @@ use waygate_core::TenantId;
 
 pub const PENDING_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const PENDING_UPLOAD_RETENTION: time::Duration = time::Duration::minutes(5);
+pub const UPLOAD_PROGRESS_WINDOW: Duration = Duration::from_secs(30);
+pub const UPLOAD_PROGRESS_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+struct UploadProgress {
+    deadline: tokio::time::Instant,
+    remaining: usize,
+}
+
+impl UploadProgress {
+    fn new() -> Self {
+        Self {
+            deadline: tokio::time::Instant::now() + UPLOAD_PROGRESS_WINDOW,
+            remaining: UPLOAD_PROGRESS_BYTES,
+        }
+    }
+
+    fn record(&mut self, bytes: usize) {
+        if bytes >= self.remaining {
+            self.deadline = tokio::time::Instant::now() + UPLOAD_PROGRESS_WINDOW;
+            self.remaining = UPLOAD_PROGRESS_BYTES;
+        } else {
+            self.remaining -= bytes;
+        }
+    }
+}
+
+async fn within_upload_progress<T>(
+    progress: &Option<UploadProgress>,
+    operation: impl std::future::Future<Output = Result<T, FileStorageError>>,
+) -> Result<T, FileStorageError> {
+    match progress {
+        Some(progress) => tokio::time::timeout_at(progress.deadline, operation)
+            .await
+            .map_err(|_| FileStorageError::UploadStalled)?,
+        None => operation.await,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GatewayFileOwner {
     pub tenant_id: TenantId,
     pub principal_sub: String,
@@ -104,6 +141,8 @@ pub enum FileStorageError {
     BatchUnavailable,
     #[error("staged file is no longer available")]
     FileUnavailable,
+    #[error("upload made insufficient progress; send at least 64 KiB or finish within 30 seconds")]
+    UploadStalled,
 }
 
 #[derive(Clone)]
@@ -135,7 +174,7 @@ impl GatewayFileStorage {
         let body = response
             .bytes_stream()
             .map(|chunk| chunk.map_err(|error| error.without_url()));
-        self.stage_stream(Uuid::new_v4(), new_file, body, pending_retention)
+        self.stage_stream(Uuid::new_v4(), new_file, body, pending_retention, false)
             .await
     }
 
@@ -147,7 +186,7 @@ impl GatewayFileStorage {
     ) -> Result<StoredGatewayFile, FileStorageError> {
         let retention = new_file.retention;
         let body = futures::stream::iter([Ok::<_, FileStorageError>(bytes::Bytes::from(bytes))]);
-        self.stage_stream(Uuid::new_v4(), new_file, body, retention)
+        self.stage_stream(Uuid::new_v4(), new_file, body, retention, false)
             .await
     }
 
@@ -164,7 +203,7 @@ impl GatewayFileStorage {
         S: futures::Stream<Item = Result<bytes::Bytes, E>> + Unpin,
         E: Into<FileStorageError>,
     {
-        self.stage_stream(id, new_file, stream, PENDING_UPLOAD_RETENTION)
+        self.stage_stream(id, new_file, stream, PENDING_UPLOAD_RETENTION, true)
             .await
     }
 
@@ -174,6 +213,7 @@ impl GatewayFileStorage {
         new_file: NewGatewayFile,
         mut stream: S,
         pending_retention: time::Duration,
+        check_upload_progress: bool,
     ) -> Result<StoredGatewayFile, FileStorageError>
     where
         S: futures::Stream<Item = Result<bytes::Bytes, E>> + Unpin,
@@ -234,9 +274,21 @@ impl GatewayFileStorage {
         let mut digest = Sha256::new();
         let mut heartbeat = tokio::time::interval(PENDING_HEARTBEAT_INTERVAL);
         heartbeat.tick().await;
+        let mut progress = check_upload_progress.then(UploadProgress::new);
         let write_result: Result<(), FileStorageError> = async {
             loop {
+                let deadline = progress.as_ref().map(|progress| progress.deadline);
                 tokio::select! {
+                    biased;
+                    _ = async {
+                        match deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending().await,
+                        }
+                    } => return Err(FileStorageError::UploadStalled),
+                    _ = heartbeat.tick() => {
+                        within_upload_progress(&progress, self.heartbeat_pending_batch(new_file.batch_id, id)).await?;
+                    }
                     chunk = stream.next() => {
                         let Some(chunk) = chunk else {
                             break;
@@ -257,15 +309,19 @@ impl GatewayFileStorage {
                         if new_file.max_bytes.is_some_and(|limit| size > limit) {
                             return Err(FileStorageError::TooLarge);
                         }
+                        if let Some(progress) = progress.as_mut() {
+                            progress.record(chunk.len());
+                        }
                         digest.update(&chunk);
-                        output.write_all(&chunk).await?;
-                    }
-                    _ = heartbeat.tick() => {
-                        self.heartbeat_pending_batch(new_file.batch_id, id).await?;
+                        within_upload_progress(&progress, async {
+                            output.write_all(&chunk).await.map_err(FileStorageError::Io)
+                        }).await?;
                     }
                 }
             }
-            output.flush().await?;
+            within_upload_progress(&progress, async {
+                output.flush().await.map_err(FileStorageError::Io)
+            }).await?;
             Ok(())
         }
         .await;
@@ -650,5 +706,43 @@ mod tests {
         validate_storage_key(id, &id.to_string()).expect("matching key");
         assert!(validate_storage_key(id, "../outside").is_err());
         assert!(validate_storage_key(id, &Uuid::new_v4().to_string()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod upload_progress_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn empty_and_small_chunks_do_not_extend_the_progress_deadline() {
+        let mut progress = UploadProgress::new();
+        let first_deadline = progress.deadline;
+        tokio::time::advance(Duration::from_secs(20)).await;
+        progress.record(0);
+        progress.record(UPLOAD_PROGRESS_BYTES - 1);
+        assert_eq!(progress.deadline, first_deadline);
+        progress.record(1);
+        assert_eq!(
+            progress.deadline,
+            tokio::time::Instant::now() + UPLOAD_PROGRESS_WINDOW
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_storage_or_heartbeat_work_obeys_the_same_deadline() {
+        let progress = Some(UploadProgress::new());
+        let result: Result<(), FileStorageError> =
+            within_upload_progress(&progress, std::future::pending()).await;
+        assert!(matches!(result, Err(FileStorageError::UploadStalled)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progressing_uploads_have_no_total_duration_limit() {
+        let mut progress = UploadProgress::new();
+        for _ in 0..100 {
+            tokio::time::advance(Duration::from_secs(20)).await;
+            assert!(tokio::time::Instant::now() < progress.deadline);
+            progress.record(UPLOAD_PROGRESS_BYTES);
+        }
     }
 }

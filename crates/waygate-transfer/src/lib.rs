@@ -31,11 +31,11 @@ use zeroize::Zeroize;
 pub use dpop::{DpopError, DpopVerifier, UnclaimedDpopProof, VerifiedDpopProof};
 pub use files_store::{
     FileInspectionStatus, FileStorageError, GatewayFileOwner, GatewayFileStorage, NewGatewayFile,
-    StoredGatewayFile, PENDING_HEARTBEAT_INTERVAL,
+    StoredGatewayFile, PENDING_HEARTBEAT_INTERVAL, UPLOAD_PROGRESS_BYTES, UPLOAD_PROGRESS_WINDOW,
 };
 pub use http::{
     credential_exchange_router, file_download_router, file_transfer_router, FileTransferAdmission,
-    CREDENTIAL_EXCHANGE_PATH, FILE_DOWNLOAD_PATH, FILE_UPLOAD_PATH,
+    FileTransferPermit, CREDENTIAL_EXCHANGE_PATH, FILE_DOWNLOAD_PATH, FILE_UPLOAD_PATH,
 };
 pub use store::PgTransferStore;
 

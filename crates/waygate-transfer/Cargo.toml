@@ -33,6 +33,7 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 ed25519-dalek.workspace = true
 waygate-test-support.workspace = true
 tempfile.workspace = true
