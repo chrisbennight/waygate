@@ -13,6 +13,7 @@ settings absent; source readers define the behavior of the deployed version.
 | `GATEWAY_SKILLS_GIT_TOKEN_ENV` | Name of the environment variable containing the repository credential, not the credential itself. |
 | `GATEWAY_DEPLOYMENT_PROFILE` | `dev` (default) or `prod`. `prod` refuses to boot with known-unsafe defaults (auth disabled, `accept_upstream_tokens=true`, no audit DB, no dashboard auth, stdio upstreams). Set explicitly on every prod deploy. |
 | `GATEWAY_PUBLIC_URL` | Public HTTPS origin used by clients, the gateway issuer, and default callback URLs. Derived from the listener unless set explicitly. |
+| `GATEWAY_MCP_ALLOWED_ORIGINS` | Comma-separated HTTP(S) origins permitted on MCP requests. Unset allows the origin of `GATEWAY_PUBLIC_URL`; an explicit list replaces it, and empty permits only requests without `Origin`. Matching uses scheme, host, and effective port. Invalid or unlisted headers return 403 before authentication; Host and bearer checks still apply. See [MCP browser origins](agents/identity.md#mcp-browser-origins). |
 | `GATEWAY_AUTH_MODE` | `enforce` (default) or `disabled` (dev only — release builds reject `disabled` and `prod` profile refuses it on top of that) |
 | `AUTHENTIK_ISSUER` | OIDC issuer URL — required when `auth_mode=enforce` |
 | `GATEWAY_DATABASE_URL` | PostgreSQL connection URL. Required by the production profile, built-in authorization server, and durable file/Code Mode features. Unset uses a warning-producing null audit sink in development. Contains a database credential. |

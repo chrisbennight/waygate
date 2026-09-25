@@ -297,7 +297,24 @@ where
         config,
     );
 
-    let app: Router<()> = Router::new().nest_service("/mcp", mcp_service);
+    let origins =
+        waygate_mcp::origin::OriginPolicy::from_config("https://gateway.example", None).unwrap();
+    let app: Router<()> =
+        Router::new()
+            .nest_service("/mcp", mcp_service)
+            .layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let allowed = origins.allows(request.headers());
+                    async move {
+                        if !allowed {
+                            return axum::response::IntoResponse::into_response(
+                                axum::http::StatusCode::FORBIDDEN,
+                            );
+                        }
+                        next.run(request).await
+                    }
+                },
+            ));
     let app = match principal {
         Some(principal) => app.layer(axum::Extension(principal)),
         None => app,
@@ -777,26 +794,7 @@ async fn streamable_http_rejects_disallowed_host_header() {
 }
 
 #[tokio::test]
-#[ignore = "rmcp 1.6.0 ships the Origin-validation API but it's opt-in: \
-            waygate-server only calls with_allowed_hosts, not \
-            with_allowed_origins, so requests with a disallowed Origin \
-            still return 200. Un-ignore once the production wire-up \
-            (a config knob mirroring MCP_ALLOWED_HOSTS) lands."]
 async fn streamable_http_rejects_disallowed_origin_header() {
-    // Pins rmcp 1.6.0's Origin-header validation surface specifically
-    // (sibling to with_allowed_hosts' Host check); this test exercises
-    // the Origin path end-to-end. With allowed hosts configured to
-    // 127.0.0.1, sending an Origin header pointing at a disallowed
-    // host should be rejected even when the Host header is legitimate.
-    //
-    // Why #[ignore]d even though the pinned rmcp (1.6.0+) ships Origin
-    // validation: the Origin validation in rmcp is opt-in. The production
-    // mount in `crates/waygate-server/src/main.rs` calls
-    // `StreamableHttpServerConfig::with_allowed_hosts(...)` but does
-    // not call `.with_allowed_origins(...)`, so the server still
-    // returns 200 for any Origin. Un-ignoring requires a parallel
-    // production change (config knob + wire-up); after that, drop the
-    // `#[ignore]` in the same commit.
     let server = spawn_gateway_with_allowed_hosts(vec![ALLOWED_HOST.into()]).await;
 
     let url = format!("http://{}/mcp", server.addr);
@@ -805,7 +803,7 @@ async fn streamable_http_rejects_disallowed_origin_header() {
         "id": 1,
         "method": "initialize",
         "params": {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": "2025-11-25",
             "capabilities": {},
             "clientInfo": {"name": "origin-probe", "version": "0.0.0"}
         }
@@ -822,12 +820,85 @@ async fn streamable_http_rejects_disallowed_origin_header() {
         .expect("POST /mcp with spoofed Origin");
 
     let status = resp.status();
-    assert!(
-        status.is_client_error(),
-        "request with disallowed Origin header should be rejected with a 4xx; got {status} {}",
-        resp.text().await.unwrap_or_default(),
-    );
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
 
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn origin_policy_applies_to_legacy_and_stateless_requests() {
+    let server = spawn_gateway_with_allowed_hosts(vec![ALLOWED_HOST.into()]).await;
+    let url = format!("http://{}/mcp", server.addr);
+    for origin in [
+        None,
+        Some("https://gateway.example"),
+        Some("https://gateway.example:8443"),
+        Some("http://gateway.example"),
+        Some("null"),
+        Some("not-an-origin"),
+    ] {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(origin) = origin {
+            headers.insert(
+                "origin",
+                reqwest::header::HeaderValue::from_str(origin).unwrap(),
+            );
+        }
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap();
+        let allowed = origin.is_none() || origin == Some("https://gateway.example");
+        let response = client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .json(
+                &json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params": {
+                    "protocolVersion":"2025-11-25", "capabilities":{},
+                    "clientInfo":{"name":"origin-probe", "version":"test"}
+                }}),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if allowed {
+                reqwest::StatusCode::OK
+            } else {
+                reqwest::StatusCode::FORBIDDEN
+            },
+            "legacy {origin:?}"
+        );
+        let response =
+            stateless_post(&client, &url, 2, "tools/list", json!({}), "origin-probe").await;
+        assert_eq!(
+            response.status(),
+            if allowed {
+                reqwest::StatusCode::OK
+            } else {
+                reqwest::StatusCode::FORBIDDEN
+            },
+            "stateless {origin:?}"
+        );
+    }
+    for method in [
+        reqwest::Method::GET,
+        reqwest::Method::DELETE,
+        reqwest::Method::OPTIONS,
+    ] {
+        let response = reqwest::Client::new()
+            .request(method.clone(), &url)
+            .header("origin", "null")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::FORBIDDEN,
+            "{method}"
+        );
+    }
     server.shutdown().await;
 }
 

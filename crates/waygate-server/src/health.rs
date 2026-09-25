@@ -486,6 +486,11 @@ mod tests {
             accept_upstream_tokens: false,
             authentik_additional_issuers: Vec::new(),
             mcp_allowed_hosts: None,
+            mcp_allowed_origins: waygate_mcp::origin::OriginPolicy::from_config(
+                "https://gateway.example",
+                None,
+            )
+            .unwrap(),
             eager_tools_list: false,
             codemode_result_storage: CodeModeResultStorage::Disabled,
             codemode_capacity: CodeModeCapacityLimits::default(),

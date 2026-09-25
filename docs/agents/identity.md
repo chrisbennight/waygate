@@ -21,7 +21,7 @@ on sessions. Authorization coverage:
 | RFC 8707 resource indicators | `BearerValidator` enforces audience binding via `set_audience()`. | [`crates/waygate-oidc/src/validator.rs`](../../crates/waygate-oidc/src/validator.rs) |
 | DCR (RFC 7591) deferral | Spec demotes DCR to MAY in `2025-11-25` and CIMD is the preferred path; this gateway does not implement DCR. AS metadata omits `registration_endpoint`. | n/a |
 | Step-up via insufficient_scope on 403 (`2025-11-25` MUST shape) | Cedar emits a `StepUpRequired` verdict that serializes as an MCP JSON-RPC error AND, via `crates/waygate-server/src/mcp_http_promote.rs::promote_mcp_errors`, gets promoted to a real HTTP 403 with `WWW-Authenticate: Bearer error="insufficient_scope", scope="...", resource_metadata="..."`. JSON-RPC body still carries the structured data envelope so existing rmcp clients see the same shape; the header is additive for clients that prefer to consume standard HTTP signals. | `crates/waygate-authz/src/gate.rs`, `crates/waygate-server/src/mcp_http_promote.rs` |
-| DNS-rebinding guard on streamable HTTP | rmcp 1.8 `StreamableHttpServerConfig.allowed_hosts` populated from `GATEWAY_MCP_ALLOWED_HOSTS` (or derived from `GATEWAY_PUBLIC_URL`). | `crates/waygate-server/src/boot.rs::resolve_mcp_allowed_hosts` |
+| DNS-rebinding guard on streamable HTTP | `StreamableHttpServerConfig.allowed_hosts` populated from `GATEWAY_MCP_ALLOWED_HOSTS` (or derived from `GATEWAY_PUBLIC_URL`). | `crates/waygate-server/src/boot.rs::resolve_mcp_allowed_hosts` |
 | OAuth 2.1 §10.4 confused-deputy — per-client consent record | `/oauth/callback` UPSERTs an `oauth_consent` row keyed on `(tenant, principal_sub, client_id)` after upstream id-token validation, before the gateway mints its own authorization code. The admin API supplies an audit trail and revocation (`/api/v1/admin/oauth_consent` list/revoke). The interactive consent screen uses the gateway-wide `require_explicit_consent` flag on top of the same rows: when the flag is set and no consent row exists (or one was revoked), the gateway renders a consent page instead of minting the code; the user's "Allow" POST UPSERTs the row before the flow continues. | `migrations/0028_oauth_consent.sql`, `migrations/0030_oauth_consent_screen.sql`, `crates/waygate-as/src/consent.rs`, `crates/waygate-as/src/callback.rs`, `crates/waygate-admin/src/oauth_consent.rs` |
 
 Four authentication paths reach the same `Principal` shape:
@@ -112,6 +112,26 @@ The composition root builds identity clients once through
 
 The request paths never construct their own clients. A client-builder failure
 is a boot error, before the gateway starts accepting traffic.
+
+## MCP browser origins
+
+All HTTP methods under `/mcp` validate a present `Origin` before authentication
+and body processing. The default allows only the origin of `GATEWAY_PUBLIC_URL`.
+Set `GATEWAY_MCP_ALLOWED_ORIGINS` to a comma-separated list to replace that
+default, for example `https://gateway.example,https://client.example:8443`.
+Include the gateway origin explicitly if both it and another browser origin
+must be accepted. Origins contain only an HTTP(S) scheme, host, and optional
+port; paths, credentials, wildcards, and `null` are invalid configuration.
+An explicitly empty value permits only requests without `Origin`.
+
+Origins match the scheme, normalized host, and effective port. An omitted
+HTTPS port means 443, not every port on that host. Malformed, duplicate, opaque,
+and unlisted origins receive HTTP 403, as required by the
+[MCP Streamable HTTP specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http).
+Clients that omit `Origin`, such as command-line MCP clients, remain supported.
+Passing this check does not grant authentication or authorization; the Host
+guard and existing bearer and policy checks still apply. Other HTTP surfaces
+retain their own policies. This allowlist does not add CORS response headers.
 
 ## Distinguishing auth methods at policy time
 
