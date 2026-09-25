@@ -147,6 +147,24 @@ identically for all three methods.
 
 ## API keys
 
+### Authentication capacity
+
+Each API-key validator admits at most four cold authentication attempts at a
+time, including their database lookup, queued or running verification, and
+profile resolution. It
+does not queue additional attempts when full. Excess demand follows the existing
+HTTP 503 `auth_infrastructure_unavailable` response; clients should retry with
+backoff. Already cached, unexpired keys continue through the cache path without
+consuming verification capacity. This is a fixed default with no environment
+setting.
+
+Argon2 verification and unknown-key dummy hashing run off the async request
+workers, with the existing hashing strength and unknown-prefix timing protection.
+Cancelling a request releases its place when its database lookup is cancelled,
+or when any already submitted hashing actually finishes. Cancellation cannot
+admit replacement work while that hashing still consumes resources. Other
+authentication methods and unrelated async requests can continue making progress.
+
 ### When to use them
 
 - **Codex** and other headless MCP clients that need a stable bearer in
@@ -224,9 +242,9 @@ long-lived.
 - **Revoke** from the dashboard sets `revoked_at = now()`. In-flight
   callers can still authenticate for up to `cache_ttl` after the
   revocation; new validations fail immediately.
-- **Expiry** is wall-clock and exposed to the validator's
-  `lookup_by_prefix` query as `expires_at > now()`. The same cache TTL
-  applies: an expired key may serve up to `cache_ttl` past its expiry.
+- **Expiry** is checked against the wall clock on cache hits, in the database
+  lookup, and after asynchronous verification and profile resolution. The cache
+  lifetime does not extend a key's recorded expiry.
 - **Sweep** lives in the periodic store loop (`ApiKeyStore::sweep_expired`).
   Only rows whose `revoked_at` OR `expires_at` is older than the
   configured retention (default 90 days) are deleted. NULL `expires_at`
@@ -237,16 +255,18 @@ long-lived.
 1. Reject anything that doesn't start with `Bearer mcpgw_` with
    `ValidationError::Malformed` so the middleware falls through to the
    next validator (which is the JWT validator).
-2. Hit the moka cache keyed on the full token. Hit → return cached
-   `Principal`.
-3. Miss → `SELECT … FROM api_keys WHERE key_prefix = $1 AND revoked_at IS NULL
-   AND (expires_at IS NULL OR expires_at > now())`.
-4. For each row (typically one), argon2id-verify the secret remainder.
-5. On a match: build the `Principal`, populate the cache, and
-   `tokio::spawn` a fire-and-forget `touch_usage` update (last_used_at +
-   hourly bucket).
-6. On no match: still argon2id-verify against a fixed dummy hash so
-   "unknown prefix" timing matches "wrong secret" timing.
+2. Look up the full token in the cache. A hit returns its `Principal` only if
+   the key has not expired, and accrues usage for the shared background flush.
+3. On a miss, validate the token's shape and obtain a verification slot before
+   looking up active, unexpired rows by prefix. Exhausted capacity returns a
+   retryable infrastructure response without queuing another lookup or hash.
+4. Run Argon2id verification in a blocking worker that owns the slot until it
+   exits, even if its caller is cancelled. An unknown prefix verifies against
+   the dummy hash; a known prefix verifies its stored hashes.
+5. On a match, resolve any profile restrictions and build the `Principal`.
+   Recheck expiry before allowing the result to authenticate or enter the cache.
+6. Cache the valid result and accrue usage for the same background flush. A
+   mismatch or expired result does not authenticate.
 
 The validator never logs the secret; the prefix is logged at
 `tracing::info` level on first use per key per hour (sampled by the
