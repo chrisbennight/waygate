@@ -1440,6 +1440,44 @@ async fn cancelled_uploads_are_not_transferable_and_failed_cleanup_is_retried_tr
     storage.sweep_expired(100).await.unwrap();
     assert!(!root.path().join(format!(".{id}.part")).exists());
 
+    // An ordinary body failure also returns before blocked cleanup, so the
+    // caller can release admission without waiting for this row lock.
+    let failed_body_id = Uuid::new_v4();
+    let (stream, sender, mut progress) = controlled_upload_stream();
+    let failed_body = {
+        let storage = storage.clone();
+        let file = new_file(failed_body_id);
+        let permit = admission.try_enter_for(&owner).unwrap();
+        tokio::spawn(async move {
+            let _permit = permit;
+            storage.stage_upload(failed_body_id, file, stream).await
+        })
+    };
+    wait_upload_reads(&mut progress, 0).await;
+    let mut locked = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM gateway_files WHERE id = $1 FOR UPDATE")
+        .bind(failed_body_id)
+        .fetch_one(&mut *locked)
+        .await
+        .unwrap();
+    sender
+        .send(Err(std::io::Error::other("synthetic body failure")))
+        .await
+        .unwrap();
+    assert!(matches!(
+        failed_body.await.unwrap(),
+        Err(waygate_transfer::FileStorageError::Io(_))
+    ));
+    assert!(admission.try_enter_for(&owner).is_ok());
+    assert!(storage
+        .find_ready(&owner, failed_body_id)
+        .await
+        .unwrap()
+        .is_none());
+    locked.rollback().await.unwrap();
+    storage.discard_batch(failed_body_id).await.unwrap();
+    assert!(!root.path().join(format!(".{failed_body_id}.part")).exists());
+
     let failed_id = Uuid::new_v4();
     let blocked_path = root.path().join(format!(".{failed_id}.part"));
     tokio::fs::create_dir(&blocked_path).await.unwrap();
@@ -1448,6 +1486,9 @@ async fn cancelled_uploads_are_not_transferable_and_failed_cleanup_is_retried_tr
         .stage_upload(failed_id, new_file(failed_id), stream)
         .await
         .is_err());
+    // Upload callers settle failure after releasing admission. An unavailable
+    // filesystem retains deletion intent for the existing sweeper to retry.
+    storage.discard_batch(failed_id).await.unwrap();
     let state: String = sqlx::query_scalar("SELECT state FROM gateway_files WHERE id = $1")
         .bind(failed_id)
         .fetch_one(&pool)

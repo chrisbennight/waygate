@@ -174,8 +174,14 @@ impl GatewayFileStorage {
         let body = response
             .bytes_stream()
             .map(|chunk| chunk.map_err(|error| error.without_url()));
-        self.stage_stream(Uuid::new_v4(), new_file, body, pending_retention, false)
-            .await
+        let id = Uuid::new_v4();
+        let result = self
+            .stage_stream(id, new_file, body, pending_retention, false)
+            .await;
+        if result.is_err() {
+            self.cleanup_failed_file(id).await;
+        }
+        result
     }
 
     /// Import an already recovered body through the same private staging lifecycle.
@@ -186,14 +192,20 @@ impl GatewayFileStorage {
     ) -> Result<StoredGatewayFile, FileStorageError> {
         let retention = new_file.retention;
         let body = futures::stream::iter([Ok::<_, FileStorageError>(bytes::Bytes::from(bytes))]);
-        self.stage_stream(Uuid::new_v4(), new_file, body, retention, false)
-            .await
+        let id = Uuid::new_v4();
+        let result = self
+            .stage_stream(id, new_file, body, retention, false)
+            .await;
+        if result.is_err() {
+            self.cleanup_failed_file(id).await;
+        }
+        result
     }
 
     /// Stage a caller upload under the gateway file identifier minted before
     /// the body arrived. The row remains pending until the transfer authority
     /// confirms completion and the HTTP handler publishes its one-file batch.
-    /// A stalled upload returns before cleanup, allowing its caller to release
+    /// A failed upload returns before cleanup, allowing its caller to release
     /// transfer admission first. Pending content remains unavailable and can
     /// be reclaimed by explicit cleanup or the inactivity sweeper.
     pub async fn stage_upload<S, E>(
@@ -268,10 +280,7 @@ impl GatewayFileStorage {
         let output = options.open(&pending_path).await;
         let mut output = match output {
             Ok(output) => output,
-            Err(error) => {
-                self.cleanup_failed_file(id).await;
-                return Err(error.into());
-            }
+            Err(error) => return Err(error.into()),
         };
         let mut size = 0_u64;
         let mut digest = Sha256::new();
@@ -330,11 +339,6 @@ impl GatewayFileStorage {
         .await;
         if let Err(error) = write_result {
             drop(output);
-            // A blocked cleanup must not keep the caller's transfer permit
-            // after the progress deadline. Pending uploads cannot be served.
-            if !matches!(error, FileStorageError::UploadStalled) {
-                self.cleanup_failed_file(id).await;
-            }
             return Err(error);
         }
         if new_file
@@ -342,7 +346,6 @@ impl GatewayFileStorage {
             .is_some_and(|expected| expected != size)
         {
             drop(output);
-            self.cleanup_failed_file(id).await;
             return Err(FileStorageError::SizeMismatch);
         }
         let sha256 = digest.finalize().to_vec();
@@ -352,30 +355,23 @@ impl GatewayFileStorage {
             .is_some_and(|expected| expected != sha256.as_slice())
         {
             drop(output);
-            self.cleanup_failed_file(id).await;
             return Err(FileStorageError::DigestMismatch);
         }
         if let Err(error) = output.sync_all().await {
             drop(output);
-            self.cleanup_failed_file(id).await;
             return Err(error.into());
         }
         drop(output);
         if let Err(error) = tokio::fs::rename(&pending_path, &final_path).await {
-            self.cleanup_failed_file(id).await;
             return Err(error.into());
         }
         if let Err(error) = sync_directory(&self.root).await {
-            self.cleanup_failed_file(id).await;
             return Err(error.into());
         }
 
         let size_i64 = match i64::try_from(size) {
             Ok(size) => size,
-            Err(_) => {
-                self.cleanup_failed_file(id).await;
-                return Err(FileStorageError::TooLarge);
-            }
+            Err(_) => return Err(FileStorageError::TooLarge),
         };
         let expires_at = OffsetDateTime::now_utc() + pending_retention;
         let update = sqlx::query(
@@ -390,13 +386,9 @@ impl GatewayFileStorage {
         .await;
         let updated = match update {
             Ok(updated) => updated,
-            Err(error) => {
-                self.cleanup_failed_file(id).await;
-                return Err(FileStorageError::Database(error));
-            }
+            Err(error) => return Err(FileStorageError::Database(error)),
         };
         if updated.rows_affected() != 1 {
-            self.cleanup_failed_file(id).await;
             return Err(FileStorageError::FileUnavailable);
         }
 

@@ -32,7 +32,7 @@ pub const FILE_DOWNLOAD_PATH: &str = "/file-transfers/content";
 pub const FILE_UPLOAD_PATH: &str = "/file-transfers/content";
 const EXCHANGE_BODY_LIMIT: usize = 1_024;
 const ACTIVE_TRANSFER_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-const STALLED_UPLOAD_FINALIZATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const FAILED_UPLOAD_FINALIZATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const CLIENT_UPLOAD_SOURCE_TOOL: &str = "prepare_upload";
 
 #[derive(Clone)]
@@ -302,22 +302,21 @@ async fn upload(
             tracing::warn!(%file_id, error = %error, "file upload could not be staged");
             heartbeat.abort();
             drop(_permit);
+            // Admission is already free. Bound settlement too, so blocked
+            // storage cannot hold the HTTP response indefinitely. Pending
+            // requests and files retain their existing inactivity recovery.
+            if tokio::time::timeout(FAILED_UPLOAD_FINALIZATION_TIMEOUT, async {
+                fail_authorized_request(&state.authority, &authorized).await;
+                state.storage.cleanup_failed_file(file_id).await;
+            })
+            .await
+            .is_err()
+            {
+                tracing::warn!(%file_id, grant_id = %authorized.grant.id, "failed upload finalization timed out; pending state will be swept");
+            }
             if matches!(error, crate::FileStorageError::UploadStalled) {
-                // Admission is already free. Bound settlement too, so blocked
-                // storage cannot hold the HTTP response indefinitely. Pending
-                // requests and files retain their existing inactivity recovery.
-                if tokio::time::timeout(STALLED_UPLOAD_FINALIZATION_TIMEOUT, async {
-                    fail_authorized_request(&state.authority, &authorized).await;
-                    state.storage.cleanup_failed_file(file_id).await;
-                })
-                .await
-                .is_err()
-                {
-                    tracing::warn!(%file_id, grant_id = %authorized.grant.id, "stalled upload finalization timed out; pending state will be swept");
-                }
                 return error_response(StatusCode::REQUEST_TIMEOUT, "upload_progress_timeout");
             }
-            fail_authorized_request(&state.authority, &authorized).await;
             return error_response(StatusCode::BAD_REQUEST, "invalid_upload");
         }
     };

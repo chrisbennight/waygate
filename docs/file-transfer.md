@@ -328,9 +328,11 @@ progress window. Empty chunks and smaller accumulated amounts do not extend
 the window. Each 64 KiB of progress starts a new window; a large burst does not
 bank time for a later stall. An upload can run for as long as it keeps making
 progress within its authorized byte limit. A stalled upload releases its
-transfer slot when the progress deadline expires. The gateway then allows up
-to five seconds to record failure and remove the partial file before returning
-HTTP 408 with `upload_progress_timeout`. If finalization is blocked or fails,
+transfer slot when the progress deadline expires. Other staging failures also
+release their slot before cleanup. The gateway then allows up to five seconds
+to record failure and remove the partial file before returning HTTP 408 with
+`upload_progress_timeout` for a stall, or HTTP 400 with `invalid_upload` for
+other staging failures. If finalization is blocked or fails,
 incomplete content remains unavailable: deletion state is retained when it was
 recorded, while abandoned pending files and requests follow their existing
 five-minute inactivity recovery. The sweeper retries cleanup when storage is
