@@ -4,6 +4,17 @@
 use super::llm::build_usage_row;
 use super::*;
 
+/// Keep admission through stream finalization or cancellation, including replay.
+pub(super) fn hold_response_capacity(
+    stream: InvocationStream,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> InvocationStream {
+    Box::pin(futures::stream::unfold(
+        (stream, permit),
+        |(mut stream, permit)| async move { stream.next().await.map(|chunk| (chunk, (stream, permit))) },
+    ))
+}
+
 /// Re-emit a stored unary OpenAI `chat.completion` `body` as a synthetic SSE
 /// chunk stream, so a streaming cache hit looks like a fresh stream to the
 /// client. No provider is contacted and the full body is already known, so this
@@ -171,6 +182,26 @@ pub(super) struct StreamCacheAgg {
     choices: std::collections::BTreeMap<u64, ChoiceAcc>,
     usage: Option<serde_json::Value>,
     unsupported: bool,
+    observed_bytes: usize,
+}
+
+/// Budget for cumulative serialized chunks considered by optional stream caching.
+const MAX_STREAM_CACHE_BYTES: usize = 1024 * 1024;
+
+struct CacheByteBudget(usize);
+
+impl std::io::Write for CacheByteBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.0 {
+            return Err(std::io::Error::other("stream cache byte limit exceeded"));
+        }
+        self.0 -= bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl StreamCacheAgg {
@@ -178,6 +209,17 @@ impl StreamCacheAgg {
     /// into the accumulator. Tolerant of non-object events (e.g. the `[DONE]`
     /// sentinel) and of chunks without choices (e.g. the usage-only chunk).
     fn observe(&mut self, event: &serde_json::Value) {
+        if self.unsupported {
+            return;
+        }
+        // Count without allocating another copy of the event. Charge complete
+        // chunks so metadata, usage, choice count, and text all consume budget.
+        let mut budget = CacheByteBudget(MAX_STREAM_CACHE_BYTES - self.observed_bytes);
+        if serde_json::to_writer(&mut budget, event).is_err() {
+            self.discard();
+            return;
+        }
+        self.observed_bytes = MAX_STREAM_CACHE_BYTES - budget.0;
         let Some(obj) = event.as_object() else {
             return;
         };
@@ -230,6 +272,16 @@ impl StreamCacheAgg {
                 }
             }
         }
+        if self.unsupported {
+            self.discard();
+        }
+    }
+
+    fn discard(&mut self) {
+        *self = Self {
+            unsupported: true,
+            ..Self::default()
+        };
     }
 
     /// Rebuild the stored `chat.completion` body, or `None` when the stream
@@ -753,5 +805,68 @@ mod replay_tests {
                 == Some("tool_calls")),
             "finish_reason tool_calls must be present"
         );
+    }
+}
+
+#[cfg(test)]
+mod resource_limit_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    #[test]
+    fn stream_cache_discards_all_retained_content_at_limit_and_stays_disabled() {
+        let mut cache = StreamCacheAgg::default();
+        let small = json!({"id":"fixture","choices":[{"index":0,"delta":{"content":"hello"}}]});
+        cache.observe(&small);
+        assert_eq!(
+            cache.build_body().unwrap()["choices"][0]["message"]["content"],
+            "hello"
+        );
+        // Individually permitted chunks can collectively exceed the cache budget.
+        let chunk = json!({"choices":[{"index":0,"delta":{"content":"x".repeat(64 * 1024)}}]});
+        for _ in 0..17 {
+            cache.observe(&chunk);
+        }
+        assert!(cache.build_body().is_none());
+        assert!(cache.choices.is_empty());
+        assert!(cache.id.is_none() && cache.model.is_none() && cache.usage.is_none());
+        cache.observe(&small);
+        assert!(cache.choices.is_empty());
+    }
+
+    #[test]
+    fn stream_cache_charges_metadata_and_stops_on_unsupported_content() {
+        for event in [
+            json!({"id":"x".repeat(MAX_STREAM_CACHE_BYTES)}),
+            json!({"usage":{"large":"x".repeat(MAX_STREAM_CACHE_BYTES)}}),
+            json!({"choices":[{"index":0,"delta":{"tool_calls":[]}}]}),
+        ] {
+            let mut cache = StreamCacheAgg::default();
+            cache.observe(&json!({"choices":[{"index":0,"delta":{"content":"before"}}]}));
+            cache.observe(&event);
+            assert!(cache.build_body().is_none());
+            assert!(cache.choices.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn response_capacity_releases_on_completion_and_cancellation() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let mut stream = hold_response_capacity(
+            Box::pin(futures::stream::empty()),
+            capacity.clone().try_acquire_owned().unwrap(),
+        );
+        assert!(capacity.clone().try_acquire_owned().is_err());
+        assert!(stream.next().await.is_none());
+        assert_eq!(capacity.available_permits(), 1);
+        let pending = hold_response_capacity(
+            Box::pin(futures::stream::pending()),
+            capacity.clone().try_acquire_owned().unwrap(),
+        );
+        assert!(capacity.clone().try_acquire_owned().is_err());
+        drop(pending);
+        assert_eq!(capacity.available_permits(), 1);
     }
 }

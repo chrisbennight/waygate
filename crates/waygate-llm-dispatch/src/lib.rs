@@ -188,7 +188,11 @@ pub struct LlmDispatcher {
     /// `/responses` and `/models` present one client identity. `None` (or an
     /// unwired handle) falls back to the providers crate's compiled default.
     codex_ua_version: Option<SharedCodexUaVersion>,
+    response_capacity: Arc<tokio::sync::Semaphore>,
 }
+
+/// Shared gateway capacity for chat, Responses, and embedding processing.
+pub const MAX_CONCURRENT_RESPONSES: usize = 8;
 
 impl LlmDispatcher {
     pub fn new(providers: ProviderClient, credentials: Arc<LlmCredentialStore>) -> Self {
@@ -197,7 +201,15 @@ impl LlmDispatcher {
             credentials,
             cooldowns: Arc::new(Mutex::new(HashMap::new())),
             codex_ua_version: None,
+            response_capacity: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_RESPONSES)),
         }
+    }
+
+    /// Admit response processing without a wait queue. The invocation keeps
+    /// this permit through unary finalization or stream completion/cancellation.
+    /// Clones share admission, including services created for new MCP sessions.
+    pub fn try_admit_response(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.response_capacity.clone().try_acquire_owned().ok()
     }
 
     /// Wire the shared Codex CLI version handle (see the field docs). Builder
@@ -581,17 +593,20 @@ impl LlmDispatcher {
         );
         let response = self
             .providers
-            .send(ProviderRequest {
-                base_url: route.base_url.clone(),
-                path: route.path.clone(),
-                bearer,
-                auth,
-                body,
-                // Embeddings are unary only — no SSE.
-                stream: false,
-                account_id: None,
-                codex_ua_version: None,
-            })
+            .send_with_limit(
+                ProviderRequest {
+                    base_url: route.base_url.clone(),
+                    path: route.path.clone(),
+                    bearer,
+                    auth,
+                    body,
+                    // Embeddings are unary only — no SSE.
+                    stream: false,
+                    account_id: None,
+                    codex_ua_version: None,
+                },
+                waygate_llm_providers::MAX_EMBEDDING_RESPONSE_BYTES,
+            )
             .await?;
         // We sent `stream: false`, so `ProviderClient::send` always returns
         // `Unary` (it JSON-decodes the body); it only yields `Stream` for
@@ -786,6 +801,18 @@ mod cooldown_tests {
                 String,
             )>())),
         )
+    }
+
+    #[test]
+    fn response_admission_is_shared_and_recovers_after_release() {
+        let dispatcher = dispatcher();
+        let clone = dispatcher.clone();
+        let permits: Vec<_> = (0..MAX_CONCURRENT_RESPONSES)
+            .map(|_| dispatcher.try_admit_response().unwrap())
+            .collect();
+        assert!(clone.try_admit_response().is_none());
+        drop(permits);
+        assert!(clone.try_admit_response().is_some());
     }
 
     fn route(label: &str) -> ResolvedRoute {

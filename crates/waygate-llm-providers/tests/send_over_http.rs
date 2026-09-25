@@ -487,3 +487,110 @@ async fn openai_chatgpt_auth_omits_account_id_header_when_absent() {
         "a supplied version drives the codex User-Agent verbatim"
     );
 }
+
+#[tokio::test]
+async fn unary_response_limits_cover_fixed_and_chunked_bodies_and_recover() {
+    let app = Router::new().route(
+        "/bounded",
+        post(|headers: HeaderMap| async move {
+            let body = "{\"result\":\"ok\"}";
+            let mut response = Response::builder().header("content-type", "application/json");
+            if headers.contains_key("x-fixed-length") {
+                response = response.header("content-length", body.len());
+            }
+            response
+                .body(Body::from_stream(futures::stream::iter([
+                    Ok::<_, std::io::Error>(&body[..5]),
+                    Ok(&body[5..]),
+                ])))
+                .unwrap()
+        }),
+    );
+    let addr = spawn(app).await;
+    for fixed in [false, true] {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if fixed {
+            headers.insert(
+                "x-fixed-length",
+                reqwest::header::HeaderValue::from_static("yes"),
+            );
+        }
+        let provider = ProviderClient::new(
+            reqwest::Client::builder()
+                .default_headers(headers)
+                .build()
+                .unwrap(),
+        );
+        for limit in [14, 15, 16] {
+            let result = provider
+                .send_with_limit(
+                    ProviderRequest {
+                        base_url: format!("http://{addr}"),
+                        path: "bounded".into(),
+                        bearer: String::new(),
+                        auth: ProviderAuth::None,
+                        body: json!({}),
+                        stream: false,
+                        account_id: None,
+                        codex_ua_version: None,
+                    },
+                    limit,
+                )
+                .await;
+            if limit < "{\"result\":\"ok\"}".len() {
+                assert!(
+                    matches!(result, Err(ProviderError::Protocol(message)) if message.contains("byte limit"))
+                );
+            } else {
+                assert!(
+                    matches!(result, Ok(ProviderResponse::Unary(body)) if body["result"] == "ok")
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn default_chat_limit_refuses_large_body_that_embedding_limit_accepts() {
+    let content = "x".repeat(waygate_llm_providers::MAX_CHAT_RESPONSE_BYTES);
+    let app = Router::new().route(
+        "/large",
+        post(move || {
+            let content = content.clone();
+            async move {
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from_stream(futures::stream::iter([
+                        Ok::<_, std::io::Error>("\"".to_owned()),
+                        Ok(content),
+                        Ok("\"".to_owned()),
+                    ])))
+                    .unwrap()
+            }
+        }),
+    );
+    let addr = spawn(app).await;
+    let request = || ProviderRequest {
+        base_url: format!("http://{addr}"),
+        path: "large".into(),
+        bearer: String::new(),
+        auth: ProviderAuth::None,
+        body: json!({}),
+        stream: false,
+        account_id: None,
+        codex_ua_version: None,
+    };
+    let provider = ProviderClient::new(reqwest::Client::new());
+    assert!(
+        matches!(provider.send(request()).await, Err(ProviderError::Protocol(message)) if message.contains("byte limit"))
+    );
+    assert!(matches!(
+        provider
+            .send_with_limit(
+                request(),
+                waygate_llm_providers::MAX_EMBEDDING_RESPONSE_BYTES
+            )
+            .await,
+        Ok(ProviderResponse::Unary(_))
+    ));
+}
