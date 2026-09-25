@@ -235,6 +235,7 @@ impl GatewayFileStorage {
         E: Into<FileStorageError>,
     {
         let storage_key = id.to_string();
+        let mut progress = check_upload_progress.then(UploadProgress::new);
         let pending_path = self.root.join(format!(".{storage_key}.part"));
         let final_path = self.root.join(&storage_key);
         // A pending row must outlive the gap to its first batch renewal even
@@ -246,8 +247,9 @@ impl GatewayFileStorage {
             time::Duration::seconds((2 * PENDING_HEARTBEAT_INTERVAL).as_secs() as i64);
         let pending_retention = pending_retention.max(pending_floor);
         let initial_expires_at = OffsetDateTime::now_utc() + pending_retention;
-        sqlx::query(
-            r#"
+        within_upload_progress(&progress, async {
+            sqlx::query(
+                r#"
             INSERT INTO gateway_files (
                 id, batch_id, tenant_id, principal_sub, principal_issuer, invocation_id,
                 upstream_server, upstream_tool, upstream_uri, storage_key, display_name,
@@ -255,38 +257,42 @@ impl GatewayFileStorage {
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             "#,
-        )
-        .bind(id)
-        .bind(new_file.batch_id)
-        .bind(new_file.owner.tenant_id.as_str())
-        .bind(&new_file.owner.principal_sub)
-        .bind(&new_file.owner.principal_issuer)
-        .bind(&new_file.invocation_id)
-        .bind(&new_file.upstream_server)
-        .bind(&new_file.upstream_tool)
-        .bind(&new_file.upstream_uri)
-        .bind(&storage_key)
-        .bind(&new_file.display_name)
-        .bind(&new_file.media_type)
-        .bind(new_file.inspection_status.as_str())
-        .bind(initial_expires_at)
-        .bind(new_file.retention.whole_seconds().max(1))
-        .execute(&self.pool)
+            )
+            .bind(id)
+            .bind(new_file.batch_id)
+            .bind(new_file.owner.tenant_id.as_str())
+            .bind(&new_file.owner.principal_sub)
+            .bind(&new_file.owner.principal_issuer)
+            .bind(&new_file.invocation_id)
+            .bind(&new_file.upstream_server)
+            .bind(&new_file.upstream_tool)
+            .bind(&new_file.upstream_uri)
+            .bind(&storage_key)
+            .bind(&new_file.display_name)
+            .bind(&new_file.media_type)
+            .bind(new_file.inspection_status.as_str())
+            .bind(initial_expires_at)
+            .bind(new_file.retention.whole_seconds().max(1))
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
         .await?;
         let mut options = tokio::fs::OpenOptions::new();
         options.create_new(true).write(true);
         #[cfg(unix)]
         options.mode(0o600);
-        let output = options.open(&pending_path).await;
-        let mut output = match output {
-            Ok(output) => output,
-            Err(error) => return Err(error.into()),
-        };
+        let mut output = within_upload_progress(&progress, async {
+            options
+                .open(&pending_path)
+                .await
+                .map_err(FileStorageError::Io)
+        })
+        .await?;
         let mut size = 0_u64;
         let mut digest = Sha256::new();
         let mut heartbeat = tokio::time::interval(PENDING_HEARTBEAT_INTERVAL);
         heartbeat.tick().await;
-        let mut progress = check_upload_progress.then(UploadProgress::new);
         let write_result: Result<(), FileStorageError> = async {
             loop {
                 let deadline = progress.as_ref().map(|progress| progress.deadline);
@@ -357,37 +363,41 @@ impl GatewayFileStorage {
             drop(output);
             return Err(FileStorageError::DigestMismatch);
         }
-        if let Err(error) = output.sync_all().await {
+        if let Err(error) = within_upload_progress(&progress, async {
+            output.sync_all().await.map_err(FileStorageError::Io)
+        })
+        .await
+        {
             drop(output);
-            return Err(error.into());
+            return Err(error);
         }
         drop(output);
-        if let Err(error) = tokio::fs::rename(&pending_path, &final_path).await {
-            return Err(error.into());
-        }
-        if let Err(error) = sync_directory(&self.root).await {
-            return Err(error.into());
-        }
+        within_upload_progress(&progress, async {
+            tokio::fs::rename(&pending_path, &final_path).await?;
+            sync_directory(&self.root).await?;
+            Ok(())
+        })
+        .await?;
 
         let size_i64 = match i64::try_from(size) {
             Ok(size) => size,
             Err(_) => return Err(FileStorageError::TooLarge),
         };
         let expires_at = OffsetDateTime::now_utc() + pending_retention;
-        let update = sqlx::query(
-            "UPDATE gateway_files SET size_bytes = $2, sha256_digest = $3, expires_at = $4 \
+        let updated = within_upload_progress(&progress, async {
+            sqlx::query(
+                "UPDATE gateway_files SET size_bytes = $2, sha256_digest = $3, expires_at = $4 \
              WHERE id = $1 AND state = 'pending'",
-        )
-        .bind(id)
-        .bind(size_i64)
-        .bind(&sha256)
-        .bind(expires_at)
-        .execute(&self.pool)
-        .await;
-        let updated = match update {
-            Ok(updated) => updated,
-            Err(error) => return Err(FileStorageError::Database(error)),
-        };
+            )
+            .bind(id)
+            .bind(size_i64)
+            .bind(&sha256)
+            .bind(expires_at)
+            .execute(&self.pool)
+            .await
+            .map_err(FileStorageError::Database)
+        })
+        .await?;
         if updated.rows_affected() != 1 {
             return Err(FileStorageError::FileUnavailable);
         }

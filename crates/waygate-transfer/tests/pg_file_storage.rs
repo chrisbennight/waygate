@@ -1028,6 +1028,9 @@ impl UploadTestDatabase {
         parent.close().await;
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)
+            // Let the controlled upload deadline, not pool admission, decide
+            // the deliberately exhausted-pool regression.
+            .acquire_timeout(waygate_transfer::UPLOAD_PROGRESS_WINDOW * 2)
             .connect_with(options)
             .await
             .expect("connect isolated upload test database");
@@ -1312,6 +1315,92 @@ async fn stalled_uploads_release_capacity_while_other_owners_and_progressing_upl
             .unwrap(),
         0
     );
+
+    // Storage setup uses the same deadline even before the body is polled.
+    let connection_one = pool.acquire().await.unwrap();
+    let connection_two = pool.acquire().await.unwrap();
+    let setup_id = Uuid::new_v4();
+    let setup_permit = admission.try_enter_for(&owner).unwrap();
+    let setup_storage = storage.clone();
+    let setup_file = new_file(setup_id, owner.clone());
+    let mut setup = Box::pin(async move {
+        let _permit = setup_permit;
+        setup_storage
+            .stage_upload(
+                setup_id,
+                setup_file,
+                futures::stream::empty::<Result<Bytes, std::io::Error>>(),
+            )
+            .await
+    });
+    assert!(futures::poll!(setup.as_mut()).is_pending());
+    advance_upload_clock(31).await;
+    assert!(matches!(
+        setup.await,
+        Err(waygate_transfer::FileStorageError::UploadStalled)
+    ));
+    assert!(admission.try_enter_for(&owner).is_ok());
+    drop(connection_one);
+    drop(connection_two);
+
+    // Completing the body does not let a locked final metadata write retain
+    // admission. Observe the database lock wait before advancing the clock.
+    let final_id = Uuid::new_v4();
+    let (stream, sender, mut progress) = controlled_upload_stream();
+    let finalizing = {
+        let storage = storage.clone();
+        let file = new_file(final_id, owner.clone());
+        let permit = admission.try_enter_for(&owner).unwrap();
+        tokio::spawn(async move {
+            let _permit = permit;
+            storage.stage_upload(final_id, file, stream).await
+        })
+    };
+    wait_upload_reads(&mut progress, 0).await;
+    let mut locked = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM gateway_files WHERE id = $1 FOR UPDATE")
+        .bind(final_id)
+        .fetch_one(&mut *locked)
+        .await
+        .unwrap();
+    sender
+        .send(Ok(Bytes::from_static(b"complete body")))
+        .await
+        .unwrap();
+    wait_upload_reads(&mut progress, 1).await;
+    drop(sender);
+    loop {
+        sqlx::query("SELECT pg_stat_clear_snapshot()")
+            .execute(&mut *locked)
+            .await
+            .unwrap();
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+             WHERE datname = current_database() AND wait_event_type = 'Lock' \
+             AND query LIKE 'UPDATE gateway_files SET size_bytes%')",
+        )
+        .fetch_one(&mut *locked)
+        .await
+        .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    advance_upload_clock(31).await;
+    assert!(matches!(
+        finalizing.await.unwrap(),
+        Err(waygate_transfer::FileStorageError::UploadStalled)
+    ));
+    assert!(admission.try_enter_for(&owner).is_ok());
+    locked.rollback().await.unwrap();
+    assert!(storage
+        .find_ready(&owner, final_id)
+        .await
+        .unwrap()
+        .is_none());
+    storage.discard_batch(final_id).await.unwrap();
+    assert!(!root.path().join(final_id.to_string()).exists());
 
     // The same storage accepts a transfer lasting longer than one progress window.
     let id = Uuid::new_v4();

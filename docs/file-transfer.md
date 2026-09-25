@@ -326,8 +326,11 @@ mismatched, or uncommitted upload never becomes a ready file.
 A client upload must deliver at least 64 KiB or finish within each 30-second
 progress window. Empty chunks and smaller accumulated amounts do not extend
 the window. Each 64 KiB of progress starts a new window; a large burst does not
-bank time for a later stall. An upload can run for as long as it keeps making
-progress within its authorized byte limit. A stalled upload releases its
+bank time for a later stall. The window begins before storage setup and also
+bounds final storage writes after the body ends. An upload can run for as long
+as it keeps making progress within its authorized byte limit. Once byte staging
+finishes, admission is released before durable authority publication, which
+retains its existing completion and uncertainty rules. A stalled upload releases its
 transfer slot when the progress deadline expires. Other staging failures also
 release their slot before cleanup. The gateway then allows up to five seconds
 to record failure and remove the partial file before returning HTTP 408 with

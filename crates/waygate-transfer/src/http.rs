@@ -321,6 +321,9 @@ async fn upload(
         }
     };
     heartbeat.abort();
+    // Byte staging is finished; durable publication keeps its own completion
+    // and uncertainty rules without occupying a streaming transfer slot.
+    drop(_permit);
     if let Err(error) = state
         .authority
         .complete_upload(
