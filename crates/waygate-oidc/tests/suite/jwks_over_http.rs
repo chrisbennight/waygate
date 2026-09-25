@@ -15,6 +15,7 @@ use axum::routing::get;
 use axum::Router;
 use serde_json::json;
 use tokio::net::TcpListener;
+use tokio::sync::{Notify, Semaphore};
 
 use waygate_oidc::{JwksError, JwksProvider};
 
@@ -41,6 +42,9 @@ struct ServerCfg {
     oversize_discovery: Arc<std::sync::atomic::AtomicBool>,
     /// Serve a JWKS past the fetch cap, chunked so no length is advertised.
     oversize_jwks: Arc<std::sync::atomic::AtomicBool>,
+    pause_discovery: Arc<std::sync::atomic::AtomicBool>,
+    discovery_entered: Arc<Notify>,
+    release_discovery: Arc<Semaphore>,
 }
 
 impl ServerCfg {
@@ -52,6 +56,9 @@ impl ServerCfg {
             jwks_body: Arc::new(std::sync::RwLock::new(JWKS_BODY.to_owned())),
             oversize_discovery: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             oversize_jwks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_discovery: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            discovery_entered: Arc::new(Notify::new()),
+            release_discovery: Arc::new(Semaphore::new(0)),
             base_url: Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -77,6 +84,10 @@ fn chunked_body_of(len: usize) -> Response {
 
 async fn discovery_handler(State(cfg): State<ServerCfg>) -> Response {
     cfg.counters.discovery.fetch_add(1, Ordering::SeqCst);
+    if cfg.pause_discovery.load(Ordering::SeqCst) {
+        cfg.discovery_entered.notify_one();
+        cfg.release_discovery.acquire().await.unwrap().forget();
+    }
     let status = cfg.discovery_status.load(Ordering::SeqCst);
     if status >= 400 {
         return Response::builder()
@@ -155,10 +166,182 @@ async fn cached_kid_does_not_refetch() {
             .expect("kid resolves");
     }
 
-    // prime() refreshes once. Three subsequent lookups for a cached kid must
-    // never go back to the wire.
+    // A fresh cached key does not require another fetch.
     assert_eq!(cfg.counters.discovery.load(Ordering::SeqCst), 1);
     assert_eq!(cfg.counters.jwks.load(Ordering::SeqCst), 1);
+}
+
+/// Advance the provider's monotonic clock without leaving real-socket I/O
+/// subject to Tokio's automatic time advancement while the runtime is idle.
+async fn advance_cache_clock(seconds: u64) {
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(seconds)).await;
+    tokio::time::resume();
+}
+
+#[tokio::test]
+async fn known_key_is_withdrawn_after_cache_expiry_without_an_unknown_kid_request() {
+    let (issuer, cfg) = spawn_idp().await;
+    let provider = Arc::new(JwksProvider::new(issuer));
+    provider.prime().await;
+    *cfg.jwks_body.write().unwrap() = json!({"keys": []}).to_string();
+
+    provider.decoding_key(KNOWN_KID).await.unwrap();
+    advance_cache_clock(300).await;
+    assert!(matches!(
+        provider.decoding_key(KNOWN_KID).await,
+        Err(JwksError::UnknownKid(_))
+    ));
+    assert_eq!(cfg.counters.discovery.load(Ordering::SeqCst), 2);
+    assert_eq!(cfg.counters.jwks.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn rollover_discovers_a_new_key_after_the_refresh_interval() {
+    let (issuer, cfg) = spawn_idp().await;
+    let provider = Arc::new(JwksProvider::new(issuer));
+    provider.prime().await;
+    let mut next: serde_json::Value = serde_json::from_str(JWKS_BODY).unwrap();
+    let mut new_key = next["keys"][0].clone();
+    new_key["kid"] = json!("successor");
+    next["keys"].as_array_mut().unwrap().push(new_key);
+    *cfg.jwks_body.write().unwrap() = next.to_string();
+
+    assert!(matches!(
+        provider.decoding_key("successor").await,
+        Err(JwksError::UnknownKid(_))
+    ));
+    advance_cache_clock(30).await;
+    provider.decoding_key("successor").await.unwrap();
+    provider.decoding_key(KNOWN_KID).await.unwrap();
+    assert_eq!(cfg.counters.jwks.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn failed_refresh_does_not_extend_known_keys_and_recovery_needs_no_restart() {
+    let (issuer, cfg) = spawn_idp().await;
+    let provider = Arc::new(JwksProvider::new(issuer));
+    provider.prime().await;
+    cfg.discovery_status.store(503, Ordering::SeqCst);
+    advance_cache_clock(30).await;
+    assert!(matches!(
+        provider.decoding_key("unknown").await,
+        Err(JwksError::Http(_))
+    ));
+    provider.decoding_key(KNOWN_KID).await.unwrap();
+
+    advance_cache_clock(270).await;
+    assert!(matches!(
+        provider.decoding_key(KNOWN_KID).await,
+        Err(JwksError::Http(_))
+    ));
+    for _ in 0..5 {
+        assert!(matches!(
+            provider.decoding_key(KNOWN_KID).await,
+            Err(JwksError::RefreshUnavailable)
+        ));
+    }
+    assert_eq!(cfg.counters.discovery.load(Ordering::SeqCst), 3);
+
+    cfg.discovery_status.store(200, Ordering::SeqCst);
+    advance_cache_clock(30).await;
+    provider.decoding_key(KNOWN_KID).await.unwrap();
+    assert_eq!(cfg.counters.discovery.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn cold_cache_failures_are_backed_off_and_can_recover() {
+    let (issuer, cfg) = spawn_idp().await;
+    cfg.discovery_status.store(503, Ordering::SeqCst);
+    let provider = Arc::new(JwksProvider::new(issuer));
+    assert!(matches!(
+        provider.decoding_key(KNOWN_KID).await,
+        Err(JwksError::Http(_))
+    ));
+    for _ in 0..5 {
+        assert!(matches!(
+            provider.decoding_key(KNOWN_KID).await,
+            Err(JwksError::RefreshUnavailable)
+        ));
+    }
+    assert_eq!(cfg.counters.discovery.load(Ordering::SeqCst), 1);
+    cfg.discovery_status.store(200, Ordering::SeqCst);
+    advance_cache_clock(30).await;
+    provider.decoding_key(KNOWN_KID).await.unwrap();
+    assert_eq!(cfg.counters.discovery.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn concurrent_lookups_share_both_successful_and_failed_refreshes() {
+    for status in [200, 503] {
+        let (issuer, cfg) = spawn_idp().await;
+        cfg.discovery_status.store(status, Ordering::SeqCst);
+        cfg.pause_discovery.store(true, Ordering::SeqCst);
+        let provider = Arc::new(JwksProvider::new(issuer));
+        let leader = {
+            let provider = provider.clone();
+            tokio::spawn(async move { provider.decoding_key(KNOWN_KID).await })
+        };
+        cfg.discovery_entered.notified().await;
+
+        let followers = futures::future::join_all((0..8).map(|_| provider.decoding_key(KNOWN_KID)));
+        futures::pin_mut!(followers);
+        assert!(futures::poll!(followers.as_mut()).is_pending());
+        assert_eq!(cfg.counters.discovery.load(Ordering::SeqCst), 1);
+        cfg.release_discovery.add_permits(1);
+        let (leader, followers) = tokio::join!(leader, followers);
+        assert_eq!(leader.unwrap().is_ok(), status == 200);
+        for follower in followers {
+            if status == 200 {
+                assert!(follower.is_ok());
+            } else {
+                assert!(matches!(follower, Err(JwksError::RefreshUnavailable)));
+            }
+        }
+        assert_eq!(cfg.counters.discovery.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn cancelled_refresh_retains_backoff_and_releases_waiters() {
+    let (issuer, cfg) = spawn_idp().await;
+    cfg.pause_discovery.store(true, Ordering::SeqCst);
+    let provider = Arc::new(JwksProvider::new(issuer));
+    let leader = {
+        let provider = provider.clone();
+        tokio::spawn(async move { provider.decoding_key(KNOWN_KID).await })
+    };
+    cfg.discovery_entered.notified().await;
+    leader.abort();
+    assert!(leader.await.unwrap_err().is_cancelled());
+
+    for _ in 0..5 {
+        assert!(matches!(
+            provider.decoding_key(KNOWN_KID).await,
+            Err(JwksError::RefreshUnavailable)
+        ));
+    }
+    assert_eq!(cfg.counters.discovery.load(Ordering::SeqCst), 1);
+    cfg.pause_discovery.store(false, Ordering::SeqCst);
+    cfg.release_discovery.add_permits(1);
+    advance_cache_clock(30).await;
+    provider.decoding_key(KNOWN_KID).await.unwrap();
+    assert_eq!(cfg.counters.discovery.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn pinned_keys_never_expire_or_fetch_even_when_primed() {
+    let (issuer, cfg) = spawn_idp().await;
+    let provider = Arc::new(JwksProvider::from_preloaded(issuer, JWKS_BODY).unwrap());
+    provider.prime().await;
+    advance_cache_clock(24 * 60 * 60).await;
+    provider.decoding_key(KNOWN_KID).await.unwrap();
+    assert!(matches!(
+        provider.decoding_key("unknown").await,
+        Err(JwksError::UnknownKid(_))
+    ));
+    assert_eq!(cfg.counters.discovery.load(Ordering::SeqCst), 0);
+    assert_eq!(cfg.counters.jwks.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -179,7 +362,7 @@ async fn unknown_kid_is_rate_limited_after_first_refresh() {
         }
     }
 
-    // The 30s `min_refresh_interval` (default) means none of the three
+    // The 30-second refresh interval means none of the three
     // lookups trigger a fresh GET — protects against the spin-the-IdP DoS.
     assert_eq!(cfg.counters.discovery.load(Ordering::SeqCst), pre_discovery);
     assert_eq!(cfg.counters.jwks.load(Ordering::SeqCst), pre_jwks);

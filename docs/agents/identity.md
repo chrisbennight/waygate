@@ -73,6 +73,29 @@ Peer-assertion runs LAST so a peer-issued JWT only hits this leg if
 no earlier validator accepted it — zero hot-path cost in the common
 single-tenant case.
 
+## External signing-key freshness
+
+Network-backed `JwksProvider` snapshots are usable for five minutes after a
+successful fetch. Once that age is reached, authentication must refresh the
+issuer's keys before accepting a token, even when its key identifier is already
+cached. A successful refresh replaces the entire snapshot, so withdrawn keys
+stop being accepted. This bound applies to new validation attempts; it does not
+retroactively cancel requests or dashboard sessions that already authenticated.
+
+Refresh attempts are shared within each provider and separated by a
+30-second minimum interval, including after failure or cancellation. A newly
+published key may therefore need to wait for that interval before it can be
+discovered. These intervals are fixed provider defaults, not environment settings.
+During an issuer outage, known keys remain usable only until the existing
+five-minute deadline. Expired or unavailable keys fail authentication until a
+refresh succeeds; failures never extend that deadline. Recovery is driven by
+subsequent authentication attempts, without requiring a restart.
+
+Providers built with `from_preloaded` intentionally pin their key set. They
+never expire or perform discovery, including during cache warming. Change the
+pinned set through its existing deployment/key-rotation procedure. Peer
+federation has its own refresh contract described in [federation](federation.md).
+
 ## Outbound identity HTTP policy
 
 The composition root builds identity clients once through

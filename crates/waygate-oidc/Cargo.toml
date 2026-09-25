@@ -29,7 +29,7 @@ sha2.workspace = true
 moka.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 # The over-cap fetch tests serve their oversized bodies as a chunked stream, so
 # the response carries no Content-Length and the streaming counter — not the
 # pre-check — is what refuses it.
