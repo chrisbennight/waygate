@@ -7,8 +7,7 @@
 //! Authentik-backed validator in the same chain would have accepted the
 //! token. Two interlocking fixes made this case healthy:
 //!
-//! 1. `JwksProvider::from_preloaded` no longer lazy-refreshes (its
-//!    `min_refresh_interval` is `Duration::MAX`), so a cache miss returns
+//! 1. `JwksProvider::from_preloaded` pins its key set, so a cache miss returns
 //!    `UnknownKid` synchronously instead of attempting a network fetch.
 //! 2. `bearer_middleware` no longer short-circuits on the first infra error;
 //!    it tries every validator and surfaces 503 only if every validator

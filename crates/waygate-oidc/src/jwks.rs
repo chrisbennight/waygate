@@ -1,16 +1,18 @@
 //! JWKS cache backed by an OIDC discovery document.
 //!
-//! Validation asks for a decoding key by `kid`. On a cache miss we pull the
-//! JWKS once, subject to a minimum refresh interval so a malicious client
-//! can't spin the gateway by flooding unknown-kid tokens.
+//! Network-backed keys expire even when their `kid` remains in use. Refreshes
+//! are serialized and rate-limited on success, failure, and cancellation.
+//! Pinned key sets never expire or contact an external issuer.
 
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use jsonwebtoken::jwk::{Jwk, JwkSet};
 use jsonwebtoken::DecodingKey;
 use serde::Deserialize;
 use thiserror::Error;
+use tokio::sync::Mutex;
+use tokio::time::Instant;
 use waygate_core::http_client::{self, Profile};
 
 #[derive(Debug, Error)]
@@ -21,6 +23,8 @@ pub enum JwksError {
     MissingJwksUri,
     #[error("kid `{0}` not present in JWKS")]
     UnknownKid(String),
+    #[error("signing keys unavailable while issuer refresh is backed off")]
+    RefreshUnavailable,
     #[error("jwt key material: {0}")]
     Key(#[from] jsonwebtoken::errors::Error),
     /// Names the document because this covers both IdP fetches — a malformed
@@ -54,11 +58,22 @@ struct CacheEntry {
     fetched_at: Instant,
 }
 
+#[derive(Default)]
+struct CacheState {
+    entry: Option<CacheEntry>,
+    next_refresh: Option<Instant>,
+    refresh_failed: bool,
+}
+
+const MAX_CACHE_AGE: Duration = Duration::from_secs(300);
+const MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
 pub struct JwksProvider {
     issuer: String,
     http: reqwest::Client,
-    cache: RwLock<Option<CacheEntry>>,
-    min_refresh_interval: Duration,
+    cache: RwLock<CacheState>,
+    refresh_lock: Mutex<()>,
+    pinned: bool,
 }
 
 impl JwksProvider {
@@ -68,8 +83,9 @@ impl JwksProvider {
             http: http_client::builder(Profile::Standard)
                 .build()
                 .expect("reqwest client"),
-            cache: RwLock::new(None),
-            min_refresh_interval: Duration::from_secs(30),
+            cache: RwLock::new(CacheState::default()),
+            refresh_lock: Mutex::new(()),
+            pinned: false,
         }
     }
 
@@ -93,8 +109,8 @@ impl JwksProvider {
             source,
         })?;
         let mut me = Self::new(issuer);
-        me.min_refresh_interval = Duration::MAX;
-        *me.cache.write().expect("cache poisoned") = Some(CacheEntry {
+        me.pinned = true;
+        me.cache.write().expect("cache poisoned").entry = Some(CacheEntry {
             keys,
             fetched_at: Instant::now(),
         });
@@ -102,30 +118,22 @@ impl JwksProvider {
     }
 
     /// Warm the cache. Called once at startup; failures are logged but don't
-    /// abort boot — the first request will retry.
+    /// abort boot. Requests retry after the refresh backoff has elapsed.
     pub async fn prime(self: &Arc<Self>) {
         if let Err(e) = self.refresh().await {
             tracing::warn!(error = %e, issuer = %self.issuer, "jwks prime failed");
         }
     }
 
-    /// Resolve a `kid` to a `DecodingKey`. Refreshes once if the `kid` isn't
-    /// cached and we're past the rate-limit window.
+    /// Resolve a `kid` using pinned keys or a network snapshot younger than
+    /// five minutes. Missing or expired keys require a rate-limited refresh;
+    /// an issuer outage never extends the lifetime of a cached network key.
     pub async fn decoding_key(self: &Arc<Self>, kid: &str) -> Result<DecodingKey, JwksError> {
         if let Some(jwk) = self.lookup(kid) {
             return Ok(DecodingKey::from_jwk(&jwk)?);
         }
 
-        let should_refresh = {
-            let guard = self.cache.read().expect("cache poisoned");
-            match &*guard {
-                None => true,
-                Some(entry) => entry.fetched_at.elapsed() >= self.min_refresh_interval,
-            }
-        };
-        if should_refresh {
-            self.refresh().await?;
-        }
+        self.refresh().await?;
 
         let jwk = self
             .lookup(kid)
@@ -135,22 +143,57 @@ impl JwksProvider {
 
     fn lookup(&self, kid: &str) -> Option<Jwk> {
         let guard = self.cache.read().expect("cache poisoned");
-        guard.as_ref().and_then(|e| e.keys.find(kid).cloned())
+        guard
+            .entry
+            .as_ref()
+            .filter(|entry| self.pinned || entry.fetched_at.elapsed() < MAX_CACHE_AGE)
+            .and_then(|entry| entry.keys.find(kid).cloned())
     }
 
     async fn refresh(&self) -> Result<(), JwksError> {
-        let jwks_uri = self.resolve_jwks_uri().await?;
-        tracing::debug!(%jwks_uri, "refreshing JWKS");
-        let body = self.fetch_capped(&jwks_uri).await?;
-        let set: JwkSet = serde_json::from_slice(&body).map_err(|source| JwksError::Json {
-            document: "JWKS",
-            source,
-        })?;
-        *self.cache.write().expect("cache poisoned") = Some(CacheEntry {
-            keys: set,
-            fetched_at: Instant::now(),
-        });
-        Ok(())
+        if self.pinned {
+            return Ok(());
+        }
+        let _refresh = self.refresh_lock.lock().await;
+        {
+            let mut cache = self.cache.write().expect("cache poisoned");
+            if cache.next_refresh.is_some_and(|next| Instant::now() < next) {
+                return if cache.refresh_failed {
+                    Err(JwksError::RefreshUnavailable)
+                } else {
+                    Ok(())
+                };
+            }
+            // Set backoff before awaiting so cancellation cannot turn a queue
+            // of callers into repeated attempts against an unavailable issuer.
+            cache.next_refresh = Some(Instant::now() + MIN_REFRESH_INTERVAL);
+            cache.refresh_failed = true;
+        }
+
+        let fetched = async {
+            let jwks_uri = self.resolve_jwks_uri().await?;
+            tracing::debug!(%jwks_uri, "refreshing JWKS");
+            let body = self.fetch_capped(&jwks_uri).await?;
+            serde_json::from_slice::<JwkSet>(&body).map_err(|source| JwksError::Json {
+                document: "JWKS",
+                source,
+            })
+        }
+        .await;
+
+        let mut cache = self.cache.write().expect("cache poisoned");
+        cache.next_refresh = Some(Instant::now() + MIN_REFRESH_INTERVAL);
+        match fetched {
+            Ok(keys) => {
+                cache.entry = Some(CacheEntry {
+                    keys,
+                    fetched_at: Instant::now(),
+                });
+                cache.refresh_failed = false;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn resolve_jwks_uri(&self) -> Result<String, JwksError> {

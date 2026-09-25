@@ -416,7 +416,7 @@ async fn unknown_kid_is_a_client_error_not_infra() {
 async fn from_preloaded_does_not_attempt_network_refresh_on_cache_miss() {
     // Belt-and-suspenders for the production failure mode: a preloaded
     // provider must never attempt OIDC discovery / JWKS fetch, even after
-    // its cache entry's `min_refresh_interval` would normally have elapsed.
+    // the refresh interval for a network-backed provider would have elapsed.
     // The previous behaviour set the interval to 30s; under load the chain
     // would tip past that and try to fetch `<issuer>/.well-known/openid-
     // configuration` — which on the gateway's own public URL returns 404 +
