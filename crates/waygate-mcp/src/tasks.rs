@@ -35,6 +35,7 @@ pub(crate) struct TaskRoute {
     pub contract: InvocationContractIdentity,
     /// Only reviewed operation selection is retained, never tool arguments.
     pub operation_arguments: Map<String, Value>,
+    pub request_facts: waygate_core::RequestFacts,
     pub created_at: String,
     pub ttl_ms: u64,
     pub exp: i64,
@@ -131,6 +132,7 @@ impl TaskRoute {
         binding: String,
         contract: InvocationContractIdentity,
         operation_arguments: Map<String, Value>,
+        request_facts: waygate_core::RequestFacts,
     ) -> Self {
         Self {
             kind: "upstream-task-v1".into(),
@@ -144,6 +146,7 @@ impl TaskRoute {
             binding,
             contract,
             operation_arguments,
+            request_facts,
             upstream_id: String::new(),
             created_at: String::new(),
             ttl_ms: 0,
@@ -258,6 +261,7 @@ mod tests {
                 requires_approval_known: true,
             },
             Map::new(),
+            waygate_core::RequestFacts::default(),
         )
     }
     #[test]
@@ -265,9 +269,7 @@ mod tests {
         let key = SessionKey::from_bytes([41; 32]);
         let sealer = TaskSealer::new(key.clone(), DEFAULT_RETENTION_SECONDS);
         let p = principal();
-        let created = time::OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap();
+        let created = waygate_core::fmt::format_ts_rfc3339(time::OffsetDateTime::now_utc());
         let mut task = Task::new(
             "opaque",
             rmcp::model::TaskStatus::Working,

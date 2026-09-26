@@ -549,3 +549,74 @@ async fn terminal_file_delivery_can_retry_without_restarting_completed_work() {
     worker.abort();
     upstream_worker.abort();
 }
+
+struct RequestGate {
+    expected: waygate_core::RequestFacts,
+    admitted: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl waygate_mcp::AuthzGate for RequestGate {
+    async fn may_discover_server(&self, _: &Principal, _: &str) -> bool {
+        true
+    }
+
+    async fn authorize_tool_call(&self, facts: &waygate_core::Facts) -> waygate_mcp::AuthzVerdict {
+        if facts.request.as_ref() == Some(&self.expected) {
+            self.admitted.fetch_add(1, Ordering::SeqCst);
+            waygate_mcp::AuthzVerdict::Allow { policy_ids: vec![] }
+        } else {
+            waygate_mcp::AuthzVerdict::Deny {
+                reason: "original request facts required".into(),
+                policy_ids: vec![],
+                reasons: vec![],
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_preserves_argument_dependent_policy_facts_after_gateway_replacement() {
+    let arguments = json!({"to":["colleague@example.com"],"body":"original message"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let gate = Arc::new(RequestGate {
+        expected: waygate_core::RequestFacts {
+            email_recipients: Some(waygate_core::EmailRecipients::from_arguments(Some(
+                &arguments,
+            ))),
+            argument_hash: waygate_catalog::argument_hash(Some(&arguments)),
+            ..Default::default()
+        },
+        admitted: AtomicUsize::new(0),
+    });
+    let upstream = Backend::new("report", true);
+    let (url, upstream_worker) = backend(upstream.clone()).await;
+    let manifests = BTreeMap::from([("service".into(), manifest("service", &url))]);
+    let (first, worker) = gateway_with_gate(manifests.clone(), gate.clone()).await;
+    let created = rpc(
+        &first,
+        "tools/call",
+        json!({"name":"service.work","arguments":arguments}),
+        "alice",
+        true,
+    )
+    .await;
+    let id = created["result"]["taskId"].as_str().unwrap();
+    worker.abort();
+    let (second, worker) = gateway_with_gate(manifests, gate.clone()).await;
+    let status = rpc(&second, "tasks/get", json!({"taskId":id}), "alice", true).await;
+    assert_eq!(status["result"]["status"], "input_required", "{status}");
+    let updated = rpc(&second, "tasks/update", json!({"taskId":id,"inputResponses":{"answer":{"result":{"action":"accept","content":{"choice":"continue"}}}}}), "alice", true).await;
+    assert!(updated.get("error").is_none(), "{updated}");
+    let cancelled = rpc(&second, "tasks/cancel", json!({"taskId":id}), "alice", true).await;
+    assert!(cancelled.get("error").is_none(), "{cancelled}");
+    let completed = rpc(&second, "tasks/get", json!({"taskId":id}), "alice", true).await;
+    assert_eq!(completed["result"]["status"], "completed", "{completed}");
+    assert_eq!(gate.admitted.load(Ordering::SeqCst), 5);
+    assert_eq!(upstream.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(upstream.updates.load(Ordering::SeqCst), 1);
+    worker.abort();
+    upstream_worker.abort();
+}

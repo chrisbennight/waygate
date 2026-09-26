@@ -53,6 +53,10 @@ impl DefaultInvocationService {
             binding.clone(),
             ctx.tool_snapshot().contract_identity(),
             operation_arguments,
+            ctx.pip_facts()
+                .request
+                .clone()
+                .expect("admitted request facts"),
         ));
         ctx.mrtr.task_binding = Some(binding);
         Ok(())
@@ -165,6 +169,12 @@ impl DefaultInvocationService {
             return Err(invalid("task's originating tool contract changed; restore the original configuration to access it"));
         }
         self.extract_facts(&mut ctx).await?;
+        // Only the immutable request projection comes from the handle. Identity,
+        // classification, policy, and ambient context are evaluated afresh.
+        ctx.pip_facts
+            .as_mut()
+            .expect("authenticated task facts")
+            .request = Some(route.request_facts.clone());
         self.authorize(&mut ctx).await?;
         self.check_profile_restrictions(&mut ctx).await?;
         self.prepare_output_validation(&mut ctx).await?;

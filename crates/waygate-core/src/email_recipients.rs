@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 
 /// Only normalized domains leave the argument boundary. An invalid envelope
 /// never exposes a partial set that a policy could mistake for all recipients.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct EmailRecipients {
     pub valid: bool,
     pub domains: BTreeSet<String>,

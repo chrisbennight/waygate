@@ -60,7 +60,8 @@ handles. Without a configured key, upstream task capability is withheld;
 Code Mode's independently configured Tasks support remains available.
 
 The client keeps an opaque encrypted task ID. It binds the upstream task ID,
-server configuration, admitted tool contract, original operation selection,
+server configuration, admitted tool contract, original operation selection and
+typed request facts (including recipient domains and the argument hash),
 tenant, issuer, subject, authentication method, and API-key profile. It contains
 no other tool arguments, credentials, or execution result. A handle is not bearer
 authority: every request also authenticates the caller, rechecks current policy
