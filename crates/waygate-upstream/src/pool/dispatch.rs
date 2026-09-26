@@ -30,11 +30,13 @@ use super::{UpstreamErrorClass, UpstreamPool};
 #[derive(Debug)]
 pub(super) enum ProcessedCallToolResponse {
     Response(CallToolResponse),
+    Task(waygate_invocation::TaskResponse),
     ProcessingError(CallToolResultProcessingError),
 }
 
 pub(super) struct ToolCallDispatchOptions<'a> {
     pub(super) mrtr: ToolCallMrtr,
+    pub(super) task: Option<waygate_mcp::tasks::TaskRpc>,
     pub(super) processor: Option<&'a dyn CallToolResultProcessor>,
 }
 
@@ -106,16 +108,58 @@ impl ToolCallFailurePhase {
 /// the SDK can prove: failure before its request handle is accepted means the
 /// request never entered the transport worker. Any later transport failure has
 /// an unknown outcome and must not be replayed.
+#[cfg(test)]
 pub(super) async fn call_tool_once_classified(
     service: &RunningService<RoleClient, rmcp::model::ClientInfo>,
     params: CallToolRequestParams,
     timeout: Option<std::time::Duration>,
 ) -> Result<CallToolResponse, ToolCallAttemptError> {
-    let request = ClientRequest::CallToolRequest(CallToolRequest::new(params));
+    call_tool_once_with_capabilities(service, params, None, timeout).await
+}
+
+pub(super) async fn call_tool_once_with_capabilities(
+    service: &RunningService<RoleClient, rmcp::model::ClientInfo>,
+    params: CallToolRequestParams,
+    capabilities: Option<&ClientCapabilities>,
+    timeout: Option<std::time::Duration>,
+) -> Result<CallToolResponse, ToolCallAttemptError> {
+    let result = send_once_classified(
+        service,
+        ClientRequest::CallToolRequest(CallToolRequest::new(params)),
+        capabilities,
+        timeout,
+    )
+    .await?;
+    match result {
+        ServerResult::CallToolResult(result) => Ok(CallToolResponse::Complete(result)),
+        ServerResult::InputRequiredResult(result) => Ok(CallToolResponse::InputRequired(result)),
+        ServerResult::CreateTaskResult(result) => Ok(CallToolResponse::Task(result)),
+        _ => Err(ToolCallAttemptError {
+            phase: ToolCallFailurePhase::DispatchedUnknownOutcome,
+            source: ServiceError::UnexpectedResponse,
+            retryable: false,
+        }),
+    }
+}
+
+pub(super) async fn send_once_classified(
+    service: &RunningService<RoleClient, rmcp::model::ClientInfo>,
+    request: ClientRequest,
+    capabilities: Option<&ClientCapabilities>,
+    timeout: Option<std::time::Duration>,
+) -> Result<ServerResult, ToolCallAttemptError> {
     let deadline = timeout.and_then(|duration| tokio::time::Instant::now().checked_add(duration));
-    let options = timeout.map_or_else(PeerRequestOptions::no_options, |duration| {
+    let mut options = timeout.map_or_else(PeerRequestOptions::no_options, |duration| {
         PeerRequestOptions::with_timeout(duration).with_max_total_timeout(duration)
     });
+    if let Some(caps) = capabilities {
+        let mut meta = rmcp::model::RequestMetaObject::default();
+        meta.insert(
+            "io.modelcontextprotocol/clientCapabilities".into(),
+            serde_json::to_value(caps).expect("capabilities serialize"),
+        );
+        options = options.with_meta(meta);
+    }
     let send = service.peer().send_cancellable_request(request, options);
     let handle = match timeout {
         Some(duration) => {
@@ -157,16 +201,7 @@ pub(super) async fn call_tool_once_classified(
         source,
         retryable: false,
     })?;
-    match result {
-        ServerResult::CallToolResult(result) => Ok(CallToolResponse::Complete(result)),
-        ServerResult::InputRequiredResult(result) => Ok(CallToolResponse::InputRequired(result)),
-        ServerResult::CreateTaskResult(result) => Ok(CallToolResponse::Task(result)),
-        _ => Err(ToolCallAttemptError {
-            phase: ToolCallFailurePhase::DispatchedUnknownOutcome,
-            source: ServiceError::UnexpectedResponse,
-            retryable: false,
-        }),
-    }
+    Ok(result)
 }
 
 pub(super) fn admitted_safe_retry(
@@ -269,6 +304,45 @@ pub(super) async fn process_call_response(
     }
 }
 
+pub(super) async fn process_dispatch_response(
+    response: Result<super::tasks::DispatchResponse, ToolCallAttemptError>,
+    processor: Option<&dyn CallToolResultProcessor>,
+    reader: &dyn CallScopedResourceReader,
+) -> Result<ProcessedCallToolResponse, ToolCallAttemptError> {
+    match response? {
+        super::tasks::DispatchResponse::Tool(response) => {
+            process_call_response(Ok(*response), processor, reader).await
+        }
+        super::tasks::DispatchResponse::Task(mut response) => {
+            if let (Some(processor), waygate_invocation::TaskResponse::Status(status)) =
+                (processor, &mut response)
+            {
+                if let rmcp::model::TaskPayload::Completed { result } = &mut status.task.payload {
+                    let parsed =
+                        serde_json::from_value(Value::Object(result.clone())).map_err(|_| {
+                            ToolCallAttemptError {
+                                phase: ToolCallFailurePhase::DispatchedUnknownOutcome,
+                                source: ServiceError::UnexpectedResponse,
+                                retryable: false,
+                            }
+                        })?;
+                    match processor.process(parsed, reader).await {
+                        Ok(processed) => {
+                            *result = serde_json::to_value(processed)
+                                .expect("tool result serializes")
+                                .as_object()
+                                .expect("tool result object")
+                                .clone();
+                        }
+                        Err(error) => return Ok(ProcessedCallToolResponse::ProcessingError(error)),
+                    }
+                }
+            }
+            Ok(ProcessedCallToolResponse::Task(response))
+        }
+    }
+}
+
 pub(super) async fn finish_call_response(
     pool: &UpstreamPool,
     server: &str,
@@ -285,14 +359,17 @@ pub(super) async fn finish_call_response(
         connection: conn_guard,
     } = lane;
     match result {
-        Ok(ProcessedCallToolResponse::Response(out)) => {
+        Ok(
+            response
+            @ (ProcessedCallToolResponse::Response(_) | ProcessedCallToolResponse::Task(_)),
+        ) => {
             if attempts > 1 {
                 record_retry_recovered(server);
             }
             let recovered = permit.success();
             drop(conn_guard);
             pool.settle_probe_recovery(server, entry, recovered).await;
-            Ok(ProcessedCallToolResponse::Response(out))
+            Ok(response)
         }
         Ok(ProcessedCallToolResponse::ProcessingError(error)) => {
             if error.upstream_failure() {
@@ -402,13 +479,15 @@ impl UpstreamPool {
                 admitted,
                 ToolCallDispatchOptions {
                     mrtr,
+                    task: None,
                     processor: None,
                 },
             )
             .await
             .and_then(|response| match response {
                 ProcessedCallToolResponse::Response(response) => Ok(response),
-                ProcessedCallToolResponse::ProcessingError(_) => Err(McpError::internal_error(
+                ProcessedCallToolResponse::Task(_)
+                | ProcessedCallToolResponse::ProcessingError(_) => Err(McpError::internal_error(
                     "call result processing ran without a processor",
                     None,
                 )),
@@ -472,13 +551,16 @@ impl UpstreamPool {
                 admitted,
                 ToolCallDispatchOptions {
                     mrtr,
+                    task: None,
                     processor: Some(processor),
                 },
             )
             .await;
 
         let outcome = match &result {
-            Ok(ProcessedCallToolResponse::Response(_)) => UpstreamOutcome::Ok,
+            Ok(ProcessedCallToolResponse::Response(_)) | Ok(ProcessedCallToolResponse::Task(_)) => {
+                UpstreamOutcome::Ok
+            }
             Ok(ProcessedCallToolResponse::ProcessingError(error)) if error.upstream_failure() => {
                 UpstreamOutcome::Error
             }
@@ -511,6 +593,9 @@ impl UpstreamPool {
         record_upstream_call(server, outcome, started.elapsed().as_secs_f64());
 
         match result {
+            Ok(ProcessedCallToolResponse::Task(_)) => Err(InvocationError::Upstream(
+                McpError::internal_error("unexpected task lifecycle response", None),
+            )),
             Ok(ProcessedCallToolResponse::Response(response)) => Ok(response),
             Ok(ProcessedCallToolResponse::ProcessingError(error)) => Err(error.into_error()),
             Err(error) => Err(InvocationError::Upstream(error)),

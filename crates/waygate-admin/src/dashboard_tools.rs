@@ -656,7 +656,8 @@ pub(crate) async fn tools_try(
         ),
         // Try-it declares no input capabilities, so the pipeline fails an
         // MRTR pause closed before it can surface here; render defensively.
-        Ok(waygate_mcp::InvocationResponse::InputRequired(_)) => TryResult::err(
+        Ok(waygate_mcp::InvocationResponse::InputRequired(_))
+        | Ok(waygate_mcp::InvocationResponse::Task(_)) => TryResult::err(
             "Unsupported",
             "This tool paused for interactive input, which the dashboard \
              try-it surface cannot provide.",

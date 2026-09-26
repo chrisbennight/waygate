@@ -67,6 +67,7 @@ mod retained_response;
 mod schema_cache;
 mod stage;
 mod stream;
+mod tasks;
 mod validation;
 use schema_cache::CachedValidator;
 pub use schema_cache::SchemaValidatorCache;
@@ -142,6 +143,7 @@ pub struct DefaultInvocationService {
     file_output_processor: Option<crate::files::SharedFileOutputProcessor>,
     /// Seals this gateway's MRTR continuation state; see [`continuation`].
     continuation_sealer: Option<Arc<continuation::ContinuationSealer>>,
+    task_sealer: Option<Arc<crate::tasks::TaskSealer>>,
     /// The inference-plane dispatch path. When both are `Some`, the
     /// `invoke` fast-path consults the resolver first; a recognized model is
     /// dispatched through the inference plane — reusing the *same* authorize /
@@ -194,6 +196,7 @@ impl DefaultInvocationService {
             file_input_processor: None,
             file_output_processor: None,
             continuation_sealer: None,
+            task_sealer: None,
             llm_dispatcher: None,
             llm_resolver: None,
             llm_usage: None,
@@ -387,6 +390,7 @@ pub fn build_default_invocation_service(
     file_output_processor: Option<crate::files::SharedFileOutputProcessor>,
     // Seals MRTR continuation state; see [`continuation`].
     continuation_sealer: Option<Arc<continuation::ContinuationSealer>>,
+    task_sealer: Option<Arc<crate::tasks::TaskSealer>>,
     // Process-wide admitted-schema validator cache. The composition root
     // passes the same handle to per-session MCP services and the admin try-it
     // service, keeping total residency bounded across all entry points.
@@ -420,6 +424,7 @@ pub fn build_default_invocation_service(
         .with_file_input_processor(file_input_processor)
         .with_file_output_processor(file_output_processor)
         .with_continuation_sealer(continuation_sealer)
+        .with_task_sealer(task_sealer)
         .with_schema_validator_cache(schema_validator_cache);
     if let Some((dispatcher, resolver)) = llm {
         service = service.with_llm(dispatcher, resolver);
@@ -445,6 +450,8 @@ pub fn build_default_invocation_service(
 /// where ownership actually transfers (audit events, error variants).
 struct InvocationContext<'a> {
     principal: Option<&'a Principal>,
+    task_origin: Option<crate::tasks::TaskRoute>,
+    task_action: Option<&'static str>,
     server: &'a str,
     tool: &'a str,
     invocation_id: uuid::Uuid,
@@ -573,6 +580,10 @@ struct InvocationContext<'a> {
 
 impl<'a> InvocationContext<'a> {
     fn audit_event(&self, action: impl Into<String>, outcome: AuditOutcome) -> AuditEvent {
+        let action = self
+            .task_action
+            .map(str::to_owned)
+            .unwrap_or_else(|| action.into());
         let mut event = AuditEvent::new(action, outcome)
             .with_acting_agent(self.acting_agent.map(str::to_owned))
             .with_invocation_hierarchy(self.invocation_hierarchy);
@@ -651,6 +662,21 @@ impl<'a> InvocationContext<'a> {
 
 #[async_trait]
 impl InvocationService for DefaultInvocationService {
+    fn supports_upstream_tasks(&self) -> bool {
+        self.task_sealer.is_some()
+    }
+
+    async fn task(
+        &self,
+        principal: Option<&Principal>,
+        task_id: &str,
+        action: waygate_invocation::TaskAction,
+        capabilities: rmcp::model::ClientCapabilities,
+    ) -> Result<waygate_invocation::TaskResponse, InvocationError> {
+        self.upstream_task(principal, task_id, action, capabilities)
+            .await
+    }
+
     async fn invoke(
         &self,
         principal: Option<&Principal>,
@@ -688,8 +714,11 @@ impl InvocationService for DefaultInvocationService {
             request_state: req.request_state.take(),
             caller_capabilities: req.caller_capabilities.take(),
             approval_gated: false,
+            task_binding: None,
         };
         let mut ctx = InvocationContext {
+            task_origin: None,
+            task_action: None,
             principal,
             server: req.server.as_str(),
             tool: req.tool.as_str(),
@@ -808,6 +837,7 @@ impl InvocationService for DefaultInvocationService {
         // before quota and the one-time approval claim; rationale in
         // `files::admit_file_inputs`.
         self.admit_file_inputs(&mut ctx).await?;
+        self.prepare_task_origin(&mut ctx).await?;
         self.enter_stage(InvocationStage::CheckQuota);
         self.check_quota(&mut ctx).await?;
         self.enter_stage(InvocationStage::CheckApproval);
@@ -843,19 +873,11 @@ impl InvocationService for DefaultInvocationService {
                     Err(refusal) => Err(refusal),
                 }
             }
-            // The gateway declares no tasks extension on the upstream leg, so
-            // a conforming upstream never materializes a task for it. Refuse
-            // loud rather than polling on the caller's behalf or forwarding a
-            // handle the caller cannot redeem through the gateway.
-            Ok(rmcp::model::CallToolResponse::Task(_)) => {
-                Err(InvocationError::Upstream(ErrorData::internal_error(
-                    format!(
-                        "upstream `{}` returned a task envelope for `{}`, which the gateway \
-                         did not request and cannot proxy",
-                        ctx.server, ctx.tool
-                    ),
-                    None,
-                )))
+            Ok(rmcp::model::CallToolResponse::Task(mut task)) => {
+                let result = self.admit_upstream_task(&mut ctx, &mut task).await;
+                self.record_outcome(&mut ctx, &result).await;
+                result?;
+                return Ok(InvocationResponse::Task(task));
             }
             // `CallToolResponse` is non-exhaustive upstream; an unknown
             // variant is a wiring/SDK-upgrade bug, not a caller error.
@@ -1658,21 +1680,29 @@ impl DefaultInvocationService {
     ) -> Result<rmcp::model::CallToolResponse, InvocationError> {
         let started = std::time::Instant::now();
         let args = ctx.arguments.take();
-        // An approval-gated call is single-round by construction: the
-        // operator's grant is claimed exactly once and must cover exactly
-        // one completed effect, so the upstream leg advertises no input
-        // capabilities — a conforming upstream then completes without
-        // pausing (as it does for a legacy caller), and a nonconforming
-        // pause fails closed downstream instead of stranding a
-        // continuation whose grant the pausing leg already consumed.
-        // Interactive multi-round approval-gated calls belong to the tasks
-        // surface, not to a second grant per round.
+        // An approval grant covers one submission. Ordinary MRTR must not
+        // create a continuation after consuming it, so elicitation is withheld.
+        // Native Tasks remain available: each input update has its own current
+        // authorization and approval check rather than replaying the submission.
         let approval_gated = {
             let facts = ctx.facts();
             facts.requires_approval || ctx.cedar_approval_policies.is_some()
         };
         if approval_gated {
-            ctx.mrtr.caller_capabilities = None;
+            // Task updates have their own approval gate. Ordinary MRTR remains single-round.
+            let tasks = ctx
+                .mrtr
+                .caller_capabilities
+                .as_ref()
+                .is_some_and(|caps| caps.supports_tasks());
+            ctx.mrtr.caller_capabilities = tasks.then(|| {
+                let mut caps = rmcp::model::ClientCapabilities::default();
+                caps.extensions = Some(std::collections::BTreeMap::from([(
+                    rmcp::model::TASKS_EXTENSION_ID.into(),
+                    Default::default(),
+                )]));
+                caps
+            });
         }
         // Bind the dispatch to the Stage-1 admitted contract: the pool
         // re-resolves the tool while holding the connection it will use for
@@ -1688,6 +1718,7 @@ impl DefaultInvocationService {
             request_state: ctx.mrtr.request_state.take(),
             caller_capabilities: ctx.mrtr.caller_capabilities.clone(),
             approval_gated,
+            task_binding: ctx.mrtr.task_binding.clone(),
         };
         let result = retained_response::dispatch(self, ctx, args, &admitted, mrtr).await;
         ctx.latency_ms = Some(started.elapsed().as_millis().min(i64::MAX as u128) as i64);

@@ -271,6 +271,7 @@ pub struct Config {
     pub file_max_bytes: Option<u64>,
     /// File streams use a separate pool from ordinary tool calls.
     pub file_transfer_concurrency: usize,
+    pub upstream_task_retention_seconds: u64,
     pub mrtr_state_key: Option<String>, // see `crate::continuation_key`
     /// Static API-key validator config. `Some` ⇒ the bearer middleware
     /// also accepts `Authorization: Bearer mcpgw_…` against the `api_keys`
@@ -1006,6 +1007,12 @@ impl Config {
             file_retention: file_transfer.retention,
             file_max_bytes: file_transfer.max_bytes,
             file_transfer_concurrency: file_transfer.concurrency,
+            upstream_task_retention_seconds: waygate_core::env::u64_in(
+                "GATEWAY_UPSTREAM_TASK_RETENTION_SECONDS",
+                waygate_mcp::tasks::DEFAULT_RETENTION_SECONDS,
+                1..=31536000,
+                "task routing retention, from creation, in seconds",
+            )?,
             mrtr_state_key: crate::continuation_key::key_from_env(),
             api_keys,
             deployment_profile,
@@ -1708,6 +1715,7 @@ mod tests {
             file_retention: FileRetention::DEFAULT,
             file_max_bytes: None,
             file_transfer_concurrency: 8,
+            upstream_task_retention_seconds: 129600,
             mrtr_state_key: None,
             api_keys: None,
             deployment_profile: profile,

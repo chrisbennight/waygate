@@ -1095,13 +1095,13 @@ async fn chat_completions(State(state): State<LlmRouterState>, req: Request) -> 
         Ok(InvocationResponse::UnaryValue(body)) => (StatusCode::OK, Json(body)).into_response(),
         // An MCP CallToolResult (or MRTR pause — this surface declares no
         // input capabilities) on the LLM route is a wiring bug.
-        Ok(InvocationResponse::Unary(_)) | Ok(InvocationResponse::InputRequired(_)) => {
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "unexpected tool result on the inference route",
-            )
-        }
+        Ok(InvocationResponse::Unary(_))
+        | Ok(InvocationResponse::InputRequired(_))
+        | Ok(InvocationResponse::Task(_)) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "unexpected tool result on the inference route",
+        ),
         // Streaming: re-emit each canonical chunk as an OpenAI-shaped SSE
         // frame. A terminal chunk is the `[DONE]` sentinel; a mid-stream error
         // surfaces as an `event: error` frame (the gates already passed before
@@ -1164,13 +1164,13 @@ async fn responses(State(state): State<LlmRouterState>, req: Request) -> Respons
         // The body is already Responses-shaped — dispatch rendered the canonical
         // response to the Responses surface.
         Ok(InvocationResponse::UnaryValue(body)) => (StatusCode::OK, Json(body)).into_response(),
-        Ok(InvocationResponse::Unary(_)) | Ok(InvocationResponse::InputRequired(_)) => {
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "unexpected tool result on the inference route",
-            )
-        }
+        Ok(InvocationResponse::Unary(_))
+        | Ok(InvocationResponse::InputRequired(_))
+        | Ok(InvocationResponse::Task(_)) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "unexpected tool result on the inference route",
+        ),
         // Named-event Responses SSE (the chunks carry their `event_name`).
         Ok(InvocationResponse::Stream(stream)) => sse_from_invocation_stream(stream),
         Err(e) => invocation_error_response(e),
@@ -1203,7 +1203,8 @@ async fn embeddings(State(state): State<LlmRouterState>, req: Request) -> Respon
         // tool result or a stream on the embeddings route is a wiring bug.
         Ok(InvocationResponse::Unary(_))
         | Ok(InvocationResponse::Stream(_))
-        | Ok(InvocationResponse::InputRequired(_)) => error_response(
+        | Ok(InvocationResponse::InputRequired(_))
+        | Ok(InvocationResponse::Task(_)) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal_error",
             "unexpected non-unary result on the embeddings route",

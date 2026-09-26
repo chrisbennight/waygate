@@ -1440,6 +1440,23 @@ impl UpstreamCatalog for UpstreamPool {
             .await
     }
 
+    async fn task_binding(&self, server: &str) -> Option<String> {
+        self.task_binding_inner(server).await
+    }
+
+    async fn task_request(
+        &self,
+        server: &str,
+        tool: &str,
+        principal: &Principal,
+        admitted: &InvocationContractIdentity,
+        request: waygate_mcp::tasks::TaskRpc,
+        processor: &dyn waygate_mcp::catalog::CallToolResultProcessor,
+    ) -> Result<waygate_invocation::TaskResponse, waygate_mcp::catalog::InvocationError> {
+        self.task_request_inner(server, tool, principal, admitted, request, processor)
+            .await
+    }
+
     async fn call_tool_response_processed(
         &self,
         server: &str,
@@ -1552,7 +1569,11 @@ impl UpstreamPool {
         admitted: Option<&InvocationContractIdentity>,
         options: dispatch::ToolCallDispatchOptions<'_>,
     ) -> Result<dispatch::ProcessedCallToolResponse, McpError> {
-        let dispatch::ToolCallDispatchOptions { mrtr, processor } = options;
+        let dispatch::ToolCallDispatchOptions {
+            mrtr,
+            processor,
+            task,
+        } = options;
         let entry = self.entry(server)?;
 
         // Refuse a call to a tombstoned upstream. A hot remove
@@ -1625,13 +1646,24 @@ impl UpstreamPool {
         // produce — operator gets a single clear signal instead of a
         // silent Tier-B dispatch.
         let snapshot = entry.manifest_snapshot();
+        if mrtr
+            .task_binding
+            .as_ref()
+            .is_some_and(|expected| tasks::binding(&snapshot).as_ref() != Some(expected))
+        {
+            return Err(McpError::invalid_params(
+                "task upstream configuration changed",
+                None,
+            ));
+        }
 
         // MRTR continuations are generation-bound (contracts in
         // `pool::dispatch`): a manifest that can never negotiate 2026
         // cannot have issued the pause a continuation answers — refuse
         // before any breaker/identity/dial cost. The reuse arm adds the
         // lane-level half for a post-reconnect rollback.
-        let has_continuation = mrtr.input_responses.is_some() || mrtr.request_state.is_some();
+        let has_continuation =
+            task.is_some() || mrtr.input_responses.is_some() || mrtr.request_state.is_some();
         if let Some(err) =
             dispatch::manifest_continuation_refusal(server, has_continuation, &snapshot)
         {
@@ -1892,6 +1924,15 @@ impl UpstreamPool {
                     ));
                 }
                 let current_manifest = entry.manifest_snapshot();
+                if mrtr.task_binding.as_ref().is_some_and(|expected| {
+                    tasks::binding(&current_manifest).as_ref() != Some(expected)
+                }) {
+                    permit.neutral();
+                    return Err(McpError::invalid_params(
+                        "task upstream configuration changed",
+                        None,
+                    ));
+                }
                 if !dispatch_contract_is_current(
                     &entry,
                     &snapshot,
@@ -1965,6 +2006,8 @@ impl UpstreamPool {
                     advertised_tool: raw_contract,
                     trace_id: &trace_id,
                     params,
+                    task: task.as_ref(),
+                    allow_tasks: mrtr.task_binding.is_some(),
                     processor,
                 })
                 .await;
@@ -2011,6 +2054,15 @@ impl UpstreamPool {
                     ));
                 }
                 let current_manifest = entry.manifest_snapshot();
+                if mrtr.task_binding.as_ref().is_some_and(|expected| {
+                    tasks::binding(&current_manifest).as_ref() != Some(expected)
+                }) {
+                    permit.neutral();
+                    return Err(McpError::invalid_params(
+                        "task upstream configuration changed",
+                        None,
+                    ));
+                }
                 if !dispatch_contract_is_current(
                     &entry,
                     &snapshot,
@@ -2194,14 +2246,16 @@ impl UpstreamPool {
                     permit.neutral();
                     return Err(err);
                 }
-                // Raw `call_tool_once` for the same reason as the per-call
-                // arm: a pause must pass through, not be driven locally. A
-                // reuse-lane dial advertises no capabilities, so a conforming
-                // 2026 upstream never pauses here; the pipeline's
-                // answerability check fails closed if one does anyway.
-                let response = dispatch::call_tool_once_classified(
+                // Forward one response without driving pauses or polling locally.
+                // Task-capable requests carry caller capabilities per request;
+                // ordinary reuse-lane calls keep the dial's empty capabilities.
+                let response = tasks::dispatch_once(
                     &conn.client,
                     params,
+                    task.as_ref(),
+                    mrtr.task_binding
+                        .as_ref()
+                        .and(mrtr.caller_capabilities.as_ref()),
                     recovery::remaining(call_deadline),
                 )
                 .await;
@@ -2212,7 +2266,7 @@ impl UpstreamPool {
                     bounded_reads_supported: matches!(snapshot.transport, crate::Transport::Http),
                 };
                 (
-                    dispatch::process_call_response(response, processor, &reader).await,
+                    dispatch::process_dispatch_response(response, processor, &reader).await,
                     conn_guard,
                 )
             }
@@ -2251,6 +2305,7 @@ pub(crate) mod reload;
 mod resources;
 mod schema_admission;
 mod session_identity;
+mod tasks;
 mod tool_listing;
 mod tool_reviews;
 

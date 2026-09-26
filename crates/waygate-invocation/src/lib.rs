@@ -689,6 +689,8 @@ impl InvocationError {
 pub enum InvocationResponse {
     /// A complete result, available in one piece. Today's universal shape.
     Unary(CallToolResult),
+    /// Durable task owned by an upstream service.
+    Task(rmcp::model::CreateTaskResult),
     /// An MRTR pause (SEP-2322): the upstream requires client-side input
     /// before the call can complete. Produced only on the MCP tool-call
     /// path, only when the downstream caller declared it can answer every
@@ -716,6 +718,7 @@ impl std::fmt::Debug for InvocationResponse {
     // type to be `Debug`, so the impl is part of the contract.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Task(task) => f.debug_tuple("Task").field(task).finish(),
             Self::Unary(result) => f.debug_tuple("Unary").field(result).finish(),
             Self::InputRequired(pause) => f.debug_tuple("InputRequired").field(pause).finish(),
             Self::UnaryValue(value) => f.debug_tuple("UnaryValue").field(value).finish(),
@@ -755,12 +758,45 @@ pub struct InvocationChunk {
     pub terminal: bool,
 }
 
+/// A native task lifecycle operation. Execution remains with the upstream.
+#[derive(Debug, Clone)]
+pub enum TaskAction {
+    Get,
+    Update(rmcp::model::InputResponses),
+    Cancel,
+}
+
+/// Typed response to a native task lifecycle operation.
+#[derive(Debug)]
+pub enum TaskResponse {
+    Status(Box<rmcp::model::GetTaskResult>),
+    Acknowledged,
+}
+
 /// The dispatch contract every per-tool-call hop flows through. Today only
 /// `waygate_mcp::server::GatewayServer` consumes this; future consumers
 /// (admin "simulate this call", a non-MCP test harness, a federated tier-C
 /// gateway hop) plug in at the same boundary.
 #[async_trait]
 pub trait InvocationService: Send + Sync + 'static {
+    /// Whether this service can route durable upstream Tasks.
+    fn supports_upstream_tasks(&self) -> bool {
+        false
+    }
+
+    /// Follow an owner-bound upstream task through the same authorization boundary.
+    async fn task(
+        &self,
+        _principal: Option<&Principal>,
+        _task_id: &str,
+        _action: TaskAction,
+        _capabilities: rmcp::model::ClientCapabilities,
+    ) -> Result<TaskResponse, InvocationError> {
+        Err(InvocationError::InvalidArguments(
+            "upstream tasks are unavailable".into(),
+        ))
+    }
+
     async fn invoke(
         &self,
         principal: Option<&Principal>,

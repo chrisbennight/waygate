@@ -84,6 +84,23 @@ pub fn discovery(encoded: Option<&str>) -> anyhow::Result<Arc<DiscoveryCursorSea
     }
 }
 
+/// Native upstream tasks require a deployment-stable key; no process-local fallback.
+pub fn task_sealer(
+    encoded: Option<&str>,
+    retention_seconds: u64,
+) -> anyhow::Result<Option<Arc<waygate_mcp::tasks::TaskSealer>>> {
+    encoded
+        .map(|encoded| {
+            let key = SessionKey::from_encoded(encoded)
+                .map_err(|error| anyhow::anyhow!("{KEY_ENV}: {error}"))?;
+            Ok(Arc::new(waygate_mcp::tasks::TaskSealer::new(
+                key,
+                retention_seconds,
+            )))
+        })
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

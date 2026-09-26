@@ -257,6 +257,7 @@ impl EvaluationGateway {
                     }
                     Err(_) => return None,
                     Ok(InvocationResponse::InputRequired(_))
+                    | Ok(InvocationResponse::Task(_))
                     | Ok(InvocationResponse::UnaryValue(_))
                     | Ok(InvocationResponse::Stream(_)) => return None,
                 }

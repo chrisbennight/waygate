@@ -58,3 +58,5 @@ mod session_isolation_http;
 mod sse_dropped_connection;
 mod sse_transport;
 mod token_exchange_over_http;
+
+mod tasks_http;

@@ -1435,6 +1435,7 @@ impl GatewayServer {
             // which has its own HTTP egress and never routes through this
             // adapter, so either here is a wiring bug — surface it as an
             // internal error, not a panic.
+            Ok(crate::InvocationResponse::Task(task)) => Ok(CallToolResponse::Task(task)),
             Ok(crate::InvocationResponse::Unary(result)) => Ok(result.into()),
             // An upstream MRTR pause the pipeline already verified the caller
             // can answer — relayed verbatim, opaque `requestState` included.
@@ -4403,6 +4404,25 @@ impl ServerHandler for GatewayServer {
     ) -> Result<GetTaskResult, McpError> {
         let _client = self.client_context(&ctx);
         let principal = principal_from_ctx(&ctx);
+        if request.task_id.starts_with(crate::tasks::HANDLE_PREFIX) {
+            let result = self
+                .invocation
+                .task(
+                    principal.as_ref(),
+                    &request.task_id,
+                    waygate_invocation::TaskAction::Get,
+                    ctx.client_capabilities().unwrap_or_default(),
+                )
+                .await
+                .map_err(crate::tasks::invocation_error)?;
+            return match result {
+                waygate_invocation::TaskResponse::Status(status) => Ok(*status),
+                _ => Err(McpError::internal_error(
+                    "invalid task status response",
+                    None,
+                )),
+            };
+        }
         for builtin in &self.builtins {
             let Some(tool) = builtin.task_tool() else {
                 continue;
@@ -4480,6 +4500,25 @@ impl ServerHandler for GatewayServer {
     ) -> Result<(), McpError> {
         let _client = self.client_context(&ctx);
         let principal = principal_from_ctx(&ctx);
+        if request.task_id.starts_with(crate::tasks::HANDLE_PREFIX) {
+            let result = self
+                .invocation
+                .task(
+                    principal.as_ref(),
+                    &request.task_id,
+                    waygate_invocation::TaskAction::Cancel,
+                    ctx.client_capabilities().unwrap_or_default(),
+                )
+                .await
+                .map_err(crate::tasks::invocation_error)?;
+            return match result {
+                waygate_invocation::TaskResponse::Acknowledged => Ok(()),
+                _ => Err(McpError::internal_error(
+                    "invalid task acknowledgement",
+                    None,
+                )),
+            };
+        }
         for builtin in &self.builtins {
             let Some(tool) = builtin.cancel_task_tool() else {
                 continue;
@@ -4512,6 +4551,25 @@ impl ServerHandler for GatewayServer {
     ) -> Result<(), McpError> {
         let _client = self.client_context(&ctx);
         let principal = principal_from_ctx(&ctx);
+        if request.task_id.starts_with(crate::tasks::HANDLE_PREFIX) {
+            let result = self
+                .invocation
+                .task(
+                    principal.as_ref(),
+                    &request.task_id,
+                    waygate_invocation::TaskAction::Update(request.input_responses.clone()),
+                    ctx.client_capabilities().unwrap_or_default(),
+                )
+                .await
+                .map_err(crate::tasks::invocation_error)?;
+            return match result {
+                waygate_invocation::TaskResponse::Acknowledged => Ok(()),
+                _ => Err(McpError::internal_error(
+                    "invalid task acknowledgement",
+                    None,
+                )),
+            };
+        }
         for builtin in &self.builtins {
             if builtin.task_tool().is_none() {
                 continue;
@@ -4720,12 +4778,13 @@ impl ServerHandler for GatewayServer {
         let mut capabilities = caps.build();
         // Tasks are the SEP-2663 extension: advertised in the extensions
         // capability map (the pre-extension `tasks` capability field no
-        // longer exists on the wire), and only when a built-in actually
-        // serves a durable task tool.
-        let tasks_enabled = self
-            .builtins
-            .iter()
-            .any(|builtin| builtin.supports_tasks() && builtin.task_tool().is_some());
+        // longer exists on the wire), when native upstream routing is enabled
+        // or a built-in serves a durable task tool.
+        let tasks_enabled = self.invocation.supports_upstream_tasks()
+            || self
+                .builtins
+                .iter()
+                .any(|builtin| builtin.supports_tasks() && builtin.task_tool().is_some());
         // SEP-2640 remains experimental. Advertise only list/get (empty
         // settings object, no directoryRead claim), and only while a complete
         // verified snapshot is actually available to serve.

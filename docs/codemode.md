@@ -809,3 +809,7 @@ select a separate authorization tier.
 - Bypassing data-plane approval or control-plane maker/checker enforcement.
 - Treating provider-side inference `code_interpreter` as this gateway
   capability.
+
+Native upstream Tasks are a separate lifecycle from Code Mode executions.
+See [upstream-owned Tasks](agents/tasks.md#upstream-owned-tasks) for direct MCP
+client support and the current connector-call boundary.

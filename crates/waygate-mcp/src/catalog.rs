@@ -278,6 +278,27 @@ pub trait UpstreamCatalog: Send + Sync + 'static {
         }
     }
 
+    /// Stable routing identity for native tasks, absent for unsupported upstreams.
+    async fn task_binding(&self, _server: &str) -> Option<String> {
+        None
+    }
+
+    /// Dispatch a lifecycle request on the originating upstream under its tool contract.
+    async fn task_request(
+        &self,
+        _server: &str,
+        _tool: &str,
+        _principal: &Principal,
+        _admitted: &InvocationContractIdentity,
+        _request: crate::tasks::TaskRpc,
+        _processor: &dyn CallToolResultProcessor,
+    ) -> Result<waygate_invocation::TaskResponse, InvocationError> {
+        Err(InvocationError::Upstream(McpError::invalid_params(
+            "upstream tasks unavailable",
+            None,
+        )))
+    }
+
     /// Proxy a call to the upstream. `tool_name` is the upstream-side name
     /// (the `<server>.` prefix has already been stripped). `principal` is
     /// forwarded so the pool can mint a per-call identity JWT for the
@@ -609,6 +630,8 @@ pub struct ToolCallMrtr {
     /// by the catalog contract or a dynamic Cedar overlay. Transport setup
     /// recovery must not spend that single-use authority on a second attempt.
     pub approval_gated: bool,
+    /// Connection identity admitted before a task-capable call may dispatch.
+    pub task_binding: Option<String>,
 }
 
 /// Authority that admitted a tool into one invocation.

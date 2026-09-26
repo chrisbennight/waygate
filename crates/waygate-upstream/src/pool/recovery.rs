@@ -66,6 +66,8 @@ pub(super) struct PerCallExecution<'a> {
     pub(super) advertised_tool: Option<&'a rmcp::model::Tool>,
     pub(super) trace_id: &'a str,
     pub(super) params: CallToolRequestParams,
+    pub(super) task: Option<&'a waygate_mcp::tasks::TaskRpc>,
+    pub(super) allow_tasks: bool,
     pub(super) processor: Option<&'a dyn CallToolResultProcessor>,
 }
 
@@ -302,7 +304,17 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
 
         let mut response = match handoff_budget(setup.deadline, setup.timeout) {
             Ok(budget) => {
-                dispatch::call_tool_once_classified(&service, setup.params.clone(), budget).await
+                super::tasks::dispatch_once(
+                    &service,
+                    setup.params.clone(),
+                    setup.task,
+                    setup
+                        .allow_tasks
+                        .then_some(setup.caller_capabilities)
+                        .flatten(),
+                    budget,
+                )
+                .await
             }
             Err(error) => Err(error),
         };
@@ -334,7 +346,7 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
             timeout: remaining(setup.deadline),
             bounded_reads_supported: matches!(setup.snapshot.transport, crate::Transport::Http),
         };
-        let result = dispatch::process_call_response(response, setup.processor, &reader).await;
+        let result = dispatch::process_dispatch_response(response, setup.processor, &reader).await;
         close_service(service, setup.deadline).await;
         return PerCallExecutionOutcome::Finished { result, attempts };
     }

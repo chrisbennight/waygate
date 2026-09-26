@@ -401,6 +401,12 @@ Where each kind of state lives and how it changes:
   refusal state; exact-generation acceptance uses the existing admin action
   registry and preserves manifest authority for annotation-mode hashes.
   See [tool change review](guides/security.md#review-an-upstream-tool-change).
+- **Upstream Tasks** — execution and recovery stay upstream. Encrypted,
+  owner-bound task handles carry routing and contract identity under the shared
+  deployment continuation key, with configurable expiry. Lifecycle requests
+  re-enter current gateway authorization and the existing upstream dispatch
+  gates. No routing database or second execution journal is introduced. See
+  [Tasks](agents/tasks.md#upstream-owned-tasks).
 - **In-memory caches** — JWKS (per-issuer in `waygate-oidc`; per-peer with
   a generation fence in `waygate-federation`), session state, the upstream
   connection pool, quota buckets. All rebuildable; none is a source of

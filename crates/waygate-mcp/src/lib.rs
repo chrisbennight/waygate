@@ -101,6 +101,8 @@ pub const SUPPORTED_MCP_SPEC_VERSIONS: &[&str] = &["2026-07-28", "2025-11-25"];
 /// compliance-mapping references.
 pub const MCP_SPEC_VERSION: &str = SUPPORTED_MCP_SPEC_VERSIONS[0];
 
+pub mod tasks;
+
 #[cfg(test)]
 mod spec_version_pin {
     use super::{MCP_SPEC_VERSION, SUPPORTED_MCP_SPEC_VERSIONS};
