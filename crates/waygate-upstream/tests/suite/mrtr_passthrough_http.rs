@@ -199,6 +199,7 @@ fn mrtr_with_caps() -> ToolCallMrtr {
         request_state: None,
         caller_capabilities: Some(elicitation_caps()),
         approval_gated: false,
+        task_binding: None,
     }
 }
 
@@ -235,6 +236,7 @@ async fn pause_passes_through_and_the_retry_round_trip_is_verbatim() {
         request_state: pause.request_state.clone(),
         caller_capabilities: Some(elicitation_caps()),
         approval_gated: false,
+        task_binding: None,
     };
     match pool
         .call_tool_response("mock", "confirm", None, None, None, retry)
@@ -327,6 +329,7 @@ async fn per_call_continuation_is_refused_on_a_legacy_pinned_manifest() {
         request_state: Some(UPSTREAM_STATE.to_owned()),
         caller_capabilities: Some(elicitation_caps()),
         approval_gated: false,
+        task_binding: None,
     };
     let err = pool
         .call_tool_response("mock", "confirm", None, None, None, retry)
@@ -362,6 +365,7 @@ async fn reuse_lane_refuses_a_continuation_on_a_legacy_leg() {
         request_state: Some(UPSTREAM_STATE.to_owned()),
         caller_capabilities: Some(elicitation_caps()),
         approval_gated: false,
+        task_binding: None,
     };
     let err = pool
         .call_tool_response("mock", "confirm", None, None, None, retry)

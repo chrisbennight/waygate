@@ -199,7 +199,7 @@ pub struct ResourceFacts {
 /// file ops outside an allowlist") without the gate parsing arguments
 /// itself. Populated by the PIP from the tool's argument schema; all
 /// optional because most are tool-specific.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct RequestFacts {
     /// Gateway-owned metadata probe. Never set from tool arguments.
     pub discovery_only: bool,

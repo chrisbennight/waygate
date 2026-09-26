@@ -1421,6 +1421,7 @@ async fn dispatch_to_a_tombstoned_entry_is_refused() {
             None,
             None,
             dispatch::ToolCallDispatchOptions {
+                task: None,
                 mrtr: Default::default(),
                 processor: None,
             },

@@ -743,3 +743,11 @@ Code: [`crates/waygate-manifest-store/`](../../crates/waygate-manifest-store/)
   selected per upstream.
 - [`docs/agents/authz.md`](authz.md) — how `ToolClassification` reaches
   Cedar at call time.
+
+## Native Tasks
+
+A 2026-07-28 upstream may return native Tasks when the gateway explicitly
+advertises the extension on that call. The gateway relays lifecycle requests
+under the original tool's governance and leaves execution with the upstream.
+See [upstream-owned Tasks](tasks.md#upstream-owned-tasks) for retention,
+restart and configuration behavior, identity requirements, and file support.

@@ -6722,6 +6722,7 @@ dependencies = [
  "waygate-catalog",
  "waygate-core",
  "waygate-federation",
+ "waygate-invocation",
  "waygate-manifest-types",
  "waygate-mcp",
  "waygate-oidc",

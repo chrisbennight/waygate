@@ -410,3 +410,13 @@ ranges and fallback defaults are defined by the gateway release.
 ## See also
 
 - [`AGENTS.md`](../AGENTS.md) — image-publish conventions and safe defaults.
+
+## Upstream task retention
+
+Native upstream Tasks use `GATEWAY_MRTR_STATE_KEY` to protect portable routing
+handles. Configure the same key on all replicas. Set
+`GATEWAY_UPSTREAM_TASK_RETENTION_SECONDS` to change the default 36-hour lifetime
+from task creation (range: 1–31536000 seconds); a shorter upstream TTL still
+wins. Expiry does not cancel upstream execution. See the
+[Tasks contract](agents/tasks.md#upstream-owned-tasks) before enabling a service
+whose work must survive reconnects and deployment changes.

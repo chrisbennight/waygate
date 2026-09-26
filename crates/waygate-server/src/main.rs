@@ -1005,6 +1005,10 @@ async fn gateway_main() -> anyhow::Result<()> {
     let admin_state_cell: Arc<std::sync::OnceLock<Arc<waygate_admin::AdminState>>> =
         Arc::new(std::sync::OnceLock::new());
     let continuation_sealer = continuation_key::sealer(cfg.mrtr_state_key.as_deref())?;
+    let task_sealer = continuation_key::task_sealer(
+        cfg.mrtr_state_key.as_deref(),
+        cfg.upstream_task_retention_seconds,
+    )?;
     let mcp_factory = Arc::new(mcp_factory::McpServerFactory {
         catalog: catalog.clone(),
         catalog_store: catalog_store.clone(),
@@ -1024,6 +1028,7 @@ async fn gateway_main() -> anyhow::Result<()> {
         file_output_processor: file_output_processor.clone(),
         source_file_reader: file_transfer::source_file_reader(transfer_runtime.as_ref()),
         continuation_sealer: continuation_sealer.clone(),
+        task_sealer: task_sealer.clone(),
         tool_list_cursor_sealer: continuation_key::cursor_sealer(cfg.mrtr_state_key.as_deref())?,
         skills: skills.catalog(),
         reviewed_skills: skills.reviewed(),
@@ -1246,6 +1251,7 @@ async fn gateway_main() -> anyhow::Result<()> {
             file_input_processor.clone(),
             file_output_processor.clone(),
             continuation_sealer.clone(),
+            task_sealer.clone(),
             schema_validator_cache.clone(),
             llm_deps.as_ref().map(crate::llm::deps_as_dyn),
             llm_usage_store.clone(),

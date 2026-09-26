@@ -146,7 +146,7 @@ impl AgentModel for OpenAiAgentModel {
             // The runtime declares no input capabilities on its requests, so
             // the pipeline fails an MRTR pause closed before it can surface
             // here; reaching this arm is a wiring bug.
-            Ok(InvocationResponse::InputRequired(_)) => {
+            Ok(InvocationResponse::InputRequired(_)) | Ok(InvocationResponse::Task(_)) => {
                 return Err(AgentError::Model(
                     "inference returned an input_required pause on the model path".to_owned(),
                 ));
@@ -615,10 +615,13 @@ impl AgentToolDispatch for UpstreamAgentDispatch {
             // The runtime declares no input capabilities, so the pipeline
             // fails an MRTR pause closed before it can surface here; treat a
             // stray one as an (error) tool result the model can adapt to.
-            Ok(InvocationResponse::InputRequired(_)) => Ok(ToolOutcome {
-                content: "tool paused for interactive input this agent cannot provide".to_owned(),
-                is_error: true,
-            }),
+            Ok(InvocationResponse::InputRequired(_)) | Ok(InvocationResponse::Task(_)) => {
+                Ok(ToolOutcome {
+                    content: "tool paused for interactive input this agent cannot provide"
+                        .to_owned(),
+                    is_error: true,
+                })
+            }
             // A pipeline denial (Cedar / profile / step-up / budget) or upstream
             // failure is fed back to the model as an (error) tool result so it
             // can adapt — NOT a hard loop error.

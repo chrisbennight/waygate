@@ -230,7 +230,7 @@ async fn chat_stream(
         }
         // The chat surface declares no input capabilities, so the pipeline
         // fails an MRTR pause closed before it can surface here.
-        Ok(InvocationResponse::InputRequired(_)) => sse_error(
+        Ok(InvocationResponse::InputRequired(_)) | Ok(InvocationResponse::Task(_)) => sse_error(
             "unexpected input_required pause on the inference route",
             None,
         ),

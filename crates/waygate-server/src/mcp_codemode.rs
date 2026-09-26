@@ -3407,12 +3407,10 @@ impl CodeModeTools {
             // pauses ride the approval-gate/task model instead.
             InvocationResponse::Stream(_)
             | InvocationResponse::UnaryValue(_)
-            | InvocationResponse::InputRequired(_) => Err(
-                waygate_invocation::InvocationError::Upstream(McpError::internal_error(
-                    "connector returned an unsupported response shape",
-                    None,
-                )),
-            ),
+            | InvocationResponse::InputRequired(_)
+            | InvocationResponse::Task(_) => Err(waygate_invocation::InvocationError::Upstream(
+                McpError::internal_error("connector returned an unsupported response shape", None),
+            )),
         }
     }
 

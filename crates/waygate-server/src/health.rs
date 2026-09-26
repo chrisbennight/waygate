@@ -517,6 +517,7 @@ mod tests {
             file_max_bytes: None,
             file_transfer_concurrency: 8,
             mrtr_state_key: None,
+            upstream_task_retention_seconds: 129600,
             api_keys: None,
             deployment_profile: DeploymentProfile::Dev,
             audit_mode: AuditMode::BestEffort,
