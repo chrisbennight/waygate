@@ -2247,8 +2247,8 @@ impl UpstreamPool {
                     return Err(err);
                 }
                 // Forward one response without driving pauses or polling locally.
-                // Task-capable requests carry caller capabilities per request;
-                // ordinary reuse-lane calls keep the dial's empty capabilities.
+                // Task-capable requests carry permitted caller capabilities;
+                // file output declares the gateway's own support per invocation.
                 let response = tasks::dispatch_once(
                     &conn.client,
                     params,
@@ -2256,6 +2256,8 @@ impl UpstreamPool {
                     mrtr.task_binding
                         .as_ref()
                         .and(mrtr.caller_capabilities.as_ref()),
+                    processor.is_some_and(|processor| processor.supports_file_output()),
+                    conn.cleartext_control_plane,
                     recovery::remaining(call_deadline),
                 )
                 .await;

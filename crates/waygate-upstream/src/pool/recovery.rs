@@ -35,7 +35,7 @@ struct PerCallDial<'a> {
 }
 
 struct PerCallDialSuccess {
-    service: RunningService<RoleClient, ClientInfo>,
+    connected: crate::transport::ConnectedService,
     attempts: usize,
 }
 
@@ -170,10 +170,10 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
             attempts,
         })
         .await;
-        let service = match dial {
+        let connected = match dial {
             Ok(success) => {
                 attempts = success.attempts;
-                success.service
+                success.connected
             }
             Err(failure) => {
                 return PerCallExecutionOutcome::Failed {
@@ -183,6 +183,7 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
             }
         };
 
+        let service = connected.service;
         if matches!(
             setup.current_manifest.classification_mode,
             crate::ClassificationMode::McpAnnotations
@@ -312,6 +313,10 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
                         .allow_tasks
                         .then_some(setup.caller_capabilities)
                         .flatten(),
+                    setup
+                        .processor
+                        .is_some_and(|processor| processor.supports_file_output()),
+                    connected.cleartext_control_plane,
                     budget,
                 )
                 .await
@@ -381,7 +386,12 @@ async fn dial_per_call(setup: PerCallDial<'_>) -> Result<PerCallDialSuccess, Per
             None => dial.await,
         };
         match dial_result {
-            Ok(service) => return Ok(PerCallDialSuccess { service, attempts }),
+            Ok(connected) => {
+                return Ok(PerCallDialSuccess {
+                    connected,
+                    attempts,
+                })
+            }
             Err(error) => {
                 let phase = ToolCallFailurePhase::from_dial_error(&error);
                 dispatch::record_failure(setup.server, phase);

@@ -159,6 +159,12 @@ impl CallScopedResourceError {
 /// only the session-affine resource reader.
 #[async_trait]
 pub trait CallToolResultProcessor: Send + Sync {
+    /// Whether this invocation can import and publish upstream file output.
+    /// This is gateway capacity, not a downstream client's capability claim.
+    fn supports_file_output(&self) -> bool {
+        false
+    }
+
     async fn process(
         &self,
         result: CallToolResult,

@@ -208,12 +208,13 @@ pub(crate) async fn connect(
     cell: Option<&IdentityCell>,
     exchange: Option<&ExchangeBundle>,
 ) -> Result<RunningService<RoleClient, ClientInfo>, DialError> {
-    connect_with_capabilities(
+    connect_with_handshake_timeout(
         manifest,
         issuer,
         cell,
         exchange,
         ClientCapabilities::default(),
+        http_policy::HANDSHAKE_TIMEOUT,
     )
     .await
 }
@@ -253,8 +254,8 @@ pub(crate) async fn connect_with_capabilities(
     cell: Option<&IdentityCell>,
     exchange: Option<&ExchangeBundle>,
     capabilities: ClientCapabilities,
-) -> Result<RunningService<RoleClient, ClientInfo>, DialError> {
-    connect_with_handshake_timeout(
+) -> Result<ConnectedService, DialError> {
+    connect_with_handshake_timeout_and_destination(
         manifest,
         issuer,
         cell,

@@ -131,10 +131,11 @@ A profile selects a wire adapter only. All three converge on the same
 canonical file identity, transfer authority, storage, integrity, retention,
 and audit lifecycle — there is exactly one transfer implementation.
 
-Toward upstreams the gateway is itself a file-transfer client and always emits
-the stateless-native declaration, built in one place
-(`waygate_mcp::files::stateless_client_capability_meta`) so both delivery
-directions and any future draft revision share a single wire shape.
+Toward upstreams the gateway is itself a file-transfer client. It emits a
+request-local declaration on each file authorization request and advertises
+download support on tool and task requests whose authenticated invocation has
+configured file output storage. Both use the shared file-capability builder,
+so transfer authorization and result production agree on the wire shape.
 
 That emission travels as an explicit per-request metadata override, not only in
 the request params. On a leg the upstream negotiated at `2026-07-28` the MCP
@@ -145,7 +146,93 @@ typed capability struct cannot carry the draft's `files` member (the same
 library gap as the initialize-time rows below), so a declaration written only
 into the params reaches such an upstream as an empty capability object. The
 library applies an explicit override after its own stamping, which is why the
-declaration is composed onto the dialed capabilities there.
+declaration is composed with the permitted Tasks and elicitation
+capabilities there.
+
+### File output negotiation for tools and Tasks
+
+This is Waygate's supported SEP-2631 draft interoperability contract, including
+its request-local adaptation for MCP `2026-07-28`. It is not a claim that the
+file-transfer proposal is a ratified MCP requirement.
+
+**Upstream servers:** read the calling host's file capabilities on the current
+request before choosing a file-backed response. The host on this leg is Waygate.
+When its authenticated invocation has a file output processor, Waygate sends
+the following metadata on `tools/call` and native task lifecycle requests,
+including each `tasks/get`. Supported Tasks and elicitation declarations may
+also be present:
+
+```json
+{
+  "_meta": {
+    "io.modelcontextprotocol/clientCapabilities": {
+      "files": {"download": true, "transports": ["https"]}
+    }
+  }
+}
+```
+
+A qualifying cleartext upstream connection adds `"http"` to `transports`;
+[the pinned-destination exception](#streaming-and-local-publication)
+still governs whether a returned descriptor may use it. Protected and stdio
+connections advertise HTTPS only. Download support does not imply upload
+support, permission to return protected data, or acceptance of arbitrary URLs.
+Each authorization request separately declares its required transfer direction.
+
+For tool output, return supported FileValue objects in `structuredContent`:
+
+```json
+{
+  "content": [],
+  "structuredContent": {
+    "files": [{"uri": "mcp-file://example/report", "mimeType": "text/plain"}]
+  }
+}
+```
+
+For a completed task, place that same tool result in the completed task's
+`result` field. Keep the original task identity and required trust labels.
+Implement `files/authorizeDownload` for the returned URI and provide a descriptor
+whose transport agrees with its URL and the advertised capabilities. Waygate
+then downloads, verifies, governs, and publishes the bytes as an owner-scoped
+`mcp-file://gateway/...` reference. No custom report polling method or bypass of
+capability negotiation is needed. An upstream without a usable negotiated
+file path must retain its documented inline behavior or explicitly report that
+file delivery is unavailable; it must not assume a declaration from an earlier
+request applies to this one.
+
+**Downstream clients:** native hosts must declare download support and HTTPS
+on each `files/authorizeDownload` request. A declaration on an earlier tool
+call or task poll does not authorize or negotiate that later request. For
+example, its params are:
+
+```json
+{
+  "uri": "mcp-file://gateway/example-id",
+  "_meta": {
+    "io.modelcontextprotocol/clientCapabilities": {
+      "files": {"download": true, "transports": ["https"]}
+    }
+  }
+}
+```
+
+Clients without native file support receive the same governed reference and
+use `gateway-files.prepare_download` with the `mcp-files` helper. They need not
+claim native capabilities on tool calls or task polls. Waygate advertises its
+own ability upstream independently of that choice; it never copies arbitrary
+downstream claims. Disabled output storage or an anonymous invocation withholds
+the upstream file declaration, even if the client advertises download support.
+A declaration reflects configured support, not a reservation of disk capacity
+or a guarantee that authorization, integrity checks, or transfer will succeed.
+
+Task completion and file delivery are separate outcomes. If delivery of a
+completed task fails, retry `tasks/get` while its ID and upstream file are
+still valid; do not submit the work again. File retention is independent of
+task retention. Initialization-only legacy negotiation, draft file content
+blocks, nested references inside downloaded bytes, and uploads in `tasks/update`
+remain subject to their existing limitations; see the matrix below,
+[result surfaces](#result-surfaces), and [Tasks](agents/tasks.md#upstream-owned-tasks).
 
 ### Version negotiation matrix
 
@@ -160,7 +247,7 @@ self-contained request from its own contents.
 | Stateless caller with request `_meta` declaration | works | request-local capability is authoritative |
 | Legacy-session caller redeclaring in request `_meta` | works | dual-version client path; request-local wins, session state never merged |
 | Legacy-session caller relying only on initialize-time `capabilities.files` | refused with a precise error | the pinned MCP library drops the draft member from its typed initialize capabilities; the refusal names the redeclare-in-`_meta` path |
-| Stateless upstream | works | the gateway emits the request-local declaration on each `files/authorize*`, as a per-request override composed onto the dialed capabilities so the library's own capability stamp cannot replace it |
+| Stateless upstream | works | the gateway emits the declaration on `files/authorize*` and on eligible tool/task requests, using an override that survives the SDK capability stamp |
 | Legacy-session upstream reading per-request `_meta` | works | the same emission travels on the session; the gateway's own downstream edge applies this exact rule, so gateway-to-gateway hops negotiate cleanly |
 | Legacy-session upstream requiring initialize-time client `files` | native route unavailable | the typed client capabilities cannot carry the draft member; the connection-layer seam (`connect_with_capabilities`) is ready for it |
 | Tool-fallback caller | works regardless of the caller's generation | `gateway-files.*` tools replace only the downstream native negotiation; the upstream leg of a later delivery still follows the upstream rows above |

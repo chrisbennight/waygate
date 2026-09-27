@@ -40,7 +40,7 @@ impl FileAuthorizationResponse {
 ///
 /// The declaration is composed onto whatever the dial declared, so a leg that
 /// mirrors a caller capability keeps it.
-fn client_capability_meta(
+pub(super) fn client_capability_meta(
     declared: &ClientCapabilities,
     operation: waygate_mcp::files::FileOperation,
     cleartext_control_plane: bool,
