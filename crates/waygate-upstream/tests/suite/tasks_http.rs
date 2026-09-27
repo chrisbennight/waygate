@@ -73,9 +73,19 @@ impl ServerHandler for Backend {
     }
     async fn call_tool(
         &self,
-        _: CallToolRequestParams,
+        request: CallToolRequestParams,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if request
+            .arguments
+            .as_ref()
+            .is_some_and(|args| args.get("probe") == Some(&json!(true)))
+        {
+            return Ok(CallToolResult::structured(json!({
+                "capabilities": ctx.meta.get(waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY)
+            }))
+            .into());
+        }
         if !ctx
             .client_capabilities()
             .is_some_and(|c| c.supports_tasks())
@@ -92,7 +102,7 @@ impl ServerHandler for Backend {
     async fn get_task(
         &self,
         request: GetTaskParams,
-        _: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<GetTaskResult, ErrorData> {
         assert_eq!(request.task_id, "same-upstream-id");
         let task = self.task();
@@ -101,9 +111,12 @@ impl ServerHandler for Backend {
                 "answer": {"method":"elicitation/create", "params":{"mode":"form","message":"Continue?",
                     "requestedSchema":{"type":"object","properties":{"choice":{"type":"string"}},"required":["choice"]}}}
             })).unwrap() },
-            TaskStatus::Completed => TaskPayload::Completed { result: serde_json::to_value(CallToolResult::structured(if self.label == "file-report" {
+            TaskStatus::Completed => TaskPayload::Completed { result: serde_json::to_value(CallToolResult::structured(if self.label == "file-report"
+                    && ctx.meta.get(waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY)
+                        .is_some_and(|caps| caps["files"]["download"] == true
+                            && caps["files"]["transports"].as_array().is_some_and(|t| t.contains(&json!("http")))) {
                     json!({"report":self.label,"file":{"uri":"mcp-file://fixture/report","mimeType":"text/plain"}})
-                } else { json!({"report":self.label}) })).unwrap().as_object().unwrap().clone() },
+                } else { json!({"report":self.label, "capabilities": ctx.meta.get(waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY)}) })).unwrap().as_object().unwrap().clone() },
             TaskStatus::Cancelled => TaskPayload::Cancelled,
             _ => TaskPayload::Working,
         };
@@ -224,15 +237,27 @@ async fn gateway_with_files(
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("alice")
                     .to_owned();
-                request.extensions_mut().insert(principal(&sub));
+                if sub != "anonymous" {
+                    request.extensions_mut().insert(principal(&sub));
+                }
                 next.run(request).await
             },
         ));
     serve(app).await
 }
 async fn rpc(url: &str, method: &str, mut params: Value, sub: &str, tasks: bool) -> Value {
+    let capabilities = params
+        .pointer("/_meta/io.modelcontextprotocol~1clientCapabilities")
+        .cloned()
+        .unwrap_or_else(|| {
+            if tasks {
+                json!({"extensions":{"io.modelcontextprotocol/tasks":{}},"elicitation":{"form":{}}})
+            } else {
+                json!({})
+            }
+        });
     params["_meta"] = json!({"io.modelcontextprotocol/protocolVersion":"2026-07-28",
-        "io.modelcontextprotocol/clientCapabilities": if tasks {json!({"extensions":{"io.modelcontextprotocol/tasks":{}},"elicitation":{"form":{}}})} else {json!({})}});
+        "io.modelcontextprotocol/clientCapabilities": capabilities});
     let mut request = reqwest::Client::new()
         .post(url)
         .header("accept", "application/json, text/event-stream")
@@ -626,5 +651,119 @@ async fn lifecycle_preserves_argument_dependent_policy_facts_after_gateway_repla
     assert_eq!(upstream.calls.load(Ordering::SeqCst), 1);
     assert_eq!(upstream.updates.load(Ordering::SeqCst), 1);
     worker.abort();
+    upstream_worker.abort();
+}
+
+#[tokio::test]
+async fn file_output_capabilities_belong_to_the_governed_invocation() {
+    struct NoFiles;
+    #[async_trait::async_trait]
+    impl waygate_mcp::files::FileOutputProcessor for NoFiles {
+        async fn prepare(
+            &self,
+            _: waygate_mcp::files::FileOutputContext,
+            result: CallToolResult,
+        ) -> Result<waygate_mcp::files::PreparedFileOutput, ErrorData> {
+            Ok(waygate_mcp::files::PreparedFileOutput {
+                result,
+                batch_id: None,
+                file_count: 0,
+            })
+        }
+        async fn publish(&self, _: &str, _: usize) -> Result<(), ErrorData> {
+            Ok(())
+        }
+        async fn discard(&self, _: &str) {}
+    }
+    let upstream = Backend::new("probe", false);
+    *upstream.state.lock().unwrap() = TaskStatus::Completed;
+    let (url, upstream_worker) = backend(upstream).await;
+    for isolation in ["per_call", "reuse"] {
+        for (enabled, subject) in [(true, "alice"), (false, "alice"), (true, "anonymous")] {
+            let mut selected = manifest("service", &url);
+            selected.session =
+                Some(serde_json::from_value(json!({"isolation": isolation})).unwrap());
+            let files: Option<waygate_mcp::files::SharedFileOutputProcessor> =
+                enabled.then(|| Arc::new(NoFiles) as waygate_mcp::files::SharedFileOutputProcessor);
+            let (gateway, worker) = gateway_with_files(
+                Arc::new(InMemoryTaskRouteStore::default()),
+                BTreeMap::from([("service".into(), selected)]),
+                Arc::new(AllowAllGate),
+                files,
+            )
+            .await;
+            for claims_files in [false, true] {
+                let claims = if claims_files {
+                    json!({
+                        "files": {"upload": true, "download": true, "transports": ["https", "ftp"]},
+                        "extensions": {"unrelated": {}}, "experimental": {"unrelated": {}}
+                    })
+                } else {
+                    json!({})
+                };
+                let response = rpc(
+                    &gateway,
+                    "tools/call",
+                    json!({
+                        "name": "service.work", "arguments": {"probe": true},
+                        "_meta": {"io.modelcontextprotocol/clientCapabilities": claims}
+                    }),
+                    subject,
+                    false,
+                )
+                .await;
+                assert!(response.get("error").is_none(), "{response}");
+                let caps = &response["result"]["structuredContent"]["capabilities"];
+                if enabled && subject != "anonymous" {
+                    assert_eq!(
+                        caps["files"],
+                        json!({"download": true, "transports": ["https", "http"]})
+                    );
+                } else {
+                    assert!(caps.get("files").is_none(), "{caps}");
+                }
+                assert!(caps.get("experimental").is_none(), "{caps}");
+                assert!(
+                    caps.get("extensions")
+                        .is_none_or(|e| e.get("unrelated").is_none()),
+                    "{caps}"
+                );
+                if subject == "alice" {
+                    let created = rpc(
+                        &gateway,
+                        "tools/call",
+                        json!({"name": "service.work"}),
+                        subject,
+                        true,
+                    )
+                    .await;
+                    let id = created["result"]["taskId"].as_str().unwrap();
+                    let completed = rpc(&gateway, "tasks/get", json!({"taskId": id,
+                        "_meta": {"io.modelcontextprotocol/clientCapabilities": {
+                            "extensions": {"io.modelcontextprotocol/tasks": {}, "unrelated": {}},
+                            "elicitation": {"form": {}},
+                            "files": {"upload": true, "download": claims_files, "transports": ["ftp"]}
+                        }}
+                    }), subject, true).await;
+                    let caps = &completed["result"]["result"]["structuredContent"]["capabilities"];
+                    assert_eq!(
+                        caps["extensions"],
+                        json!({"io.modelcontextprotocol/tasks": {}}),
+                        "{completed}"
+                    );
+                    assert_eq!(caps["elicitation"], json!({"form": {}}));
+                    if enabled {
+                        assert_eq!(
+                            caps["files"],
+                            json!({"download": true, "transports": ["https", "http"]})
+                        );
+                    } else {
+                        assert!(caps.get("files").is_none(), "{caps}");
+                    }
+                }
+            }
+            worker.abort();
+        }
+    }
     upstream_worker.abort();
 }

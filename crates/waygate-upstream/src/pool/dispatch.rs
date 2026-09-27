@@ -114,19 +114,19 @@ pub(super) async fn call_tool_once_classified(
     params: CallToolRequestParams,
     timeout: Option<std::time::Duration>,
 ) -> Result<CallToolResponse, ToolCallAttemptError> {
-    call_tool_once_with_capabilities(service, params, None, timeout).await
+    call_tool_once_with_meta(service, params, None, timeout).await
 }
 
-pub(super) async fn call_tool_once_with_capabilities(
+pub(super) async fn call_tool_once_with_meta(
     service: &RunningService<RoleClient, rmcp::model::ClientInfo>,
     params: CallToolRequestParams,
-    capabilities: Option<&ClientCapabilities>,
+    meta: Option<rmcp::model::RequestMetaObject>,
     timeout: Option<std::time::Duration>,
 ) -> Result<CallToolResponse, ToolCallAttemptError> {
     let result = send_once_classified(
         service,
         ClientRequest::CallToolRequest(CallToolRequest::new(params)),
-        capabilities,
+        meta,
         timeout,
     )
     .await?;
@@ -145,19 +145,14 @@ pub(super) async fn call_tool_once_with_capabilities(
 pub(super) async fn send_once_classified(
     service: &RunningService<RoleClient, rmcp::model::ClientInfo>,
     request: ClientRequest,
-    capabilities: Option<&ClientCapabilities>,
+    meta: Option<rmcp::model::RequestMetaObject>,
     timeout: Option<std::time::Duration>,
 ) -> Result<ServerResult, ToolCallAttemptError> {
     let deadline = timeout.and_then(|duration| tokio::time::Instant::now().checked_add(duration));
     let mut options = timeout.map_or_else(PeerRequestOptions::no_options, |duration| {
         PeerRequestOptions::with_timeout(duration).with_max_total_timeout(duration)
     });
-    if let Some(caps) = capabilities {
-        let mut meta = rmcp::model::RequestMetaObject::default();
-        meta.insert(
-            "io.modelcontextprotocol/clientCapabilities".into(),
-            serde_json::to_value(caps).expect("capabilities serialize"),
-        );
+    if let Some(meta) = meta {
         options = options.with_meta(meta);
     }
     let send = service.peer().send_cancellable_request(request, options);
@@ -726,9 +721,9 @@ pub(super) fn legacy_continuation_refusal(
 /// mirrored: sampling and roots are deprecated in MCP 2026-07-28 and the
 /// repo's deprecation posture builds no passthrough for them, and
 /// extension declarations (e.g. the SEP-2663 tasks extension) and
-/// experimental capabilities are the caller's contract with the *gateway* —
-/// advertising any of these upstream would invite responses (a sampling
-/// pause, a task envelope) that the dispatch pipeline must refuse.
+/// experimental capabilities are the caller's contract with the *gateway*.
+/// Request dispatch separately composes admitted Tasks and gateway file
+/// support; neither is inherited from this connection's declaration.
 ///
 /// The decision reads the boot lane's negotiated generation, but each dial
 /// negotiates independently under `protocol: auto` — so the caller MUST
@@ -793,13 +788,10 @@ pub(super) async fn per_call_dial(
     caller: Option<&ClientCapabilities>,
     negotiated_protocol: Option<&str>,
     has_continuation: bool,
-) -> Result<
-    rmcp::service::RunningService<rmcp::RoleClient, rmcp::model::ClientInfo>,
-    crate::transport::DialError,
-> {
+) -> Result<crate::transport::ConnectedService, crate::transport::DialError> {
     let mirrored = mirrored_dial_capabilities(caller, negotiated_protocol);
     if mirrored.is_none() && !has_continuation {
-        return crate::transport::connect(snapshot, issuer, cell, exchange).await;
+        return crate::transport::connect_with_destination(snapshot, issuer, cell, exchange).await;
     }
     crate::transport::connect_with_capabilities(
         &pinned_2026_manifest(snapshot),

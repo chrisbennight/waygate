@@ -234,6 +234,10 @@ pub(super) async fn dispatch(
 
 #[async_trait::async_trait]
 impl CallToolResultProcessor for RetainedResponseProcessor<'_> {
+    fn supports_file_output(&self) -> bool {
+        self.ctx.principal.is_some() && self.service.file_output_processor.is_some()
+    }
+
     async fn process(
         &self,
         result: CallToolResult,

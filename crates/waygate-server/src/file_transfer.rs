@@ -3544,7 +3544,7 @@ mod tests {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService,
     };
-    use rmcp::{RoleClient, RoleServer, ServerHandler, ServiceExt};
+    use rmcp::{RoleClient, RoleServer, ServerHandler};
     use serde_json::json;
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
@@ -3636,12 +3636,52 @@ mod tests {
         upload: Option<AuthorizeUploadResult>,
         imported_arguments: Arc<tokio::sync::Mutex<Option<Map<String, Value>>>>,
         authorization_meta: ObservedAuthorizationMeta,
+        created_at: String,
+    }
+
+    impl PrintableFileUpstream {
+        fn report(&self, context: &RequestContext<RoleServer>) -> CallToolResult {
+            let capabilities = &context.meta.0[CLIENT_CAPABILITIES_META_KEY]["files"];
+            let files = self
+                .results
+                .iter()
+                .filter(|result| {
+                    capabilities["download"] == true
+                        && capabilities["transports"]
+                            .as_array()
+                            .is_some_and(|transports| {
+                                transports.contains(
+                                    &serde_json::to_value(&result.download.transport).unwrap(),
+                                )
+                            })
+                })
+                .map(|result| &result.file)
+                .collect::<Vec<_>>();
+            let mut result = CallToolResult::success(vec![ContentBlock::text("output is ready")]);
+            result.structured_content = Some(json!({"files": files}));
+            result
+        }
+
+        fn task(&self) -> rmcp::model::Task {
+            rmcp::model::Task::new(
+                "render-task",
+                rmcp::model::TaskStatus::Completed,
+                &self.created_at,
+                &self.created_at,
+            )
+            .with_ttl_ms(3600000)
+        }
     }
 
     impl ServerHandler for PrintableFileUpstream {
         fn get_info(&self) -> ServerInfo {
-            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-                .with_server_info(Implementation::new("printable-file-test", "0.0.0"))
+            ServerInfo::new(
+                ServerCapabilities::builder()
+                    .enable_tools()
+                    .enable_tasks()
+                    .build(),
+            )
+            .with_server_info(Implementation::new("printable-file-test", "0.0.0"))
         }
 
         async fn list_tools(
@@ -3695,7 +3735,7 @@ mod tests {
         async fn call_tool(
             &self,
             request: CallToolRequestParams,
-            _context: RequestContext<RoleServer>,
+            context: RequestContext<RoleServer>,
         ) -> Result<CallToolResponse, McpError> {
             if request.name.as_ref() == "import" {
                 *self.imported_arguments.lock().await = request.arguments;
@@ -3703,14 +3743,35 @@ mod tests {
                     CallToolResult::success(vec![ContentBlock::text("file imported")]).into(),
                 );
             }
-            let mut result = CallToolResult::success(vec![ContentBlock::text("output is ready")]);
-            let files = self
-                .results
-                .iter()
-                .map(|result| &result.file)
-                .collect::<Vec<_>>();
-            result.structured_content = Some(json!({"files": files}));
-            Ok(result.into())
+            if context
+                .client_capabilities()
+                .is_some_and(|caps| caps.supports_tasks())
+            {
+                return Ok(CallToolResponse::Task(rmcp::model::CreateTaskResult::new(
+                    self.task(),
+                )));
+            }
+            Ok(self.report(&context).into())
+        }
+
+        async fn get_task(
+            &self,
+            request: rmcp::model::GetTaskParams,
+            context: RequestContext<RoleServer>,
+        ) -> Result<rmcp::model::GetTaskResult, McpError> {
+            assert_eq!(request.task_id, "render-task");
+            Ok(rmcp::model::GetTaskResult::new(
+                rmcp::model::DetailedTask::new(
+                    self.task(),
+                    rmcp::model::TaskPayload::Completed {
+                        result: serde_json::to_value(self.report(&context))
+                            .unwrap()
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    },
+                ),
+            ))
         }
 
         async fn on_custom_request(
@@ -3772,6 +3833,7 @@ mod tests {
             upload,
             imported_arguments: imported_arguments.clone(),
             authorization_meta: authorization_meta.clone(),
+            created_at: format_ts_rfc3339(OffsetDateTime::now_utc()),
         };
         let factory = handler.clone();
         let service = StreamableHttpService::new(
@@ -3793,6 +3855,13 @@ mod tests {
     }
 
     async fn connect_printable(address: std::net::SocketAddr) -> Arc<UpstreamPool> {
+        connect_printable_with_isolation(address, "per_call").await
+    }
+
+    async fn connect_printable_with_isolation(
+        address: std::net::SocketAddr,
+        isolation: &str,
+    ) -> Arc<UpstreamPool> {
         let manifest = UpstreamManifest {
             classification_mode: Default::default(),
             approval_mode: Default::default(),
@@ -3811,7 +3880,7 @@ mod tests {
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,
-            session: None,
+            session: Some(serde_json::from_value(json!({"isolation": isolation})).unwrap()),
         };
         Arc::new(UpstreamPool::connect(BTreeMap::from([("printable".to_owned(), manifest)])).await)
     }
@@ -4887,7 +4956,7 @@ mod tests {
     /// cleartext segment.
     #[tokio::test]
     async fn real_mcp_upstream_file_becomes_a_gateway_reference_without_embedding_bytes() {
-        upstream_file_round_trip(TransferScheme::Https).await;
+        upstream_file_round_trip(TransferScheme::Https, false).await;
     }
 
     /// The same round trip with plaintext descriptors, which is what the pinned
@@ -4901,7 +4970,7 @@ mod tests {
     /// control plane exactly as a private sidecar would.
     #[tokio::test]
     async fn a_pinned_cleartext_upstream_completes_a_plaintext_round_trip() {
-        upstream_file_round_trip(TransferScheme::Http).await;
+        upstream_file_round_trip(TransferScheme::Http, false).await;
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4924,7 +4993,17 @@ mod tests {
         }
     }
 
-    async fn upstream_file_round_trip(scheme: TransferScheme) {
+    #[tokio::test]
+    async fn completed_task_downloads_files_on_a_per_call_connection() {
+        upstream_file_round_trip(TransferScheme::Https, true).await;
+    }
+
+    #[tokio::test]
+    async fn completed_task_downloads_files_on_a_reused_cleartext_connection() {
+        upstream_file_round_trip(TransferScheme::Http, true).await;
+    }
+
+    async fn upstream_file_round_trip(scheme: TransferScheme, task: bool) {
         use sqlx::{migrate::MigrateDatabase, ConnectOptions};
         let Some(parent) = waygate_test_support::pg::audit_pool_or_skip().await else {
             return;
@@ -5087,7 +5166,15 @@ mod tests {
                 }),
             )
             .await;
-        let catalog = connect_printable(upstream_address).await;
+        let catalog = connect_printable_with_isolation(
+            upstream_address,
+            if scheme == TransferScheme::Http {
+                "reuse"
+            } else {
+                "per_call"
+            },
+        )
+        .await;
         let root = tempfile::tempdir().expect("file storage root");
         let storage = Arc::new(
             GatewayFileStorage::new(pool.clone(), root.path())
@@ -5182,7 +5269,11 @@ mod tests {
         let invocation = Arc::new(
             DefaultInvocationService::new(shared_catalog.clone(), authz.clone(), evidence.clone())
                 .with_file_input_processor(Some(processor.clone()))
-                .with_file_output_processor(Some(processor.clone())),
+                .with_file_output_processor(Some(processor.clone()))
+                .with_task_router(Some(Arc::new(waygate_mcp::tasks::TaskRouter::new(
+                    Arc::new(waygate_mcp::tasks::PgTaskRouteStore::new(pool.clone())),
+                    3600,
+                )))),
         );
         let handler = GatewayServer::with_deps(shared_catalog, authz, evidence.clone())
             .with_invocation_service(invocation)
@@ -5211,18 +5302,75 @@ mod tests {
                 "http://{gateway_address}/mcp"
             ))),
         );
+        use rmcp::service::ClientServiceExt as _;
         let client: rmcp::service::RunningService<RoleClient, ClientInfo> = ClientInfo::new(
             ClientCapabilities::default(),
             Implementation::new("file-aware-test-client", "0.0.0"),
         )
-        .serve(transport)
+        .serve_with_lifecycle(
+            transport,
+            if task {
+                rmcp::service::ClientLifecycleMode::Discover {
+                    preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
+                }
+            } else {
+                rmcp::service::ClientLifecycleMode::Initialize
+            },
+        )
         .await
         .expect("connect to gateway MCP server");
 
-        let result = client
-            .call_tool(CallToolRequestParams::new("printable.render"))
-            .await
-            .expect("call printable through production invocation path");
+        let result = if task {
+            let mut meta = rmcp::model::RequestMetaObject::default();
+            meta.insert(
+                CLIENT_CAPABILITIES_META_KEY.into(),
+                json!({
+                    "extensions": {"io.modelcontextprotocol/tasks": {}},
+                    "files": {"download": true, "transports": ["https"]}
+                }),
+            );
+            let created = client
+                .peer()
+                .send_request_with_option(
+                    ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(
+                        CallToolRequestParams::new("printable.render"),
+                    )),
+                    rmcp::service::PeerRequestOptions::no_options().with_meta(meta.clone()),
+                )
+                .await
+                .unwrap()
+                .await_response()
+                .await
+                .unwrap();
+            let ServerResult::CreateTaskResult(created) = created else {
+                panic!("expected a task, got {created:?}");
+            };
+            let completed = client
+                .peer()
+                .send_request_with_option(
+                    ClientRequest::GetTaskRequest(rmcp::model::GetTaskRequest::new(
+                        rmcp::model::GetTaskParams::new(&created.task.task_id),
+                    )),
+                    rmcp::service::PeerRequestOptions::no_options().with_meta(meta),
+                )
+                .await
+                .unwrap()
+                .await_response()
+                .await
+                .unwrap();
+            let ServerResult::GetTaskResult(completed) = completed else {
+                panic!("expected task status, got {completed:?}");
+            };
+            let rmcp::model::TaskPayload::Completed { result } = completed.task.payload else {
+                panic!("expected a completed task");
+            };
+            serde_json::from_value::<CallToolResult>(Value::Object(result)).unwrap()
+        } else {
+            client
+                .call_tool(CallToolRequestParams::new("printable.render"))
+                .await
+                .expect("call printable through production invocation path")
+        };
         assert_eq!(authorized.load(Ordering::SeqCst), 2);
         let visible = serde_json::to_string(&result).expect("serialize tool result");
         assert_eq!(visible.matches("mcp-file://gateway/").count(), 2);
@@ -5636,20 +5784,30 @@ mod tests {
             .contains("requires declared download support"));
         assert!(!observed_native_download.load(Ordering::SeqCst));
 
-        let native_params = json!({
-            "uri": gateway_uri,
-            "_meta": {
-                CLIENT_CAPABILITIES_META_KEY: {
-                    "files": {"download": true, "transports": ["https"]}
-                }
-            }
-        });
+        let native_params = json!({"uri": gateway_uri});
+        let native_options = || {
+            rmcp::service::PeerRequestOptions::no_options().with_meta(
+                rmcp::model::RequestMetaObject(rmcp::model::MetaObject(
+                    waygate_mcp::files::stateless_client_capability_meta(
+                        waygate_mcp::files::FileOperation::Download,
+                    )
+                    .into_iter()
+                    .collect(),
+                )),
+            )
+        };
         let blocked = client
             .peer()
-            .send_request(ClientRequest::CustomRequest(CustomRequest::new(
-                waygate_mcp::files::AUTHORIZE_DOWNLOAD_METHOD,
-                Some(native_params.clone()),
-            )))
+            .send_request_with_option(
+                ClientRequest::CustomRequest(CustomRequest::new(
+                    waygate_mcp::files::AUTHORIZE_DOWNLOAD_METHOD,
+                    Some(native_params.clone()),
+                )),
+                native_options(),
+            )
+            .await
+            .expect("send native download authorization")
+            .await_response()
             .await
             .expect_err("Cedar overlay must block native download authorization");
         assert!(blocked
@@ -5661,10 +5819,16 @@ mod tests {
 
         let authorization = client
             .peer()
-            .send_request(ClientRequest::CustomRequest(CustomRequest::new(
-                waygate_mcp::files::AUTHORIZE_DOWNLOAD_METHOD,
-                Some(native_params),
-            )))
+            .send_request_with_option(
+                ClientRequest::CustomRequest(CustomRequest::new(
+                    waygate_mcp::files::AUTHORIZE_DOWNLOAD_METHOD,
+                    Some(native_params),
+                )),
+                native_options(),
+            )
+            .await
+            .expect("send native download authorization")
+            .await_response()
             .await
             .expect("authorize native file download");
         assert_eq!(native_quota.calls.load(Ordering::SeqCst), 1);
@@ -5781,8 +5945,9 @@ mod tests {
                     .any(|file| target["file_uri"] == file.uri()));
             }
         }
+        let delivery_action = if task { "TaskGet" } else { "CallTool" };
         assert!(evidence.iter().any(|event| {
-            event.action == "CallTool" && event.id.to_string() == ready_invocation_id
+            event.action == delivery_action && event.id.to_string() == ready_invocation_id
         }));
 
         client.cancel().await.expect("stop gateway MCP client");

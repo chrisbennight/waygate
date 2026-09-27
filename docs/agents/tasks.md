@@ -116,6 +116,15 @@ intent; only a subsequent observed `cancelled` status confirms termination.
 Completed task results pass through the existing retained-response reader,
 trust checks, response inspection, schema validation, and governed file plane.
 Polling again after a delivery failure retries retrieval, never tool execution.
+For an authenticated invocation with configured file output storage, tool and
+task dispatch declare Waygate's own file-download capability on every request,
+including terminal `tasks/get`. This is independent of downstream native file
+support: helper clients can consume the resulting gateway reference too.
+Per-call and reused connections use the actual connection's permitted
+transports. Disabled storage and anonymous calls do not advertise file output;
+Tasks and elicitation negotiation retain their existing rules. See the
+[file output interoperability contract](../file-transfer.md#file-output-negotiation-for-tools-and-tasks)
+for upstream requirements, native client metadata, and helper behavior.
 File retention is governed separately from task retention; a task lifetime is
 not a promise that all upstream files will remain available for that duration.
 Annotation-native upstreams provide trust labels on task envelopes and final

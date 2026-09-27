@@ -41,18 +41,34 @@ pub(super) async fn dispatch_once(
     params: rmcp::model::CallToolRequestParams,
     task: Option<&TaskRpc>,
     capabilities: Option<&ClientCapabilities>,
+    file_output: bool,
+    cleartext_control_plane: bool,
     timeout: Option<Duration>,
 ) -> Result<DispatchResponse, dispatch::ToolCallAttemptError> {
-    let mirrored = capabilities.map(task_capabilities);
+    let mirrored = task
+        .map(|task| &task.capabilities)
+        .or(capabilities)
+        .map(task_capabilities);
+    let meta = if file_output {
+        Some(file_transfers::client_capability_meta(
+            mirrored.as_ref().unwrap_or(&service.service().capabilities),
+            waygate_mcp::files::FileOperation::Download,
+            cleartext_control_plane,
+        ))
+    } else {
+        mirrored.map(|caps| {
+            let mut meta = rmcp::model::RequestMetaObject::default();
+            meta.insert(
+                waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY.to_owned(),
+                serde_json::to_value(caps).expect("capabilities serialize"),
+            );
+            meta
+        })
+    };
     let Some(task) = task else {
-        return dispatch::call_tool_once_with_capabilities(
-            service,
-            params,
-            mirrored.as_ref(),
-            timeout,
-        )
-        .await
-        .map(|result| DispatchResponse::Tool(Box::new(result)));
+        return dispatch::call_tool_once_with_meta(service, params, meta, timeout)
+            .await
+            .map(|result| DispatchResponse::Tool(Box::new(result)));
     };
     if task.expires_at <= time::OffsetDateTime::now_utc().unix_timestamp() {
         return Err(dispatch::ToolCallAttemptError {
@@ -65,13 +81,7 @@ pub(super) async fn dispatch_once(
         });
     }
     let request = request(task);
-    let result = dispatch::send_once_classified(
-        service,
-        request,
-        Some(&task_capabilities(&task.capabilities)),
-        timeout,
-    )
-    .await?;
+    let result = dispatch::send_once_classified(service, request, meta, timeout).await?;
     let response = match (&task.action, result) {
         (TaskAction::Get, ServerResult::GetTaskResult(result))
             if result.task.task.task_id == task.task_id

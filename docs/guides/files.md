@@ -37,6 +37,27 @@ The [bundled transfer skill](../../skills/mcp-file-transfer/SKILL.md) gives exac
 helper framing and recovery instructions. A denied helper network call should
 be resolved in the execution host's network permissions.
 
+## Receiving tool and task reports
+
+An upstream may return a file from an ordinary tool call or from a completed
+native task. Waygate advertises its own download support upstream when file
+output storage is configured and the invocation is authenticated. Helper
+clients do not need to advertise native file capabilities to receive these
+references. Disabled storage cannot be enabled by a client's capability claim.
+
+Native clients must include
+`_meta["io.modelcontextprotocol/clientCapabilities"].files` with
+`{"download": true, "transports": ["https"]}` on each
+`files/authorizeDownload` request. A declaration on the earlier tool call or
+task poll is insufficient. Helper clients instead use the prepare/download
+steps above; neither path places the bytes in model context.
+
+A completed task can still encounter a delivery failure. Retry `tasks/get` to
+retrieve its result while the task ID and upstream file remain valid,
+without submitting the work again. A task's lifetime does not extend file
+retention. See the [upstream and client interoperability contract](../file-transfer.md#file-output-negotiation-for-tools-and-tasks)
+for examples, transport constraints, and supported draft limitations.
+
 ## What makes the workflow governed
 
 File ownership, credential-profile restrictions, authorization, expiry,
