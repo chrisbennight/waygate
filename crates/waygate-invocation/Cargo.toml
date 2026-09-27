@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-waygate-core.workspace = true
+waygate-core = { workspace = true, features = ["store"] }
 waygate-oidc.workspace = true
 
 async-trait.workspace = true

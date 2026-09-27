@@ -36,8 +36,8 @@ pub(crate) struct McpServerFactory {
     pub file_input_processor: Option<waygate_mcp::files::SharedFileInputProcessor>,
     pub file_output_processor: Option<waygate_mcp::files::SharedFileOutputProcessor>,
     pub source_file_reader: Option<crate::file_transfer::SharedStoredTextReader>,
-    /// Seals portable upstream Tasks; requires a configured deployment key.
-    pub task_sealer: Option<Arc<waygate_mcp::tasks::TaskSealer>>,
+    /// Resolves upstream Tasks through the shared routing database.
+    pub task_router: Option<Arc<waygate_mcp::tasks::TaskRouter>>,
     /// Seals MRTR continuation state; `None` when no key is configured.
     pub continuation_sealer: Option<Arc<waygate_mcp::invocation::continuation::ContinuationSealer>>,
     /// Authenticates stateless tool-list cursors across request-scoped server
@@ -101,7 +101,7 @@ impl McpServerFactory {
             self.file_input_processor.clone(),
             self.file_output_processor.clone(),
             self.continuation_sealer.clone(),
-            self.task_sealer.clone(),
+            self.task_router.clone(),
             self.schema_validator_cache.clone(),
             self.llm_deps.as_ref().map(crate::llm::deps_as_dyn),
             self.llm_usage_store.clone(),

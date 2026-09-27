@@ -11,9 +11,10 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
-use waygate_mcp::tasks::TaskSealer;
+use waygate_mcp::tasks::TaskRouter;
 use waygate_mcp::{AllowAllGate, DefaultInvocationService, GatewayServer, NullSink};
-use waygate_oidc::{AuthMethod, Principal, SessionKey};
+use waygate_oidc::{AuthMethod, Principal};
+use waygate_test_support::task_routes::InMemoryTaskRouteStore;
 use waygate_upstream::{UpstreamManifest, UpstreamPool};
 
 #[derive(Clone)]
@@ -184,17 +185,20 @@ fn principal(sub: &str) -> Principal {
     }
 }
 async fn gateway(
+    store: Arc<InMemoryTaskRouteStore>,
     manifests: BTreeMap<String, UpstreamManifest>,
 ) -> (String, tokio::task::JoinHandle<()>) {
-    gateway_with_gate(manifests, Arc::new(AllowAllGate)).await
+    gateway_with_gate(store.clone(), manifests, Arc::new(AllowAllGate)).await
 }
 async fn gateway_with_gate(
+    store: Arc<InMemoryTaskRouteStore>,
     manifests: BTreeMap<String, UpstreamManifest>,
     gate: waygate_mcp::SharedAuthz,
 ) -> (String, tokio::task::JoinHandle<()>) {
-    gateway_with_files(manifests, gate, None).await
+    gateway_with_files(store.clone(), manifests, gate, None).await
 }
 async fn gateway_with_files(
+    store: Arc<InMemoryTaskRouteStore>,
     manifests: BTreeMap<String, UpstreamManifest>,
     gate: waygate_mcp::SharedAuthz,
     files: Option<waygate_mcp::files::SharedFileOutputProcessor>,
@@ -203,10 +207,7 @@ async fn gateway_with_files(
     let invocation = Arc::new(
         DefaultInvocationService::new(pool.clone(), gate, Arc::new(NullSink))
             .with_file_output_processor(files)
-            .with_task_sealer(Some(Arc::new(TaskSealer::new(
-                SessionKey::from_bytes([19; 32]),
-                129600,
-            )))),
+            .with_task_router(Some(Arc::new(TaskRouter::new(store, 129600)))),
     );
     let service = StreamableHttpService::new(
         move || Ok(GatewayServer::new(pool.clone()).with_invocation_service(invocation.clone())),
@@ -277,6 +278,7 @@ impl waygate_mcp::AuthzGate for Gate {
 }
 #[tokio::test]
 async fn tasks_survive_gateway_replacement_and_route_colliding_ids_without_reexecution() {
+    let store = Arc::new(InMemoryTaskRouteStore::default());
     let a = Backend::new("alpha-report", true);
     let b = Backend::new("beta-report", false);
     let (a_url, a_worker) = backend(a.clone()).await;
@@ -285,7 +287,7 @@ async fn tasks_survive_gateway_replacement_and_route_colliding_ids_without_reexe
         ("alpha".into(), manifest("alpha", &a_url)),
         ("beta".into(), manifest("beta", &b_url)),
     ]);
-    let (first, worker) = gateway(manifests.clone()).await;
+    let (first, worker) = gateway(store.clone(), manifests.clone()).await;
     let refused = rpc(
         &first,
         "tools/call",
@@ -317,9 +319,11 @@ async fn tasks_survive_gateway_replacement_and_route_colliding_ids_without_reexe
     .await;
     let beta = second_task["result"]["taskId"].as_str().unwrap();
     assert_ne!(alpha, beta);
+    assert_eq!(alpha.len(), 36);
+    assert_eq!(beta.len(), 36);
     worker.abort();
     let gate = Arc::new(Gate(AtomicBool::new(true)));
-    let (second, worker) = gateway_with_gate(manifests.clone(), gate.clone()).await;
+    let (second, worker) = gateway_with_gate(store.clone(), manifests.clone(), gate.clone()).await;
     let denied = rpc(
         &second,
         "tasks/get",
@@ -394,10 +398,10 @@ async fn tasks_survive_gateway_replacement_and_route_colliding_ids_without_reexe
     assert_eq!(b.calls.load(Ordering::SeqCst), 1);
     worker.abort();
     // Reusing a catalog name for a different upstream must not transfer task authority.
-    let (changed, worker) = gateway(BTreeMap::from([(
-        "alpha".into(),
-        manifest("alpha", &b_url),
-    )]))
+    let (changed, worker) = gateway(
+        store.clone(),
+        BTreeMap::from([("alpha".into(), manifest("alpha", &b_url))]),
+    )
     .await;
     let rejected = rpc(
         &changed,
@@ -412,7 +416,7 @@ async fn tasks_survive_gateway_replacement_and_route_colliding_ids_without_reexe
     // An unavailable origin is an operational error, never a fabricated terminal state.
     a_worker.abort();
     let _ = a_worker.await;
-    let (unavailable, worker) = gateway(manifests).await;
+    let (unavailable, worker) = gateway(store.clone(), manifests).await;
     let rejected = rpc(
         &unavailable,
         "tasks/get",
@@ -424,7 +428,7 @@ async fn tasks_survive_gateway_replacement_and_route_colliding_ids_without_reexe
     assert!(rejected.get("error").is_some(), "{rejected}");
     assert!(rejected.get("result").is_none());
     worker.abort();
-    let (removed, worker) = gateway(BTreeMap::new()).await;
+    let (removed, worker) = gateway(store.clone(), BTreeMap::new()).await;
     assert!(rpc(
         &removed,
         "tasks/get",
@@ -441,12 +445,13 @@ async fn tasks_survive_gateway_replacement_and_route_colliding_ids_without_reexe
 
 #[tokio::test]
 async fn prompt_cancellation_reports_observed_termination() {
+    let store = Arc::new(InMemoryTaskRouteStore::default());
     let upstream = Backend::new("report", true);
     let (url, upstream_worker) = backend(upstream).await;
-    let (gateway, worker) = gateway(BTreeMap::from([(
-        "service".into(),
-        manifest("service", &url),
-    )]))
+    let (gateway, worker) = gateway(
+        store.clone(),
+        BTreeMap::from([("service".into(), manifest("service", &url))]),
+    )
     .await;
     let created = rpc(
         &gateway,
@@ -512,6 +517,7 @@ impl waygate_mcp::files::FileOutputProcessor for Files {
 }
 #[tokio::test]
 async fn terminal_file_delivery_can_retry_without_restarting_completed_work() {
+    let store = Arc::new(InMemoryTaskRouteStore::default());
     let upstream = Backend::new("file-report", false);
     *upstream.state.lock().unwrap() = TaskStatus::Completed;
     let (url, upstream_worker) = backend(upstream.clone()).await;
@@ -520,6 +526,7 @@ async fn terminal_file_delivery_can_retry_without_restarting_completed_work() {
         published: AtomicUsize::new(0),
     });
     let (gateway, worker) = gateway_with_files(
+        store.clone(),
         BTreeMap::from([("service".into(), manifest("service", &url))]),
         Arc::new(AllowAllGate),
         Some(files.clone()),
@@ -577,6 +584,7 @@ impl waygate_mcp::AuthzGate for RequestGate {
 
 #[tokio::test]
 async fn lifecycle_preserves_argument_dependent_policy_facts_after_gateway_replacement() {
+    let store = Arc::new(InMemoryTaskRouteStore::default());
     let arguments = json!({"to":["colleague@example.com"],"body":"original message"})
         .as_object()
         .unwrap()
@@ -594,7 +602,7 @@ async fn lifecycle_preserves_argument_dependent_policy_facts_after_gateway_repla
     let upstream = Backend::new("report", true);
     let (url, upstream_worker) = backend(upstream.clone()).await;
     let manifests = BTreeMap::from([("service".into(), manifest("service", &url))]);
-    let (first, worker) = gateway_with_gate(manifests.clone(), gate.clone()).await;
+    let (first, worker) = gateway_with_gate(store.clone(), manifests.clone(), gate.clone()).await;
     let created = rpc(
         &first,
         "tools/call",
@@ -605,7 +613,7 @@ async fn lifecycle_preserves_argument_dependent_policy_facts_after_gateway_repla
     .await;
     let id = created["result"]["taskId"].as_str().unwrap();
     worker.abort();
-    let (second, worker) = gateway_with_gate(manifests, gate.clone()).await;
+    let (second, worker) = gateway_with_gate(store.clone(), manifests, gate.clone()).await;
     let status = rpc(&second, "tasks/get", json!({"taskId":id}), "alice", true).await;
     assert_eq!(status["result"]["status"], "input_required", "{status}");
     let updated = rpc(&second, "tasks/update", json!({"taskId":id,"inputResponses":{"answer":{"result":{"action":"accept","content":{"choice":"continue"}}}}}), "alice", true).await;

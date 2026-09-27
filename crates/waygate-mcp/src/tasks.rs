@@ -1,49 +1,28 @@
-//! Native upstream task routing. Handles contain encrypted routing metadata,
+//! Native upstream task routing. Short IDs resolve durable routing metadata,
 //! never execution state; the upstream remains the lifecycle authority.
 
 use rmcp::model::{ClientCapabilities, Task};
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-use waygate_invocation::{InvocationContractIdentity, TaskAction};
-use waygate_oidc::{
-    session::{self, HasExp, SessionKey},
-    Principal,
-};
+use std::sync::Arc;
+use waygate_invocation::TaskAction;
+use waygate_oidc::Principal;
 
-pub const HANDLE_PREFIX: &str = "waygate-task-v1.";
+pub mod store;
+pub use store::PgTaskRouteStore;
+pub use waygate_invocation::task_routes::{TaskRoute, TaskRouteStore};
+
+pub const HANDLE_PREFIX: &str = "wgt_";
+const LEGACY_HANDLE_PREFIX: &str = "waygate-task-v1.";
+
+pub fn is_upstream_task(handle: &str) -> bool {
+    handle.starts_with(HANDLE_PREFIX) || handle.starts_with(LEGACY_HANDLE_PREFIX)
+}
 pub const DEFAULT_RETENTION_SECONDS: u64 = 36 * 60 * 60;
-const MAX_HANDLE_BYTES: usize = 32 * 1024;
+const MAX_ROUTE_BYTES: usize = 24 * 1024;
 
 #[derive(Clone)]
-pub struct TaskSealer {
-    key: SessionKey,
+pub struct TaskRouter {
+    store: Arc<dyn TaskRouteStore>,
     retention_seconds: u64,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct TaskRoute {
-    kind: String,
-    sub: String,
-    issuer: String,
-    tenant: String,
-    profile: Value,
-    auth_method: String,
-    pub server: String,
-    pub tool: String,
-    pub upstream_id: String,
-    pub binding: String,
-    pub contract: InvocationContractIdentity,
-    /// Only reviewed operation selection is retained, never tool arguments.
-    pub operation_arguments: Map<String, Value>,
-    pub request_facts: waygate_core::RequestFacts,
-    pub created_at: String,
-    pub ttl_ms: u64,
-    pub exp: i64,
-}
-impl HasExp for TaskRoute {
-    fn exp(&self) -> i64 {
-        self.exp
-    }
 }
 
 /// A lifecycle RPC dispatched under the original tool's admitted contract.
@@ -57,15 +36,15 @@ pub struct TaskRpc {
     pub created_at: String,
 }
 
-impl TaskSealer {
-    pub fn new(key: SessionKey, retention_seconds: u64) -> Self {
+impl TaskRouter {
+    pub fn new(store: Arc<dyn TaskRouteStore>, retention_seconds: u64) -> Self {
         Self {
-            key,
+            store,
             retention_seconds,
         }
     }
 
-    pub(crate) fn seal(
+    pub(crate) async fn register(
         &self,
         mut route: TaskRoute,
         task: &mut Task,
@@ -90,33 +69,42 @@ impl TaskSealer {
         if route.upstream_id.is_empty() || route.upstream_id.len() > 4096 {
             return Err(invalid("upstream task identifier is empty or too large"));
         }
-        let encoded = session::encrypt(&self.key, &route)
-            .map_err(|_| invalid("could not protect task routing"))?;
-        let handle = format!("{HANDLE_PREFIX}{encoded}");
-        if handle.len() > MAX_HANDLE_BYTES {
-            return Err(invalid("task routing exceeds the handle size limit"));
+        if serde_json::to_vec(&route)
+            .map_err(|_| invalid("invalid task routing metadata"))?
+            .len()
+            > MAX_ROUTE_BYTES
+        {
+            return Err(invalid("task routing metadata exceeds the size limit"));
         }
+        let id = uuid::Uuid::new_v4();
+        self.store.insert(id, &route).await.map_err(storage_error)?;
+        let handle = format!("{HANDLE_PREFIX}{}", id.simple());
         task.task_id = handle.clone();
         task.ttl_ms = Some(ttl);
         Ok(handle)
     }
 
-    pub(crate) fn open(
+    pub(crate) async fn open(
         &self,
         handle: &str,
         principal: &Principal,
     ) -> Result<TaskRoute, rmcp::ErrorData> {
-        if handle.len() > MAX_HANDLE_BYTES {
+        if handle.starts_with(LEGACY_HANDLE_PREFIX) {
+            return Err(invalid("Legacy task handles are no longer supported; use the originating upstream to recover outstanding work"));
+        }
+        if handle.len() != HANDLE_PREFIX.len() + 32 {
             return Err(not_found());
         }
         let encoded = handle.strip_prefix(HANDLE_PREFIX).ok_or_else(not_found)?;
-        let route: TaskRoute = session::decrypt(&self.key, encoded).map_err(|_| not_found())?;
-        if route.kind != "upstream-task-v1"
-            || route.sub != principal.sub
-            || route.issuer != principal.issuer
-            || route.tenant != principal.tenant.as_str()
-            || route.profile != profile(principal)
-            || route.auth_method != principal.auth_method.as_str()
+        let id = uuid::Uuid::parse_str(encoded).map_err(|_| not_found())?;
+        let route = self
+            .store
+            .get(id, principal.tenant.as_str())
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(not_found)?;
+        if route.exp <= time::OffsetDateTime::now_utc().unix_timestamp()
+            || !route.belongs_to(principal)
         {
             return Err(not_found());
         }
@@ -124,51 +112,15 @@ impl TaskSealer {
     }
 }
 
-impl TaskRoute {
-    pub(crate) fn new(
-        principal: &Principal,
-        server: &str,
-        tool: &str,
-        binding: String,
-        contract: InvocationContractIdentity,
-        operation_arguments: Map<String, Value>,
-        request_facts: waygate_core::RequestFacts,
-    ) -> Self {
-        Self {
-            kind: "upstream-task-v1".into(),
-            sub: principal.sub.clone(),
-            issuer: principal.issuer.clone(),
-            tenant: principal.tenant.as_str().into(),
-            profile: profile(principal),
-            auth_method: principal.auth_method.as_str().into(),
-            server: server.into(),
-            tool: tool.into(),
-            binding,
-            contract,
-            operation_arguments,
-            request_facts,
-            upstream_id: String::new(),
-            created_at: String::new(),
-            ttl_ms: 0,
-            exp: 0,
-        }
-    }
+fn storage_error(error: waygate_core::store::StoreError) -> rmcp::ErrorData {
+    // Database diagnostics can contain metadata; expose only the failure category.
+    tracing::warn!(
+        conflict = matches!(error, waygate_core::store::StoreError::Conflict),
+        "upstream task routing storage operation failed"
+    );
+    rmcp::ErrorData::internal_error("Task routing storage unavailable; upstream work may still be running; do not automatically resubmit the original tool call", None)
 }
 
-fn profile(principal: &Principal) -> Value {
-    principal
-        .api_key_profile_restrictions
-        .as_ref()
-        .map_or(Value::Null, |p| {
-            let mut servers = p.allowed_servers.clone().unwrap_or_default();
-            servers.sort();
-            servers.dedup();
-            let mut tools = p.allowed_tools.clone().unwrap_or_default();
-            tools.sort();
-            tools.dedup();
-            serde_json::json!({"profile_id": p.profile_id, "servers": servers, "tools": tools})
-        })
-}
 pub(crate) fn not_found() -> rmcp::ErrorData {
     invalid("Task not found or no longer accessible")
 }
@@ -224,6 +176,8 @@ pub(crate) fn invocation_error(error: waygate_invocation::InvocationError) -> rm
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
+    use waygate_invocation::InvocationContractIdentity;
     use waygate_invocation::{InvocationContractAuthority, InvocationRisk};
     fn principal() -> Principal {
         Principal {
@@ -264,10 +218,10 @@ mod tests {
             waygate_core::RequestFacts::default(),
         )
     }
-    #[test]
-    fn handles_are_portable_but_bound_to_owner_profile_and_retention() {
-        let key = SessionKey::from_bytes([41; 32]);
-        let sealer = TaskSealer::new(key.clone(), DEFAULT_RETENTION_SECONDS);
+    #[tokio::test]
+    async fn handles_are_short_and_bound_to_owner_profile_and_retention() {
+        let store = Arc::new(waygate_test_support::task_routes::InMemoryTaskRouteStore::default());
+        let router = TaskRouter::new(store.clone(), DEFAULT_RETENTION_SECONDS);
         let p = principal();
         let created = waygate_core::fmt::format_ts_rfc3339(time::OffsetDateTime::now_utc());
         let mut task = Task::new(
@@ -276,24 +230,24 @@ mod tests {
             &created,
             &created,
         )
-        .with_ttl_ms(60000);
-        let handle = sealer.seal(route(&p), &mut task).unwrap();
-        assert_eq!(task.ttl_ms, Some(60000));
-        assert!(!handle.contains("opaque"));
-        let second_replica = TaskSealer::new(key.clone(), DEFAULT_RETENTION_SECONDS);
+        .with_ttl_ms(3_600_000);
+        let handle = router.register(route(&p), &mut task).await.unwrap();
+        assert_eq!(task.ttl_ms, Some(3_600_000));
+        assert_eq!(handle.len(), 36);
+        let second_replica = TaskRouter::new(store.clone(), DEFAULT_RETENTION_SECONDS);
         assert_eq!(
-            second_replica.open(&handle, &p).unwrap().upstream_id,
+            second_replica.open(&handle, &p).await.unwrap().upstream_id,
             "opaque"
         );
         let mut other = p.clone();
         other.sub = "mallory".into();
-        assert!(second_replica.open(&handle, &other).is_err());
+        assert!(second_replica.open(&handle, &other).await.is_err());
         other = p.clone();
         other.issuer = "another-issuer".into();
-        assert!(second_replica.open(&handle, &other).is_err());
+        assert!(second_replica.open(&handle, &other).await.is_err());
         other = p.clone();
         other.tenant = waygate_core::TenantId::parse("other").unwrap();
-        assert!(second_replica.open(&handle, &other).is_err());
+        assert!(second_replica.open(&handle, &other).await.is_err());
         other = p.clone();
         other.api_key_profile_restrictions = Some(waygate_oidc::ApiKeyProfileRestrictions {
             profile_id: "limited".into(),
@@ -301,21 +255,57 @@ mod tests {
             allowed_servers: Some(vec!["server".into()]),
             allowed_tools: None,
         });
-        assert!(second_replica.open(&handle, &other).is_err());
-        assert!(
-            TaskSealer::new(SessionKey::from_bytes([42; 32]), DEFAULT_RETENTION_SECONDS)
-                .open(&handle, &p)
-                .is_err()
-        );
-        let mut expired = second_replica.open(&handle, &p).unwrap();
+        assert!(second_replica.open(&handle, &other).await.is_err());
+        other = p.clone();
+        other.auth_method = waygate_oidc::AuthMethod::ApiKey;
+        assert!(second_replica.open(&handle, &other).await.is_err());
+        let mut expired = second_replica.open(&handle, &p).await.unwrap();
         expired.exp = 1;
-        let expired_handle = format!(
-            "{HANDLE_PREFIX}{}",
-            session::encrypt(&key, &expired).unwrap()
+        let id = uuid::Uuid::new_v4();
+        store.insert(id, &expired).await.unwrap();
+        assert!(router
+            .open(&format!("{HANDLE_PREFIX}{}", id.simple()), &p)
+            .await
+            .is_err());
+        assert!(router.open(&format!("{handle}!"), &p).await.is_err());
+        assert!(router.open("waygate-task-v1.old", &p).await.is_err());
+        // Policy metadata grows in storage, never in the client-visible identifier.
+        let mut large = route(&p);
+        large.request_facts.file_paths = vec!["long/path/".repeat(100)];
+        task.task_id = "upstream-id".into();
+        assert_eq!(
+            router.register(large, &mut task).await.unwrap().len(),
+            handle.len()
         );
-        assert!(sealer.open(&expired_handle, &p).is_err());
-        let mut tampered = handle;
-        tampered.push('!');
-        assert!(sealer.open(&tampered, &p).is_err());
+        let expired_created = "2000-01-01T00:00:00Z";
+        task.created_at = expired_created.into();
+        assert!(router.register(route(&p), &mut task).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn unavailable_storage_returns_an_error_without_publishing_a_task_id() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        pool.close().await;
+        let router = TaskRouter::new(
+            Arc::new(PgTaskRouteStore::new(pool)),
+            DEFAULT_RETENTION_SECONDS,
+        );
+        let p = principal();
+        let handle = format!("{HANDLE_PREFIX}{}", uuid::Uuid::new_v4().simple());
+        assert_eq!(
+            router.open(&handle, &p).await.err().unwrap().code,
+            rmcp::model::ErrorCode::INTERNAL_ERROR
+        );
+        let created = waygate_core::fmt::format_ts_rfc3339(time::OffsetDateTime::now_utc());
+        let mut task = Task::new(
+            "upstream-still-running",
+            rmcp::model::TaskStatus::Working,
+            &created,
+            &created,
+        );
+        assert!(router.register(route(&p), &mut task).await.is_err());
+        assert_eq!(task.task_id, "upstream-still-running");
     }
 }

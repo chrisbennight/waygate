@@ -103,13 +103,13 @@ extending a crate.
 | `waygate-tenants` | Domain | Canonical tenant registry | — |
 | `waygate-federation` | Domain | Tier-C gateway-to-gateway federation: peer registry, JWKS cache, `PeerJwtValidator` | — |
 | `waygate-transfer` | Domain | Short-lived file-transfer grants and credentials, saved-file metadata, streaming file storage, cleanup, and fixed transfer routes | MCP/SEP wire translation (`waygate-mcp`); choosing and running file scanners |
-| `waygate-invocation` | Domain | The `InvocationService` trait and transport-neutral `InvocationRequest` — the seam every per-tool-call hop flows through | The default implementation (`waygate-mcp`) |
+| `waygate-invocation` | Domain | The `InvocationService` trait and transport-neutral `InvocationRequest` — the seam every per-tool-call hop flows through; upstream task route types and persistence seam | The default implementation (`waygate-mcp`) |
 | `waygate-llm-translate` | Domain | OpenAI-shaped client surfaces ↔ provider-neutral canonical model; `InferenceRecord` | Transport (`waygate-llm-providers`) |
 | `waygate-llm-dispatch` | Domain | One LLM call end-to-end: resolve credential → render → invoke → record | — |
 | `waygate-agent` | Domain | The in-process bounded LLM ↔ tool agent loop and its trait seams | The concrete model/dispatch/gate impls (`waygate-agent-runtime`) |
 | `waygate-agent-runtime` | Domain | The concrete impls of `waygate-agent`'s seams: `OpenAiAgentModel`, `UpstreamAgentDispatch`, `ChatApprovalGate`, and the in-chat approval rendezvous | HTML/askama; anything Composition-layer (`waygate-admin` consumes it, never the reverse) |
 | `waygate-authz` | Domain | The Cedar **engine** (`AuthzEngine`), entity model, step-up semantics, break-glass gate | Policy bundle storage (`waygate-policy`); role storage (`waygate-rbac`) |
-| `waygate-mcp` | Domain | MCP protocol surface: canonical governed discovery records over upstream and built-in definitions, standard catalog/dispatch, the versioned gateway-owned closed-draft `searchTools` compatibility adapter, the draft SEP-2640 Skills list/get/resource projection, draft SEP-2631 file types and method translation, the fifteen-stage invocation pipeline, and the trait seams `UpstreamCatalog` / `AuthzGate` | File storage and credentials; retrieval indexes as catalog authority; requiring upstreams to implement compatibility adapters; audit/evidence and inference-seam types (`waygate-evidence` — this crate re-exports them for compat) |
+| `waygate-mcp` | Domain | MCP protocol surface: canonical governed discovery records over upstream and built-in definitions, standard catalog/dispatch, the versioned gateway-owned closed-draft `searchTools` compatibility adapter, the draft SEP-2640 Skills list/get/resource projection, draft SEP-2631 file types and method translation, the fifteen-stage invocation pipeline, durable upstream task routing metadata, and the trait seams `UpstreamCatalog` / `AuthzGate` | File storage and credentials; retrieval indexes as catalog authority; requiring upstreams to implement compatibility adapters; audit/evidence and inference-seam types (`waygate-evidence` — this crate re-exports them for compat) |
 | `waygate-storage` | Domain | Audit/observability persistence: audit sink + hash chain + verification, ECS/OCSF export, retention/rollups/sweeps, syslog/exporter/outbox, LLM cache/usage/budgets/catalog, agent conversations | Audit/evidence domain types (`waygate-evidence`) and emission policy (callers choose required vs best-effort recording) |
 | `waygate-as` | Domain | The optional built-in OAuth 2.1 **Authorization Server**: CIMD client registration, PKCE, consent, and the upstream-session store + refresher implementing the `waygate_oidc::upstream_session` seam | Resource-server validation and the seam's types (`waygate-oidc`, re-exported here for compat) |
 | `waygate-upstream` | Domain | Upstream MCP connection pool: transports (streamable HTTP / SSE / stdio), health, session identity | Manifest types/parsers (`waygate-manifest-types` — re-exported here for compat); manifest *history* (`waygate-manifest-store`) |
@@ -401,11 +401,12 @@ Where each kind of state lives and how it changes:
   refusal state; exact-generation acceptance uses the existing admin action
   registry and preserves manifest authority for annotation-mode hashes.
   See [tool change review](guides/security.md#review-an-upstream-tool-change).
-- **Upstream Tasks** — execution and recovery stay upstream. Encrypted,
-  owner-bound task handles carry routing and contract identity under the shared
-  deployment continuation key, with configurable expiry. Lifecycle requests
-  re-enter current gateway authorization and the existing upstream dispatch
-  gates. No routing database or second execution journal is introduced. See
+- **Upstream Tasks** — execution and recovery stay upstream. Short opaque IDs
+  resolve immutable owner-bound routing records in PostgreSQL, with configurable
+  expiry. The MCP task module owns the routing store and protocol projection;
+  the server wires database availability and periodic metadata cleanup. Lifecycle
+  requests re-enter current gateway authorization and the existing upstream
+  dispatch gates. No second execution journal or polling worker is introduced. See
   [Tasks](agents/tasks.md#upstream-owned-tasks).
 - **In-memory caches** — JWKS (per-issuer in `waygate-oidc`; per-peer with
   a generation fence in `waygate-federation`), session state, the upstream

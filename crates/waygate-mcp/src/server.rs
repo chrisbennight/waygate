@@ -4404,7 +4404,7 @@ impl ServerHandler for GatewayServer {
     ) -> Result<GetTaskResult, McpError> {
         let _client = self.client_context(&ctx);
         let principal = principal_from_ctx(&ctx);
-        if request.task_id.starts_with(crate::tasks::HANDLE_PREFIX) {
+        if crate::tasks::is_upstream_task(&request.task_id) {
             let result = self
                 .invocation
                 .task(
@@ -4500,7 +4500,7 @@ impl ServerHandler for GatewayServer {
     ) -> Result<(), McpError> {
         let _client = self.client_context(&ctx);
         let principal = principal_from_ctx(&ctx);
-        if request.task_id.starts_with(crate::tasks::HANDLE_PREFIX) {
+        if crate::tasks::is_upstream_task(&request.task_id) {
             let result = self
                 .invocation
                 .task(
@@ -4551,7 +4551,7 @@ impl ServerHandler for GatewayServer {
     ) -> Result<(), McpError> {
         let _client = self.client_context(&ctx);
         let principal = principal_from_ctx(&ctx);
-        if request.task_id.starts_with(crate::tasks::HANDLE_PREFIX) {
+        if crate::tasks::is_upstream_task(&request.task_id) {
             let result = self
                 .invocation
                 .task(

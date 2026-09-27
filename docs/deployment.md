@@ -413,8 +413,11 @@ ranges and fallback defaults are defined by the gateway release.
 
 ## Upstream task retention
 
-Native upstream Tasks use `GATEWAY_MRTR_STATE_KEY` to protect portable routing
-handles. Configure the same key on all replicas. Set
+Native upstream Tasks use `GATEWAY_DATABASE_URL` to persist routing metadata
+behind short task IDs. Replicas share that database; no task-routing key is
+required. Without a database, upstream Tasks are disabled while the gateway
+still boots. Drain old encrypted task handles before upgrading; see the
+[transition guide](agents/tasks.md#transition-from-encrypted-handles). Set
 `GATEWAY_UPSTREAM_TASK_RETENTION_SECONDS` to change the default 36-hour lifetime
 from task creation (range: 1–31536000 seconds); a shorter upstream TTL still
 wins. Expiry does not cancel upstream execution. See the
