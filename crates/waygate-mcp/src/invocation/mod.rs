@@ -143,7 +143,7 @@ pub struct DefaultInvocationService {
     file_output_processor: Option<crate::files::SharedFileOutputProcessor>,
     /// Seals this gateway's MRTR continuation state; see [`continuation`].
     continuation_sealer: Option<Arc<continuation::ContinuationSealer>>,
-    task_sealer: Option<Arc<crate::tasks::TaskSealer>>,
+    task_router: Option<Arc<crate::tasks::TaskRouter>>,
     /// The inference-plane dispatch path. When both are `Some`, the
     /// `invoke` fast-path consults the resolver first; a recognized model is
     /// dispatched through the inference plane — reusing the *same* authorize /
@@ -196,7 +196,7 @@ impl DefaultInvocationService {
             file_input_processor: None,
             file_output_processor: None,
             continuation_sealer: None,
-            task_sealer: None,
+            task_router: None,
             llm_dispatcher: None,
             llm_resolver: None,
             llm_usage: None,
@@ -390,7 +390,7 @@ pub fn build_default_invocation_service(
     file_output_processor: Option<crate::files::SharedFileOutputProcessor>,
     // Seals MRTR continuation state; see [`continuation`].
     continuation_sealer: Option<Arc<continuation::ContinuationSealer>>,
-    task_sealer: Option<Arc<crate::tasks::TaskSealer>>,
+    task_router: Option<Arc<crate::tasks::TaskRouter>>,
     // Process-wide admitted-schema validator cache. The composition root
     // passes the same handle to per-session MCP services and the admin try-it
     // service, keeping total residency bounded across all entry points.
@@ -424,7 +424,7 @@ pub fn build_default_invocation_service(
         .with_file_input_processor(file_input_processor)
         .with_file_output_processor(file_output_processor)
         .with_continuation_sealer(continuation_sealer)
-        .with_task_sealer(task_sealer)
+        .with_task_router(task_router)
         .with_schema_validator_cache(schema_validator_cache);
     if let Some((dispatcher, resolver)) = llm {
         service = service.with_llm(dispatcher, resolver);
@@ -663,7 +663,7 @@ impl<'a> InvocationContext<'a> {
 #[async_trait]
 impl InvocationService for DefaultInvocationService {
     fn supports_upstream_tasks(&self) -> bool {
-        self.task_sealer.is_some()
+        self.task_router.is_some()
     }
 
     async fn task(

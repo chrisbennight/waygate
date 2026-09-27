@@ -66,6 +66,7 @@ use thiserror::Error;
 use waygate_oidc::Principal;
 
 pub use waygate_core::InvocationHierarchy;
+pub mod task_routes;
 
 /// Input to [`InvocationService::invoke`]. Carries the parsed
 /// `<server>.<tool>` pair, the JSON arguments (already deserialized from the

@@ -13,6 +13,7 @@ publish.workspace = true
 waygate-admin.workspace = true
 waygate-apikeys.workspace = true
 waygate-core.workspace = true
+waygate-invocation.workspace = true
 waygate-skills.workspace = true
 waygate-manifest-store.workspace = true
 waygate-manifest-types.workspace = true

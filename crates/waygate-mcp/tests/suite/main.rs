@@ -28,4 +28,5 @@ mod llm_dispatch;
 mod quarantine_dispatch;
 mod quota_action_selection;
 mod streamable_http_e2e;
+mod tasks_pg;
 mod waygate_server;

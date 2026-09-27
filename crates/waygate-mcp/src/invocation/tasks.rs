@@ -1,14 +1,14 @@
 //! Governed lifecycle access for upstream-owned Tasks.
 use super::*;
-use crate::tasks::{TaskRoute, TaskRpc, TaskSealer};
+use crate::tasks::{TaskRoute, TaskRouter, TaskRpc};
 use rmcp::model::{ClientCapabilities, CreateTaskResult, TaskPayload};
 use serde_json::{Map, Value};
 use waygate_invocation::{TaskAction, TaskResponse};
 
 impl DefaultInvocationService {
     #[must_use]
-    pub fn with_task_sealer(mut self, sealer: Option<Arc<TaskSealer>>) -> Self {
-        self.task_sealer = sealer;
+    pub fn with_task_router(mut self, router: Option<Arc<TaskRouter>>) -> Self {
+        self.task_router = router;
         self
     }
 
@@ -24,7 +24,7 @@ impl DefaultInvocationService {
         if !requested {
             return Ok(());
         }
-        let binding = if self.task_sealer.is_some() && ctx.principal.is_some() {
+        let binding = if self.task_router.is_some() && ctx.principal.is_some() {
             self.catalog.task_binding(ctx.server).await
         } else {
             None
@@ -79,10 +79,11 @@ impl DefaultInvocationService {
             task.meta.clone(),
         )
         .await?;
-        self.task_sealer
+        self.task_router
             .as_ref()
-            .expect("task admission requires a sealer")
-            .seal(route, &mut task.task)
+            .expect("task admission requires a router")
+            .register(route, &mut task.task)
+            .await
             .map_err(InvocationError::Upstream)?;
         Ok(CallToolResult::success(vec![]))
     }
@@ -113,12 +114,13 @@ impl DefaultInvocationService {
     ) -> Result<TaskResponse, InvocationError> {
         let principal =
             principal.ok_or_else(|| InvocationError::Upstream(crate::tasks::not_found()))?;
-        let sealer = self
-            .task_sealer
+        let router = self
+            .task_router
             .as_ref()
             .ok_or_else(|| InvocationError::Upstream(crate::tasks::not_found()))?;
-        let route = sealer
+        let route = router
             .open(handle, principal)
+            .await
             .map_err(InvocationError::Upstream)?;
         if !capabilities.supports_tasks() {
             return Err(invalid(
@@ -169,7 +171,7 @@ impl DefaultInvocationService {
             return Err(invalid("task's originating tool contract changed; restore the original configuration to access it"));
         }
         self.extract_facts(&mut ctx).await?;
-        // Only the immutable request projection comes from the handle. Identity,
+        // Only the immutable request projection comes from the stored route. Identity,
         // classification, policy, and ambient context are evaluated afresh.
         ctx.pip_facts
             .as_mut()

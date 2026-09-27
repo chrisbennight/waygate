@@ -22,3 +22,4 @@ pub mod mocks;
 pub mod pg;
 
 pub mod skills;
+pub mod task_routes;
