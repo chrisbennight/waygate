@@ -469,9 +469,10 @@ pub fn validate_action_params(action_type: &str, params: &Value) -> Vec<String> 
     match jsonschema::validator_for(&schema) {
         Ok(validator) => validator
             .iter_errors(params)
-            // Payload-safe: surfaces field NAMES + paths + schema rules, never
-            // the offending instance VALUE.
-            .map(|e| waygate_mcp::invocation::sanitize_validation_error(&e))
+            // Payload-safe: surfaces schema-declared names, bounds, permitted
+            // values, and rule paths, never the offending instance VALUE or a
+            // key read from `params`.
+            .map(|e| waygate_mcp::invocation::sanitize_validation_error(&e, Some(&schema)))
             .collect(),
         // A generated schema that won't compile is OUR bug, not the caller's —
         // log and treat as "no schema-level objection".

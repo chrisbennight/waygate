@@ -1119,7 +1119,16 @@ impl DefaultInvocationService {
         // versus `Some(empty)` exactly as the caller supplied it.
         let arguments_were_present = ctx.arguments.is_some();
         let arguments = serde_json::Value::Object(ctx.arguments.take().unwrap_or_default());
-        let validation = check_value_against_validator(&validator, &arguments);
+        // The admitted input schema lets a rejection name the properties the
+        // contract accepts, so a caller that used the wrong spelling can
+        // correct it without re-deriving the contract. Borrowed for the length
+        // of this call only: `ctx.arguments` is already moved out, and the
+        // check returns an owned reason before the arguments are restored.
+        let validation = check_value_against_validator(
+            &validator,
+            &arguments,
+            ctx.tool_snapshot().input_schema(),
+        );
         let serde_json::Value::Object(arguments) = arguments else {
             unreachable!("input arguments are constructed as a JSON object")
         };
@@ -1778,7 +1787,9 @@ impl DefaultInvocationService {
             ResolutionAuthority::SyntheticModel => ("synthetic_model", "none"),
         };
 
-        match check_value_against_validator(validator, structured) {
+        // An output violation is the upstream's contract to fix, not the
+        // caller's, so the accepted-property detail has no audience here.
+        match check_value_against_validator(validator, structured, None) {
             SchemaCheck::Pass => Ok(()),
             SchemaCheck::Violation(reason) => {
                 tracing::info!(

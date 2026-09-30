@@ -1791,7 +1791,8 @@ mod profile_restriction_tests {
 
     fn check_output(schema: &serde_json::Value, structured: &serde_json::Value) -> SchemaCheck {
         let validator = jsonschema::validator_for(schema).expect("test schema must compile");
-        check_value_against_validator(&validator, structured)
+        // Mirrors the output path, which supplies no schema.
+        check_value_against_validator(&validator, structured, None)
     }
 
     #[test]
