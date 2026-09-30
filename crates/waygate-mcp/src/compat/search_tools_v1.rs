@@ -21,8 +21,7 @@ pub const ADAPTER_VERSION: &str = "1";
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchToolsRequest {
-    /// Operation discovery or type-schema lookup. When omitted, `name` selects
-    /// type lookup; otherwise the request searches operations.
+    /// Search operations by default; a supplied `name` selects type lookup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<Mode>,
     /// Optional gateway compatibility filters for operation discovery.
