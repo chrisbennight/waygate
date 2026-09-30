@@ -1,9 +1,8 @@
 //! Version 1 of the gateway-owned legacy `searchTools` compatibility adapter.
 //!
-//! SEP #1888 never became core MCP. These DTOs freeze the gateway's historical
-//! wire contract; upstream servers continue to publish ordinary MCP tools and
-//! do not implement this adapter. A future compatibility change gets a new
-//! module/version rather than silently changing this one.
+//! SEP #1888 never became core MCP. Upstream servers publish ordinary MCP tools
+//! and do not implement this adapter. Request defaults and accepted spellings
+//! live in the same implementation as the advertised contract.
 
 use std::sync::{Arc, OnceLock};
 
@@ -16,16 +15,16 @@ use crate::protocol::RiskTier;
 
 /// Stable internal identity of this gateway-owned compatibility contract.
 pub const ADAPTER_ID: &str = "gateway.search-tools.compat";
-/// Wire-contract version. Increment by adding a sibling module, never by
-/// silently changing the DTOs in this module.
+/// Internal wire-contract identity.
 pub const ADAPTER_VERSION: &str = "1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchToolsRequest {
-    /// Operation discovery or type-schema lookup. Unlike the abandoned draft,
-    /// the frozen gateway contract requires this field.
-    pub mode: Mode,
+    /// Operation discovery or type-schema lookup. When omitted, `name` selects
+    /// type lookup; otherwise the request searches operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<Mode>,
     /// Optional gateway compatibility filters for operation discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filters: Option<OperationFilters>,
@@ -45,9 +44,37 @@ pub struct SearchToolsRequest {
     /// (SEP #1888 / Anthropic Tool-Search progressive disclosure).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<Detail>,
+    #[schemars(skip)]
+    #[serde(default, skip_serializing)]
+    pub query: Option<String>,
 }
 
 impl SearchToolsRequest {
+    pub fn mode(&self) -> Mode {
+        self.mode.unwrap_or(if self.name.is_some() {
+            Mode::Types
+        } else {
+            Mode::Operations
+        })
+    }
+
+    /// Fold accepted query spellings into the canonical filters before search.
+    pub fn normalize(mut self) -> Result<Self, &'static str> {
+        if let Some(query) = self.query.take() {
+            let filters = self.filters.get_or_insert_with(OperationFilters::default);
+            if filters
+                .query
+                .as_ref()
+                .is_some_and(|existing| existing != &query)
+            {
+                return Err("query and filters.query must agree when both are supplied");
+            }
+            filters.query = Some(query);
+        }
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Validate the constraints published by [`input_schema`]. Serde and
     /// schemars share the field shape; this pins the one numeric constraint
     /// that serde alone cannot enforce.
@@ -63,8 +90,10 @@ impl SearchToolsRequest {
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// Search for callable operations.
+    #[serde(alias = "search")]
     Operations,
     /// Resolve one input or output type handle to JSON Schema.
+    #[serde(alias = "describe")]
     Types,
 }
 
@@ -74,8 +103,10 @@ pub enum Mode {
 #[serde(rename_all = "camelCase")]
 pub enum Detail {
     /// Name + risk tier only — the cheapest representation for ranking.
+    #[serde(alias = "names")]
     NameOnly,
     /// Name + description + risk tier.
+    #[serde(alias = "summary")]
     NameDescription,
     /// Every field (current behaviour).
     #[default]
@@ -302,6 +333,64 @@ mod tests {
         let req: SearchToolsRequest =
             serde_json::from_str(r#"{"mode":"operations","detail":"nameOnly"}"#).unwrap();
         assert_eq!(req.detail, Some(Detail::NameOnly));
+    }
+
+    #[test]
+    fn mode_is_inferred_only_when_omitted() {
+        for (value, expected) in [
+            (json!({}), Mode::Operations),
+            (json!({"query": "message"}), Mode::Operations),
+            (json!({"name": "srv.tool#input"}), Mode::Types),
+            (
+                json!({"mode": "operations", "name": "srv.tool#input"}),
+                Mode::Operations,
+            ),
+            (json!({"mode": "search"}), Mode::Operations),
+            (
+                json!({"mode": "describe", "name": "srv.tool#input"}),
+                Mode::Types,
+            ),
+        ] {
+            let request: SearchToolsRequest = serde_json::from_value(value).unwrap();
+            assert_eq!(request.mode(), expected);
+        }
+    }
+
+    #[test]
+    fn query_normalization_preserves_other_filters_and_rejects_conflicts() {
+        let request: SearchToolsRequest = serde_json::from_value(json!({
+            "query": "message", "filters": {"riskLevel": "low", "scope": "read"}
+        }))
+        .unwrap();
+        let request = request.normalize().unwrap();
+        let filters = request.filters.unwrap();
+        assert_eq!(filters.query.as_deref(), Some("message"));
+        assert_eq!(filters.risk_level, Some(RiskTier::Low));
+        assert_eq!(filters.scope.as_deref(), Some("read"));
+
+        for (query, accepted) in [("message", true), ("contact", false)] {
+            let request: SearchToolsRequest = serde_json::from_value(json!({
+                "query": query, "filters": {"query": "message"}
+            }))
+            .unwrap();
+            assert_eq!(request.normalize().is_ok(), accepted);
+        }
+    }
+
+    #[test]
+    fn schema_advertises_optional_mode_and_only_canonical_spellings() {
+        let input = Value::Object((*input_schema()).clone());
+        let validator = jsonschema::validator_for(&input).unwrap();
+        assert!(validator.is_valid(&json!({})));
+        assert!(validator.is_valid(&json!({"name": "srv.tool#input"})));
+        let properties = input["properties"].as_object().unwrap();
+        assert!(!properties.contains_key("query"));
+        for alias in ["search", "describe", "summary", "names"] {
+            assert!(!input.to_string().contains(&format!("\"{alias}\"")));
+        }
+        for value in [json!({"mode": "invalid"}), json!({"detail": "invalid"})] {
+            assert!(serde_json::from_value::<SearchToolsRequest>(value).is_err());
+        }
     }
 
     #[test]
