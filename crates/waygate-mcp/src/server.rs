@@ -1369,7 +1369,7 @@ impl GatewayServer {
                     serde_json::from_value(Value::Object(args)).map_err(|e| {
                         McpError::invalid_params(format!("searchTools args: {e}"), None)
                     })?;
-                req.validate().map_err(|reason| {
+                let req = req.normalize().map_err(|reason| {
                     McpError::invalid_params(
                         format!("searchTools args: {reason}"),
                         Some(json!({
@@ -3438,7 +3438,7 @@ impl GatewayServer {
         principal: Option<&Principal>,
         disclosed: Option<&DisclosedTools>,
     ) -> Result<CallToolResult, McpError> {
-        let result = match req.mode {
+        let result = match req.mode() {
             Mode::Operations => {
                 self.handle_operations(server, &req, principal, disclosed)
                     .await
@@ -3456,7 +3456,7 @@ impl GatewayServer {
         // discovery call. Gated by `GATEWAY_AUDIT_DISCOVERY` (off by
         // default). Records server + outcome + mode; no result payload.
         if self.audit_discovery {
-            let mode = match req.mode {
+            let mode = match req.mode() {
                 Mode::Operations => "operations",
                 Mode::Types => "types",
             };

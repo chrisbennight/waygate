@@ -2481,6 +2481,58 @@ async fn search_tools_operations_filters_by_query() {
 }
 
 #[tokio::test]
+async fn search_tools_defaults_and_aliases_return_the_canonical_result() {
+    let catalog: SharedCatalog = FakeCatalog::new(vec![(
+        "example-messages".into(),
+        vec![
+            tool("send_message", "send a message"),
+            tool("list_contacts", "enumerate contacts"),
+        ],
+    )]);
+    let server = GatewayServer::new(catalog);
+    for (canonical, alternate) in [
+        (json!({"mode": "operations"}), json!({})),
+        (
+            json!({"mode": "operations", "filters": {"query": "contact"}}),
+            json!({"query": "contact"}),
+        ),
+        (
+            json!({"mode": "operations", "filters": {"query": "contact"}, "detail": "nameDescription"}),
+            json!({"mode": "search", "query": "contact", "detail": "summary"}),
+        ),
+        (
+            json!({"mode": "operations", "detail": "nameOnly"}),
+            json!({"detail": "names"}),
+        ),
+        (
+            json!({"mode": "types", "name": "example-messages.send_message#input"}),
+            json!({"name": "example-messages.send_message#input"}),
+        ),
+        (
+            json!({"mode": "types", "name": "example-messages.send_message#input"}),
+            json!({"mode": "describe", "name": "example-messages.send_message#input"}),
+        ),
+    ] {
+        let mut results = Vec::new();
+        for arguments in [canonical, alternate] {
+            results.push(
+                server
+                    .dispatch_tool_call(
+                        CallToolRequestParams::new("example-messages.searchTools")
+                            .with_arguments(obj(arguments)),
+                        None,
+                    )
+                    .await
+                    .expect("search succeeds")
+                    .structured_content,
+            );
+        }
+        assert_eq!(results[0], results[1]);
+        assert!(results[0].is_some());
+    }
+}
+
+#[tokio::test]
 async fn search_tools_types_returns_input_schema() {
     let catalog: SharedCatalog = FakeCatalog::new(vec![(
         "example-messages".into(),
@@ -2552,23 +2604,27 @@ async fn search_tools_types_refuses_quarantined_tool_without_principal() {
     }
 
     let server = GatewayServer::new(Arc::new(QuarantinedTypeCatalog));
-    let error = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools").with_arguments(obj(json!({
-                "mode": "types",
-                "name": "example-messages.quarantined#input"
-            }))),
-            None,
-        )
-        .await
-        .expect_err("auth-disabled dispatch must still enforce runtime quarantine");
+    for arguments in [
+        json!({"mode": "types", "name": "example-messages.quarantined#input"}),
+        json!({"mode": "describe", "name": "example-messages.quarantined#input"}),
+        json!({"name": "example-messages.quarantined#input"}),
+    ] {
+        let error = server
+            .dispatch_tool_call(
+                CallToolRequestParams::new("example-messages.searchTools")
+                    .with_arguments(obj(arguments)),
+                None,
+            )
+            .await
+            .expect_err("auth-disabled dispatch must still enforce runtime quarantine");
 
-    assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-    assert_eq!(
-        error.message,
-        "unknown type: example-messages.quarantined#input"
-    );
-    assert!(error.data.is_none());
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(
+            error.message,
+            "unknown type: example-messages.quarantined#input"
+        );
+        assert!(error.data.is_none());
+    }
 }
 
 /// An upstream tool declaring the FULL self-documenting surface — title, output
