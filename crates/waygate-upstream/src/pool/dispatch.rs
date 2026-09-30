@@ -131,7 +131,15 @@ pub(super) async fn call_tool_once_with_meta(
     )
     .await?;
     match result {
-        ServerResult::CallToolResult(result) => Ok(CallToolResponse::Complete(result)),
+        ServerResult::CallToolResult(mut result) => {
+            // Legacy upstreams omit the discriminator, but the gateway owes
+            // current clients a complete result. The SDK strips this default
+            // again when serializing for a legacy downstream peer.
+            result
+                .result_type
+                .get_or_insert(rmcp::model::ResultType::COMPLETE);
+            Ok(CallToolResponse::Complete(result))
+        }
         ServerResult::InputRequiredResult(result) => Ok(CallToolResponse::InputRequired(result)),
         ServerResult::CreateTaskResult(result) => Ok(CallToolResponse::Task(result)),
         _ => Err(ToolCallAttemptError {
@@ -860,6 +868,75 @@ mod tests {
         assert_eq!(error.phase, ToolCallFailurePhase::PreDispatch);
         assert!(error.phase.dispatch_proven_absent());
         assert!(matches!(error.source, ServiceError::TransportClosed));
+        server_task.await.expect("server task joins");
+    }
+
+    #[derive(Clone)]
+    struct LegacyUpstreamTestServer;
+
+    impl ServerHandler for LegacyUpstreamTestServer {
+        fn get_info(&self) -> rmcp::model::ServerInfo {
+            rmcp::model::ServerInfo::default().with_protocol_version(ProtocolVersion::V_2025_11_25)
+        }
+
+        async fn call_tool(
+            &self,
+            request: CallToolRequestParams,
+            _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        ) -> Result<CallToolResponse, McpError> {
+            let mut result = CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                "legacy upstream reply",
+            )]);
+            result.result_type = None;
+            result.is_error = Some(request.name == "error");
+            result.structured_content = Some(serde_json::json!({"source": "upstream"}));
+            let mut meta = rmcp::model::MetaObject::new();
+            meta.insert("source".to_owned(), serde_json::json!("upstream"));
+            result.meta = Some(meta);
+            Ok(CallToolResponse::Complete(result))
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_upstream_omitting_result_type_is_normalized_to_complete() {
+        let (server_transport, client_transport) = tokio::io::duplex(4096);
+        let server_task = tokio::spawn(async move {
+            let server = LegacyUpstreamTestServer
+                .serve(server_transport)
+                .await
+                .expect("server initializes");
+            server.waiting().await.expect("server worker joins");
+        });
+        let info = ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new("legacy-upstream-test-client", "0.0.0"),
+        )
+        .with_protocol_version(ProtocolVersion::V_2025_11_25);
+        let client = info
+            .serve(client_transport)
+            .await
+            .expect("client initializes");
+
+        for tool in ["read", "error"] {
+            let params = CallToolRequestParams::new(tool);
+            let raw = client
+                .call_tool(params.clone())
+                .await
+                .expect("upstream reply");
+            assert_eq!(raw.result_type, None, "the legacy wire omits resultType");
+
+            let response = call_tool_once_classified(&client, params, None)
+                .await
+                .expect("legacy upstream completes the call");
+            let CallToolResponse::Complete(result) = response else {
+                panic!("expected a complete response: {response:?}");
+            };
+            let mut expected = raw;
+            expected.result_type = Some(rmcp::model::ResultType::COMPLETE);
+            assert_eq!(result, expected, "only the discriminator should change");
+        }
+
+        client.cancel().await.expect("client worker closes");
         server_task.await.expect("server task joins");
     }
 

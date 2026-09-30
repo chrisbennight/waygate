@@ -319,11 +319,11 @@ pub trait UpstreamCatalog: Send + Sync + 'static {
     /// equals this value at the moment the RPC is bound to a connection —
     /// otherwise a catalog/manifest change racing the pipeline could execute
     /// a contract the earlier stages never saw.
-    /// Invoke `<server>.<tool>` on the upstream. Results pass through with
-    /// their `result_type` untouched: a legacy upstream omits the field
-    /// and, per the 2026-07-28 result discriminator's compatibility rule,
-    /// an absent `resultType` MUST be treated as "complete" — no consumer
-    /// may branch on its presence.
+    /// Invoke `<server>.<tool>` on the upstream. Completed results must carry
+    /// `result_type: Some(COMPLETE)` even when a legacy upstream omits it.
+    /// The gateway's client protocol governs its outbound result: the MCP SDK
+    /// strips the discriminator for older clients and preserves it for
+    /// 2026-07-28 clients. Other result fields retain their upstream values.
     async fn call_tool(
         &self,
         server: &str,

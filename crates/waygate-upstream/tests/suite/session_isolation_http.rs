@@ -573,6 +573,69 @@ async fn connect_legacy(
 }
 
 #[tokio::test]
+async fn legacy_upstream_tool_result_has_complete_discriminator_on_current_gateway_wire() {
+    let (upstream_addr, _) = spawn_mock_upstream().await;
+    for isolation in [SessionIsolation::Reuse, SessionIsolation::PerCall] {
+        let catalog: waygate_mcp::catalog::SharedCatalog =
+            Arc::new(connect_legacy(upstream_addr, Some(isolation)).await);
+        let service = StreamableHttpService::new(
+            move || Ok(waygate_mcp::GatewayServer::new(catalog.clone())),
+            LocalSessionManager::default().into(),
+            StreamableHttpServerConfig::default(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("gateway binds");
+        let addr = listener.local_addr().expect("gateway address");
+        let app: Router<()> = Router::new().nest_service("/mcp", service);
+        let gateway = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/mcp"))
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2026-07-28")
+            .header("mcp-method", "tools/call")
+            .header("mcp-name", "mock.noop")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "mock.noop",
+                    "arguments": {},
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                        "io.modelcontextprotocol/clientCapabilities": {},
+                        "io.modelcontextprotocol/clientInfo": {
+                            "name": "result-type-probe",
+                            "version": "0.0.0"
+                        }
+                    }
+                }
+            }))
+            .send()
+            .await
+            .expect("call reaches gateway");
+        assert!(response.status().is_success());
+        let body = response.text().await.expect("response body");
+        let payload = body
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap_or(&body);
+        let message: serde_json::Value = serde_json::from_str(payload).expect("JSON-RPC response");
+        assert_eq!(message["result"]["resultType"], "complete", "{body}");
+        assert_eq!(
+            message["result"]["content"],
+            serde_json::json!([{"type": "text", "text": "ok"}]),
+            "{body}"
+        );
+
+        gateway.abort();
+        assert!(gateway.await.expect_err("gateway cancelled").is_cancelled());
+    }
+}
+
+#[tokio::test]
 async fn negotiated_resource_capability_excludes_tool_only_upstreams() {
     let (resource_addr, _) = spawn_mock_upstream().await;
     let resource_pool = connect_legacy(resource_addr, Some(SessionIsolation::Reuse)).await;

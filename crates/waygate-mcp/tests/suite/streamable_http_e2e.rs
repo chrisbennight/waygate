@@ -1454,24 +1454,32 @@ async fn tasks_client_gets_task_treatment_for_every_enqueueable_tool() {
 /// field for every peer that did not negotiate 2026-07-28 — which is
 /// every session on the legacy path, while 2026-07-28 peers are served
 /// statelessly with the field intact. Pin the legacy wire: neither
-/// `tools/list` nor `resources/list` responses on a session may carry
+/// `tools/list`, `resources/list`, nor `tools/call` responses may carry
 /// `resultType`, so a future SDK regression (or a gateway change that
 /// bypasses the strip) fails here instead of silently changing the
 /// 2025-11-25 wire.
 #[tokio::test]
-async fn legacy_list_responses_carry_no_result_type_on_the_wire() {
+async fn legacy_responses_carry_no_result_type_on_the_wire() {
     let server = spawn_gateway_with_allowed_hosts(vec![ALLOWED_HOST.into()]).await;
     let url = format!("http://{}/mcp", server.addr);
     let client = reqwest::Client::new();
     let session_id = raw_initialize_session(&client, &url).await;
 
-    for (id, method) in [(11, "tools/list"), (12, "resources/list")] {
+    for (id, method, params) in [
+        (11, "tools/list", json!({})),
+        (12, "resources/list", json!({})),
+        (
+            13,
+            "tools/call",
+            json!({"name": "demo.echo", "arguments": {}}),
+        ),
+    ] {
         let resp = client
             .post(&url)
             .header("accept", "application/json, text/event-stream")
             .header("content-type", "application/json")
             .header("mcp-session-id", &session_id)
-            .json(&json!({"jsonrpc": "2.0", "id": id, "method": method}))
+            .json(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
             .send()
             .await
             .expect("POST list request");
