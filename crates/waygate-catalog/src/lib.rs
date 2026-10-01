@@ -29,8 +29,8 @@ mod types;
 
 pub use import::{ImportOperation, ImportServer, ImportStats, ImportTool, ManifestImporter};
 pub use schema_hash::{
-    approval_binding_hash, argument_hash, behavior_hash, manifest_classification_hash, schema_hash,
-    validator_schema_hash, ClassifiedOperation,
+    approval_binding_hash, argument_hash, behavior_hash, canonical_json_hash,
+    manifest_classification_hash, schema_hash, validator_schema_hash, ClassifiedOperation,
 };
 pub use store::{CatalogStore, PgCatalogStore, SharedCatalogStore, TOOL_RESOLUTION_BATCH_SIZE};
 pub use types::{

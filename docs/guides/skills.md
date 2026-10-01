@@ -21,6 +21,15 @@ using `skill_script` and `skill_revision`, plus separate `input`. The gateway
 loads its verified source without a download/re-upload round trip or putting
 the helper text in model context. See [Code Mode](code-mode.md).
 
+Keep the complete load and its `document_hash` together. On another load of
+that URI, pass the hash as `known_document_hash` while retaining any required
+revision pin. An unchanged authorized document returns `unchanged: true`, URI,
+revision, and hash without repeating instructions or the inventory. Changed
+content or caller facts return a complete load with a new hash; unavailable or
+quarantined content is refused. Omit the hash to refresh completely. The gateway
+still verifies source content, approval, policy, profile, and inspection on
+every load, and reuse grants no execution authority.
+
 ## Work through a synthetic source
 
 The [summarize-items skill](../../examples/skills/summarize-items/SKILL.md)

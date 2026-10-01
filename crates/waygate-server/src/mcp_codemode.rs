@@ -919,7 +919,26 @@ impl CodeModeTools {
             .await?
             .ok_or_else(|| unknown_tool(""))?;
         let contract = connector_contract_for_tool(&admitted).ok_or_else(|| unknown_tool(""))?;
-        Ok(structured(&contract))
+        let document_hash = waygate_catalog::canonical_json_hash(
+            "codemode-discovery-document-v1",
+            &serde_json::to_value((&contract, principal)).map_err(|_| {
+                McpError::internal_error("connector response encoding failed", None)
+            })?,
+        );
+        let response = if params.known_document_hash.as_deref() == Some(&document_hash) {
+            DescribeResult::Unchanged {
+                unchanged: true,
+                contract_version: contract.contract_version,
+                binding: contract.binding,
+                document_hash,
+            }
+        } else {
+            DescribeResult::Complete {
+                contract: Box::new(contract),
+                document_hash,
+            }
+        };
+        Ok(structured(&response))
     }
 
     async fn resolve_describe_target(
@@ -5895,7 +5914,11 @@ struct DescribeParams {
     connector: Option<String>,
     /// Exact operation name from `codemode.search.tools[].binding`.
     #[schemars(length(min = 1, max = MAX_SELECTOR_LENGTH))]
+    #[serde(rename = "operation_id", alias = "operation")]
     operation: Option<String>,
+    /// document_hash from a complete description you still hold. A match returns compact unchanged content after fresh authorization and catalog resolution; omit to refresh.
+    #[schemars(length(equal = 64), regex(pattern = r"^[0-9a-f]{64}$"))]
+    known_document_hash: Option<String>,
 }
 
 // The source forms are independent optional properties rather than a
@@ -6453,6 +6476,23 @@ struct DescribeResponse {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(untagged)]
+#[schemars(extend("type" = "object"))]
+enum DescribeResult {
+    Complete {
+        #[serde(flatten)]
+        contract: Box<DescribeResponse>,
+        document_hash: String,
+    },
+    Unchanged {
+        unchanged: bool,
+        contract_version: ContractVersion,
+        binding: ConnectorBinding,
+        document_hash: String,
+    },
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 struct ConnectorBinding {
     /// Exact upstream or gateway-local connector namespace.
     connector: String,
@@ -6989,15 +7029,17 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         Tool::new(
             format!("{NAMESPACE}.describe"),
             "Describe one tool returned by `codemode.search` as a runtime-neutral, versioned \
-             connector contract. Pass `connector` and `operation` from the returned `binding` for \
+             connector contract. Pass `connector` and `operation_id` using the returned binding names for \
              an unambiguous lookup; `name` remains accepted only when it identifies one exact pair. \
              Returns exact admitted input/output schemas, raw connector binding names, governance \
              classification, and catalog or manifest snapshot identity. Denied, restricted, \
-             quarantined, ambiguous, and unknown selectors share one unavailable error shape.",
+             quarantined, ambiguous, and unknown selectors share one unavailable error shape. \
+             If you still hold a complete description, pass its document_hash as known_document_hash \
+             for compact unchanged content after fresh authorization and catalog resolution; omit to refresh.",
             input_schema::<DescribeParams>(),
         )
         .with_title("Describe a Code Mode connector")
-        .with_output_schema::<DescribeResponse>()
+        .with_output_schema::<DescribeResult>()
         .annotate(ToolAnnotations::new().read_only(true).destructive(false)),
         Tool::new(
             format!("{NAMESPACE}.execute"),
@@ -9505,6 +9547,7 @@ mod tests {
             .describe(
                 &principal,
                 DescribeParams {
+                    known_document_hash: None,
                     name: None,
                     connector: Some("email".to_owned()),
                     operation: Some("healthy".to_owned()),
@@ -9543,6 +9586,7 @@ mod tests {
             .describe(
                 &principal,
                 DescribeParams {
+                    known_document_hash: None,
                     name: Some("fixture.conditional".to_owned()),
                     connector: None,
                     operation: None,
@@ -9618,6 +9662,7 @@ mod tests {
             .describe(
                 &principal,
                 DescribeParams {
+                    known_document_hash: None,
                     name: Some("email.malformed".to_owned()),
                     connector: None,
                     operation: None,
@@ -9670,6 +9715,7 @@ mod tests {
             .describe(
                 &principal,
                 DescribeParams {
+                    known_document_hash: None,
                     name: Some("email.read".to_owned()),
                     connector: None,
                     operation: None,
@@ -9868,6 +9914,7 @@ mod tests {
             .describe(
                 &principal,
                 DescribeParams {
+                    known_document_hash: None,
                     name: None,
                     connector: Some("llm.foo".to_owned()),
                     operation: Some("bar".to_owned()),
@@ -9882,6 +9929,7 @@ mod tests {
             .describe(
                 &principal,
                 DescribeParams {
+                    known_document_hash: None,
                     name: Some("llm.foo.bar".to_owned()),
                     connector: None,
                     operation: None,
@@ -9951,6 +9999,7 @@ mod tests {
             .describe(
                 &principal,
                 DescribeParams {
+                    known_document_hash: None,
                     name: None,
                     connector: Some(" mail ".to_owned()),
                     operation: Some(" read ".to_owned()),
@@ -9965,6 +10014,7 @@ mod tests {
             .describe(
                 &principal,
                 DescribeParams {
+                    known_document_hash: None,
                     name: None,
                     connector: Some("mail".to_owned()),
                     operation: Some("read".to_owned()),
@@ -9976,6 +10026,7 @@ mod tests {
             .describe(
                 &principal,
                 DescribeParams {
+                    known_document_hash: None,
                     name: None,
                     connector: Some(oversized_server),
                     operation: Some(oversized_tool),
@@ -10217,6 +10268,7 @@ mod tests {
             tools.describe(
                 &principal,
                 DescribeParams {
+                    known_document_hash: None,
                     name: None,
                     connector: Some("email".to_owned()),
                     operation: Some(tool.to_owned()),
@@ -12619,6 +12671,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn describe_reuses_only_the_current_authorized_complete_document() {
+        let fake = FakeCatalog::with_tools(&[("email", "read", false)]);
+        let catalog: SharedCatalog = Arc::new(fake.clone());
+        let authz: SharedAuthz = Arc::new(SelectiveAuthz);
+        let server = GatewayServer::with_authz(catalog.clone(), authz.clone())
+            .with_builtin_tools(Arc::new(code_mode_tools(catalog, authz)));
+        let principal = reader();
+        let full = server
+            .dispatch_tool_call(
+                call(
+                    "codemode.describe",
+                    json!({"connector":"email","operation_id":"read"}),
+                ),
+                Some(&principal),
+            )
+            .await
+            .unwrap();
+        let hash = full.structured_content.as_ref().unwrap()["document_hash"].clone();
+        let repeated = server
+            .dispatch_tool_call(
+                call(
+                    "codemode.describe",
+                    json!({"connector":"email","operation_id":"read","known_document_hash":hash}),
+                ),
+                Some(&principal),
+            )
+            .await
+            .unwrap();
+        let unchanged = repeated.structured_content.as_ref().unwrap();
+        assert_eq!(unchanged["unchanged"], true);
+        assert_eq!(unchanged["document_hash"], hash);
+        assert!(unchanged.get("input_schema").is_none());
+        assert!(
+            serde_json::to_vec(&repeated).unwrap().len() < serde_json::to_vec(&full).unwrap().len()
+        );
+        let legacy = server
+            .dispatch_tool_call(
+                call(
+                    "codemode.describe",
+                    json!({"connector":"email","operation":"read"}),
+                ),
+                Some(&principal),
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy.structured_content, full.structured_content);
+        assert!(server
+            .dispatch_tool_call(
+                call(
+                    "codemode.describe",
+                    json!({"connector":"email","operation_id":"read","operation":"hidden"})
+                ),
+                Some(&principal)
+            )
+            .await
+            .is_err());
+        let definition = tool_defs()
+            .into_iter()
+            .find(|tool| tool.name == "codemode.describe")
+            .unwrap();
+        assert!(definition.input_schema["properties"]
+            .get("operation")
+            .is_none());
+        assert_eq!(definition.output_schema.as_ref().unwrap()["type"], "object");
+        let validator =
+            jsonschema::validator_for(&Value::Object((*definition.output_schema.unwrap()).clone()))
+                .unwrap();
+        assert!(validator.is_valid(unchanged));
+        assert!(validator.is_valid(full.structured_content.as_ref().unwrap()));
+
+        let mut changed_principal = principal.clone();
+        changed_principal
+            .scopes
+            .push(Scope::McpInvoke.as_str().to_owned());
+        let changed = server
+            .dispatch_tool_call(
+                call(
+                    "codemode.describe",
+                    json!({"name":"email.read","known_document_hash":hash}),
+                ),
+                Some(&changed_principal),
+            )
+            .await
+            .unwrap();
+        assert!(changed
+            .structured_content
+            .as_ref()
+            .unwrap()
+            .get("input_schema")
+            .is_some());
+        assert_ne!(
+            changed.structured_content.as_ref().unwrap()["document_hash"],
+            hash
+        );
+
+        let mut changed_catalog = fake.clone();
+        changed_catalog.replace_input_schema("email","read",json!({"type":"object","properties":{"new_field":{"type":"boolean"}},"required":["new_field"]}));
+        let catalog: SharedCatalog = Arc::new(changed_catalog);
+        let authz: SharedAuthz = Arc::new(SelectiveAuthz);
+        let changed_server = GatewayServer::with_authz(catalog.clone(), authz.clone())
+            .with_builtin_tools(Arc::new(code_mode_tools(catalog, authz)));
+        let changed = changed_server
+            .dispatch_tool_call(
+                call(
+                    "codemode.describe",
+                    json!({"name":"email.read","known_document_hash":hash}),
+                ),
+                Some(&principal),
+            )
+            .await
+            .unwrap();
+        assert!(
+            changed.structured_content.as_ref().unwrap()["input_schema"]["properties"]
+                .get("new_field")
+                .is_some()
+        );
+        assert_ne!(
+            changed.structured_content.as_ref().unwrap()["document_hash"],
+            hash
+        );
+
+        let mut quarantined = fake;
+        quarantined.quarantine("email", "read");
+        let catalog: SharedCatalog = Arc::new(quarantined);
+        let authz: SharedAuthz = Arc::new(SelectiveAuthz);
+        let quarantined_server = GatewayServer::with_authz(catalog.clone(), authz.clone())
+            .with_builtin_tools(Arc::new(code_mode_tools(catalog, authz)));
+        assert!(quarantined_server
+            .dispatch_tool_call(
+                call(
+                    "codemode.describe",
+                    json!({"name":"email.read","known_document_hash":hash})
+                ),
+                Some(&principal)
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn describe_is_hermetic_for_unknown_denied_and_quarantined_tools() {
         let mut fake =
             FakeCatalog::with_tools(&[("email", "hidden", false), ("email", "quarantined", false)]);
@@ -12633,7 +12825,10 @@ mod tests {
         for name in ["email.unknown", "email.hidden", "email.quarantined"] {
             let error = server
                 .dispatch_tool_call(
-                    call("codemode.describe", json!({"name": name})),
+                    call(
+                        "codemode.describe",
+                        json!({"name": name,"known_document_hash":"0".repeat(64)}),
+                    ),
                     Some(&principal),
                 )
                 .await

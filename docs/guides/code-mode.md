@@ -8,7 +8,8 @@ call passes through the same invocation pipeline as a direct MCP call.
 ## Discover before executing
 
 Use `codemode.search` to find an operation and `codemode.describe` to load its
-typed contract. Use the returned connector and operation identifiers exactly;
+typed contract. Pass its binding's connector as `connector` and operation as
+`operation_id`. Use these identifiers exactly;
 a dot inside a name is not a separator to infer. Bindings are synchronous:
 
 ```javascript
@@ -22,6 +23,14 @@ caller. Submit the body in `codemode.execute.source`. For real workflows,
 project only the fields needed for the answer instead of returning whole
 responses. Pass variable data in the separate `input` object and read it as
 `execution.input`; never build source by interpolating untrusted values.
+
+Save the complete description and its `document_hash` together. When you still
+hold that description, supply the hash as `known_document_hash` on the same
+describe request. A matching current contract returns `unchanged: true` with
+its binding and hash, without repeating schemas. A changed contract or caller
+returns the full description and a new hash. Unavailable or unauthorized tools
+remain unavailable. Omit the hash for a complete refresh. This reuses only the
+document you hold; every execution still resolves and authorizes its calls.
 
 Source can also be an owner-scoped uploaded JavaScript file, a retained source
 digest, or a verified skill-script URI. Exactly one source selector is allowed.
