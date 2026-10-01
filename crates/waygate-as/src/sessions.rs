@@ -205,11 +205,7 @@ impl UpstreamSessionStore for PgUpstreamSessionStore {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<SessionMetadata>, SessionStoreError> {
-        // Hard cap: a buggy admin client paging through too aggressively
-        // shouldn't be able to ask the gateway to serialize the whole
-        // table in one shot. 500 is generous for human-driven UI use
-        // and tight enough to bound worst-case JSON payload size.
-        let effective_limit = limit.min(MAX_LIST_LIMIT) as i64;
+        let effective_limit = i64::from(limit);
         let rows = sqlx::query(
             r#"
             SELECT sub, upstream_issuer, key_id, access_expires_at, refreshed_at, created_at

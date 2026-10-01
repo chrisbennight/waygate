@@ -848,7 +848,7 @@ impl ExecutionStore for PgExecutionStore {
         &self,
         owner: &OwnedInFlight,
         before: Option<(OffsetDateTime, Uuid)>,
-        limit: u16,
+        limit: usize,
     ) -> Result<Vec<InFlightExecution>, StoreError> {
         // The confinement predicate uses `->` deliberately: a row whose
         // profile lacks the key yields SQL NULL and matches no caller, which
@@ -897,7 +897,7 @@ impl ExecutionStore for PgExecutionStore {
         .bind(&owner.profile_confinement)
         .bind(before.map(|(submitted_at, _)| submitted_at))
         .bind(before.map(|(_, id)| id))
-        .bind(i64::from(limit))
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -1607,7 +1607,7 @@ impl ExecutionStore for PgExecutionStore {
         tenant_id: &str,
         id: Uuid,
         after_event_id: Option<i64>,
-        limit: u16,
+        limit: usize,
     ) -> Result<Vec<ExecutionArtifact>, StoreError> {
         let rows = sqlx::query(
             r#"
@@ -1629,7 +1629,7 @@ impl ExecutionStore for PgExecutionStore {
         .bind(tenant_id)
         .bind(id)
         .bind(after_event_id)
-        .bind(i64::from(limit))
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(row_to_artifact).collect())

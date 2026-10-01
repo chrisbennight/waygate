@@ -298,3 +298,54 @@ async fn peers_lifecycle_and_isolation() {
         .await
         .expect("cleanup tenants");
 }
+
+#[tokio::test]
+async fn peer_pages_above_the_old_ceiling_preserve_scope() {
+    let Some(pool) = connect().await else {
+        return;
+    };
+    let tenant = seed_tenant(&pool, &format!("counts-{}", Uuid::new_v4())).await;
+    let store = PgFederatedPeersStore::new(pool.clone());
+    for i in 0..551 {
+        store
+            .insert(NewFederatedPeer {
+                tenant_id: &tenant,
+                peer_name: &format!("fixture-{i:03}"),
+                issuer: &format!("https://peer-{i}.example.test"),
+                jwks_url: &format!("https://peer-{i}.example.test/jwks"),
+                trust_tier: TrustTier::Full,
+            })
+            .await
+            .unwrap();
+    }
+    let first = store
+        .list(&tenant, PeerFilter::default(), 550, 0)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 550);
+    assert!(first.iter().all(|row| row.tenant_id == tenant));
+    assert_eq!(
+        store
+            .list(&tenant, PeerFilter::default(), u32::MAX, 0)
+            .await
+            .unwrap()
+            .len(),
+        551
+    );
+    let second = store
+        .list(&tenant, PeerFilter::default(), u32::MAX, 550)
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert!(!first.iter().any(|row| row.id == second[0].id));
+    assert!(store
+        .list("other-tenant", PeerFilter::default(), 550, 0)
+        .await
+        .unwrap()
+        .is_empty());
+    sqlx::query("DELETE FROM tenants WHERE id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+}

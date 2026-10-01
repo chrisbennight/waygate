@@ -130,7 +130,7 @@ pub trait UpstreamSessionStore: Send + Sync + 'static {
     /// `limit` caps the page size so a deployment with millions of
     /// off-key rows doesn't pull the world into memory. The
     /// Postgres impl applies the same `MAX_LIST_LIMIT` hard cap as
-    /// the admin list path.
+    /// the HTTP admin caller.
     ///
     /// `decryptable_key_ids` is the set of keyring ids the current
     /// `UpstreamCrypto` can decrypt under — typically every entry
@@ -159,10 +159,9 @@ pub trait UpstreamSessionStore: Send + Sync + 'static {
     /// bearer envelope is for the gateway's per-call Tier-A path
     /// only, never the admin read surface.
     ///
-    /// `limit` caps how many rows per page. The Postgres impl
-    /// applies a hard upper bound (currently 500) regardless of
-    /// what the caller passes, so a misconfigured admin client
-    /// can't accidentally fetch the whole table.
+    /// `limit` caps how many rows per page. HTTP admin callers apply their
+    /// page budget before calling the store; MCP resource reads honor their
+    /// requested count within the integer parameter range.
     async fn list_all(
         &self,
         limit: u32,

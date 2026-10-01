@@ -3100,6 +3100,45 @@ async fn bare_tool_name_is_rejected() {
 }
 
 #[tokio::test]
+async fn search_tools_keeps_eligible_hits_after_filtering_indexed_tools() {
+    let eligible = tool(
+        "list_contacts",
+        "enumerate contacts and pick a message target",
+    );
+    let withheld = tool("send_message", "send a message to a contact");
+    let index = waygate_mcp::SearchIndex::new().expect("search index init");
+    index
+        .replace_server("example-messages", &[eligible.clone(), withheld])
+        .unwrap();
+    assert_eq!(
+        index
+            .search("example-messages", "message", 1)
+            .unwrap()
+            .unwrap(),
+        vec!["send_message"]
+    );
+    let catalog: SharedCatalog =
+        FakeCatalog::new(vec![("example-messages".into(), vec![eligible])]);
+    let server = GatewayServer::new(catalog).with_index(index);
+    let result = server
+        .dispatch_tool_call(
+            CallToolRequestParams::new("example-messages.searchTools").with_arguments(obj(json!({
+                "mode":"operations", "filters":{"query":"message"}, "limit":usize::MAX
+            }))),
+            None,
+        )
+        .await
+        .unwrap();
+    let content = result.structured_content.unwrap();
+    assert_eq!(content["operations"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        content["operations"][0]["name"],
+        "example-messages.list_contacts"
+    );
+    assert!(content["next_cursor"].is_null());
+}
+
+#[tokio::test]
 async fn search_tools_uses_bm25_index_when_query_present() {
     // Two tools where the query word appears in *both* name and description,
     // but the BM25 signal should still prefer the one whose name is a direct

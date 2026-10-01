@@ -48,6 +48,52 @@ fn live_token(client_id: &str, sub: &str, suffix: u32) -> RefreshToken {
     }
 }
 
+#[tokio::test]
+async fn upstream_session_metadata_pages_honor_large_counts() {
+    use waygate_as::sessions::{PgUpstreamSessionStore, UpstreamSessionStore};
+
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let prefix = format!("count-sessions-{}-", Uuid::new_v4());
+    let issuer = "https://count-fixture.example.test";
+    sqlx::query(
+        "INSERT INTO user_upstream_sessions
+         (sub,upstream_issuer,tokens_ciphertext,key_id,access_expires_at)
+         SELECT $1 || lpad(i::text,4,'0'),$2,$3,'fixture',now()+interval '1 hour'
+         FROM generate_series(1,551) i",
+    )
+    .bind(&prefix)
+    .bind(issuer)
+    .bind(vec![0_u8])
+    .execute(&pool)
+    .await
+    .unwrap();
+    let store = PgUpstreamSessionStore::new(pool.clone());
+    let all = store.list_all(u32::MAX, 0).await.unwrap();
+    assert_eq!(
+        all.iter()
+            .filter(|row| row.sub.starts_with(&prefix))
+            .count(),
+        551
+    );
+    // This operator-global table also contains concurrent test fixtures. Check
+    // page sizes without assuming that other callers keep its offsets stable.
+    let first = store.list_all(550, 0).await.unwrap();
+    assert_eq!(first.len(), 550);
+    let second = store.list_all(1, 550).await.unwrap();
+    assert_eq!(second.len(), 1);
+    assert!(store.list_all(1, u32::MAX).await.unwrap().is_empty());
+    sqlx::query(
+        "DELETE FROM user_upstream_sessions WHERE starts_with(sub,$1) AND upstream_issuer=$2",
+    )
+    .bind(&prefix)
+    .bind(issuer)
+    .execute(&pool)
+    .await
+    .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_and_revoke_by_client_sub_roundtrip() {
     let Some(pool) = connect().await else {

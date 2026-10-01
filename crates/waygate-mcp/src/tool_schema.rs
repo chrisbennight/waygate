@@ -6,7 +6,7 @@
 //! say so explicitly. Keep that protocol check separate from ordinary schema
 //! compilation so publication and invocation enforce the same rule.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use rmcp::model::{JsonObject, Tool};
@@ -177,6 +177,95 @@ pub fn portable_schema_value(schema: &Value) -> Option<Value> {
 /// Project an MCP input schema only when it also declares an object root.
 pub fn portable_input_schema_value(schema: &Value) -> Option<Value> {
     input_schema_value_has_object_root(schema).then(|| portable_schema_value(schema))?
+}
+
+/// Collect declarations applying to the root instance, including compositions
+/// and references. Property-value schemas and unused definitions describe
+/// other instances, so their field names are excluded.
+pub(crate) fn root_property_names(schema: &Value) -> HashSet<&str> {
+    let mut properties = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut resources = HashMap::new();
+    collect_embedded_resources(schema, None, &mut resources);
+    let mut pending = vec![(schema, None, schema)];
+    while let Some((node, parent_base, parent_resource)) = pending.pop() {
+        if !visited.insert(node as *const Value) {
+            continue;
+        }
+        let Some(object) = node.as_object() else {
+            continue;
+        };
+        let base = schema_base(object, parent_base.as_ref());
+        let resource = if object.contains_key("$id") {
+            node
+        } else {
+            parent_resource
+        };
+        if let Some(declared) = object.get("properties").and_then(Value::as_object) {
+            properties.extend(declared.keys().map(String::as_str));
+        }
+        if let Some(patterns) = object.get("patternProperties").and_then(Value::as_object) {
+            for pattern in patterns.keys() {
+                // Match only the fixed envelope spellings with the same regular
+                // expression semantics as the admitted JSON Schema validator.
+                let Ok(validator) = jsonschema::validator_for(&json!({"pattern": pattern})) else {
+                    continue;
+                };
+                for field in [
+                    "operation_id",
+                    "operation",
+                    "name",
+                    "tool",
+                    "arguments",
+                    "args",
+                ] {
+                    if validator.is_valid(&Value::String(field.to_owned())) {
+                        properties.insert(field);
+                    }
+                }
+            }
+        }
+        for keyword in ["allOf", "anyOf", "oneOf"] {
+            if let Some(branches) = object.get(keyword).and_then(Value::as_array) {
+                pending.extend(branches.iter().map(|child| (child, base.clone(), resource)));
+            }
+        }
+        for keyword in ["if", "then", "else", "not"] {
+            if let Some(child) = object.get(keyword) {
+                pending.push((child, base.clone(), resource));
+            }
+        }
+        for keyword in ["dependentSchemas", "dependencies"] {
+            if let Some(branches) = object.get(keyword).and_then(Value::as_object) {
+                pending.extend(
+                    branches
+                        .values()
+                        .filter(|child| child.is_object())
+                        .map(|child| (child, base.clone(), resource)),
+                );
+            }
+        }
+        for reference in REFERENCE_KEYWORDS
+            .iter()
+            .filter_map(|keyword| object.get(*keyword).and_then(Value::as_str))
+        {
+            let target = if let Some(fragment) = reference.strip_prefix('#') {
+                fragment_target(resource, fragment).map(|node| (node, base.clone(), resource))
+            } else {
+                resolve_uri(reference, base.as_ref()).and_then(|resolved| {
+                    let resource = *resources.get(&resource_uri(&resolved))?;
+                    let node = fragment_target(resource, resolved.fragment().unwrap_or(""))?;
+                    let mut resource_base = resolved;
+                    resource_base.set_fragment(None);
+                    Some((node, Some(resource_base), resource))
+                })
+            };
+            if let Some(target) = target {
+                pending.push(target);
+            }
+        }
+    }
+    properties
 }
 
 /// Whether a schema has none of MCP Inspector's portability findings.
@@ -434,18 +523,20 @@ fn reference_target_exists<'a>(
 }
 
 fn fragment_target_exists(resource: &Value, fragment: &str) -> bool {
-    let Some(fragment) = percent_decode_fragment(fragment) else {
-        return false;
-    };
+    fragment_target(resource, fragment).is_some()
+}
+
+fn fragment_target<'a>(resource: &'a Value, fragment: &str) -> Option<&'a Value> {
+    let fragment = percent_decode_fragment(fragment)?;
     if fragment.is_empty() {
-        return true;
+        return Some(resource);
     }
     if fragment.starts_with('/') {
         return resource
             .pointer(&fragment)
-            .is_some_and(|target| target.is_object() || target.is_boolean());
+            .filter(|target| target.is_object() || target.is_boolean());
     }
-    resource_declares_anchor(resource, &fragment, true)
+    resource_anchor(resource, &fragment, true)
 }
 
 fn percent_decode_fragment(fragment: &str) -> Option<String> {
@@ -475,12 +566,10 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn resource_declares_anchor(node: &Value, anchor: &str, resource_root: bool) -> bool {
-    let Some(object) = node.as_object() else {
-        return false;
-    };
+fn resource_anchor<'a>(node: &'a Value, anchor: &str, resource_root: bool) -> Option<&'a Value> {
+    let object = node.as_object()?;
     if !resource_root && object.contains_key("$id") {
-        return false;
+        return None;
     }
     if ["$anchor", "$dynamicAnchor"].iter().any(|keyword| {
         object
@@ -488,9 +577,9 @@ fn resource_declares_anchor(node: &Value, anchor: &str, resource_root: bool) -> 
             .and_then(Value::as_str)
             .is_some_and(|candidate| candidate == anchor)
     }) {
-        return true;
+        return Some(node);
     }
-    subschemas(object).any(|child| resource_declares_anchor(child, anchor, false))
+    subschemas(object).find_map(|child| resource_anchor(child, anchor, false))
 }
 
 fn schema_base(object: &JsonObject, parent_base: Option<&Url>) -> Option<Url> {

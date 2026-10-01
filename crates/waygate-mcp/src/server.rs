@@ -3503,8 +3503,7 @@ impl GatewayServer {
             .filter(|q| !q.trim().is_empty());
 
         // BM25 path: ask the index for a ranked list of tool names, then
-        // reorder the catalog view to match. `limit + 1` gives pagination a
-        // little headroom without fetching the full corpus on every query.
+        // reorder the finite catalog view before applying pagination.
         // The index generation fences the separately-awaited catalog snapshot:
         // a refresh that lands between them forces a retry, and sustained churn
         // falls back to filtering one fresh catalog snapshot without BM25.
@@ -3517,7 +3516,7 @@ impl GatewayServer {
                 for _ in 0..MAX_CATALOG_SNAPSHOT_RETRIES {
                     let generation = idx.generation();
                     let tools = self.catalog.list_tools(server).await?;
-                    let (ranked, fallback) = match idx.search(server, q, 500) {
+                    let (ranked, fallback) = match idx.search(server, q, usize::MAX) {
                         Ok(Some(names)) => (index::reorder_by_names(tools, &names), None),
                         Ok(None) => (
                             tools

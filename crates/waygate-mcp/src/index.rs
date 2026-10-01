@@ -395,9 +395,13 @@ impl SearchIndex {
 
         // `order_by_score` returns an `impl Collector` in tantivy 0.26 —
         // `TopDocs` itself no longer implements Collector directly.
+        // The authoritative catalog can withhold indexed tools. Collect enough
+        // ranked candidates to filter those tools without losing eligible hits,
+        // while bounding the collector by this reader's finite document count.
+        let available = usize::try_from(searcher.num_docs()).unwrap_or(usize::MAX);
         let top = searcher.search(
             &combined,
-            &TopDocs::with_limit(limit.max(1)).order_by_score(),
+            &TopDocs::with_limit(limit.min(available).max(1)).order_by_score(),
         )?;
         let mut names = Vec::with_capacity(top.len());
         for (_score, addr) in top {
@@ -474,10 +478,10 @@ pub fn reorder_by_names(tools: Vec<Tool>, names: &[String]) -> Vec<Tool> {
 pub fn paginate(
     items: Vec<OperationDescriptor>,
     cursor: Option<&str>,
-    limit: Option<u32>,
+    limit: Option<usize>,
 ) -> (Vec<OperationDescriptor>, Option<String>) {
     let start: usize = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
-    let limit = limit.unwrap_or(50).min(500) as usize;
+    let limit = limit.unwrap_or(50);
     let total = items.len();
 
     let page: Vec<_> = items.into_iter().skip(start).take(limit).collect();

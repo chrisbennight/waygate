@@ -31,8 +31,7 @@ use waygate_oidc::{Principal, Scope};
 use crate::mcp_builtin::{schema_obj, structured};
 
 pub const NAMESPACE: &str = waygate_core::DISCOVERY_BUILTIN_NAMESPACE;
-const DEFAULT_LIMIT: u16 = 20;
-const MAX_LIMIT: u16 = 100;
+const DEFAULT_LIMIT: usize = 20;
 const MAX_QUERY_LENGTH: usize = 256;
 const MAX_CURSOR_LENGTH: usize = 1_024;
 const MAX_SUMMARY_TITLE_CHARS: usize = 160;
@@ -139,12 +138,9 @@ impl DiscoveryTools {
                 Some(json!({"error": "invalid_discovery_query"})),
             ));
         }
-        if params
-            .limit
-            .is_some_and(|limit| limit == 0 || limit > MAX_LIMIT)
-        {
+        if params.limit == Some(0) {
             return Err(McpError::invalid_params(
-                "`limit` must be between 1 and 100",
+                "`limit` must be positive",
                 Some(json!({"error": "invalid_discovery_limit"})),
             ));
         }
@@ -159,7 +155,7 @@ impl DiscoveryTools {
             );
             return Err(invalid_cursor());
         }
-        let limit = usize::from(params.limit.unwrap_or(DEFAULT_LIMIT));
+        let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
         let visible = self.stable_visible_tools(principal).await?;
         let ranked = rank_visible_tools(query, visible);
         let cursor_supplied = params.cursor.is_some();
@@ -447,7 +443,8 @@ struct SearchParams {
     query: String,
     /// Maximum number of compact results to return.
     #[serde(default)]
-    limit: Option<u16>,
+    #[schemars(range(min = 1))]
+    limit: Option<usize>,
     /// Opaque continuation returned by the prior page for the same query.
     #[serde(default)]
     cursor: Option<String>,
@@ -1000,6 +997,56 @@ mod tests {
             );
         }
         snapshot
+    }
+
+    #[tokio::test]
+    async fn larger_discovery_counts_select_the_available_authorized_catalog() {
+        let epoch = ToolCatalogEpoch::new();
+        let entries = (0..150)
+            .map(|i| {
+                published_tool(
+                    "inventory",
+                    &format!("lookup{i:04}"),
+                    "fixture inventory lookup",
+                )
+            })
+            .collect();
+        let catalog = Arc::new(PublishedCatalog::new(
+            BTreeMap::from([("inventory".into(), entries)]),
+            epoch.clone(),
+        ));
+        let discovery = DiscoveryTools::new(
+            AuthorizedCatalog::new(catalog, Arc::new(DenyRefund), BuiltinRegistry::default()),
+            epoch,
+        );
+        for (limit, expected) in [(None, 20), (Some(120), 120), (Some(usize::MAX), 150)] {
+            let params = SearchParams {
+                query: "inventory".into(),
+                limit,
+                cursor: None,
+            };
+            let schema = serde_json::to_value(schemars::schema_for!(SearchParams)).unwrap();
+            assert!(schema["properties"]["limit"].get("maximum").is_none());
+            let result = discovery
+                .search(&principal(), params)
+                .await
+                .unwrap()
+                .structured_content
+                .unwrap();
+            assert_eq!(result["tools"].as_array().unwrap().len(), expected);
+            assert_eq!(result.get("next_cursor").is_some(), expected < 150);
+        }
+        assert!(discovery
+            .search(
+                &principal(),
+                SearchParams {
+                    query: "inventory".into(),
+                    limit: Some(0),
+                    cursor: None
+                }
+            )
+            .await
+            .is_err());
     }
 
     #[tokio::test]

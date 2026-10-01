@@ -256,3 +256,55 @@ async fn rules_lifecycle_and_isolation() {
         .await
         .expect("cleanup tenants");
 }
+
+#[tokio::test]
+async fn rule_pages_above_the_old_ceiling_preserve_scope() {
+    let Some(pool) = connect().await else {
+        return;
+    };
+    let tenant = seed_tenant(&pool, &format!("counts-{}", Uuid::new_v4())).await;
+    let store = PgInspectionRulesStore::new(pool.clone());
+    for i in 0..551 {
+        store
+            .insert(NewInspectionRule {
+                tenant_id: &tenant,
+                inspector: InspectorKind::Pii,
+                name: &format!("fixture-{i:03}"),
+                config: &json!({"pattern":"fixture", "label":"FIXTURE"}),
+                applies_to: &json!({}),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+    }
+    let first = store
+        .list(&tenant, RuleFilter::default(), 550, 0)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 550);
+    assert!(first.iter().all(|row| row.tenant_id == tenant));
+    assert_eq!(
+        store
+            .list(&tenant, RuleFilter::default(), u32::MAX, 0)
+            .await
+            .unwrap()
+            .len(),
+        551
+    );
+    let second = store
+        .list(&tenant, RuleFilter::default(), u32::MAX, 550)
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert!(!first.iter().any(|row| row.id == second[0].id));
+    assert!(store
+        .list("other-tenant", RuleFilter::default(), 550, 0)
+        .await
+        .unwrap()
+        .is_empty());
+    sqlx::query("DELETE FROM tenants WHERE id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+}

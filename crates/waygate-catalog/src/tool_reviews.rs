@@ -79,12 +79,24 @@ impl PgCatalogStore {
             .bind(tenant).bind(server).fetch_all(&self.pool).await?)
     }
     pub async fn pending(&self, tenant: &str) -> Result<Vec<ToolReview>, CatalogError> {
+        self.pending_page(tenant, 50, 0).await
+    }
+
+    pub async fn pending_page(
+        &self,
+        tenant: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<ToolReview>, CatalogError> {
         let names: Vec<(String, String)> = sqlx::query_as(
             "SELECT s.name,t.name FROM tool_contract_reviews r
              JOIN mcp_tools t ON t.id=r.tool_id JOIN mcp_servers s ON s.id=t.server_id
-             WHERE s.tenant_id=$1 AND r.quarantined ORDER BY r.observed_at DESC LIMIT 50",
+             WHERE s.tenant_id=$1 AND r.quarantined
+             ORDER BY r.observed_at DESC,r.tool_id LIMIT $2 OFFSET $3",
         )
         .bind(tenant)
+        .bind(i64::from(limit))
+        .bind(i64::from(offset))
         .fetch_all(&self.pool)
         .await?;
         let mut result = Vec::new();

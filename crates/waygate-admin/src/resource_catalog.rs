@@ -400,14 +400,11 @@ async fn list_tool_contract_reviews(
 ) -> Result<ReadPage, ReadError> {
     cap(&state.servers.tool_reviews)?;
     let selector = parse_filters("tool_contract_review", filters)?;
-    let context = crate::tool_reviews::read_context(state, tenant, selector)
+    let context = crate::tool_reviews::read_context_page(state, tenant, selector, limit, offset)
         .await
         .map_err(|error| store_err("tool_contract_review", error.detail()))?;
     Ok(ReadPage {
-        rows: page(context.reviews, offset, limit)
-            .into_iter()
-            .map(to_value)
-            .collect(),
+        rows: context.reviews.into_iter().map(to_value).collect(),
         limit,
         offset,
     })

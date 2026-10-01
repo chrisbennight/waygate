@@ -66,6 +66,9 @@ struct GrantFakeCatalog {
     /// imported. Effectfulness for such tools comes from reviewed annotations at
     /// dispatch, not this flag.
     annotation_native: bool,
+    input_schema: Option<Value>,
+    discriminator: Option<String>,
+    schema_hash: String,
     grants: Mutex<Vec<ApprovalGrant>>,
 }
 
@@ -78,6 +81,9 @@ impl GrantFakeCatalog {
             live_schema_override: None,
             requires_approval: true,
             annotation_native: false,
+            input_schema: None,
+            discriminator: None,
+            schema_hash: "h".into(),
             grants: Mutex::new(Vec::new()),
         }
     }
@@ -105,20 +111,20 @@ impl GrantFakeCatalog {
 
     fn tool(&self) -> ToolDefinition {
         ToolDefinition {
-            discriminator: None,
+            discriminator: self.discriminator.clone(),
             operations: Vec::new(),
             tool_id: self.tool_id,
             server_id: self.server_id,
             server_name: "example-messages".into(),
             tool_name: "send".into(),
-            schema_hash: "h".into(),
+            schema_hash: self.schema_hash.clone(),
             description: "".into(),
             classification_mode: if self.annotation_native {
                 "mcp_annotations".into()
             } else {
                 "manifest".into()
             },
-            input_schema: None,
+            input_schema: self.input_schema.clone(),
             output_schema: None,
             tool_annotations: None,
             action_metadata: None,
@@ -525,7 +531,7 @@ impl ExecutionStore for GrantFakeExecutionStore {
         _tenant_id: &str,
         _id: Uuid,
         _after_event_id: Option<i64>,
-        _limit: u16,
+        _limit: usize,
     ) -> Result<Vec<ExecutionArtifact>, StoreError> {
         unreachable!("approval route tests do not list artifacts")
     }
@@ -565,7 +571,11 @@ async fn state_with_execution(
     catalog: Option<SharedCatalogStore>,
     executions: Option<SharedExecutionStore>,
 ) -> Arc<AdminState> {
-    let pool = Arc::new(UpstreamPool::connect(BTreeMap::new()).await);
+    let mut pool = UpstreamPool::connect(BTreeMap::new()).await;
+    if let Some(catalog) = catalog.as_ref() {
+        pool = pool.with_catalog(catalog.clone());
+    }
+    let pool = Arc::new(pool);
     Arc::new(
         AdminState::new(
             pool,
@@ -985,6 +995,200 @@ async fn mint_grant_persists_and_argument_hash_matches() {
     assert_eq!(v["principal_sub"].as_str().unwrap(), "alice@example.com");
     assert_eq!(v["reason"].as_str().unwrap(), "ticket #42");
     assert!(v["consumed_at"].is_null());
+}
+
+#[tokio::test]
+async fn mint_grant_normalizes_aliases_and_refuses_duplicates_before_storage() {
+    let catalog = Arc::new(GrantFakeCatalog {
+        input_schema: Some(json!({
+            "type":"object", "properties":{
+                "operation_id":{"type":"string"}, "arguments":{"type":"object"}
+            }
+        })),
+        discriminator: Some("operation_id".into()),
+        ..GrantFakeCatalog::new(true)
+    });
+    let shared: SharedCatalogStore = catalog.clone();
+    let app = api_router(state_with(Some(shared)).await);
+    let expected = waygate_catalog::approval_binding_hash(
+        "h",
+        &waygate_catalog::argument_hash(Some(
+            json!({"operation_id":"messages.send","arguments":{"name":"business"}})
+                .as_object()
+                .unwrap(),
+        )),
+    );
+    for arguments in [
+        json!({"operation_id":"messages.send","arguments":{"name":"business"}}),
+        json!({"name":"messages.send","args":{"name":"business"}}),
+        json!({"operation":"messages.send","args":{"name":"business"}}),
+        json!({"tool":"messages.send","arguments":{"name":"business"}}),
+    ] {
+        let response = app.clone().oneshot(post_json(
+            "/api/v1/admin/approval_grants",
+            &json!({"principal_sub":"alice@example.com", "principal_issuer":"https://issuer.test",
+                "tool":"example-messages.send", "behavior_hash":"h", "arguments":arguments}),
+            &["mcp:admin"]
+        )).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(body_json(response).await["argument_hash"], expected);
+    }
+    let granted = catalog.grants.lock().unwrap().len();
+    for arguments in [
+        json!({"operation_id":"messages.send","name":"messages.send","arguments":{}}),
+        json!({"name":"messages.send","operation":"messages.send","args":{}}),
+        json!({"operation_id":"messages.send","arguments":{},"args":{}}),
+    ] {
+        let response = app.clone().oneshot(post_json(
+            "/api/v1/admin/approval_grants",
+            &json!({"principal_sub":"alice@example.com", "principal_issuer":"https://issuer.test",
+                "tool":"example-messages.send", "behavior_hash":"h", "arguments":arguments}),
+            &["mcp:admin"]
+        )).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!body_json(response)
+            .await
+            .to_string()
+            .contains("messages.send"));
+        assert_eq!(catalog.grants.lock().unwrap().len(), granted);
+    }
+}
+
+#[derive(Clone)]
+struct ApprovalEnvelopeUpstream;
+
+impl rmcp::ServerHandler for ApprovalEnvelopeUpstream {
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        rmcp::model::ServerInfo::new(
+            rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+        )
+        .with_server_info(rmcp::model::Implementation::new(
+            "approval-envelope-fixture",
+            "1",
+        ))
+        .with_protocol_version(rmcp::model::ProtocolVersion::LATEST)
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        Ok(rmcp::model::ListToolsResult::with_all_items(vec![
+            rmcp::model::Tool::new(
+                "send",
+                "Synthetic approval envelope",
+                json!({"type":"object","properties":{
+                    "operation_id":{"type":"string"},"arguments":{"type":"object"}
+                }})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        ]))
+    }
+}
+
+#[tokio::test]
+async fn mint_imported_grant_normalizes_with_the_published_input_contract() {
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+    let service = StreamableHttpService::new(
+        || Ok(ApprovalEnvelopeUpstream),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default().with_legacy_session_mode(true),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, axum::Router::new().nest_service("/mcp", service))
+            .await
+            .unwrap();
+    });
+    let behavior_hash = waygate_catalog::manifest_classification_hash(
+        "send",
+        "high",
+        true,
+        false,
+        Some("operation_id"),
+        &[],
+    );
+    let catalog = Arc::new(GrantFakeCatalog {
+        discriminator: Some("operation_id".into()),
+        schema_hash: behavior_hash.clone(),
+        ..GrantFakeCatalog::new(true)
+    });
+    assert!(
+        catalog.input_schema.is_none(),
+        "imported versions have no stored input schema"
+    );
+    let mut manifest = waygate_test_support::admin::example_messages_manifest();
+    manifest.url = Some(format!("http://{address}/mcp"));
+    let mut classification = waygate_upstream::ToolClassification::new(
+        "send",
+        waygate_core::RiskTier::High,
+        true,
+        false,
+    );
+    classification.discriminator = Some("operation_id".into());
+    manifest.tools = vec![classification];
+    let shared: SharedCatalogStore = catalog.clone();
+    let pool = UpstreamPool::connect(BTreeMap::from([(manifest.name.clone(), manifest)]))
+        .await
+        .with_catalog(shared.clone());
+    let state = Arc::new(AdminState::new(
+        Arc::new(pool),
+        None,
+        None,
+        AdminState::null_evidence(),
+        None,
+        None,
+        None,
+        Some(shared),
+        "http://127.0.0.1:0".into(),
+    ));
+    let app = api_router(state);
+    let expected = waygate_catalog::approval_binding_hash(
+        &behavior_hash,
+        &waygate_catalog::argument_hash(Some(
+            json!({
+                "operation_id":"messages.send", "arguments":{"name":"business"}
+            })
+            .as_object()
+            .unwrap(),
+        )),
+    );
+    for arguments in [
+        json!({"name":"messages.send","args":{"name":"business"}}),
+        json!({"operation_id":"messages.send","arguments":{"name":"business"}}),
+    ] {
+        let response = app.clone().oneshot(post_json(
+            "/api/v1/admin/approval_grants", &json!({
+                "principal_sub":"alice@example.com", "principal_issuer":"https://issuer.test",
+                "tool":"example-messages.send", "behavior_hash":behavior_hash, "arguments":arguments,
+            }), &["mcp:admin"],
+        )).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(body_json(response).await["argument_hash"], expected);
+    }
+    let response = app
+        .oneshot(post_json(
+            "/api/v1/admin/approval_grants",
+            &json!({
+                "principal_sub":"alice@example.com", "principal_issuer":"https://issuer.test",
+                "tool":"example-messages.send", "behavior_hash":behavior_hash,
+                "arguments":{"name":"messages.send","operation_id":"messages.send","args":{}},
+            }),
+            &["mcp:admin"],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(catalog.grants.lock().unwrap().len(), 2);
+    server.abort();
 }
 
 #[tokio::test]

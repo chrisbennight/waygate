@@ -25,6 +25,10 @@ saturate to that range. Resource reads retain their per-resource scope gates;
 change lists paginate only over the caller's own requests. HTTP endpoints retain
 their existing pagination budgets.
 
+The listing selectors in `gateway-admin.get_action_context` also default to 50
+items and honor positive explicit counts. Manifest names, policy IDs, publish
+candidates, and rollback candidates retain their stable ordering and offsets.
+
 ## Prepare a concrete proposal
 
 1. Call `gateway-admin.describe_action` to discover the available actions.

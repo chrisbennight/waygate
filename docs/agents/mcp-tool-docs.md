@@ -152,6 +152,15 @@ Every built-in tool definition must satisfy all seven:
 
 ## Polymorphic inputs: the `describe_action` pattern
 
+For upstream operation envelopes, publish `operation_id` and `arguments` as the
+canonical fields. Use the same selector for per-operation classification. The
+gateway accepts undeclared selector spellings at an admitted envelope's root
+and normalizes them before schema validation, policy, approval hashing, and
+dispatch. It rejects duplicate spellings even when their values agree. Declared
+business fields and nested arguments retain their meaning. Do not advertise
+these accepted spellings in schemas or examples. See the
+[upstream envelope guide](tool-envelopes.md) for authoring and count handling.
+
 The recurring trap is `propose_change`, whose `params` shape is keyed by
 `action_type`. Do **not** inline a 22-branch `oneOf` into the `tools/list` schema
 (it loads every variant into every client's context on connect — the exact bloat

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use waygate_core::page::{default_list_limit, MAX_LIST_LIMIT};
+use waygate_core::page::default_list_limit;
 use waygate_core::TenantId;
 use waygate_manifest_store::{
     ManifestBundle, ManifestBundleSummary, ManifestError, ManifestHistoryFilter, ManifestStatus,
@@ -167,7 +167,7 @@ pub struct LiveManifestContext {
     pub total: u32,
     /// Stable, alphabetically sorted page of live server names.
     pub server_names: Vec<String>,
-    /// Effective page size after clamping the requested limit.
+    /// Positive page size selected by the caller.
     pub limit: u32,
     /// Zero-based item offset requested by the caller.
     pub offset: u32,
@@ -189,7 +189,7 @@ pub struct LivePolicyContext {
     pub total: u32,
     /// Stable page of addressable `@id` values in source order.
     pub policy_ids: Vec<String>,
-    /// Effective page size after clamping the requested limit.
+    /// Positive page size selected by the caller.
     pub limit: u32,
     /// Zero-based item offset requested by the caller.
     pub offset: u32,
@@ -227,7 +227,7 @@ pub struct BundleContext {
     pub candidate_kind: &'static str,
     pub total: u32,
     pub candidates: Vec<BundleCandidate>,
-    /// Effective page size after clamping the requested limit.
+    /// Positive page size selected by the caller.
     pub limit: u32,
     /// Zero-based item offset requested by the caller.
     pub offset: u32,
@@ -269,9 +269,9 @@ struct ManifestSelector {
     /// returned. Omit to list names only.
     #[serde(default)]
     server_name: Option<String>,
-    /// Page size for the name listing. Defaults to the shared list limit and
-    /// is clamped to 1..=500.
-    #[serde(default = "default_list_limit")]
+    /// Positive page size for the name listing; defaults to 50.
+    #[serde(default = "default_list_limit", deserialize_with = "positive_limit")]
+    #[schemars(range(min = 1))]
     limit: u32,
     /// Zero-based item offset into the stable name listing. Defaults to 0.
     #[serde(default)]
@@ -285,9 +285,9 @@ struct PolicySelector {
     /// Omit to list ids only.
     #[serde(default)]
     policy_id: Option<String>,
-    /// Page size for the id listing. Defaults to the shared list limit and is
-    /// clamped to 1..=500.
-    #[serde(default = "default_list_limit")]
+    /// Positive page size for the id listing; defaults to 50.
+    #[serde(default = "default_list_limit", deserialize_with = "positive_limit")]
+    #[schemars(range(min = 1))]
     limit: u32,
     /// Zero-based item offset into the source-ordered id listing. Defaults to
     /// 0.
@@ -302,9 +302,9 @@ struct PublishSelector {
     /// draft candidates only.
     #[serde(default)]
     bundle_id: Option<Uuid>,
-    /// Page size for the candidate listing. Defaults to the shared list limit
-    /// and is clamped to 1..=500.
-    #[serde(default = "default_list_limit")]
+    /// Positive page size for the candidate listing; defaults to 50.
+    #[serde(default = "default_list_limit", deserialize_with = "positive_limit")]
+    #[schemars(range(min = 1))]
     limit: u32,
     /// Zero-based item offset into the candidate listing. Defaults to 0.
     #[serde(default)]
@@ -318,13 +318,21 @@ struct RollbackSelector {
     /// Omit to list rollback candidates only.
     #[serde(default)]
     version: Option<i32>,
-    /// Page size for the candidate listing. Defaults to the shared list limit
-    /// and is clamped to 1..=500.
-    #[serde(default = "default_list_limit")]
+    /// Positive page size for the candidate listing; defaults to 50.
+    #[serde(default = "default_list_limit", deserialize_with = "positive_limit")]
+    #[schemars(range(min = 1))]
     limit: u32,
     /// Zero-based item offset into the candidate listing. Defaults to 0.
     #[serde(default)]
     offset: u32,
+}
+
+fn positive_limit<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let limit = u32::deserialize(deserializer)?;
+    if limit == 0 {
+        return Err(serde::de::Error::custom("limit must be positive"));
+    }
+    Ok(limit)
 }
 
 fn schema_of<T: JsonSchema>() -> Value {
@@ -885,7 +893,7 @@ fn page<T>(items: Vec<T>, requested_limit: u32, requested_offset: u32) -> (Vec<T
 }
 
 fn clamped_page(requested_limit: u32, requested_offset: u32) -> (u32, u32) {
-    (requested_limit.clamp(1, MAX_LIST_LIMIT), requested_offset)
+    (requested_limit.max(1), requested_offset)
 }
 
 fn usize_to_u32(n: usize) -> u32 {
@@ -1004,15 +1012,47 @@ mod tests {
     }
 
     #[test]
-    fn pagination_uses_the_shared_default_and_ceiling() {
-        let (page_items, limit, offset) = page((0..600).collect(), 0, 5);
-        assert_eq!(page_items, vec![5]);
-        assert_eq!(limit, 1);
-        assert_eq!(offset, 5);
+    fn context_pagination_preserves_default_large_counts_and_offsets() {
+        let omitted =
+            parse_selector::<ManifestSelector>("manifest.upsert_servers", serde_json::json!({}))
+                .unwrap();
+        assert_eq!(omitted.limit, 50);
+        let (page_items, limit, offset) = page((0..601).collect(), omitted.limit, 5);
+        assert_eq!(page_items, (5..55).collect::<Vec<_>>());
+        assert_eq!((limit, offset), (50, 5));
+        for count in [600, u32::MAX] {
+            let (page_items, limit, offset) = page((0..601).collect(), count, 0);
+            assert_eq!(page_items, (0..count.min(601)).collect::<Vec<_>>());
+            assert_eq!((limit, offset), (count, 0));
+            let (next, _, _) = page((0..601).collect(), count, 600);
+            assert_eq!(next, [600]);
+        }
+    }
 
-        let (page_items, limit, _) = page((0..600).collect(), u32::MAX, 0);
-        assert_eq!(page_items.len(), MAX_LIST_LIMIT as usize);
-        assert_eq!(limit, MAX_LIST_LIMIT);
+    #[test]
+    fn every_paged_context_selector_accepts_large_counts_and_rejects_zero() {
+        for action in [
+            "manifest.upsert_servers",
+            "policy.upsert_fragment",
+            "manifest.publish",
+            "policy.rollback",
+        ] {
+            let descriptor = context_descriptor(action).unwrap();
+            let validator = jsonschema::validator_for(&descriptor.selector_schema).unwrap();
+            assert!(validator.is_valid(&serde_json::json!({"limit": u32::MAX})));
+            assert!(!validator.is_valid(&serde_json::json!({"limit": 0})));
+        }
+        macro_rules! verify {
+            ($selector:ty, $action:literal) => {
+                assert_eq!(parse_selector::<$selector>($action, serde_json::json!({})).unwrap().limit, 50);
+                assert_eq!(parse_selector::<$selector>($action, serde_json::json!({"limit": u32::MAX})).unwrap().limit, u32::MAX);
+                assert!(parse_selector::<$selector>($action, serde_json::json!({"limit": 0})).unwrap_err().detail().contains("limit must be positive"));
+            };
+        }
+        verify!(ManifestSelector, "manifest.upsert_servers");
+        verify!(PolicySelector, "policy.upsert_fragment");
+        verify!(PublishSelector, "manifest.publish");
+        verify!(RollbackSelector, "policy.rollback");
     }
 
     #[test]
