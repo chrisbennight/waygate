@@ -474,10 +474,10 @@ pub fn reorder_by_names(tools: Vec<Tool>, names: &[String]) -> Vec<Tool> {
 pub fn paginate(
     items: Vec<OperationDescriptor>,
     cursor: Option<&str>,
-    limit: Option<u32>,
+    limit: Option<usize>,
 ) -> (Vec<OperationDescriptor>, Option<String>) {
     let start: usize = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
-    let limit = limit.unwrap_or(50).min(500) as usize;
+    let limit = limit.unwrap_or(50);
     let total = items.len();
 
     let page: Vec<_> = items.into_iter().skip(start).take(limit).collect();

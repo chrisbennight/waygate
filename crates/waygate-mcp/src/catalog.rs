@@ -795,6 +795,34 @@ pub struct OperationResolution {
     pub inadmissible: bool,
 }
 
+fn normalize_envelope_field(
+    arguments: &mut serde_json::Map<String, Value>,
+    properties: &serde_json::Map<String, Value>,
+    canonical: &str,
+    aliases: &[&str],
+) -> Result<(), String> {
+    let supplied = usize::from(arguments.contains_key(canonical))
+        + aliases
+            .iter()
+            .filter(|alias| {
+                **alias != canonical
+                    && !properties.contains_key(**alias)
+                    && arguments.contains_key(**alias)
+            })
+            .count();
+    if supplied > 1 {
+        return Err(format!("supply only one spelling of `{canonical}`"));
+    }
+    for alias in aliases {
+        if *alias != canonical && !properties.contains_key(*alias) {
+            if let Some(value) = arguments.remove(*alias) {
+                arguments.insert(canonical.to_owned(), value);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn admit_input_schema(schema: Option<Value>) -> (Option<Arc<Value>>, bool, Option<String>) {
     let Some(schema) = schema else {
         return (None, false, None);
@@ -1126,6 +1154,49 @@ impl InvocationToolSnapshot {
     /// The argument field selecting this tool's operation, when it has one.
     pub fn discriminator(&self) -> Option<&str> {
         self.discriminator.as_deref()
+    }
+
+    /// Normalize hidden selector spellings against this admitted envelope.
+    /// Declared business fields and nested operation arguments are preserved.
+    pub fn normalize_arguments(
+        &self,
+        arguments: &mut serde_json::Map<String, Value>,
+    ) -> Result<(), String> {
+        let Some(properties) = self
+            .input_schema()
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object)
+        else {
+            return Ok(());
+        };
+        let selectors = ["operation_id", "operation", "name", "tool"];
+        let canonical = self
+            .discriminator()
+            .filter(|field| selectors.contains(field) && properties.contains_key(*field))
+            .or_else(|| {
+                if !matches!(
+                    self.facts.name.as_str(),
+                    "catalog.describe" | "operations.describe"
+                ) && !(properties.contains_key("operation_id")
+                    && properties.contains_key("arguments"))
+                {
+                    return None;
+                }
+                let mut declared = selectors
+                    .iter()
+                    .copied()
+                    .filter(|field| properties.contains_key(*field));
+                let field = declared.next()?;
+                declared.next().is_none().then_some(field)
+            });
+        let Some(canonical) = canonical else {
+            return Ok(());
+        };
+        normalize_envelope_field(arguments, properties, canonical, &selectors)?;
+        if properties.contains_key("arguments") && !properties.contains_key("args") {
+            normalize_envelope_field(arguments, properties, "arguments", &["args"])?;
+        }
+        Ok(())
     }
 
     /// Whether this tool's authorization facts can vary with the call's

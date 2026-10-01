@@ -618,6 +618,11 @@ impl<'a> InvocationContext<'a> {
     /// One operation, so a path that admits a snapshot cannot leave the
     /// per-operation overlay unset and strand every later stage without facts.
     fn admit_snapshot(&mut self, snapshot: InvocationToolSnapshot) -> Result<(), InvocationError> {
+        if let Some(arguments) = self.arguments.as_mut() {
+            snapshot
+                .normalize_arguments(arguments)
+                .map_err(InvocationError::InvalidArguments)?;
+        }
         let resolution = snapshot.resolve_operation(self.arguments.as_ref());
         if resolution.inadmissible {
             // Refused rather than dropped. Dispatch forwards the caller's

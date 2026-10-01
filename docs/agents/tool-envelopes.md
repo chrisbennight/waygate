@@ -1,0 +1,31 @@
+# Upstream operation envelopes
+
+Publish one canonical operation selector, `operation_id`, and one canonical
+argument object, `arguments`, for a tool that dispatches operations. Derive the
+input schema from the same request type that the handler validates. Per-operation
+classification must use that selector, so policy evaluates the operation that
+will execute. Describe tools should also publish `operation_id` for their exact
+operation lookup. A qualified tool identity is a separate selector and retains
+its own meaning.
+
+At the gateway admission boundary, an admitted envelope can accept `operation`,
+`name`, or `tool` for its operation selector and `args` for its argument object.
+These spellings are accepted only when they are not declared business fields.
+The gateway normalizes the root before validation, policy facts, approval hashes,
+and dispatch. It never rewrites nested operation arguments. Supplying more than
+one spelling of the same envelope field is an error, including equal values;
+that error occurs before policy or upstream effects. Ordinary tools with a
+business `name` field do not become operation envelopes.
+
+Schemas, examples, and discovery responses advertise only the canonical fields.
+An upstream server that also serves direct clients should apply the same
+normalization before its own validation and dispatch. This keeps direct and
+gateway-mediated calls consistent without teaching agents multiple spellings.
+
+Keep compact defaults and reject non-positive result counts. Honor an explicit
+positive count for a finite local collection without an arbitrary count ceiling.
+Retain byte limits, timeouts, retention rules, and authorization. When the real
+upstream API imposes a page limit, send its supported count and report the
+requested, effective, and returned counts. Compute continuation from the page
+actually requested upstream; a clamped page is not evidence that the collection
+ended.

@@ -30,6 +30,11 @@ revision. Optional compatibility metadata never grants execution permission.
 
 ## Pause and continue deliberately
 
+Search, artifact-reference lists, and execution lists accept positive explicit
+result counts without a local count ceiling. Omitting the count retains the
+compact default; a larger count selects only available authorized records.
+Execution budgets, retained-content limits, and response inspection still apply.
+
 With a control database and explicit `GATEWAY_CODEMODE_RESULT_STORAGE=allow`,
 the gateway can retain bounded execution content, checkpoints, artifacts, and
 results. This is an operator data-retention decision. Without that opt-in,

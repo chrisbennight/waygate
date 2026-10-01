@@ -691,6 +691,198 @@ async fn dispatch_forwards_the_admitted_contract_identity() {
     );
 }
 
+struct EnvelopeCatalog {
+    snapshot: InvocationToolSnapshot,
+    tools: Vec<Tool>,
+    seen: Mutex<Vec<serde_json::Map<String, Value>>>,
+}
+
+#[async_trait]
+impl UpstreamCatalog for EnvelopeCatalog {
+    async fn list_servers(&self) -> Vec<String> {
+        vec!["example-secrets".into()]
+    }
+
+    async fn list_tools(&self, _: &str) -> Result<Vec<Tool>, McpError> {
+        Ok(self.tools.clone())
+    }
+
+    async fn resolve_invocation_tool(
+        &self,
+        _: &str,
+        server: &str,
+        name: &str,
+    ) -> ResolvedInvocationTool {
+        if let Some(definition) = self.tools.iter().find(|tool| tool.name == name) {
+            return ResolvedInvocationTool::Ready(
+                InvocationToolSnapshot::manifest_fallback(self.tool_facts(server, name), true)
+                    .with_published_definition(Some(definition.clone())),
+            );
+        }
+        ResolvedInvocationTool::Ready(self.snapshot.clone())
+    }
+
+    async fn call_tool(
+        &self,
+        _: &str,
+        _: &str,
+        args: Option<serde_json::Map<String, Value>>,
+        _: Option<&waygate_oidc::Principal>,
+        _: Option<&waygate_invocation::InvocationContractIdentity>,
+    ) -> Result<CallToolResult, McpError> {
+        self.seen.lock().unwrap().push(args.unwrap());
+        Ok(CallToolResult::success(vec![Content::text("ok")]))
+    }
+}
+
+#[tokio::test]
+async fn envelope_aliases_share_validation_policy_hashes_and_dispatch() {
+    let snapshot = InvocationToolSnapshot::catalog(
+        executor_snapshot().facts().clone(),
+        Uuid::from_u128(91),
+        "canonical-envelope".into(),
+        Some(json!({"type":"object","additionalProperties":false,
+        "required":["operation_id","arguments"],"properties":{
+            "operation_id":{"type":"string"},
+            "arguments":{"type":"object","additionalProperties":false,
+                "properties":{"name":{"type":"string"},"args":{"type":"string"}}}
+        }})),
+        None,
+    )
+    .with_operation_classifications(
+        Some("operation_id".into()),
+        vec![OperationClassification {
+            value: "projects.list".into(),
+            risk: RiskTier::Low,
+            side_effects: false,
+            pii: false,
+        }],
+    );
+    let catalog = Arc::new(EnvelopeCatalog {
+        snapshot,
+        tools: Vec::new(),
+        seen: Mutex::default(),
+    });
+    let gate = Arc::new(RecordingGate::default());
+    let service = DefaultInvocationService::new(catalog.clone(), gate.clone(), Arc::new(NullSink));
+    let principal = waygate_oidc::Principal {
+        sub: "reader".into(),
+        email: None,
+        groups: vec![],
+        issuer: "https://issuer.example".into(),
+        scopes: vec!["mcp:invoke".into()],
+        tenant: waygate_core::TenantId::default(),
+        auth_method: waygate_oidc::AuthMethod::Oauth,
+        raw_token: None,
+        roles: vec![],
+        scim: None,
+        enrichment_blocked: None,
+        api_key_profile_restrictions: None,
+    };
+    let canonical =
+        json!({"operation_id":"projects.list","arguments":{"name":"business","args":"nested"}});
+    for selector in ["operation_id", "name", "operation", "tool"] {
+        let mut request = InvocationRequest::new("example-secrets", "read");
+        request.arguments = json!({selector:"projects.list","args":canonical["arguments"]})
+            .as_object()
+            .cloned();
+        service.invoke(Some(&principal), request).await.unwrap();
+        let facts = gate.seen.lock().unwrap().clone().unwrap();
+        assert_eq!(facts.resource.operation.as_deref(), Some("projects.list"));
+        assert_eq!(facts.resource.risk, RiskTier::Low);
+        assert_eq!(
+            facts.request.unwrap().argument_hash,
+            waygate_catalog::argument_hash(canonical.as_object())
+        );
+        assert_eq!(catalog.seen.lock().unwrap().last(), canonical.as_object());
+    }
+    for arguments in [
+        json!({"operation_id":"projects.list","name":"projects.list","arguments":{}}),
+        json!({"name":"projects.list","tool":"projects.list","args":{}}),
+        json!({"operation_id":"projects.list","arguments":{},"args":{}}),
+        json!({"name":"projects.list","args":{"unexpected":"input-canary"}}),
+    ] {
+        *gate.seen.lock().unwrap() = None;
+        let before = catalog.seen.lock().unwrap().len();
+        let mut request = InvocationRequest::new("example-secrets", "read");
+        request.arguments = arguments.as_object().cloned();
+        let error = service.invoke(Some(&principal), request).await.unwrap_err();
+        assert!(!error.to_string().contains("input-canary"));
+        assert!(gate.seen.lock().unwrap().is_none());
+        assert_eq!(catalog.seen.lock().unwrap().len(), before);
+    }
+}
+
+#[tokio::test]
+async fn legacy_discovery_search_selects_more_than_five_hundred_ranked_tools() {
+    let tools: Vec<_> = (0..600)
+        .map(|i| {
+            Tool::new(
+                format!("tool{i:04}"),
+                "fixture inventory",
+                Arc::new(json!({"type":"object"}).as_object().unwrap().clone()),
+            )
+        })
+        .collect();
+    let index = waygate_mcp::index::SearchIndex::new().unwrap();
+    index.replace_server("example-secrets", &tools).unwrap();
+    let catalog = Arc::new(EnvelopeCatalog {
+        snapshot: executor_snapshot(),
+        tools,
+        seen: Mutex::default(),
+    });
+    let server = waygate_mcp::GatewayServer::new(catalog).with_index(index);
+    for (limit, expected) in [(None, 50), (Some(100_000), 600), (Some(usize::MAX), 600)] {
+        let mut arguments = json!({"query":"fixture","detail":"nameOnly"});
+        if let Some(limit) = limit {
+            arguments["limit"] = json!(limit);
+        }
+        let result = server
+            .dispatch_tool_call(
+                rmcp::model::CallToolRequestParams::new("example-secrets.searchTools")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+                None,
+            )
+            .await
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(result["operations"].as_array().unwrap().len(), expected);
+        assert_eq!(result.get("nextCursor").is_some(), expected < 600);
+    }
+}
+
+#[test]
+fn envelope_normalization_preserves_declared_business_fields() {
+    let snapshot = InvocationToolSnapshot::catalog(
+        executor_snapshot().facts().clone(), Uuid::from_u128(92), "business-fields".into(),
+        Some(json!({"type":"object","properties":{"operation_id":{"type":"string"},"arguments":{"type":"object"},"name":{"type":"string"}}})), None,
+    ).with_operation_classifications(Some("operation_id".into()), Vec::new());
+    let mut arguments =
+        json!({"operation":"projects.list","name":"business","args":{"tool":"nested"}})
+            .as_object()
+            .unwrap()
+            .clone();
+    snapshot.normalize_arguments(&mut arguments).unwrap();
+    assert_eq!(
+        arguments,
+        json!({"operation_id":"projects.list","name":"business","arguments":{"tool":"nested"}})
+            .as_object()
+            .unwrap()
+            .clone()
+    );
+    let snapshot = InvocationToolSnapshot::catalog(
+        executor_snapshot().facts().clone(),
+        Uuid::from_u128(93),
+        "ordinary-name".into(),
+        Some(json!({"type":"object","properties":{"name":{"type":"string"}}})),
+        None,
+    );
+    let mut arguments = json!({"operation":"business"}).as_object().unwrap().clone();
+    snapshot.normalize_arguments(&mut arguments).unwrap();
+    assert!(arguments.contains_key("operation"));
+}
+
 /// A high-risk executor whose narrow operation an operator has classified.
 fn executor_snapshot() -> InvocationToolSnapshot {
     InvocationToolSnapshot::catalog(

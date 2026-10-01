@@ -34,9 +34,9 @@ pub struct SearchToolsRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     /// Maximum operations returned in this page. Defaults to 50.
-    #[schemars(range(min = 1, max = 500))]
+    #[schemars(range(min = 1))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<u32>,
+    pub limit: Option<usize>,
     /// Verbosity of each returned `OperationDescriptor`. Omitted ⇒ `Full`
     /// (back-compat). Lighter levels let a client fetch a cheap representation
     /// first, then re-query for detail on the few tools it cares about
@@ -78,8 +78,8 @@ impl SearchToolsRequest {
     /// schemars share the field shape; this pins the one numeric constraint
     /// that serde alone cannot enforce.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.limit.is_some_and(|limit| !(1..=500).contains(&limit)) {
-            return Err("limit must be between 1 and 500 inclusive");
+        if self.limit == Some(0) {
+            return Err("limit must be positive");
         }
         Ok(())
     }
@@ -436,12 +436,16 @@ mod tests {
     fn published_limit_constraint_matches_runtime_validation() {
         let input = Value::Object((*input_schema()).clone());
         let validator = jsonschema::validator_for(&input).expect("input schema compiles");
-        for limit in [0, 501] {
-            let value = json!({"mode": "operations", "limit": limit});
-            assert!(!validator.is_valid(&value));
-            let request: SearchToolsRequest =
-                serde_json::from_value(value).expect("shape deserializes before validation");
-            assert!(request.validate().is_err());
+        let value = json!({"mode": "operations", "limit": 0});
+        assert!(!validator.is_valid(&value));
+        let request: SearchToolsRequest =
+            serde_json::from_value(value).expect("shape deserializes before validation");
+        assert!(request.validate().is_err());
+        for limit in [501, 100_000, usize::MAX] {
+            let value = json!({"limit": limit});
+            assert!(validator.is_valid(&value));
+            let request: SearchToolsRequest = serde_json::from_value(value).unwrap();
+            assert!(request.normalize().is_ok());
         }
     }
 }

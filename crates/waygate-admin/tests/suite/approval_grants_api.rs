@@ -525,7 +525,7 @@ impl ExecutionStore for GrantFakeExecutionStore {
         _tenant_id: &str,
         _id: Uuid,
         _after_event_id: Option<i64>,
-        _limit: u16,
+        _limit: usize,
     ) -> Result<Vec<ExecutionArtifact>, StoreError> {
         unreachable!("approval route tests do not list artifacts")
     }

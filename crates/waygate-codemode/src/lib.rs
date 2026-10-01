@@ -548,7 +548,7 @@ pub trait ExecutionStore: Send + Sync + 'static {
         &self,
         owner: &OwnedInFlight,
         before: Option<(OffsetDateTime, Uuid)>,
-        limit: u16,
+        limit: usize,
     ) -> Result<Vec<InFlightExecution>, StoreError> {
         let _ = (owner, before, limit);
         Ok(Vec::new())
@@ -694,7 +694,7 @@ pub trait ExecutionStore: Send + Sync + 'static {
         tenant_id: &str,
         id: Uuid,
         after_event_id: Option<i64>,
-        limit: u16,
+        limit: usize,
     ) -> Result<Vec<ExecutionArtifact>, StoreError>;
 
     async fn get_artifact(
