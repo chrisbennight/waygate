@@ -137,6 +137,13 @@ Every built-in tool definition must satisfy all seven:
    `crates/waygate-admin/src/change_requests.rs` is the floor; extend it to params
    shape.
 
+   Admitted input-schema rejections name declared fields, bounds, and permitted
+   values. Failed `oneOf` and `anyOf` choices include each variant's first
+   failing rule; overlapping `oneOf` choices identify the matching variants.
+   Variant lists are bounded and nested unions are summarized. Caller-supplied
+   keys, values, and instance paths are withheld because the same reason is
+   retained in audit storage.
+
 7. **Single source of truth.** The advertised schema is *derived from the same
    Rust type* that deserializes/serializes at runtime (`schemars::JsonSchema`),
    via the workspace `schemars` dependency. Hand-written `json!` schemas that can
