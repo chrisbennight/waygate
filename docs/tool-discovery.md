@@ -148,6 +148,12 @@ from splicing pages across catalog or policy generations.
 
 ## Discovery cost
 
+Search accepts a positive explicit result count without a local count ceiling;
+omitting it retains the surface's compact default. Large counts select only
+available authorized records. The legacy `searchTools` adapter ranks the full
+eligible catalog before taking a page, so its index cannot silently impose an
+earlier result ceiling. Cursor freshness and response inspection still apply.
+
 Listing and search read governed catalog and review decisions in bounded
 groups instead of a serial database round trip for each tool. Definitions and
 classifications are indexed by name within the request. The gateway still

@@ -59,13 +59,10 @@ use crate::process_mode::codemode_protocol::{
 };
 
 pub const NAMESPACE: &str = waygate_core::CODEMODE_BUILTIN_NAMESPACE;
-const DEFAULT_SEARCH_LIMIT: u16 = 50;
-const MAX_SEARCH_LIMIT: u16 = 100;
-const DEFAULT_ARTIFACT_LIMIT: u16 = 50;
-const MAX_ARTIFACT_LIMIT: u16 = 100;
+const DEFAULT_SEARCH_LIMIT: usize = 50;
+const DEFAULT_ARTIFACT_LIMIT: usize = 50;
 const MAX_ARTIFACT_CURSOR_LENGTH: usize = 20;
-const DEFAULT_EXECUTION_LIST_LIMIT: u16 = 50;
-const MAX_EXECUTION_LIST_LIMIT: u16 = 100;
+const DEFAULT_EXECUTION_LIST_LIMIT: usize = 50;
 // A nanosecond keyset timestamp, a UUID, and the separator fit well inside
 // this; anything longer is not a cursor this surface issued.
 const MAX_EXECUTION_LIST_CURSOR_LENGTH: usize = 80;
@@ -846,7 +843,6 @@ impl CodeModeTools {
         }
         validate_search_params(&params)?;
         let limit = params.limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
-        let limit = usize::from(limit);
         let query = params
             .query
             .as_deref()
@@ -1553,7 +1549,7 @@ impl CodeModeTools {
                 tracing::error!(%error, "could not list Code Mode executions");
                 execution_unavailable()
             })?;
-        let next_cursor = if executions.len() > usize::from(limit) {
+        let next_cursor = if executions.len() > limit {
             executions.pop();
             executions.last().map(execution_list_cursor)
         } else {
@@ -1666,7 +1662,7 @@ impl CodeModeTools {
                 );
                 execution_unavailable()
             })?;
-        let next_cursor = if artifacts.len() > usize::from(limit) {
+        let next_cursor = if artifacts.len() > limit {
             artifacts.pop();
             artifacts.last().map(artifact_cursor)
         } else {
@@ -3030,11 +3026,24 @@ impl CodeModeTools {
                 RunnerFrame::Call {
                     id,
                     call_id,
-                    arguments,
+                    mut arguments,
                 } => {
                     calls += 1;
                     let hierarchy = nested_invocation_hierarchy(&attempt, calls)?;
-                    let admitted = admitted_call(admitted_calls, &call_id);
+                    let admitted = admitted_call(admitted_calls, &call_id).and_then(|admitted| {
+                        if let (Some(snapshot), Some(arguments)) = (
+                            admitted
+                                .approval_context
+                                .as_ref()
+                                .and_then(|context| context.invocation_snapshot.as_ref()),
+                            arguments.as_object_mut(),
+                        ) {
+                            snapshot
+                                .normalize_arguments(arguments)
+                                .map_err(|error| connector_error("invalid_arguments", error))?;
+                        }
+                        Ok(admitted)
+                    });
                     let event_detail = match admitted.as_ref() {
                         Ok(admitted) => serde_json::json!({
                             "server": admitted.server,
@@ -4363,14 +4372,8 @@ fn parse_execution_list_cursor(
 }
 
 fn validate_execution_list_params(params: &ExecutionListParams) -> Result<(), McpError> {
-    if params
-        .limit
-        .is_some_and(|limit| limit == 0 || limit > MAX_EXECUTION_LIST_LIMIT)
-    {
-        return Err(McpError::invalid_params(
-            format!("`limit` must be between 1 and {MAX_EXECUTION_LIST_LIMIT}"),
-            None,
-        ));
+    if params.limit.is_some_and(|limit| limit == 0) {
+        return Err(McpError::invalid_params("`limit` must be positive", None));
     }
     if params
         .cursor
@@ -4386,14 +4389,8 @@ fn validate_execution_list_params(params: &ExecutionListParams) -> Result<(), Mc
 }
 
 fn validate_artifact_list_params(params: &ArtifactListParams) -> Result<(), McpError> {
-    if params
-        .limit
-        .is_some_and(|limit| limit == 0 || limit > MAX_ARTIFACT_LIMIT)
-    {
-        return Err(McpError::invalid_params(
-            format!("`limit` must be between 1 and {MAX_ARTIFACT_LIMIT}"),
-            None,
-        ));
+    if params.limit.is_some_and(|limit| limit == 0) {
+        return Err(McpError::invalid_params("`limit` must be positive", None));
     }
     if params
         .cursor
@@ -5225,6 +5222,7 @@ fn mutation_approval_request(
 /// not change what is authorized, hashed, or submitted upstream.
 #[derive(Debug, Clone)]
 struct ApprovalContext {
+    invocation_snapshot: Option<InvocationToolSnapshot>,
     description: String,
     sensitive_input: bool,
     input_fields: Vec<String>,
@@ -5255,6 +5253,7 @@ impl ApprovalContext {
             .map(|fields| fields.keys().cloned().collect())
             .unwrap_or_default();
         Self {
+            invocation_snapshot: tool.invocation_snapshot().cloned(),
             description: tool
                 .definition
                 .description
@@ -5741,14 +5740,8 @@ fn parse_args<T: DeserializeOwned>(arguments: &JsonObject, action: &str) -> Resu
 }
 
 fn validate_search_params(params: &SearchParams) -> Result<(), McpError> {
-    if params
-        .limit
-        .is_some_and(|limit| limit == 0 || limit > MAX_SEARCH_LIMIT)
-    {
-        return Err(McpError::invalid_params(
-            format!("`limit` must be between 1 and {MAX_SEARCH_LIMIT}"),
-            None,
-        ));
+    if params.limit.is_some_and(|limit| limit == 0) {
+        return Err(McpError::invalid_params("`limit` must be positive", None));
     }
     if params
         .query
@@ -5904,9 +5897,9 @@ struct SearchParams {
     /// Exclusive cursor returned by a prior search response.
     #[schemars(length(max = MAX_CURSOR_LENGTH))]
     cursor: Option<String>,
-    /// Maximum returned tools. Defaults to 50; maximum 100.
-    #[schemars(range(min = 1, max = MAX_SEARCH_LIMIT))]
-    limit: Option<u16>,
+    /// Maximum returned tools. Defaults to 50.
+    #[schemars(range(min = 1))]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -6113,9 +6106,9 @@ struct ArtifactListParams {
     /// Exclusive cursor returned by a prior artifact-list response.
     #[schemars(length(max = MAX_ARTIFACT_CURSOR_LENGTH))]
     cursor: Option<String>,
-    /// Maximum returned references. Defaults to 50; maximum 100.
-    #[schemars(range(min = 1, max = MAX_ARTIFACT_LIMIT))]
-    limit: Option<u16>,
+    /// Maximum returned references. Defaults to 50.
+    #[schemars(range(min = 1))]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -6124,9 +6117,9 @@ struct ExecutionListParams {
     /// Exclusive cursor returned by a prior execution-list response.
     #[schemars(length(max = MAX_EXECUTION_LIST_CURSOR_LENGTH))]
     cursor: Option<String>,
-    /// Maximum returned executions. Defaults to 50; maximum 100.
-    #[schemars(range(min = 1, max = MAX_EXECUTION_LIST_LIMIT))]
-    limit: Option<u16>,
+    /// Maximum returned executions. Defaults to 50.
+    #[schemars(range(min = 1))]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -8232,7 +8225,7 @@ mod tests {
             &self,
             owner: &OwnedInFlight,
             before: Option<(time::OffsetDateTime, Uuid)>,
-            limit: u16,
+            limit: usize,
         ) -> Result<Vec<InFlightExecution>, StoreError> {
             self.list_owners.lock().await.push(owner.clone());
             let mut page: Vec<InFlightExecution> = self
@@ -8254,7 +8247,7 @@ mod tests {
                 })
                 .collect();
             page.sort_by_key(|row| std::cmp::Reverse((row.submitted_at, row.id)));
-            page.truncate(usize::from(limit));
+            page.truncate(limit);
             Ok(page)
         }
 
@@ -8748,7 +8741,7 @@ mod tests {
             _tenant_id: &str,
             id: Uuid,
             after_event_id: Option<i64>,
-            limit: u16,
+            limit: usize,
         ) -> Result<Vec<ExecutionArtifact>, StoreError> {
             let now = time::OffsetDateTime::now_utc();
             Ok(self
@@ -8776,7 +8769,7 @@ mod tests {
                         created_at: now,
                     })
                 })
-                .take(usize::from(limit))
+                .take(limit)
                 .collect())
         }
 
@@ -8787,7 +8780,7 @@ mod tests {
             artifact_id: Uuid,
         ) -> Result<Option<ExecutionArtifactContent>, StoreError> {
             let artifact = self
-                .list_artifacts(tenant_id, id, None, u16::MAX)
+                .list_artifacts(tenant_id, id, None, usize::MAX)
                 .await?
                 .into_iter()
                 .find(|artifact| artifact.artifact_id == artifact_id);
@@ -9370,6 +9363,41 @@ mod tests {
         assert!(structured(&describe)["governance"]
             .get("required_step_up_scope")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn larger_search_counts_select_available_tools_with_unchanged_defaults() {
+        let names: Vec<_> = (0..150).map(|i| format!("read{i:04}")).collect();
+        let specs: Vec<_> = names
+            .iter()
+            .map(|name| ("inventory", name.as_str(), false))
+            .collect();
+        let catalog: SharedCatalog = Arc::new(FakeCatalog::with_tools(&specs));
+        let authz: SharedAuthz = Arc::new(SelectiveAuthz);
+        let server = GatewayServer::with_authz(catalog.clone(), authz.clone())
+            .with_builtin_tools(Arc::new(code_mode_tools(catalog, authz)));
+        for (limit, expected) in [(None, 50), (Some(120), 120), (Some(usize::MAX), 150)] {
+            let mut args = json!({});
+            if let Some(limit) = limit {
+                args["limit"] = json!(limit);
+            }
+            let response = server
+                .dispatch_tool_call(call("codemode.search", args), Some(&reader()))
+                .await
+                .unwrap();
+            assert_eq!(
+                structured(&response)["tools"].as_array().unwrap().len(),
+                expected
+            );
+            assert_eq!(
+                structured(&response).get("next_cursor").is_some(),
+                expected < 150
+            );
+        }
+        assert!(server
+            .dispatch_tool_call(call("codemode.search", json!({"limit":0})), Some(&reader()))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -11807,6 +11835,89 @@ mod tests {
         assert_eq!(
             context.arguments_preview(&json!({"untrusted-secret-key": "value"})),
             json!({})
+        );
+    }
+
+    #[tokio::test]
+    async fn mutation_envelope_aliases_bind_approval_to_canonical_dispatch_arguments() {
+        let fake = FakeCatalog::with_tools(&[("email", "send", true)]);
+        let snapshot = InvocationToolSnapshot::catalog(
+            ToolFacts {
+                server: "email".into(),
+                name: "send".into(),
+                risk: RiskTier::High,
+                side_effects: true,
+                pii: false,
+                requires_approval: true,
+                requires_approval_known: true,
+            },
+            Uuid::from_u128(94),
+            "executor-schema".into(),
+            Some(
+                json!({"type":"object","properties":{"operation_id":{"type":"string"},"arguments":{"type":"object"}}}),
+            ),
+            None,
+        );
+        let call_id = runner_call_id("email", "send");
+        let admitted = HashMap::from([(
+            call_id.clone(),
+            AdmittedCall {
+                approval_context: Some(ApprovalContext {
+                    invocation_snapshot: Some(snapshot),
+                    description: "Send a message".into(),
+                    sensitive_input: false,
+                    input_fields: vec!["operation_id".into(), "arguments".into()],
+                }),
+                server: "email".into(),
+                tool: "send".into(),
+                contract: upstream_contract(fake.contract_identity("email", "send")),
+            },
+        )]);
+        let invocation = Arc::new(ApprovalRequiredInvocation::default());
+        let tools =
+            CodeModeTools::new(Arc::new(fake), Arc::new(SelectiveAuthz), invocation.clone());
+        let canonical = json!({"operation_id":"messages.send","arguments":{"name":"business"}});
+        let (mut parent_stdin, _) = tokio::io::duplex(4096);
+        let (mut runner_stdout, parent_stdout) = tokio::io::duplex(4096);
+        runner_stdout
+            .write_all(
+                &encode_frame(&RunnerFrame::Call {
+                    id: 1,
+                    call_id,
+                    arguments: json!({"name":"messages.send","args":canonical["arguments"]}),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        runner_stdout.write_all(b"\n").await.unwrap();
+        let outcome = tools
+            .broker_runner_frames(
+                RunnerAttempt {
+                    principal: &reader(),
+                    execution_id: Uuid::now_v7(),
+                    claim: None,
+                    persist_content: true,
+                    profile: CodeExecutionProfile::LegacyApprovalBound,
+                    source_digest: source_digest("fixture program"),
+                    deadline: None,
+                },
+                &admitted,
+                &mut parent_stdin,
+                &mut BufReader::new(parent_stdout),
+            )
+            .await
+            .unwrap();
+        let RunnerProgramOutcome::WaitingForApproval { approval, .. } = outcome else {
+            panic!("approval pause expected")
+        };
+        assert_eq!(
+            approval.argument_hash,
+            waygate_catalog::argument_hash(canonical.as_object())
+        );
+        assert_eq!(
+            invocation.requests.lock().await[0].arguments.as_ref(),
+            canonical.as_object()
         );
     }
 
@@ -15552,6 +15663,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn larger_artifact_counts_select_available_references() {
+        let store = Arc::new(RecordingExecutionStore::default());
+        let tools = code_mode_tools(
+            Arc::new(FakeCatalog::with_tools(&[])),
+            Arc::new(SelectiveAuthz),
+        )
+        .with_execution_store(store.clone())
+        .with_result_persistence_allowed(true);
+        let mut principal = reader();
+        principal.scopes.push(Scope::McpInvoke.as_str().into());
+        let id = waiting_execution(&store, &principal, ExecutionStatus::WaitingForResume).await;
+        for _ in 0..150 {
+            store.events.lock().await.push(execution_event(
+                ExecutionEventKind::ArtifactEmitted,
+                None,
+                None,
+                json!({"artifact_id":Uuid::now_v7(),"value":{"row":"fixture"}}),
+            ));
+        }
+        for (limit, expected) in [(None, 50), (Some(120), 120), (Some(usize::MAX), 150)] {
+            let schema = serde_json::to_value(schemars::schema_for!(ArtifactListParams)).unwrap();
+            assert!(schema["properties"]["limit"].get("maximum").is_none());
+            let result = tools
+                .artifacts(
+                    &principal,
+                    ArtifactListParams {
+                        execution_id: id.to_string(),
+                        cursor: None,
+                        limit,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                structured(&result)["artifacts"].as_array().unwrap().len(),
+                expected
+            );
+            assert_eq!(
+                structured(&result).get("next_cursor").is_some(),
+                expected < 150
+            );
+        }
+        assert!(tools
+            .artifacts(
+                &principal,
+                ArtifactListParams {
+                    execution_id: id.to_string(),
+                    cursor: None,
+                    limit: Some(0)
+                }
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn emitted_artifacts_are_listable_and_retrievable_after_failure() {
         let catalog: SharedCatalog = Arc::new(FakeCatalog::with_tools(&[]));
         let authz: SharedAuthz = Arc::new(SelectiveAuthz);
@@ -15924,6 +16091,47 @@ mod tests {
             second.get("next_cursor").is_none(),
             "the final page carries no cursor"
         );
+
+        *store.in_flight.lock().await = (0..150)
+            .map(|i| {
+                let mut row = rows[0].clone();
+                row.id = Uuid::now_v7();
+                row.submitted_at = base - time::Duration::minutes(i);
+                row
+            })
+            .collect();
+        for (limit, expected) in [(None, 50), (Some(120), 120), (Some(usize::MAX), 150)] {
+            let schema = serde_json::to_value(schemars::schema_for!(ExecutionListParams)).unwrap();
+            assert!(schema["properties"]["limit"].get("maximum").is_none());
+            let result = tools
+                .list_executions(
+                    &principal,
+                    ExecutionListParams {
+                        cursor: None,
+                        limit,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                structured(&result)["executions"].as_array().unwrap().len(),
+                expected
+            );
+            assert_eq!(
+                structured(&result).get("next_cursor").is_some(),
+                expected < 150
+            );
+        }
+        assert!(tools
+            .list_executions(
+                &principal,
+                ExecutionListParams {
+                    cursor: None,
+                    limit: Some(0)
+                }
+            )
+            .await
+            .is_err());
 
         let owners = store.list_owners.lock().await;
         assert!(!owners.is_empty());

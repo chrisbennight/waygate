@@ -126,9 +126,9 @@ pub struct SearchArgs {
     #[arg(long)]
     pub risk_level: Option<String>,
 
-    /// Page size (1–500).
+    /// Positive page size; omit to use the server default.
     #[arg(long)]
-    pub limit: Option<u32>,
+    pub limit: Option<usize>,
 
     /// Cursor token returned by a previous call.
     #[arg(long)]

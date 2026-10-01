@@ -45,6 +45,7 @@ use waygate_catalog::{
     GrantExecutionBinding, GrantFilter, NewApprovalGrant, ResolvedTool, SharedCatalogStore,
 };
 use waygate_core::TenantId;
+use waygate_mcp::catalog::{ResolutionAuthority, ResolvedInvocationTool, UpstreamCatalog};
 use waygate_oidc::Principal;
 
 use crate::error::{ApiError, ApiErrorBody, ApiResult};
@@ -111,10 +112,10 @@ pub struct CreateGrantRequest {
     /// reassignable) string name.
     pub tool: String,
     /// One of `arguments` / `argument_hash` is required. When
-    /// `arguments` is set the handler computes the canonical
-    /// argument digest server-side so the operator and the caller
-    /// can't disagree on canonicalization. When `argument_hash` is
-    /// set, it is that same raw canonical argument digest (advanced
+    /// `arguments` is set the handler normalizes envelope spellings against
+    /// the Live tool contract and computes the canonical argument digest
+    /// server-side. When `argument_hash` is set, it must already describe
+    /// that normalized call shape (advanced
     /// flow; useful for an approval-needed event). The gateway
     /// combines either form with the current approved behavior hash
     /// before storage, so a later tool-version change cannot reuse
@@ -356,7 +357,7 @@ async fn create_grant(
     // must be present. Both-set is rejected as `400` so an operator
     // can't accidentally bind to a stale pre-computed hash that
     // disagrees with the passed-through args.
-    let raw_argument_hash = match (&body.arguments, &body.argument_hash) {
+    match (&body.arguments, &body.argument_hash) {
         (Some(_), Some(_)) => {
             return Err(ApiError::BadRequest(
                 "specify exactly one of `arguments` / `argument_hash`, not both".into(),
@@ -371,8 +372,7 @@ async fn create_grant(
             // `null` is treated as "no arguments" — matches the
             // pool-side `argument_hash(None)` semantics so an
             // empty-args grant covers an empty-args call.
-            serde_json::Value::Null => waygate_catalog::argument_hash(None),
-            serde_json::Value::Object(map) => waygate_catalog::argument_hash(Some(map)),
+            serde_json::Value::Null | serde_json::Value::Object(_) => (),
             _ => {
                 return Err(ApiError::BadRequest(
                     "`arguments` must be a JSON object or null".into(),
@@ -385,26 +385,76 @@ async fn create_grant(
                     "`argument_hash` must be non-empty".into(),
                 ));
             }
-            h.clone()
         }
-    };
+    }
 
     // Tool resolution: must be a `<server>.<tool>` qualified name
     // that's Live in the caller's tenant catalog. Quarantined /
     // PendingApproval / NotFound all refuse — minting a grant for
     // a tool the gateway wouldn't dispatch anyway is dead code.
-    let (server_id, tool_id, tool_behavior_hash) =
-        match catalog.resolve_tool(&tenant, &body.tool).await {
-            Ok(ResolvedTool::Live(def)) => (def.server_id, def.tool_id, def.schema_hash),
-            Ok(ResolvedTool::Quarantined { .. })
-            | Ok(ResolvedTool::PendingApproval { .. })
-            | Ok(ResolvedTool::NotFound) => {
-                return Err(ApiError::NotFound("tool not Live in catalog"));
-            }
-            Err(e) => {
-                return Err(ApiError::Internal(format!("catalog resolve_tool: {e}")));
+    let definition = match catalog.resolve_tool(&tenant, &body.tool).await {
+        Ok(ResolvedTool::Live(def)) => def,
+        Ok(ResolvedTool::Quarantined { .. })
+        | Ok(ResolvedTool::PendingApproval { .. })
+        | Ok(ResolvedTool::NotFound) => {
+            return Err(ApiError::NotFound("tool not Live in catalog"));
+        }
+        Err(e) => {
+            return Err(ApiError::Internal(format!("catalog resolve_tool: {e}")));
+        }
+    };
+
+    // Use the same admitted schema and envelope normalization as invocation,
+    // so approving an alias spelling authorizes the canonical call shape.
+    let raw_argument_hash = if let Some(serde_json::Value::Object(mut arguments)) = body.arguments {
+        let snapshot = match state
+            .upstreams
+            .resolve_invocation_tool(&tenant, &definition.server_name, &definition.tool_name)
+            .await
+        {
+            ResolvedInvocationTool::Ready(snapshot) => snapshot,
+            ResolvedInvocationTool::Quarantined { .. }
+            | ResolvedInvocationTool::Unavailable { .. } => {
+                return Err(ApiError::Conflict(
+                    "tool contract is unavailable for approval; refresh and retry".into(),
+                ));
             }
         };
+        if !matches!(snapshot.authority(), ResolutionAuthority::Catalog {tool_id, schema_hash}
+            if *tool_id == definition.tool_id && schema_hash == &definition.schema_hash)
+        {
+            return Err(ApiError::Conflict(
+                "tool behavior changed during approval; refresh and retry".into(),
+            ));
+        }
+        if snapshot.input_schema_unavailable() {
+            return Err(ApiError::BadRequest(
+                "tool input schema is unavailable".into(),
+            ));
+        }
+        snapshot
+            .normalize_arguments(&mut arguments)
+            .map_err(ApiError::BadRequest)?;
+        let current = catalog
+            .resolve_live_tool_id(&tenant, definition.tool_id)
+            .await
+            .map_err(|e| ApiError::Internal(format!("catalog resolve_live_tool_id: {e}")))?
+            .ok_or(ApiError::NotFound("tool not Live in catalog"))?;
+        if current.server_id != definition.server_id
+            || current.schema_hash != definition.schema_hash
+        {
+            return Err(ApiError::Conflict(
+                "tool behavior changed during approval; refresh and retry".into(),
+            ));
+        }
+        waygate_catalog::argument_hash(Some(&arguments))
+    } else {
+        body.argument_hash
+            .unwrap_or_else(|| waygate_catalog::argument_hash(None))
+    };
+    let server_id = definition.server_id;
+    let tool_id = definition.tool_id;
+    let tool_behavior_hash = definition.schema_hash;
 
     // Bind the grant to the contract the approver reviewed, not to whichever
     // version is Live when this POST lands. If the tool's approved behavior
