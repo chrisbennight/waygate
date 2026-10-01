@@ -3516,7 +3516,7 @@ impl GatewayServer {
                 for _ in 0..MAX_CATALOG_SNAPSHOT_RETRIES {
                     let generation = idx.generation();
                     let tools = self.catalog.list_tools(server).await?;
-                    let (ranked, fallback) = match idx.search(server, q, tools.len()) {
+                    let (ranked, fallback) = match idx.search(server, q, usize::MAX) {
                         Ok(Some(names)) => (index::reorder_by_names(tools, &names), None),
                         Ok(None) => (
                             tools
