@@ -174,6 +174,14 @@ pub fn sanitize_validation_error(
     e: &jsonschema::ValidationError,
     schema: Option<&serde_json::Value>,
 ) -> String {
+    validation_reason(e, schema, true)
+}
+
+fn validation_reason(
+    e: &jsonschema::ValidationError,
+    schema: Option<&serde_json::Value>,
+    include_variants: bool,
+) -> String {
     use jsonschema::error::ValidationErrorKind as K;
     let label: String = match e.kind() {
         K::Minimum { limit } => format!("value below minimum {limit}"),
@@ -202,8 +210,30 @@ pub fn sanitize_validation_error(
             }
             None => "unexpected property".into(),
         },
-        K::OneOfNotValid { .. } => "value matches none of the permitted variants".into(),
-        K::OneOfMultipleValid { .. } => "value matches more than one permitted variant".into(),
+        K::OneOfNotValid { context } | K::AnyOf { context } if include_variants => {
+            let failures = render_list(context.iter().enumerate().filter_map(|(index, errors)| {
+                errors.first().map(|first| {
+                    format!(
+                        "variant {index}: {}",
+                        validation_reason(first, schema, false)
+                    )
+                })
+            }));
+            format!("value matches none of the permitted variants; {failures}")
+        }
+        K::OneOfNotValid { .. } | K::AnyOf { .. } => {
+            "value matches none of the permitted variants".into()
+        }
+        K::OneOfMultipleValid { context } => {
+            let matches = render_list(
+                context
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, errors)| errors.is_empty())
+                    .map(|(index, _)| format!("variant {index}")),
+            );
+            format!("value matches more than one permitted variant: {matches}")
+        }
         K::Pattern { .. } => "pattern mismatch".into(),
         K::Required { property } => match property {
             serde_json::Value::String(s) => format!("required field `{s}` is missing"),
@@ -371,6 +401,57 @@ mod tests {
         assert!(reason.contains("read"), "{reason}");
         assert!(reason.contains("destructive"), "{reason}");
         assert!(!reason.contains("write"), "{reason}");
+    }
+
+    #[test]
+    fn variant_failure_names_each_branches_first_correction() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"target": {"oneOf": [
+                {"type": "object", "required": ["operation_id"]},
+                {"type": "object", "required": ["selector"]}
+            ]}}
+        });
+        let reason = violation(
+            &schema,
+            &json!({"target": {"caller-secret-marker": "private-value"}}),
+        );
+        assert!(
+            reason.contains("variant 0: required field `operation_id` is missing"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("variant 1: required field `selector` is missing"),
+            "{reason}"
+        );
+        assert!(!reason.contains("caller-secret-marker"), "{reason}");
+        assert!(!reason.contains("private-value"), "{reason}");
+    }
+
+    #[test]
+    fn overlapping_variants_name_the_matching_branches() {
+        let reason = violation(
+            &json!({"oneOf": [
+                {"type": "integer"}, {"minimum": 0}, {"type": "string"}
+            ]}),
+            &json!(7),
+        );
+        assert!(reason.contains("variant 0, variant 1"), "{reason}");
+        assert!(!reason.contains("variant 2"), "{reason}");
+    }
+
+    #[test]
+    fn variant_details_do_not_recursively_expand_nested_unions() {
+        let reason = violation(
+            &json!({"oneOf": [
+                {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+                {"type": "boolean"}
+            ]}),
+            &json!({"private-key": "private-value"}),
+        );
+        assert_eq!(reason.matches("variant 0:").count(), 1, "{reason}");
+        assert!(!reason.contains("private-key"), "{reason}");
+        assert!(!reason.contains("private-value"), "{reason}");
     }
 
     /// A wide schema must not grow an unbounded audit row.
