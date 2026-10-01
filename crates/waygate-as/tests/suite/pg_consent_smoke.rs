@@ -13,7 +13,7 @@
 //! 4. Re-consent after revoke clears revoked_at —
 //!    the user got re-granted, not silently locked out.
 //! 5. List scoping: tenant filter, principal_sub filter,
-//!    and limit clamp at MAX_LIST_LIMIT.
+//!    and caller-selected page windows.
 
 use std::env;
 
@@ -21,7 +21,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::Row;
 use uuid::Uuid;
 
-use waygate_as::consent::{ConsentStore, NewConsentGrant, PgConsentStore, MAX_LIST_LIMIT};
+use waygate_as::consent::{ConsentStore, NewConsentGrant, PgConsentStore};
 
 async fn connect() -> Option<sqlx::PgPool> {
     let url = env::var("AUDIT_DATABASE_URL").ok()?;
@@ -166,7 +166,7 @@ async fn first_grant_then_reconsent_then_revoke_then_regrant() {
     );
     assert_eq!(g3.scopes, initial_scopes);
 
-    // 5. List scoping (tenant + sub) + limit clamp.
+    // 5. List scoping (tenant + sub) and caller-selected windows.
     let bare = store
         .list(&tenant_id, Some(&sub), 50, 0)
         .await
@@ -174,17 +174,42 @@ async fn first_grant_then_reconsent_then_revoke_then_regrant() {
     assert_eq!(bare.len(), 1);
     assert_eq!(bare[0].id, g1.id);
 
-    // Limit clamp: ask for 1_000_000; we should never get
-    // more than MAX_LIST_LIMIT rows back.
-    let clamped = store
-        .list(&tenant_id, None, 1_000_000, 0)
-        .await
-        .expect("list-clamped");
-    assert!(
-        clamped.len() <= MAX_LIST_LIMIT as usize,
-        "Pg query must clamp limit, got {} > {}",
-        clamped.len(),
-        MAX_LIST_LIMIT
+    for index in 0..550 {
+        let client = format!("https://cli.example/page-{index}.json");
+        store
+            .upsert(NewConsentGrant {
+                tenant_id: &tenant_id,
+                principal_sub: "page-user",
+                client_id: &client,
+                scopes: &initial_scopes,
+                expires_at: None,
+            })
+            .await
+            .expect("seed page grant");
+    }
+    assert_eq!(
+        store.list(&tenant_id, None, 550, 0).await.unwrap().len(),
+        550
+    );
+    assert_eq!(
+        store
+            .list(&tenant_id, None, u32::MAX, 0)
+            .await
+            .unwrap()
+            .len(),
+        551
+    );
+    assert_eq!(
+        store.list(&tenant_id, None, 550, 550).await.unwrap().len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list(&tenant_id, Some(&sub), u32::MAX, 0)
+            .await
+            .unwrap()
+            .len(),
+        1
     );
 
     // Cleanup — leave the table tidy. The tenants row is

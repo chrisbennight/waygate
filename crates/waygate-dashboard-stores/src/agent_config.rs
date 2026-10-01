@@ -144,7 +144,7 @@ pub enum AgentConfigError {
     DuplicateName,
 }
 
-/// Hard ceiling on `list` page size — mirrors the other admin stores.
+/// Default HTTP pagination ceiling; stores honor the caller-selected window.
 pub use waygate_core::page::MAX_LIST_LIMIT;
 
 #[async_trait]
@@ -356,7 +356,7 @@ impl AgentConfigStore for PgAgentConfigStore {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<AgentConfig>, AgentConfigError> {
-        let effective_limit = limit.min(MAX_LIST_LIMIT) as i64;
+        let effective_limit = i64::from(limit);
         let rows = sqlx::query(
             r#"
             SELECT id, tenant_id, name, kind, model_alias, instructions,
@@ -596,7 +596,7 @@ impl AgentConfigStore for InMemoryAgentConfigStore {
             .cloned()
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
-        let effective_limit = limit.min(MAX_LIST_LIMIT) as usize;
+        let effective_limit = limit as usize;
         Ok(out
             .into_iter()
             .skip(offset as usize)

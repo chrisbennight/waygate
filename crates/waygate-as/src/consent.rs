@@ -67,10 +67,8 @@ pub trait ConsentStore: Send + Sync + 'static {
     /// `principal_sub` is `Some`, scope to that user;
     /// otherwise return every grant in the tenant.
     /// Ordered by `(principal_sub, client_id)` for stable
-    /// pagination. `limit` is clamped to
-    /// [`MAX_LIST_LIMIT`] inside the Postgres impl so a
-    /// misconfigured admin client can't fetch the whole
-    /// table in one shot.
+    /// pagination. The caller-selected window is applied in SQL; HTTP handlers
+    /// enforce their own pagination budget.
     async fn list(
         &self,
         tenant_id: &str,
@@ -150,13 +148,7 @@ pub struct ConsentGrant {
 /// `Arc<dyn …>` shape every other store in this crate uses.
 pub type SharedConsentStore = Arc<dyn ConsentStore>;
 
-/// Hard ceiling on [`ConsentStore::list`] page size.
-/// Mirrors [`crate::sessions::MAX_LIST_LIMIT`] so an
-/// operator paging the consent table sees the same shape
-/// as paging the upstream-sessions table. Exported so the
-/// admin handler can clamp BEFORE calling `list` and echo
-/// the actually-applied limit (paging by an echoed-but-
-/// uncapped limit would skip rows).
+/// HTTP pagination ceiling, applied by the admin handler before store reads.
 pub use waygate_core::page::MAX_LIST_LIMIT;
 
 #[derive(Debug, thiserror::Error)]
@@ -220,10 +212,7 @@ impl ConsentStore for PgConsentStore {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<ConsentGrant>, ConsentStoreError> {
-        // Same MAX_LIST_LIMIT discipline as
-        // upstream_sessions: clamp here so a misconfigured
-        // caller can't fetch the whole table.
-        let effective_limit = limit.min(MAX_LIST_LIMIT) as i64;
+        let effective_limit = i64::from(limit);
         let offset_i = offset as i64;
 
         let rows = match principal_sub {

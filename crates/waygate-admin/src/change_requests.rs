@@ -202,6 +202,10 @@ pub struct StatusResponse {
 
 #[derive(Debug, Serialize, ToSchema, schemars::JsonSchema)]
 pub struct ListResponse {
+    /// Count selected by the caller.
+    pub requested_limit: u64,
+    /// Number of status rows returned.
+    pub count: usize,
     pub requests: Vec<StatusResponse>,
     pub limit: u32,
     pub offset: u32,
@@ -581,7 +585,7 @@ async fn list_requests(
             store,
             &state.public_url,
             &actor,
-            q.limit,
+            u64::from(q.limit.min(MAX_LIST_LIMIT)),
             q.offset,
             q.lifecycle.as_deref(),
         )
@@ -599,7 +603,7 @@ pub async fn list_core(
     store: &SharedChangeRequestStore,
     public_url: &str,
     actor: &Principal,
-    limit: u32,
+    limit: u64,
     offset: u32,
     lifecycle: Option<&str>,
 ) -> Result<ListResponse, ApiError> {
@@ -607,7 +611,7 @@ pub async fn list_core(
         None => None,
         Some(s) => Some(parse_lifecycle(s)?),
     };
-    let effective_limit = limit.min(MAX_LIST_LIMIT);
+    let effective_limit = u32::try_from(limit).unwrap_or(u32::MAX);
     let rows = store
         .list_for_requester(
             actor.tenant.as_str(),
@@ -618,11 +622,14 @@ pub async fn list_core(
         )
         .await
         .map_err(map_store_err)?;
+    let count = rows.len();
     let requests = rows
         .into_iter()
         .map(|cr| status_response_summary(public_url, &cr))
         .collect();
     Ok(ListResponse {
+        requested_limit: limit,
+        count,
         requests,
         limit: effective_limit,
         offset,

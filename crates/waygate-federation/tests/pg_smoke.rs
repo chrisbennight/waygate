@@ -10,7 +10,7 @@
 //! 3. List filter combinations (peer_name / issuer /
 //!    trust_tier).
 //! 4. Update mutates + the `updated_at` trigger fires.
-//! 5. `MAX_LIST_LIMIT` clamp.
+//! 5. Large tenant page windows; refresh pagination remains bounded.
 //! 6. UNIQUE (tenant_id, peer_name) AND (tenant_id, issuer)
 //!    each surface as `PeerError::DuplicateName`.
 
@@ -213,17 +213,13 @@ async fn peers_lifecycle_and_isolation() {
         updated.updated_at,
     );
 
-    // 5. MAX_LIST_LIMIT clamp.
-    let clamped = store
+    // 5. A large window returns the available tenant rows.
+    let page = store
         .list(&tenant_a, PeerFilter::default(), 1_000_000, 0)
         .await
-        .expect("list clamped");
-    assert!(
-        clamped.len() <= MAX_LIST_LIMIT as usize,
-        "list must clamp; got {} > {}",
-        clamped.len(),
-        MAX_LIST_LIMIT,
-    );
+        .expect("list large window");
+    assert_eq!(page.len(), 2);
+    assert!(page.iter().all(|row| row.tenant_id == tenant_a));
 
     // 6. UNIQUE collisions on (tenant, peer_name) AND
     //    (tenant, issuer) each surface as DuplicateName.
@@ -301,4 +297,55 @@ async fn peers_lifecycle_and_isolation() {
         .execute(&pool)
         .await
         .expect("cleanup tenants");
+}
+
+#[tokio::test]
+async fn peer_pages_above_the_old_ceiling_preserve_scope() {
+    let Some(pool) = connect().await else {
+        return;
+    };
+    let tenant = seed_tenant(&pool, &format!("counts-{}", Uuid::new_v4())).await;
+    let store = PgFederatedPeersStore::new(pool.clone());
+    for i in 0..551 {
+        store
+            .insert(NewFederatedPeer {
+                tenant_id: &tenant,
+                peer_name: &format!("fixture-{i:03}"),
+                issuer: &format!("https://peer-{i}.example.test"),
+                jwks_url: &format!("https://peer-{i}.example.test/jwks"),
+                trust_tier: TrustTier::Full,
+            })
+            .await
+            .unwrap();
+    }
+    let first = store
+        .list(&tenant, PeerFilter::default(), 550, 0)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 550);
+    assert!(first.iter().all(|row| row.tenant_id == tenant));
+    assert_eq!(
+        store
+            .list(&tenant, PeerFilter::default(), u32::MAX, 0)
+            .await
+            .unwrap()
+            .len(),
+        551
+    );
+    let second = store
+        .list(&tenant, PeerFilter::default(), u32::MAX, 550)
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert!(!first.iter().any(|row| row.id == second[0].id));
+    assert!(store
+        .list("other-tenant", PeerFilter::default(), 550, 0)
+        .await
+        .unwrap()
+        .is_empty());
+    sqlx::query("DELETE FROM tenants WHERE id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
 }

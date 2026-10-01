@@ -76,7 +76,7 @@ pub struct SessionRow {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SessionListResponse {
     pub sessions: Vec<SessionRow>,
-    /// The actually-applied page size (after the store's hard cap
+    /// The actually-applied page size (after the HTTP pagination budget
     /// at `waygate_core::page::MAX_LIST_LIMIT` is enforced). An
     /// operator script paging by `offset += response.limit` is
     /// guaranteed not to skip rows: echoing the request's raw limit
@@ -117,7 +117,7 @@ async fn list_sessions(
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<SessionListResponse>> {
     let store = state.identity.upstream_sessions.require()?;
-    // Clamp the request limit to the store's hard cap BEFORE the
+    // Clamp the request limit to the HTTP pagination budget BEFORE the
     // SQL query so the echoed `limit` reflects what the gateway
     // actually applied: a client asking for limit=1000 would
     // otherwise get a 500-row page with an echoed `limit: 1000`,

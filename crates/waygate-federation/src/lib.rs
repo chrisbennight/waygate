@@ -138,9 +138,7 @@ pub enum PeerError {
     DuplicateName,
 }
 
-/// Hard ceiling on `list_peers` page size — mirrors the
-/// other admin stores (`oauth_consent`, `break_glass_tokens`,
-/// `inspection_rules`).
+/// HTTP and refresh pagination ceiling; tenant list reads honor their window.
 pub use waygate_core::page::MAX_LIST_LIMIT;
 
 #[async_trait]
@@ -256,7 +254,7 @@ impl FederatedPeersStore for PgFederatedPeersStore {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<FederatedPeer>, PeerError> {
-        let effective_limit = limit.min(MAX_LIST_LIMIT) as i64;
+        let effective_limit = i64::from(limit);
         let offset_i = offset as i64;
         let trust_str = filter.trust_tier.map(|t| t.as_str().to_owned());
         let rows = sqlx::query(

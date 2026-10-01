@@ -974,8 +974,8 @@ fn unknown_action(action_type: &str) -> McpError {
 /// (e.g. `{"lifecycle":123}` must error, not list everything unfiltered).
 /// The lifecycle *value* is still validated by
 /// `list_core`'s `parse_lifecycle` (pending|expired|decided).
-fn parse_list_args(args: &JsonObject) -> Result<(u32, u32, Option<String>), McpError> {
-    let limit = parse_opt_u32(args, "limit")?.unwrap_or(50);
+fn parse_list_args(args: &JsonObject) -> Result<(u64, u32, Option<String>), McpError> {
+    let limit = parse_count(args, "limit", 50)?;
     let offset = parse_opt_u32(args, "offset")?.unwrap_or(0);
     let lifecycle = match args.get("lifecycle") {
         None | Some(Value::Null) => None,
@@ -999,6 +999,27 @@ pub(crate) fn parse_opt_u32(args: &JsonObject, key: &str) -> Result<Option<u32>,
             .map(Some)
             .ok_or_else(|| {
                 McpError::invalid_params(format!("`{key}` must be a non-negative integer"), None)
+            }),
+    }
+}
+
+/// Read a positive record count, defaulting only when it is absent or null.
+/// Counts beyond the integer representation saturate so a finite collection
+/// can still satisfy a request for all available rows.
+pub(crate) fn parse_count(args: &JsonObject, key: &str, default: u64) -> Result<u64, McpError> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(value) => value
+            .as_u64()
+            .filter(|count| *count > 0)
+            .or_else(|| {
+                value
+                    .as_f64()
+                    .filter(|count| count.is_finite() && *count > 0.0 && count.fract() == 0.0)
+                    .map(|count| format!("{count:.0}").parse::<u64>().unwrap_or(u64::MAX))
+            })
+            .ok_or_else(|| {
+                McpError::invalid_params(format!("`{key}` must be a positive integer"), None)
             }),
     }
 }
@@ -1353,6 +1374,8 @@ mod tests {
         });
         // ListResponse nests StatusResponse, so this also exercises the item schema.
         assert_validates(&ListResponse {
+            requested_limit: 50,
+            count: 1,
             requests: vec![status],
             limit: 50,
             offset: 0,
@@ -2491,6 +2514,78 @@ permit (
             error.message.contains("content_file"),
             "both surfaces must refuse for the same, named reason: {error}",
         );
+    }
+
+    #[tokio::test]
+    async fn list_my_changes_honors_large_counts_with_requester_isolation() {
+        let t = tools();
+        let maker = principal(&["mcp:propose"]);
+        for index in 0..610 {
+            t.store
+                .propose(NewChangeRequest {
+                    tenant_id: maker.tenant.as_str().to_owned(),
+                    requested_by: if index < 10 {
+                        "other-maker".to_owned()
+                    } else {
+                        maker.sub.clone()
+                    },
+                    client_id: None,
+                    action_type: "agent_config.create".into(),
+                    params: json!({}),
+                    preview: None,
+                    target_etag: None,
+                    justification: "exercise requester pagination".into(),
+                    requirement: ApprovalRequirement::single("dashboard-admins"),
+                    expires_at: OffsetDateTime::now_utc() + Duration::hours(1),
+                })
+                .await
+                .unwrap();
+        }
+        for (args, expected, requested) in [
+            (json!({}), 50, 50),
+            (json!({"limit":550}), 550, 550),
+            (json!({"limit":u64::MAX}), 600, u64::MAX),
+        ] {
+            let result = t
+                .call("list_my_changes", args.as_object().cloned(), Some(&maker))
+                .await
+                .unwrap();
+            let page = result.structured_content.unwrap();
+            assert_eq!(page["requests"].as_array().unwrap().len(), expected);
+            assert_eq!(page["count"], expected);
+            assert_eq!(page["requested_limit"], requested);
+            assert_eq!(page["limit"], requested.min(u64::from(u32::MAX)));
+        }
+        let page = t
+            .call(
+                "list_my_changes",
+                json!({"limit":550,"offset":550}).as_object().cloned(),
+                Some(&maker),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.structured_content.unwrap()["count"], 50);
+    }
+
+    #[test]
+    fn record_counts_default_only_when_absent_and_reject_invalid_values() {
+        assert_eq!(parse_count(&JsonObject::new(), "limit", 50).unwrap(), 50);
+        for (value, expected) in [
+            (json!(600), 600),
+            (json!(u64::MAX), u64::MAX),
+            (
+                serde_json::from_str::<Value>("18446744073709551616").unwrap(),
+                u64::MAX,
+            ),
+        ] {
+            assert_eq!(
+                parse_count(json!({"limit":value}).as_object().unwrap(), "limit", 50).unwrap(),
+                expected
+            );
+        }
+        for value in [json!(0), json!(-1), json!(1.5), json!("600"), json!(true)] {
+            assert!(parse_count(json!({"limit":value}).as_object().unwrap(), "limit", 50).is_err());
+        }
     }
 
     #[tokio::test]

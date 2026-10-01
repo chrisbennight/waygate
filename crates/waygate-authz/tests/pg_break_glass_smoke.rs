@@ -23,7 +23,7 @@ use sqlx::postgres::PgPoolOptions;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use waygate_authz::{BreakGlassStore, NewBreakGlassToken, PgBreakGlassStore, MAX_LIST_LIMIT};
+use waygate_authz::{BreakGlassStore, NewBreakGlassToken, PgBreakGlassStore};
 
 async fn connect() -> Option<sqlx::PgPool> {
     let url = env::var("AUDIT_DATABASE_URL").ok()?;
@@ -209,18 +209,13 @@ async fn mint_list_candidates_claim_and_single_use() {
         .expect("delete same-tenant");
     assert!(same_delete, "same-tenant delete must return true");
 
-    // MAX_LIST_LIMIT clamp (defensive; we don't insert
-    // enough rows to actually hit the cap, but pin the
-    // contract).
+    // A large window returns the remaining tenant rows.
     let listed = store
         .list(&tenant_id, None, 1_000_000, 0)
         .await
-        .expect("list clamped");
-    assert!(
-        listed.len() <= MAX_LIST_LIMIT as usize,
-        "list must clamp at MAX_LIST_LIMIT, got {}",
-        listed.len(),
-    );
+        .expect("list large window");
+    assert_eq!(listed.len(), 3);
+    assert!(listed.iter().all(|row| row.tenant_id == tenant_id));
 
     // Cleanup — cascade via tenant DELETE.
     sqlx::query("DELETE FROM tenants WHERE id IN ($1, $2)")
@@ -229,4 +224,48 @@ async fn mint_list_candidates_claim_and_single_use() {
         .execute(&pool)
         .await
         .expect("cleanup tenants");
+}
+
+#[tokio::test]
+async fn break_glass_pages_above_the_old_ceiling_preserve_scope() {
+    let Some(pool) = connect().await else {
+        return;
+    };
+    let tenant = format!("bg-counts-{}", Uuid::new_v4());
+    ensure_tenant(&pool, &tenant).await;
+    let store = PgBreakGlassStore::new(pool.clone());
+    for _ in 0..551 {
+        store
+            .mint(NewBreakGlassToken {
+                tenant_id: &tenant,
+                issued_to: "fixture-user",
+                issued_by: "fixture-admin",
+                reason: "pagination fixture",
+                scope_pattern: "fixture.read",
+                requires_amr: &[],
+                expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
+            })
+            .await
+            .unwrap();
+    }
+    let first = store.list(&tenant, None, 550, 0).await.unwrap();
+    assert_eq!(first.len(), 550);
+    assert!(first.iter().all(|row| row.tenant_id == tenant));
+    assert_eq!(
+        store.list(&tenant, None, u32::MAX, 0).await.unwrap().len(),
+        551
+    );
+    let second = store.list(&tenant, None, u32::MAX, 550).await.unwrap();
+    assert_eq!(second.len(), 1);
+    assert!(!first.iter().any(|row| row.id == second[0].id));
+    assert!(store
+        .list("other-tenant", None, 550, 0)
+        .await
+        .unwrap()
+        .is_empty());
+    sqlx::query("DELETE FROM tenants WHERE id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
 }

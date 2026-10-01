@@ -3,6 +3,88 @@ use uuid::Uuid;
 use waygate_catalog::{tool_reviews::PgCatalogStore, ImportServer, ImportTool, ManifestImporter};
 
 #[tokio::test]
+async fn pending_review_pages_honor_counts_offsets_and_tenant_scope() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("review-counts-{}", Uuid::new_v4());
+    let tools: Vec<ImportTool> = (0..101)
+        .map(|i| ImportTool {
+            name: format!("tool-{i:03}"),
+            approved_behavior_hash: None,
+            risk: "low".into(),
+            side_effects: false,
+            pii: false,
+            discriminator: None,
+            operations: vec![],
+        })
+        .collect();
+    let server = ImportServer {
+        tenant_id: tenant.clone(),
+        name: "fixture".into(),
+        transport: "http".into(),
+        runtime_target: json!({"url":"http://example.test/mcp"}),
+        classification_mode: "manifest".into(),
+        tools,
+    };
+    ManifestImporter::new(pool.clone())
+        .import_atomic(&tenant, &[server], false)
+        .await
+        .unwrap();
+    let store = PgCatalogStore::new(pool.clone());
+    for i in 0..101 {
+        let name = format!("tool-{i:03}");
+        store
+            .observe(
+                &tenant,
+                "fixture",
+                &name,
+                "baseline",
+                &json!({"description":"baseline"}),
+                true,
+            )
+            .await
+            .unwrap();
+        store
+            .observe(
+                &tenant,
+                "fixture",
+                &name,
+                "candidate",
+                &json!({"description":"candidate"}),
+                true,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.pending(&tenant).await.unwrap().len(), 50);
+    let first = store.pending_page(&tenant, 100, 0).await.unwrap();
+    assert_eq!(first.len(), 100);
+    assert!(first.iter().all(|row| row.tenant_id == tenant));
+    let second = store.pending_page(&tenant, u32::MAX, 100).await.unwrap();
+    assert_eq!(second.len(), 1);
+    assert!(!first.iter().any(|row| row.tool_id == second[0].tool_id));
+    assert_eq!(
+        store
+            .pending_page(&tenant, u32::MAX, 0)
+            .await
+            .unwrap()
+            .len(),
+        101
+    );
+    assert!(store
+        .pending_page("another-tenant", 100, 0)
+        .await
+        .unwrap()
+        .is_empty());
+    sqlx::query("DELETE FROM tenants WHERE id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn quarantine_survives_restart_and_stale_decisions_cannot_release_a_new_contract() {
     let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
         return;

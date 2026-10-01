@@ -227,7 +227,7 @@ pub struct ToolReviewCandidate {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ToolReviewContext {
-    /// Exact selected review, or up to 50 recent pending reviews when no tool was selected.
+    /// Exact selected review, or a requested page of pending reviews.
     pub reviews: Vec<ToolReviewCandidate>,
 }
 
@@ -235,6 +235,16 @@ pub(crate) async fn read_context(
     state: &AdminState,
     tenant: &str,
     selector: ToolReviewSelector,
+) -> Result<ToolReviewContext, ApiError> {
+    read_context_page(state, tenant, selector, 50, 0).await
+}
+
+pub(crate) async fn read_context_page(
+    state: &AdminState,
+    tenant: &str,
+    selector: ToolReviewSelector,
+    limit: u32,
+    offset: u32,
 ) -> Result<ToolReviewContext, ApiError> {
     if tenant != waygate_core::TenantId::DEFAULT {
         return Err(ApiError::Forbidden(
@@ -248,8 +258,15 @@ pub(crate) async fn read_context(
             .get(tenant, &server, &tool)
             .await
             .map_err(unavailable)?
-            .ok_or(ApiError::NotFound("Tool review not found"))?],
-        (None, None) => store.pending(tenant).await.map_err(unavailable)?,
+            .ok_or(ApiError::NotFound("Tool review not found"))?]
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect(),
+        (None, None) => store
+            .pending_page(tenant, limit, offset)
+            .await
+            .map_err(unavailable)?,
         _ => {
             return Err(ApiError::BadRequest(
                 "Select both server and tool, or omit both to list pending reviews".into(),

@@ -250,7 +250,7 @@ pub async fn rollup_tool_stats(
     pii: Option<bool>,
     limit: i64,
 ) -> Result<Vec<ToolStat>, sqlx::Error> {
-    let limit = limit.clamp(1, 200);
+    let limit = limit.max(1);
     let rows = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
         r#"
         SELECT server, tool,

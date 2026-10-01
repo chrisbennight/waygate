@@ -11,7 +11,7 @@
 //! 4. `(tenant, name)` UNIQUE collision → `DuplicateName`.
 //! 5. Full-replace `update` mutates the row, clears a nullable field, and the
 //!    `updated_at` trigger fires.
-//! 6. `MAX_LIST_LIMIT` clamp.
+//! 6. Caller-selected page windows preserve tenant scope.
 //! 7. The largest validator-accepted, maximally escaped config persists.
 
 use std::env;
@@ -21,7 +21,6 @@ use uuid::Uuid;
 
 use waygate_dashboard_stores::agent_config::{
     AgentConfigError, AgentConfigFields, AgentConfigStore, AgentKind, PgAgentConfigStore,
-    MAX_LIST_LIMIT,
 };
 
 async fn connect() -> Option<sqlx::PgPool> {
@@ -213,12 +212,19 @@ async fn agent_config_lifecycle_and_isolation() {
         .expect("cross update")
         .is_none());
 
-    // 6. MAX_LIST_LIMIT clamp.
-    let clamped = store
-        .list(&tenant_a, 1_000_000, 0)
-        .await
-        .expect("list clamped");
-    assert!(clamped.len() <= MAX_LIST_LIMIT as usize);
+    // 6. Caller-selected windows preserve tenant scope.
+    for index in 0..550 {
+        let name = format!("page-agent-{index:04}");
+        store
+            .insert(&tenant_a, fields(&name, "model", &[]))
+            .await
+            .unwrap();
+    }
+    let page = store.list(&tenant_a, 550, 0).await.unwrap();
+    assert_eq!(page.len(), 550);
+    assert!(page.iter().all(|row| row.tenant_id == tenant_a));
+    assert_eq!(store.list(&tenant_a, u32::MAX, 0).await.unwrap().len(), 552);
+    assert_eq!(store.list(&tenant_a, 550, 550).await.unwrap().len(), 2);
 
     // Cross-tenant and stale guarded deletes are no-ops; the current version
     // removes exactly the reviewed row. Direct delete still removes its own

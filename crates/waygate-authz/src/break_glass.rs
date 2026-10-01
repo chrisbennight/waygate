@@ -111,9 +111,8 @@ pub trait BreakGlassStore: Send + Sync + 'static {
     /// stamped `created_at` to the caller.
     async fn mint(&self, mint: NewBreakGlassToken<'_>) -> Result<BreakGlassToken, BreakGlassError>;
 
-    /// Page through tokens for a tenant. Hard-capped at
-    /// [`MAX_LIST_LIMIT`] inside the Pg impl, same
-    /// MAX_LIST_LIMIT-echo discipline as `oauth_consent`.
+    /// Page through tokens for a tenant using the caller-selected window.
+    /// HTTP handlers enforce their own pagination budget.
     ///
     /// Lifecycle gate:
     ///
@@ -202,10 +201,7 @@ pub struct BreakGlassToken {
 
 pub type SharedBreakGlassStore = Arc<dyn BreakGlassStore>;
 
-/// Hard ceiling on [`BreakGlassStore::list`] page size,
-/// mirroring [`crate::oauth_consent::MAX_LIST_LIMIT`]
-/// (and the same shape as `oauth_consent` /
-/// `upstream_sessions`).
+/// HTTP pagination ceiling, applied by the admin handler before store reads.
 pub use waygate_core::page::MAX_LIST_LIMIT;
 
 #[derive(Debug, thiserror::Error)]
@@ -308,7 +304,7 @@ impl BreakGlassStore for PgBreakGlassStore {
         // secondary key for ties (and the only key for the
         // other two lifecycles, since `used_at IS NULL` in
         // both Active and Expired).
-        let effective_limit = limit.min(MAX_LIST_LIMIT) as i64;
+        let effective_limit = i64::from(limit);
         let offset_i = offset as i64;
         let rows = sqlx::query(
             r#"

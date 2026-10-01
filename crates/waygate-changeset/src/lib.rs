@@ -1049,7 +1049,7 @@ impl ChangeRequestStore for PgChangeRequestStore {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<ChangeRequestStatusSummary>, ChangeRequestError> {
-        let effective_limit = limit.min(MAX_LIST_LIMIT) as i64;
+        let effective_limit = i64::from(limit);
         let offset_i = offset as i64;
         let rows = sqlx::query_as::<_, ChangeRequestStatusSummary>(
             r#"
@@ -1640,7 +1640,7 @@ impl ChangeRequestStore for InMemoryChangeRequestStore {
                 .cmp(&a.created_at)
                 .then_with(|| a.id.cmp(&b.id))
         });
-        let effective_limit = limit.min(MAX_LIST_LIMIT) as usize;
+        let effective_limit = limit as usize;
         Ok(matched
             .into_iter()
             .skip(offset as usize)

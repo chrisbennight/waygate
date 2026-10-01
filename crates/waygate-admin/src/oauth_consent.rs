@@ -105,7 +105,7 @@ pub struct GrantRow {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct GrantListResponse {
     pub grants: Vec<GrantRow>,
-    /// Echoed page size after the store's hard cap at
+    /// Echoed page size after the HTTP pagination budget at
     /// [`MAX_LIST_LIMIT`] is applied. Paging by
     /// `offset += limit` is safe — see the same discipline
     /// on `upstream_sessions::SessionListResponse`.
