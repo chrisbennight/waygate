@@ -204,6 +204,27 @@ pub(crate) fn root_property_names(schema: &Value) -> HashSet<&str> {
         if let Some(declared) = object.get("properties").and_then(Value::as_object) {
             properties.extend(declared.keys().map(String::as_str));
         }
+        if let Some(patterns) = object.get("patternProperties").and_then(Value::as_object) {
+            for pattern in patterns.keys() {
+                // Match only the fixed envelope spellings with the same regular
+                // expression semantics as the admitted JSON Schema validator.
+                let Ok(validator) = jsonschema::validator_for(&json!({"pattern": pattern})) else {
+                    continue;
+                };
+                for field in [
+                    "operation_id",
+                    "operation",
+                    "name",
+                    "tool",
+                    "arguments",
+                    "args",
+                ] {
+                    if validator.is_valid(&Value::String(field.to_owned())) {
+                        properties.insert(field);
+                    }
+                }
+            }
+        }
         for keyword in ["allOf", "anyOf", "oneOf"] {
             if let Some(branches) = object.get(keyword).and_then(Value::as_array) {
                 pending.extend(branches.iter().map(|child| (child, base.clone(), resource)));

@@ -886,6 +886,11 @@ fn envelope_normalization_preserves_declared_business_fields() {
 #[test]
 fn envelope_normalization_preserves_composed_and_referenced_root_fields() {
     for declarations in [
+        json!({"patternProperties":{"^name$":{"type":"string"}}}),
+        json!({"allOf":[{"patternProperties":{"^name$":{"type":"string"}}}]}),
+        json!({"$ref":"#/$defs/business", "$defs":{
+            "business":{"patternProperties":{"^name$":{"type":"string"}}}
+        }}),
         json!({"allOf":[{"properties":{"name":{"type":"string"}}}]}),
         json!({"anyOf":[{"properties":{"name":{"type":"string"}}},{"type":"object"}]}),
         json!({"oneOf":[{"properties":{"name":{"type":"string"}}}]}),
@@ -935,6 +940,58 @@ fn envelope_normalization_preserves_composed_and_referenced_root_fields() {
                 .clone()
         );
     }
+}
+
+#[test]
+fn envelope_pattern_declarations_preserve_business_arguments_without_claiming_other_fields() {
+    for pattern in ["^(name|args)$", "(?=name$)^name$"] {
+        let schema = json!({"type":"object","properties":{
+            "operation_id":{"type":"string"},"arguments":{"type":"object"}
+        },"patternProperties":{pattern:{}}});
+        let snapshot = InvocationToolSnapshot::catalog(
+            executor_snapshot().facts().clone(),
+            Uuid::from_u128(96),
+            "pattern-business-fields".into(),
+            Some(schema.clone()),
+            None,
+        );
+        let mut arguments =
+            json!({"operation_id":"projects.list","arguments":{},"name":"business"})
+                .as_object()
+                .unwrap()
+                .clone();
+        snapshot.normalize_arguments(&mut arguments).unwrap();
+        assert_eq!(arguments["name"], "business");
+        assert!(jsonschema::validator_for(&schema)
+            .unwrap()
+            .is_valid(&json!(arguments)));
+        if pattern == "^(name|args)$" {
+            arguments.insert("args".into(), json!("business argument"));
+            snapshot.normalize_arguments(&mut arguments).unwrap();
+            assert_eq!(arguments["args"], "business argument");
+        }
+    }
+    let snapshot = InvocationToolSnapshot::catalog(
+        executor_snapshot().facts().clone(),
+        Uuid::from_u128(97),
+        "nonmatching-pattern".into(),
+        Some(json!({"type":"object","properties":{
+            "operation_id":{"type":"string"},"arguments":{"type":"object"}
+        },"patternProperties":{"^business_":{}}})),
+        None,
+    );
+    let mut arguments = json!({"name":"projects.list","args":{}})
+        .as_object()
+        .unwrap()
+        .clone();
+    snapshot.normalize_arguments(&mut arguments).unwrap();
+    assert_eq!(
+        arguments,
+        json!({"operation_id":"projects.list","arguments":{}})
+            .as_object()
+            .unwrap()
+            .clone()
+    );
 }
 
 #[test]
