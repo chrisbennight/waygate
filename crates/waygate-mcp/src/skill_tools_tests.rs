@@ -58,6 +58,22 @@ async fn ordinary_tools_deliver_instructions_and_files() {
     )
     .await;
     assert!(loaded["instructions"].as_str().unwrap().contains("# Demo"));
+    let unchanged = invoke(
+        &tools,
+        "load",
+        json!({"uri":skill["uri"],"revision":skill["revision"],"known_document_hash":loaded["document_hash"]}),
+    ).await;
+    assert_eq!(unchanged["unchanged"], true);
+    assert!(unchanged.get("instructions").is_none());
+    assert_eq!(unchanged["document_hash"], loaded["document_hash"]);
+    assert!(serde_json::to_vec(&unchanged).unwrap().len()*3 < serde_json::to_vec(&loaded).unwrap().len());
+    let refreshed = invoke(&tools,"load",json!({"uri":skill["uri"]})).await;
+    assert_eq!(refreshed, loaded);
+    let miss = invoke(&tools,"load",json!({"uri":skill["uri"],"known_document_hash":"0".repeat(64)})).await;
+    assert_eq!(miss, loaded);
+    let mut denied = read_principal();
+    denied.scopes.clear();
+    assert!(tools.call("load", args(json!({"uri":skill["uri"],"known_document_hash":loaded["document_hash"]})), Some(&denied)).await.is_err());
     assert!(loaded["files"][0]["code_mode_tested"].is_null());
     assert_eq!(loaded["files"][0]["execution"], "Not applicable (skill instructions)");
     let file = invoke(
@@ -111,7 +127,7 @@ async fn distribution_approval_and_quarantine_cover_discovery_and_retained_reads
     assert!(invoke(&tools, "search", json!({})).await["skills"].as_array().unwrap().is_empty());
     assert!(tools.prompts(None, Some(&principal)).await.unwrap().prompts.is_empty());
     assert!(tools.call("read_file", args(json!({"uri":uri,"revision":revision})), Some(&principal)).await.is_err());
-    assert!(tools.call("load", args(json!({"uri":uri,"revision":revision})), Some(&principal)).await.is_err());
+    assert!(tools.call("load", args(json!({"uri":uri,"revision":revision,"known_document_hash":loaded["document_hash"]})), Some(&principal)).await.is_err());
     assert!(reader.read_verified_skill_resource(uri, Some(&principal), true).await.is_err());
 }
 
@@ -370,6 +386,13 @@ async fn file_inventory_and_cross_skill_search_keep_the_loaded_revision() {
         )))
         .await
         .unwrap();
+    assert!(tools.call("load", args(json!({"uri":"skill://catalog/demo/SKILL.md","known_document_hash":loaded["document_hash"]})), Some(&read_principal())).await.is_err());
+    let replacement_tools = SkillTools::new(
+        GatewayServer::new(Arc::new(EmptyCatalog)).with_approved_skill_fixture(Some(catalog.clone())),
+    );
+    let replacement = invoke(&replacement_tools,"load",json!({"uri":"skill://catalog/demo/SKILL.md","known_document_hash":loaded["document_hash"]})).await;
+    assert!(replacement["instructions"].as_str().unwrap().contains("Replacement instructions"));
+    assert_ne!(replacement["document_hash"], loaded["document_hash"]);
     let search = invoke(&tools, "search", json!({"revision":revision})).await;
     assert_eq!(search["skills"][0]["revision"], revision);
     let root = invoke(
