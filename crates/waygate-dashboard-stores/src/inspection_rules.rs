@@ -115,9 +115,7 @@ pub enum RuleError {
     DuplicateName,
 }
 
-/// Hard ceiling on `list_rules` page size — mirrors the other
-/// admin stores (`oauth_consent`, `break_glass_tokens`,
-/// `inspection_rules`).
+/// HTTP pagination ceiling, applied by the admin handler before store reads.
 pub use waygate_core::page::MAX_LIST_LIMIT;
 
 #[async_trait]
@@ -218,7 +216,7 @@ impl InspectionRulesStore for PgInspectionRulesStore {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<InspectionRule>, RuleError> {
-        let effective_limit = limit.min(MAX_LIST_LIMIT) as i64;
+        let effective_limit = i64::from(limit);
         let offset_i = offset as i64;
         let inspector_str = filter.inspector.map(|k| k.as_str().to_owned());
         let rows = sqlx::query(

@@ -68,7 +68,7 @@ use waygate_oidc::{AuthMethod, Principal, Scope};
 use waygate_storage::audit::{AuditQuery, AuditRow};
 use waygate_upstream::{UpstreamHealth, UpstreamRuntimeState};
 
-use crate::mcp_builtin::{parse_opt_u32, schema_obj, structured};
+use crate::mcp_builtin::{parse_count, parse_opt_u32, schema_obj, structured};
 use waygate_core::fmt::format_ts_rfc3339;
 
 /// The reserved namespace this handler answers, aliased to the cross-crate
@@ -169,7 +169,8 @@ impl ObserveTools {
             .audit
             .get()
             .ok_or_else(|| McpError::internal_error("no audit reader configured", None))?;
-        let limit = i64::from(parse_opt_u32(args, "limit")?.unwrap_or(20).min(200));
+        let requested_limit = parse_count(args, "limit", 20)?;
+        let limit = i64::try_from(requested_limit).unwrap_or(i64::MAX);
         let since = resolve_since(args, "since", Duration::hours(24))?;
         let query = AuditQuery {
             tenant_id: Some(principal.tenant.as_str().to_owned()),
@@ -189,6 +190,8 @@ impl ObserveTools {
         Ok(structured(&QueryAuditResponse {
             count: events.len(),
             events,
+            requested_limit,
+            limit,
         }))
     }
 
@@ -210,7 +213,8 @@ impl ObserveTools {
                 None,
             )
         })?;
-        let top = i64::from(parse_opt_u32(args, "top")?.unwrap_or(10).min(50));
+        let requested_top = parse_count(args, "top", 10)?;
+        let top = i64::try_from(requested_top).unwrap_or(i64::MAX);
         let query = AuditQuery {
             tenant_id: Some(principal.tenant.as_str().to_owned()),
             since: Some(OffsetDateTime::now_utc() - dur),
@@ -239,6 +243,8 @@ impl ObserveTools {
             })
             .collect();
         Ok(structured(&ActivitySummaryResponse {
+            requested_top,
+            top,
             window,
             by_outcome: label_counts(&facets.outcome),
             by_risk: label_counts(&facets.risk),
@@ -475,7 +481,8 @@ impl ObserveTools {
         {
             return Err(need_scope(Scope::McpAdmin.as_str(), &resource_type));
         }
-        let limit = parse_opt_u32(args, "limit")?.unwrap_or(50);
+        let requested_limit = parse_count(args, "limit", 50)?;
+        let limit = u32::try_from(requested_limit).unwrap_or(u32::MAX);
         let offset = parse_opt_u32(args, "offset")?.unwrap_or(0);
         let filters = match args.get("filters") {
             None | Some(Value::Null) => serde_json::Map::new(),
@@ -507,6 +514,7 @@ impl ObserveTools {
             resource_type,
             count: page.rows.len(),
             rows: page.rows,
+            requested_limit,
             limit: page.limit,
             offset: page.offset,
         }))
@@ -701,6 +709,10 @@ struct AuditRowView {
 /// Output of `query_audit`: a compact, newest-first page of audit rows.
 #[derive(Serialize, schemars::JsonSchema)]
 struct QueryAuditResponse {
+    /// Caller-selected count before the SQL integer representation is applied.
+    requested_limit: u64,
+    /// Positive SQL limit used for the query.
+    limit: i64,
     count: usize,
     events: Vec<AuditRowView>,
 }
@@ -726,6 +738,10 @@ struct TopToolStat {
 /// Output of `activity_summary`: facet rollups + the busiest tools.
 #[derive(Serialize, schemars::JsonSchema)]
 struct ActivitySummaryResponse {
+    /// Caller-selected number of top tools.
+    requested_top: u64,
+    /// Positive SQL limit used for the top-tool query.
+    top: i64,
     window: String,
     by_outcome: Vec<LabelCount>,
     by_risk: Vec<LabelCount>,
@@ -905,7 +921,7 @@ fn query_audit_schema() -> Arc<JsonObject> {
             "category": {"type": "string", "description": "Exact event category, e.g. invocation | admin_mutation | auth_attempt | policy_reload."},
             "risk": {"type": "string", "description": "Exact tool risk tier: low | medium | high."},
             "principal": {"type": "string", "description": "Case-sensitive substring matched against principal sub OR email."},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Max rows (default 20, cap 200)."}
+            "limit": {"type": "integer", "minimum": 1, "description": "Positive maximum rows (default 20); the applied SQL limit is reported."}
         }
     }))
 }
@@ -915,7 +931,7 @@ fn activity_summary_schema() -> Arc<JsonObject> {
         "type": "object",
         "properties": {
             "window": {"type": "string", "description": "Relative window, e.g. `24h`, `7d`, `30d`. Default 7d."},
-            "top": {"type": "integer", "minimum": 1, "maximum": 50, "description": "Number of top tools to return (default 10, cap 50)."}
+            "top": {"type": "integer", "minimum": 1, "description": "Positive number of top tools to return (default 10); the applied SQL limit is reported."}
         }
     }))
 }
@@ -1122,7 +1138,9 @@ struct ReadResourceResponse {
     resource_type: String,
     count: usize,
     rows: Vec<Value>,
-    /// Applied page size (after the per-resource cap).
+    /// Caller-selected count before the store integer representation is applied.
+    requested_limit: u64,
+    /// Positive page size passed to the resource store.
     limit: u32,
     offset: u32,
 }
@@ -1147,7 +1165,7 @@ fn read_resource_schema() -> Arc<JsonObject> {
         "properties": {
             "resource_type": {"type": "string", "description": resource_description},
             "filters": {"type": "object", "description": "Optional filters; the keys are specific to the resource_type (call `describe_resource` for that resource's filter schema — mirrors propose_change.params ↔ describe_action). Most resources take none."},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Max rows (default 50, cap 200)."},
+            "limit": {"type": "integer", "minimum": 1, "description": "Positive maximum rows (default 50); counts beyond the store integer range saturate and the applied limit is reported."},
             "offset": {"type": "integer", "minimum": 0, "description": "Pagination offset (default 0)."}
         }
     }))
@@ -1449,10 +1467,14 @@ mod tests {
         }
 
         assert_validates(&QueryAuditResponse {
+            requested_limit: 20,
+            limit: 20,
             count: 0,
             events: Vec::new(),
         });
         assert_validates(&ActivitySummaryResponse {
+            requested_top: 10,
+            top: 10,
             window: "24h".to_string(),
             by_outcome: vec![LabelCount {
                 label: "allow".to_string(),
@@ -1501,6 +1523,7 @@ mod tests {
             }],
         });
         assert_validates(&ReadResourceResponse {
+            requested_limit: 50,
             resource_type: "rate_limit_policy".to_string(),
             count: 1,
             rows: vec![json!({"id": "00000000-0000-0000-0000-000000000000", "name": "default"})],

@@ -226,7 +226,12 @@ async fn list_decisions(
         q.principal,
     );
     let events = reader
-        .query_events(&query, q.limit, q.after_id)
+        .query_events(
+            &query,
+            q.limit
+                .clamp(1, i64::from(waygate_core::page::MAX_LIST_LIMIT)),
+            q.after_id,
+        )
         .await
         .map_err(|e| ApiError::Internal(format!("audit query: {e}")))?;
     let next_after_id =

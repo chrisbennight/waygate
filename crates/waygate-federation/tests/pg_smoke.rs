@@ -10,7 +10,7 @@
 //! 3. List filter combinations (peer_name / issuer /
 //!    trust_tier).
 //! 4. Update mutates + the `updated_at` trigger fires.
-//! 5. `MAX_LIST_LIMIT` clamp.
+//! 5. Large tenant page windows; refresh pagination remains bounded.
 //! 6. UNIQUE (tenant_id, peer_name) AND (tenant_id, issuer)
 //!    each surface as `PeerError::DuplicateName`.
 
@@ -213,17 +213,13 @@ async fn peers_lifecycle_and_isolation() {
         updated.updated_at,
     );
 
-    // 5. MAX_LIST_LIMIT clamp.
-    let clamped = store
+    // 5. A large window returns the available tenant rows.
+    let page = store
         .list(&tenant_a, PeerFilter::default(), 1_000_000, 0)
         .await
-        .expect("list clamped");
-    assert!(
-        clamped.len() <= MAX_LIST_LIMIT as usize,
-        "list must clamp; got {} > {}",
-        clamped.len(),
-        MAX_LIST_LIMIT,
-    );
+        .expect("list large window");
+    assert_eq!(page.len(), 2);
+    assert!(page.iter().all(|row| row.tenant_id == tenant_a));
 
     // 6. UNIQUE collisions on (tenant, peer_name) AND
     //    (tenant, issuer) each surface as DuplicateName.

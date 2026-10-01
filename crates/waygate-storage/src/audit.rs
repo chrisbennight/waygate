@@ -1626,7 +1626,7 @@ impl AuditReader for PgAuditSink {
         limit: i64,
         after_id: Option<Uuid>,
     ) -> Result<Vec<AuditRow>, sqlx::Error> {
-        let limit = limit.clamp(1, 500);
+        let limit = limit.max(1);
         // One static query using the `($N IS NULL OR <pred>)` idiom (same
         // house style as `verify_chain`'s ts filter): every filter is a
         // bound `Option`, so a `None` dimension drops out of the WHERE
@@ -1727,7 +1727,7 @@ impl AuditReader for PgAuditSink {
         query: &AuditQuery,
         limit: i64,
     ) -> Result<Vec<ToolStat>, sqlx::Error> {
-        let limit = limit.clamp(1, 200);
+        let limit = limit.max(1);
         // Same `($N IS NULL OR …)` filter idiom + tenant scope as
         // `query_events`, minus the keyset cursor, grouped by (server, tool).
         // The caller clears `outcome` so the FILTER counts (errors/denied)

@@ -12,7 +12,7 @@
 //!    enabled).
 //! 4. `update` mutates the row + the `updated_at` trigger
 //!    fires.
-//! 5. `MAX_LIST_LIMIT` clamp.
+//! 5. Large page windows preserve tenant scope.
 //! 6. UNIQUE (tenant_id, inspector, name) surfaces as
 //!    `RuleError::DuplicateName`.
 
@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use waygate_dashboard_stores::inspection_rules::{
     InspectionRulesStore, InspectorKind, NewInspectionRule, PgInspectionRulesStore, RuleError,
-    RuleFilter, RuleUpdate, MAX_LIST_LIMIT,
+    RuleFilter, RuleUpdate,
 };
 
 async fn connect() -> Option<sqlx::PgPool> {
@@ -219,17 +219,13 @@ async fn rules_lifecycle_and_isolation() {
         .expect("cross update");
     assert!(cross_update.is_none());
 
-    // 5. MAX_LIST_LIMIT clamp.
-    let clamped = store
+    // 5. A large window returns the available tenant rows.
+    let page = store
         .list(&tenant_a, RuleFilter::default(), 1_000_000, 0)
         .await
-        .expect("list clamped");
-    assert!(
-        clamped.len() <= MAX_LIST_LIMIT as usize,
-        "list must clamp; got {} > {}",
-        clamped.len(),
-        MAX_LIST_LIMIT,
-    );
+        .expect("list large window");
+    assert_eq!(page.len(), 2);
+    assert!(page.iter().all(|row| row.tenant_id == tenant_a));
 
     // 6. UNIQUE constraint surfaces DuplicateName.
     let dup_err = store

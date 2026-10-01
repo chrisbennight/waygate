@@ -23,6 +23,11 @@ Authorization simulation is useful for explaining a candidate policy decision.
 It does not execute the tool or grant future access; the actual invocation
 still checks current authority and state.
 
+Audit queries default to 20 rows and activity summaries to 10 top tools.
+Positive explicit counts are honored. Responses report the requested count and
+the applied SQL limit; counts beyond the database integer range saturate to that
+range. Tenant scope, filters, and audit retention still determine available rows.
+
 ## Configure the signals
 
 For a reproducible starting point, run the [quickstart checker](../../examples/quickstart/README.md).

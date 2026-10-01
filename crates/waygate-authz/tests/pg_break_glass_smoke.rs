@@ -23,7 +23,7 @@ use sqlx::postgres::PgPoolOptions;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use waygate_authz::{BreakGlassStore, NewBreakGlassToken, PgBreakGlassStore, MAX_LIST_LIMIT};
+use waygate_authz::{BreakGlassStore, NewBreakGlassToken, PgBreakGlassStore};
 
 async fn connect() -> Option<sqlx::PgPool> {
     let url = env::var("AUDIT_DATABASE_URL").ok()?;
@@ -209,18 +209,13 @@ async fn mint_list_candidates_claim_and_single_use() {
         .expect("delete same-tenant");
     assert!(same_delete, "same-tenant delete must return true");
 
-    // MAX_LIST_LIMIT clamp (defensive; we don't insert
-    // enough rows to actually hit the cap, but pin the
-    // contract).
+    // A large window returns the remaining tenant rows.
     let listed = store
         .list(&tenant_id, None, 1_000_000, 0)
         .await
-        .expect("list clamped");
-    assert!(
-        listed.len() <= MAX_LIST_LIMIT as usize,
-        "list must clamp at MAX_LIST_LIMIT, got {}",
-        listed.len(),
-    );
+        .expect("list large window");
+    assert_eq!(listed.len(), 3);
+    assert!(listed.iter().all(|row| row.tenant_id == tenant_id));
 
     // Cleanup — cascade via tenant DELETE.
     sqlx::query("DELETE FROM tenants WHERE id IN ($1, $2)")

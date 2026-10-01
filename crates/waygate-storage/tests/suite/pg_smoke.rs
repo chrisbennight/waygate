@@ -1434,6 +1434,38 @@ async fn rollup_folds_counts_exactly_once() {
 }
 
 #[tokio::test]
+async fn query_events_and_tool_rollups_honor_large_requested_counts() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    use waygate_storage::{AuditQuery, AuditReader};
+    let sink = PgAuditSink::with_pool(pool.clone());
+    let server = format!("large-count-{}", Uuid::new_v4());
+    let tenant = waygate_core::TenantId::parse(server.clone()).unwrap();
+    for index in 0..550 {
+        let mut event = AuditEvent::new("CallTool", AuditOutcome::Success);
+        event.tenant = tenant.clone();
+        event.server = Some(server.clone());
+        event.tool = Some(format!("tool-{index}"));
+        sink.record_required(event).await.unwrap();
+    }
+    let query = AuditQuery {
+        tenant_id: Some(server),
+        ..Default::default()
+    };
+    assert_eq!(
+        sink.query_events(&query, 550, None).await.unwrap().len(),
+        550
+    );
+    assert_eq!(sink.tool_stats(&query, 550).await.unwrap().len(), 550);
+    waygate_storage::rollup_once(&pool).await.unwrap();
+    assert_eq!(
+        sink.rollup_tool_stats(&query, 550).await.unwrap().len(),
+        550
+    );
+}
+
+#[tokio::test]
 async fn query_events_filters_by_policy_id() {
     // The Decision Log "decisions that matched this policy"
     // reverse lookup is `policy_ids @> ARRAY[$id]`, served by the

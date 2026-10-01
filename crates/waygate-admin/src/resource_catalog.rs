@@ -61,20 +61,12 @@ use serde_json::{Map, Value};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use waygate_dashboard_stores::agent_config::MAX_LIST_LIMIT as AGENT_MAX_LIMIT;
-use waygate_dashboard_stores::inspection_rules::{
-    InspectorKind, RuleFilter, MAX_LIST_LIMIT as RULE_MAX_LIMIT,
-};
-use waygate_federation::{PeerFilter, TrustTier, MAX_LIST_LIMIT as PEER_MAX_LIMIT};
+use waygate_dashboard_stores::inspection_rules::{InspectorKind, RuleFilter};
+use waygate_federation::{PeerFilter, TrustTier};
 use waygate_oidc::Scope;
 
 use crate::state::AdminState;
 use waygate_core::fmt::format_ts_rfc3339;
-
-/// Hard cap on a single page, matching `query_audit`'s 200-row cap. (The
-/// default page size when `limit` is omitted is applied at the MCP boundary,
-/// like the other observe tools.)
-const MAX_LIMIT: u32 = 200;
 
 /// Which scope a resource type reads under. The MCP `read_resource` tool
 /// enforces this per resource; `describe_resource` advertises it.
@@ -141,8 +133,7 @@ pub struct ReadPage {
 }
 
 /// One page-listing implementation, type-erased for the registry. Takes
-/// `(state, tenant, filters, clamped_limit, offset)`; returns the page (the
-/// natively-paginated stores may return a smaller effective `limit`).
+/// `(state, tenant, filters, limit, offset)`; returns the applied page.
 type ListFn = for<'a> fn(
     &'a AdminState,
     &'a str,
@@ -362,8 +353,8 @@ fn cap<T>(c: &crate::capability::Capability<T>) -> Result<&T, ReadError> {
 /// handler calls; maps the store DTO to a schemars row view.
 ///
 /// `filters` keys are resource-specific (see each entry's `filter_schema`);
-/// resources with no filters ignore the object. `limit` is clamped to
-/// `[1, MAX_LIMIT]`. Natively-paginated stores get the window pushed down; the
+/// resources with no filters ignore the object. Positive limits are honored.
+/// Natively-paginated stores get the window pushed down; the
 /// rest are paged over the returned vec.
 pub async fn read(
     state: &AdminState,
@@ -373,7 +364,7 @@ pub async fn read(
     limit: u32,
     offset: u32,
 ) -> Result<ReadPage, ReadError> {
-    let limit = limit.clamp(1, MAX_LIMIT);
+    let limit = limit.max(1);
     let d = descriptors()
         .iter()
         .find(|d| d.resource_type == resource_type)
@@ -643,9 +634,8 @@ async fn list_agent_config(
     offset: u32,
 ) -> Result<ReadPage, ReadError> {
     let store = cap(&state.agent.agent_configs)?;
-    let eff = limit.min(AGENT_MAX_LIMIT);
     let rows = store
-        .list(tenant, eff, offset)
+        .list(tenant, limit, offset)
         .await
         .map_err(|e| store_err("agent_configs", e))?
         .into_iter()
@@ -653,7 +643,7 @@ async fn list_agent_config(
         .collect();
     Ok(ReadPage {
         rows,
-        limit: eff,
+        limit,
         offset,
     })
 }
@@ -690,16 +680,14 @@ async fn list_inspection_rule(
 ) -> Result<ReadPage, ReadError> {
     let f: InspectionRuleFilter = parse_filters("inspection_rule", filters)?;
     let store = cap(&state.policy.inspection_rules)?;
-    // This store paginates natively; clamp to ITS cap and push the
-    // window down rather than slicing client-side.
-    let eff = limit.min(RULE_MAX_LIMIT);
+    // Push the requested window into the store before serializing rows.
     let filter = RuleFilter {
         inspector: f.inspector.as_deref().and_then(InspectorKind::parse),
         name: f.name.as_deref(),
         enabled: f.enabled,
     };
     let rules = store
-        .list(tenant, filter, eff, offset)
+        .list(tenant, filter, limit, offset)
         .await
         .map_err(|e| store_err("inspection_rules", e))?;
     let rows = rules
@@ -708,7 +696,7 @@ async fn list_inspection_rule(
         .collect();
     Ok(ReadPage {
         rows,
-        limit: eff,
+        limit,
         offset,
     })
 }
@@ -722,14 +710,13 @@ async fn list_peer(
 ) -> Result<ReadPage, ReadError> {
     let f: PeerFilterArgs = parse_filters("peer", filters)?;
     let store = cap(&state.federation.federated_peers)?;
-    let eff = limit.min(PEER_MAX_LIMIT);
     let filter = PeerFilter {
         peer_name: f.peer_name.as_deref(),
         issuer: f.issuer.as_deref(),
         trust_tier: f.trust_tier.as_deref().and_then(TrustTier::parse),
     };
     let peers = store
-        .list(tenant, filter, eff, offset)
+        .list(tenant, filter, limit, offset)
         .await
         .map_err(|e| store_err("federated_peers", e))?;
     let rows = peers
@@ -738,7 +725,7 @@ async fn list_peer(
         .collect();
     Ok(ReadPage {
         rows,
-        limit: eff,
+        limit,
         offset,
     })
 }
@@ -1747,6 +1734,44 @@ mod tests {
                 other => panic!("unexpected read({rt}) result with no store: {other:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn resource_windows_honor_large_counts_and_preserve_tenant_scope() {
+        let store = Arc::new(InMemoryAgentConfigStore::new());
+        for index in 0..610 {
+            let name = format!("agent-{index:04}");
+            store
+                .insert(
+                    if index < 10 { "other" } else { "default" },
+                    AgentConfigFields {
+                        name: &name,
+                        kind: AgentKind::Classification,
+                        model_alias: "reasoning-default",
+                        instructions: None,
+                        allowed_tools: &[],
+                        max_steps: 6,
+                        max_tool_calls: 12,
+                        token_budget: None,
+                        enabled: true,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let state = empty_state().await.with_agent_configs(Some(store));
+        for (limit, expected) in [(50, 50), (550, 550), (u32::MAX, 600)] {
+            let page = read(&state, "agent_config", "default", &Map::new(), limit, 0)
+                .await
+                .unwrap();
+            assert_eq!(page.rows.len(), expected);
+            assert_eq!(page.limit, limit);
+            assert!(page.rows.iter().all(|row| row["tenant_id"] == "default"));
+        }
+        let page = read(&state, "agent_config", "default", &Map::new(), 550, 550)
+            .await
+            .unwrap();
+        assert_eq!(page.rows.len(), 50);
     }
 
     #[tokio::test]
