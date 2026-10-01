@@ -45,6 +45,7 @@ use waygate_catalog::{
     GrantExecutionBinding, GrantFilter, NewApprovalGrant, ResolvedTool, SharedCatalogStore,
 };
 use waygate_core::TenantId;
+use waygate_mcp::catalog::{ResolutionAuthority, ResolvedInvocationTool, UpstreamCatalog};
 use waygate_oidc::Principal;
 
 use crate::error::{ApiError, ApiErrorBody, ApiResult};
@@ -406,16 +407,45 @@ async fn create_grant(
     // Use the same admitted schema and envelope normalization as invocation,
     // so approving an alias spelling authorizes the canonical call shape.
     let raw_argument_hash = if let Some(serde_json::Value::Object(mut arguments)) = body.arguments {
-        if let Some(schema) = definition.input_schema.as_ref() {
-            let schema = waygate_mcp::tool_schema::portable_input_schema_value(schema)
-                .ok_or_else(|| ApiError::BadRequest("tool input schema is unavailable".into()))?;
-            waygate_mcp::catalog::normalize_envelope_arguments(
-                &schema,
-                &definition.tool_name,
-                definition.discriminator.as_deref(),
-                &mut arguments,
-            )
+        let snapshot = match state
+            .upstreams
+            .resolve_invocation_tool(&tenant, &definition.server_name, &definition.tool_name)
+            .await
+        {
+            ResolvedInvocationTool::Ready(snapshot) => snapshot,
+            ResolvedInvocationTool::Quarantined { .. }
+            | ResolvedInvocationTool::Unavailable { .. } => {
+                return Err(ApiError::Conflict(
+                    "tool contract is unavailable for approval; refresh and retry".into(),
+                ));
+            }
+        };
+        if !matches!(snapshot.authority(), ResolutionAuthority::Catalog {tool_id, schema_hash}
+            if *tool_id == definition.tool_id && schema_hash == &definition.schema_hash)
+        {
+            return Err(ApiError::Conflict(
+                "tool behavior changed during approval; refresh and retry".into(),
+            ));
+        }
+        if snapshot.input_schema_unavailable() {
+            return Err(ApiError::BadRequest(
+                "tool input schema is unavailable".into(),
+            ));
+        }
+        snapshot
+            .normalize_arguments(&mut arguments)
             .map_err(ApiError::BadRequest)?;
+        let current = catalog
+            .resolve_live_tool_id(&tenant, definition.tool_id)
+            .await
+            .map_err(|e| ApiError::Internal(format!("catalog resolve_live_tool_id: {e}")))?
+            .ok_or(ApiError::NotFound("tool not Live in catalog"))?;
+        if current.server_id != definition.server_id
+            || current.schema_hash != definition.schema_hash
+        {
+            return Err(ApiError::Conflict(
+                "tool behavior changed during approval; refresh and retry".into(),
+            ));
         }
         waygate_catalog::argument_hash(Some(&arguments))
     } else {

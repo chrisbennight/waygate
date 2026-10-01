@@ -214,14 +214,20 @@ pub(crate) fn root_property_names(schema: &Value) -> HashSet<&str> {
                 pending.push((child, base.clone(), resource));
             }
         }
-        if let Some(branches) = object.get("dependentSchemas").and_then(Value::as_object) {
-            pending.extend(
-                branches
-                    .values()
-                    .map(|child| (child, base.clone(), resource)),
-            );
+        for keyword in ["dependentSchemas", "dependencies"] {
+            if let Some(branches) = object.get(keyword).and_then(Value::as_object) {
+                pending.extend(
+                    branches
+                        .values()
+                        .filter(|child| child.is_object())
+                        .map(|child| (child, base.clone(), resource)),
+                );
+            }
         }
-        if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        for reference in REFERENCE_KEYWORDS
+            .iter()
+            .filter_map(|keyword| object.get(*keyword).and_then(Value::as_str))
+        {
             let target = if let Some(fragment) = reference.strip_prefix('#') {
                 fragment_target(resource, fragment).map(|node| (node, base.clone(), resource))
             } else {

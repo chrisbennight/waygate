@@ -889,6 +889,14 @@ fn envelope_normalization_preserves_composed_and_referenced_root_fields() {
         json!({"allOf":[{"properties":{"name":{"type":"string"}}}]}),
         json!({"anyOf":[{"properties":{"name":{"type":"string"}}},{"type":"object"}]}),
         json!({"oneOf":[{"properties":{"name":{"type":"string"}}}]}),
+        json!({"dependencies":{"operation_id":{"properties":{"name":{"type":"string"}}}}}),
+        json!({"dependentSchemas":{"operation_id":{"properties":{"name":{"type":"string"}}}}}),
+        json!({"$dynamicRef":"#business", "$defs":{
+            "business":{"$dynamicAnchor":"business", "properties":{"name":{"type":"string"}}}
+        }}),
+        json!({"$recursiveRef":"#/$defs/business", "$defs":{
+            "business":{"properties":{"name":{"type":"string"}}}
+        }}),
         json!({"$ref":"#/$defs/business", "$defs":{
             "business":{"properties":{"name":{"type":"string"}},"allOf":[{"$ref":"#/$defs/business"}]}
         }}),
