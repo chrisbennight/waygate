@@ -66,6 +66,8 @@ struct GrantFakeCatalog {
     /// imported. Effectfulness for such tools comes from reviewed annotations at
     /// dispatch, not this flag.
     annotation_native: bool,
+    input_schema: Option<Value>,
+    discriminator: Option<String>,
     grants: Mutex<Vec<ApprovalGrant>>,
 }
 
@@ -78,6 +80,8 @@ impl GrantFakeCatalog {
             live_schema_override: None,
             requires_approval: true,
             annotation_native: false,
+            input_schema: None,
+            discriminator: None,
             grants: Mutex::new(Vec::new()),
         }
     }
@@ -105,7 +109,7 @@ impl GrantFakeCatalog {
 
     fn tool(&self) -> ToolDefinition {
         ToolDefinition {
-            discriminator: None,
+            discriminator: self.discriminator.clone(),
             operations: Vec::new(),
             tool_id: self.tool_id,
             server_id: self.server_id,
@@ -118,7 +122,7 @@ impl GrantFakeCatalog {
             } else {
                 "manifest".into()
             },
-            input_schema: None,
+            input_schema: self.input_schema.clone(),
             output_schema: None,
             tool_annotations: None,
             action_metadata: None,
@@ -985,6 +989,63 @@ async fn mint_grant_persists_and_argument_hash_matches() {
     assert_eq!(v["principal_sub"].as_str().unwrap(), "alice@example.com");
     assert_eq!(v["reason"].as_str().unwrap(), "ticket #42");
     assert!(v["consumed_at"].is_null());
+}
+
+#[tokio::test]
+async fn mint_grant_normalizes_aliases_and_refuses_duplicates_before_storage() {
+    let catalog = Arc::new(GrantFakeCatalog {
+        input_schema: Some(json!({
+            "type":"object", "properties":{
+                "operation_id":{"type":"string"}, "arguments":{"type":"object"}
+            }
+        })),
+        discriminator: Some("operation_id".into()),
+        ..GrantFakeCatalog::new(true)
+    });
+    let shared: SharedCatalogStore = catalog.clone();
+    let app = api_router(state_with(Some(shared)).await);
+    let expected = waygate_catalog::approval_binding_hash(
+        "h",
+        &waygate_catalog::argument_hash(Some(
+            json!({"operation_id":"messages.send","arguments":{"name":"business"}})
+                .as_object()
+                .unwrap(),
+        )),
+    );
+    for arguments in [
+        json!({"operation_id":"messages.send","arguments":{"name":"business"}}),
+        json!({"name":"messages.send","args":{"name":"business"}}),
+        json!({"operation":"messages.send","args":{"name":"business"}}),
+        json!({"tool":"messages.send","arguments":{"name":"business"}}),
+    ] {
+        let response = app.clone().oneshot(post_json(
+            "/api/v1/admin/approval_grants",
+            &json!({"principal_sub":"alice@example.com", "principal_issuer":"https://issuer.test",
+                "tool":"example-messages.send", "behavior_hash":"h", "arguments":arguments}),
+            &["mcp:admin"]
+        )).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(body_json(response).await["argument_hash"], expected);
+    }
+    let granted = catalog.grants.lock().unwrap().len();
+    for arguments in [
+        json!({"operation_id":"messages.send","name":"messages.send","arguments":{}}),
+        json!({"name":"messages.send","operation":"messages.send","args":{}}),
+        json!({"operation_id":"messages.send","arguments":{},"args":{}}),
+    ] {
+        let response = app.clone().oneshot(post_json(
+            "/api/v1/admin/approval_grants",
+            &json!({"principal_sub":"alice@example.com", "principal_issuer":"https://issuer.test",
+                "tool":"example-messages.send", "behavior_hash":"h", "arguments":arguments}),
+            &["mcp:admin"]
+        )).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!body_json(response)
+            .await
+            .to_string()
+            .contains("messages.send"));
+        assert_eq!(catalog.grants.lock().unwrap().len(), granted);
+    }
 }
 
 #[tokio::test]

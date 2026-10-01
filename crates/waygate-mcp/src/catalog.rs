@@ -797,7 +797,7 @@ pub struct OperationResolution {
 
 fn normalize_envelope_field(
     arguments: &mut serde_json::Map<String, Value>,
-    properties: &serde_json::Map<String, Value>,
+    properties: &std::collections::HashSet<&str>,
     canonical: &str,
     aliases: &[&str],
 ) -> Result<(), String> {
@@ -806,7 +806,7 @@ fn normalize_envelope_field(
             .iter()
             .filter(|alias| {
                 **alias != canonical
-                    && !properties.contains_key(**alias)
+                    && !properties.contains(**alias)
                     && arguments.contains_key(**alias)
             })
             .count();
@@ -814,11 +814,47 @@ fn normalize_envelope_field(
         return Err(format!("supply only one spelling of `{canonical}`"));
     }
     for alias in aliases {
-        if *alias != canonical && !properties.contains_key(*alias) {
+        if *alias != canonical && !properties.contains(*alias) {
             if let Some(value) = arguments.remove(*alias) {
                 arguments.insert(canonical.to_owned(), value);
             }
         }
+    }
+    Ok(())
+}
+
+/// Normalize an admitted tool envelope before policy, approval binding, or
+/// dispatch. Declared root business fields and nested arguments are preserved.
+pub fn normalize_envelope_arguments(
+    schema: &Value,
+    tool_name: &str,
+    discriminator: Option<&str>,
+    arguments: &mut serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    let properties = crate::tool_schema::root_property_names(schema);
+    let selectors = ["operation_id", "operation", "name", "tool"];
+    let canonical = discriminator
+        .filter(|field| selectors.contains(field) && properties.contains(*field))
+        .or_else(|| {
+            if properties.contains("operation_id") && properties.contains("arguments") {
+                return Some("operation_id");
+            }
+            if !matches!(tool_name, "catalog.describe" | "operations.describe") {
+                return None;
+            }
+            let mut declared = selectors
+                .iter()
+                .copied()
+                .filter(|field| properties.contains(*field));
+            let field = declared.next()?;
+            declared.next().is_none().then_some(field)
+        });
+    let Some(canonical) = canonical else {
+        return Ok(());
+    };
+    normalize_envelope_field(arguments, &properties, canonical, &selectors)?;
+    if properties.contains("arguments") && !properties.contains("args") {
+        normalize_envelope_field(arguments, &properties, "arguments", &["args"])?;
     }
     Ok(())
 }
@@ -1162,41 +1198,10 @@ impl InvocationToolSnapshot {
         &self,
         arguments: &mut serde_json::Map<String, Value>,
     ) -> Result<(), String> {
-        let Some(properties) = self
-            .input_schema()
-            .and_then(|schema| schema.get("properties"))
-            .and_then(Value::as_object)
-        else {
+        let Some(schema) = self.input_schema() else {
             return Ok(());
         };
-        let selectors = ["operation_id", "operation", "name", "tool"];
-        let canonical = self
-            .discriminator()
-            .filter(|field| selectors.contains(field) && properties.contains_key(*field))
-            .or_else(|| {
-                if !matches!(
-                    self.facts.name.as_str(),
-                    "catalog.describe" | "operations.describe"
-                ) && !(properties.contains_key("operation_id")
-                    && properties.contains_key("arguments"))
-                {
-                    return None;
-                }
-                let mut declared = selectors
-                    .iter()
-                    .copied()
-                    .filter(|field| properties.contains_key(*field));
-                let field = declared.next()?;
-                declared.next().is_none().then_some(field)
-            });
-        let Some(canonical) = canonical else {
-            return Ok(());
-        };
-        normalize_envelope_field(arguments, properties, canonical, &selectors)?;
-        if properties.contains_key("arguments") && !properties.contains_key("args") {
-            normalize_envelope_field(arguments, properties, "arguments", &["args"])?;
-        }
-        Ok(())
+        normalize_envelope_arguments(schema, &self.facts.name, self.discriminator(), arguments)
     }
 
     /// Whether this tool's authorization facts can vary with the call's

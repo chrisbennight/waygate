@@ -883,6 +883,70 @@ fn envelope_normalization_preserves_declared_business_fields() {
     assert!(arguments.contains_key("operation"));
 }
 
+#[test]
+fn envelope_normalization_preserves_composed_and_referenced_root_fields() {
+    for declarations in [
+        json!({"allOf":[{"properties":{"name":{"type":"string"}}}]}),
+        json!({"anyOf":[{"properties":{"name":{"type":"string"}}},{"type":"object"}]}),
+        json!({"oneOf":[{"properties":{"name":{"type":"string"}}}]}),
+        json!({"$ref":"#/$defs/business", "$defs":{
+            "business":{"properties":{"name":{"type":"string"}},"allOf":[{"$ref":"#/$defs/business"}]}
+        }}),
+        json!({"$ref":"#business", "$defs":{
+            "business":{"$anchor":"business", "properties":{"name":{"type":"string"}}}
+        }}),
+        json!({"$ref":"#/$defs/c%25d", "$defs":{
+            "c%d":{"properties":{"name":{"type":"string"}}}
+        }}),
+    ] {
+        let mut schema = json!({"type":"object","properties":{
+            "operation_id":{"type":"string"},"arguments":{"type":"object"}
+        }});
+        schema
+            .as_object_mut()
+            .unwrap()
+            .extend(declarations.as_object().unwrap().clone());
+        let snapshot = InvocationToolSnapshot::catalog(
+            executor_snapshot().facts().clone(),
+            Uuid::from_u128(94),
+            "composed-business-fields".into(),
+            Some(schema),
+            None,
+        );
+        let mut arguments =
+            json!({"operation":"projects.list","name":"business","args":{"tool":"nested"}})
+                .as_object()
+                .unwrap()
+                .clone();
+        snapshot.normalize_arguments(&mut arguments).unwrap();
+        assert_eq!(
+            arguments,
+            json!({"operation_id":"projects.list","name":"business","arguments":{"tool":"nested"}})
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+    }
+}
+
+#[test]
+fn envelope_normalization_ignores_nested_and_unused_declarations() {
+    let snapshot = InvocationToolSnapshot::catalog(
+        executor_snapshot().facts().clone(), Uuid::from_u128(95), "nested-business-fields".into(),
+        Some(json!({"type":"object","properties":{
+            "operation_id":{"type":"string"}, "arguments":{"type":"object","properties":{"name":{"type":"string"}}}
+        },"$defs":{"unused":{"properties":{"name":{"type":"string"},"args":{"type":"object"}}}}})), None,
+    ).with_operation_classifications(Some("operation_id".into()), Vec::new());
+    let mut arguments =
+        json!({"name":"projects.list","args":{"name":"nested","args":{"tool":"business"}}})
+            .as_object()
+            .unwrap()
+            .clone();
+    snapshot.normalize_arguments(&mut arguments).unwrap();
+    assert_eq!(arguments, json!({"operation_id":"projects.list","arguments":{"name":"nested","args":{"tool":"business"}}})
+        .as_object().unwrap().clone());
+}
+
 /// A high-risk executor whose narrow operation an operator has classified.
 fn executor_snapshot() -> InvocationToolSnapshot {
     InvocationToolSnapshot::catalog(
