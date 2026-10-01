@@ -167,9 +167,15 @@ fn digest_hex(h: Sha256) -> String {
 /// digest to their key so any schema-only approval change cannot reuse a stale
 /// positive or negative compilation result.
 pub fn validator_schema_hash(schema: &Value) -> String {
+    canonical_json_hash("validator-schema-v1", schema)
+}
+
+/// Compute a stable digest of canonical JSON under a distinct application domain.
+pub fn canonical_json_hash(domain: &str, value: &Value) -> String {
     let mut h = Sha256::new();
-    h.update(b"validator-schema-v1\x00");
-    let canonical = canonicalize(schema);
+    h.update(domain.as_bytes());
+    h.update(b"\x00");
+    let canonical = canonicalize(value);
     let serialized = serde_json::to_string(&canonical).unwrap_or_default();
     h.update(serialized.as_bytes());
     digest_hex(h)
@@ -380,6 +386,24 @@ mod tests {
                 Some(&annotations),
                 Some(&action),
             )
+        );
+    }
+
+    #[test]
+    fn canonical_json_hash_separates_domains_and_ignores_object_order() {
+        let left: Value = serde_json::from_str(r#"{"beta":2,"alpha":1}"#).unwrap();
+        let right: Value = serde_json::from_str(r#"{"alpha":1,"beta":2}"#).unwrap();
+        assert_eq!(
+            canonical_json_hash("document-v1", &left),
+            canonical_json_hash("document-v1", &right)
+        );
+        assert_ne!(
+            canonical_json_hash("document-v1", &left),
+            canonical_json_hash("other-document-v1", &right)
+        );
+        assert_eq!(
+            validator_schema_hash(&left),
+            canonical_json_hash("validator-schema-v1", &left)
         );
     }
 
