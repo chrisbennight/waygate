@@ -88,6 +88,7 @@ struct LoadResult {
 
 #[derive(Serialize, JsonSchema)]
 #[serde(untagged)]
+#[schemars(extend("type" = "object"))]
 enum LoadResponse {
     Complete {
         #[serde(flatten)]

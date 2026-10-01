@@ -24,6 +24,9 @@ async fn invoke(tools: &SkillTools, name: &str, value: Value) -> Value {
         .into_iter()
         .find(|tool| tool.name == format!("gateway-skills.{name}"))
         .unwrap();
+    if name == "load" {
+        assert_eq!(definition.output_schema.as_ref().unwrap()["type"], "object");
+    }
     jsonschema::validator_for(&serde_json::to_value(definition.output_schema).unwrap())
         .unwrap()
         .validate(&value)

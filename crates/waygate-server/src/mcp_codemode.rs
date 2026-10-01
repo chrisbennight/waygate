@@ -6484,6 +6484,7 @@ struct DescribeResponse {
 
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(untagged)]
+#[schemars(extend("type" = "object"))]
 enum DescribeResult {
     Complete {
         #[serde(flatten)]
@@ -12622,6 +12623,7 @@ mod tests {
         assert!(definition.input_schema["properties"]
             .get("operation")
             .is_none());
+        assert_eq!(definition.output_schema.as_ref().unwrap()["type"], "object");
         let validator =
             jsonschema::validator_for(&Value::Object((*definition.output_schema.unwrap()).clone()))
                 .unwrap();
