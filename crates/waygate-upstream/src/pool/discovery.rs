@@ -78,6 +78,7 @@ impl UpstreamPool {
                     .unwrap_or_default();
                 contract.behavior_hash = original.behavior_hash;
                 contract.advertised_definition = original.definition;
+                contract.native_tasks = super::tasks::supported(connection);
                 published.insert(tool.name.to_string(), contract);
             }
         }

@@ -1143,7 +1143,17 @@ impl InvocationToolSnapshot {
     /// The definition remains optional because synthetic model admissions and
     /// static invocation-only catalogs have no MCP descriptor to publish.
     #[must_use]
-    pub fn with_published_definition(mut self, definition: Option<Tool>) -> Self {
+    pub fn with_published_definition(self, definition: Option<Tool>) -> Self {
+        self.with_published_definition_and_task_support(definition, false)
+    }
+
+    /// Bind a definition and native Task capability from the same connection.
+    #[must_use]
+    pub fn with_published_definition_and_task_support(
+        mut self,
+        definition: Option<Tool>,
+        native_tasks: bool,
+    ) -> Self {
         if matches!(self.authority, ResolutionAuthority::ManifestFallback { .. }) {
             if let Some(definition) = definition.as_ref() {
                 if self.input_schema.is_none() && !self.input_schema_unavailable {
@@ -1165,7 +1175,7 @@ impl InvocationToolSnapshot {
                 }
             }
         }
-        if !self.facts.side_effects && self.discriminator.is_none() {
+        if !native_tasks && !self.facts.side_effects && self.discriminator.is_none() {
             if let Some((_, input)) = definition
                 .as_ref()
                 .zip(self.input_schema.as_deref())

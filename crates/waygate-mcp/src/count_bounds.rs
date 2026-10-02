@@ -30,6 +30,11 @@ impl CountBound {
     }
 
     pub(crate) fn project(tool: &Tool, input: &Value) -> Option<(Self, Value)> {
+        // A reference can share the limit's constraints with another budget.
+        // Keep those schemas intact rather than relax every referencing field.
+        if contains_reference(input) {
+            return None;
+        }
         let output = tool.output_schema.as_ref()?;
         // Wrapped text has no reliable row count. Its extensible object lets
         // the gateway report an adjustment without rewriting the text result.
@@ -175,6 +180,17 @@ impl CountBound {
                     "clamped":{"type":"boolean"}},
                 "required":["requested","effective","upstreamMaximum","returned","clamped"]}},
             "required":["limit"]})
+    }
+}
+
+fn contains_reference(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            matches!(key.as_str(), "$ref" | "$dynamicRef" | "$recursiveRef")
+                || contains_reference(value)
+        }),
+        Value::Array(items) => items.iter().any(contains_reference),
+        _ => false,
     }
 }
 

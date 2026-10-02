@@ -15,12 +15,13 @@ struct CountCatalog {
     side_effects: bool,
     stored_maximum: Option<u64>,
     closed_stored_output: bool,
+    referenced_budget: bool,
     calls: Mutex<Vec<Map<String, Value>>>,
 }
 
 impl CountCatalog {
     fn tool(&self) -> Tool {
-        Tool::new(
+        let mut tool = Tool::new(
             "search",
             "Search wrapped text",
             Arc::new(
@@ -43,7 +44,12 @@ impl CountCatalog {
             .as_object()
             .unwrap()
             .clone(),
-        ))
+        ));
+        if self.referenced_budget {
+            Arc::make_mut(&mut tool.input_schema)["properties"]["extract_count"] =
+                json!({"$ref":"#/properties/limit"});
+        }
+        tool
     }
 
     fn snapshot(&self) -> InvocationToolSnapshot {
@@ -113,6 +119,7 @@ fn service(maximum: u64, side_effects: bool) -> (DefaultInvocationService, Arc<C
         side_effects,
         stored_maximum: None,
         closed_stored_output: false,
+        referenced_budget: false,
         calls: Mutex::default(),
     });
     let service =
@@ -237,6 +244,7 @@ async fn stored_ceiling_does_not_hide_live_ceiling_changes_from_cached_calls() {
         side_effects: false,
         stored_maximum: Some(1024),
         closed_stored_output: false,
+        referenced_budget: false,
         calls: Mutex::default(),
     });
     assert_ne!(expected, current.snapshot().contract_identity());
@@ -259,6 +267,7 @@ async fn closed_stored_output_keeps_counts_within_the_admitted_contract() {
         side_effects: false,
         stored_maximum: None,
         closed_stored_output: true,
+        referenced_budget: false,
         calls: Mutex::default(),
     });
     let published =
@@ -292,6 +301,42 @@ async fn closed_stored_output_keeps_counts_within_the_admitted_contract() {
         result.structured_content.unwrap(),
         json!({"result":"original result"})
     );
+    assert_eq!(catalog.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn referenced_acquisition_budgets_keep_their_native_ceiling() {
+    let catalog = Arc::new(CountCatalog {
+        maximum: 1024,
+        side_effects: false,
+        stored_maximum: None,
+        closed_stored_output: false,
+        referenced_budget: true,
+        calls: Mutex::default(),
+    });
+    let published =
+        crate::discovery::CatalogTool::from_upstream_snapshot("connector", catalog.snapshot())
+            .unwrap();
+    let input = json!(published.definition.input_schema);
+    let validator = jsonschema::validator_for(&input).unwrap();
+    assert!(!validator.is_valid(&json!({"query":"fixture","limit":2048})));
+    assert!(!validator.is_valid(&json!({"query":"fixture","limit":10,"extract_count":2048})));
+    let service =
+        DefaultInvocationService::new(catalog.clone(), Arc::new(AllowAllGate), Arc::new(NullSink));
+    for arguments in [
+        json!({"query":"fixture","limit":2048}),
+        json!({"query":"fixture","limit":10,"extract_count":2048}),
+    ] {
+        assert!(service.invoke(None, request(arguments)).await.is_err());
+    }
+    assert!(catalog.calls.lock().unwrap().is_empty());
+    service
+        .invoke(
+            None,
+            request(json!({"query":"fixture","limit":10,"extract_count":10})),
+        )
+        .await
+        .unwrap();
     assert_eq!(catalog.calls.lock().unwrap().len(), 1);
 }
 

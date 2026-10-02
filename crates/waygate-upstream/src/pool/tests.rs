@@ -3097,6 +3097,7 @@ fn published_with_hash(approved: Option<&str>) -> schema_admission::PublishedToo
     schema_admission::PublishedToolContract {
         definition: None,
         advertised_definition: None,
+        native_tasks: false,
         input_schema: Some(serde_json::json!({"type": "object"})),
         output_schema: None,
         tool_annotations: Some(serde_json::json!({
@@ -3389,6 +3390,7 @@ async fn manifest_fallback_keeps_legacy_snapshot_shape() {
         schema_admission::PublishedToolContract {
             definition: None,
             advertised_definition: None,
+            native_tasks: false,
             input_schema: Some(serde_json::json!({"type": "object"})),
             output_schema: Some(serde_json::json!({"type": "integer"})),
             tool_annotations: Some(serde_json::json!({

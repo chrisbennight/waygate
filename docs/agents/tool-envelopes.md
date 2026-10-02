@@ -34,10 +34,10 @@ For read-only FastMCP tools with a simple wrapped text result, a positive intege
 `limit` and a declared native maximum, the gateway admits larger requested
 counts and clamps them immediately before dispatch. The published limit schema
 retains its minimum and default and identifies the native maximum under
-`x-mcp-result-count`. Additional count constraints and task-capable tools retain
-their native contract. A different stored input or output contract also retains
-its authority over validation; count projection requires agreement with the
-published source contract.
+`x-mcp-result-count`. Schemas with references, additional count constraints, and
+connections with native Tasks support retain their native contract. A different
+stored input or output contract also retains its authority over validation;
+count projection requires agreement with the published source contract.
 
 An adjusted response includes `_gateway_counts.limit` with `requested`,
 `effective`, `upstreamMaximum`, `returned`, and `clamped`. `returned` is null

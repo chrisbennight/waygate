@@ -17,6 +17,14 @@ pub(super) fn binding(manifest: &UpstreamManifest) -> Option<String> {
         .map(|value| waygate_catalog::validator_schema_hash(&value))
 }
 
+pub(super) fn supported(connection: &Connection) -> bool {
+    connection.negotiated_protocol.as_deref() == Some("2026-07-28")
+        && connection
+            .client
+            .peer_info()
+            .is_some_and(|info| info.capabilities.supports_tasks())
+}
+
 pub(super) enum DispatchResponse {
     Tool(Box<CallToolResponse>),
     Task(TaskResponse),
@@ -113,12 +121,7 @@ impl UpstreamPool {
         for slot in &entry.slots {
             let guard = slot.conn.read().await;
             if let Some(conn) = guard.as_ref() {
-                if conn.negotiated_protocol.as_deref() == Some("2026-07-28")
-                    && conn
-                        .client
-                        .peer_info()
-                        .is_some_and(|info| info.capabilities.supports_tasks())
-                {
+                if supported(conn) {
                     return binding(&manifest);
                 }
             }

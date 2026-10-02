@@ -25,6 +25,7 @@ struct Backend {
     created: String,
     label: &'static str,
     prompt_cancel: bool,
+    wrapped_count: bool,
 }
 impl Backend {
     fn new(label: &'static str, prompt_cancel: bool) -> Self {
@@ -37,6 +38,7 @@ impl Backend {
                 .unwrap(),
             label,
             prompt_cancel,
+            wrapped_count: false,
         }
     }
     fn task(&self) -> Task {
@@ -64,11 +66,28 @@ impl ServerHandler for Backend {
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let tool = Tool::new(
+        let mut tool = Tool::new(
             "work",
             "Run a background operation",
             Arc::new(json!({"type":"object"}).as_object().unwrap().clone()),
         );
+        if self.wrapped_count {
+            tool.input_schema = Arc::new(
+                json!({"type":"object","properties":{
+                    "limit":{"type":"integer","minimum":1,"maximum":1024,"default":10}
+                }})
+                .as_object()
+                .unwrap()
+                .clone(),
+            );
+            tool = tool.with_raw_output_schema(Arc::new(
+                json!({"type":"object","x-fastmcp-wrap-result":true,
+                    "properties":{"result":{"type":"string"}},"required":["result"]})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ));
+        }
         Ok(ListToolsResult::with_all_items(vec![tool]))
     }
     async fn call_tool(
@@ -111,7 +130,9 @@ impl ServerHandler for Backend {
                 "answer": {"method":"elicitation/create", "params":{"mode":"form","message":"Continue?",
                     "requestedSchema":{"type":"object","properties":{"choice":{"type":"string"}},"required":["choice"]}}}
             })).unwrap() },
-            TaskStatus::Completed => TaskPayload::Completed { result: serde_json::to_value(CallToolResult::structured(if self.label == "file-report"
+            TaskStatus::Completed => TaskPayload::Completed { result: serde_json::to_value(CallToolResult::structured(if self.wrapped_count {
+                    json!({"result":self.label})
+                } else if self.label == "file-report"
                     && ctx.meta.get(waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY)
                         .is_some_and(|caps| caps["files"]["download"] == true
                             && caps["files"]["transports"].as_array().is_some_and(|t| t.contains(&json!("http")))) {
@@ -283,6 +304,60 @@ async fn rpc(url: &str, method: &str, mut params: Value, sub: &str, tasks: bool)
         .unwrap_or(&body);
     serde_json::from_str(body).unwrap_or_else(|_| panic!("invalid fixture response: {body}"))
 }
+#[tokio::test]
+async fn native_task_capabilities_preserve_wrapped_count_contracts() {
+    let mut upstream = Backend::new("original result", true);
+    upstream.wrapped_count = true;
+    let (upstream_url, upstream_worker) = backend(upstream.clone()).await;
+    let manifests = BTreeMap::from([("alpha".into(), manifest("alpha", &upstream_url))]);
+    let (url, worker) = gateway(Arc::new(InMemoryTaskRouteStore::default()), manifests).await;
+    let listed = rpc(&url, "tools/list", json!({}), "alice", true).await;
+    let tool = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "alpha.work")
+        .unwrap();
+    assert!(tool.get("execution").is_none());
+    assert_eq!(tool["inputSchema"]["properties"]["limit"]["maximum"], 1024);
+    let oversized = rpc(
+        &url,
+        "tools/call",
+        json!({"name":"alpha.work","arguments":{"limit":2048}}),
+        "alice",
+        true,
+    )
+    .await;
+    assert_eq!(oversized["error"]["code"], -32602, "{oversized}");
+    assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
+    let response = rpc(
+        &url,
+        "tools/call",
+        json!({"name":"alpha.work","arguments":{"limit":1024}}),
+        "alice",
+        true,
+    )
+    .await;
+    assert_eq!(response["result"]["resultType"], "task", "{response}");
+    assert_eq!(upstream.calls.load(Ordering::SeqCst), 1);
+    *upstream.state.lock().unwrap() = TaskStatus::Completed;
+    let result = rpc(
+        &url,
+        "tasks/get",
+        json!({"taskId":response["result"]["taskId"]}),
+        "alice",
+        true,
+    )
+    .await;
+    assert_eq!(
+        result["result"]["result"]["structuredContent"],
+        json!({"result":"original result"}),
+        "{result}"
+    );
+    worker.abort();
+    upstream_worker.abort();
+}
+
 struct Gate(AtomicBool);
 #[async_trait::async_trait]
 impl waygate_mcp::AuthzGate for Gate {
