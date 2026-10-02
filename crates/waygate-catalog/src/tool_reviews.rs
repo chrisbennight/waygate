@@ -168,8 +168,10 @@ impl PgCatalogStore {
             .await
     }
 
-    /// Annotation admission supplies its authoritative approved hash. A first
-    /// mismatched observation is a candidate, never an accepted baseline.
+    /// Annotation admission seeds the approval for a first observation. Later
+    /// observations use durable catalog activation and exact review decisions;
+    /// a live session's manifest can lag either source of accepted changes.
+    /// A mismatched observation is a candidate, never an accepted baseline.
     /// Missing historical content is kept as null rather than reconstructed.
     #[allow(clippy::too_many_arguments)]
     pub async fn observe_against_approval(
@@ -185,7 +187,7 @@ impl PgCatalogStore {
         let mut tx = self.pool.begin().await?;
         let id: Option<Uuid> = sqlx::query_scalar(
             "SELECT t.id FROM mcp_tools t JOIN mcp_servers s ON s.id=t.server_id
-             WHERE s.tenant_id=$1 AND s.name=$2 AND t.name=$3",
+             WHERE s.tenant_id=$1 AND s.name=$2 AND t.name=$3 FOR UPDATE OF t",
         )
         .bind(tenant)
         .bind(server)
@@ -197,6 +199,31 @@ impl PgCatalogStore {
             // reconciliation creates their identity. Admission refuses absence.
             return Ok(false);
         };
+        let previous = sqlx::query(
+            "SELECT observed_hash, approved_hash, quarantined FROM tool_contract_reviews WHERE tool_id=$1 FOR UPDATE",
+        ).bind(id).fetch_optional(&mut *tx).await?;
+        // Catalog activation records deliberate manifest changes, including
+        // rollback. Exact review approvals remain durable when a new observed
+        // candidate clears its decision marker. Read both after taking the row
+        // locks shared with import and review writes, so session lag cannot
+        // replace a newer acceptance or erase its retained comparison.
+        let durable_approval = if approved_hash.is_some() {
+            sqlx::query_scalar::<_, String>(
+                "SELECT approval_hash FROM (
+                    (SELECT schema_hash AS approval_hash, approved_at AS accepted_at, 0 AS priority
+                     FROM mcp_tool_versions WHERE tool_id=$1 AND approved_at IS NOT NULL
+                     ORDER BY approved_at DESC LIMIT 1)
+                    UNION ALL
+                    (SELECT subject_version_hash AS approval_hash, created_at AS accepted_at, 1 AS priority
+                     FROM catalog_approvals WHERE tenant_id=$2 AND subject_type='tool_version'
+                     AND subject_id=$1 AND action='approved' AND reason='Accepted observed tool contract'
+                     ORDER BY created_at DESC, id DESC LIMIT 1)
+                 ) approvals ORDER BY accepted_at DESC, priority DESC LIMIT 1",
+            ).bind(id).bind(tenant).fetch_optional(&mut *tx).await?
+        } else {
+            None
+        };
+        let approved_hash = durable_approval.as_deref().or(approved_hash);
         // Use PostgreSQL's representation so the bound matches the table's
         // constraint, including JSONB whitespace. Retain identity and refusal
         // even when the comparison itself cannot be stored.
@@ -230,17 +257,14 @@ impl PgCatalogStore {
         .bind(storage_requires_review || approval_mismatch)
         .execute(&mut *tx)
         .await?;
-        let previous = sqlx::query(
-            "SELECT observed_hash, approved_hash, quarantined, decided_at FROM tool_contract_reviews WHERE tool_id=$1 FOR UPDATE",
-        ).bind(id).fetch_one(&mut *tx).await?;
+        let previous = match previous {
+            Some(previous) => previous,
+            None => sqlx::query(
+                "SELECT observed_hash, approved_hash, quarantined FROM tool_contract_reviews WHERE tool_id=$1 FOR UPDATE",
+            ).bind(id).fetch_one(&mut *tx).await?,
+        };
         let old: String = previous.get("observed_hash");
-        // Repair observations recorded before annotation admission supplied its
-        // approval. A recorded decision wins over a live manifest that can lag
-        // its persisted replacement during asynchronous reload.
         let repair_baseline = approval_mismatch
-            && previous
-                .get::<Option<OffsetDateTime>, _>("decided_at")
-                .is_none()
             && (previous.get::<String, _>("approved_hash") != baseline_hash
                 || !previous.get::<bool, _>("quarantined"));
         if repair_baseline {
@@ -357,8 +381,8 @@ impl PgCatalogStore {
         let changed = result.rows_affected() == 1;
         if changed {
             sqlx::query("INSERT INTO catalog_approvals
-                (id,tenant_id,subject_type,subject_id,subject_version_hash,action,actor,reason)
-                VALUES ($1,$2,'tool_version',$3,$4,'approved',$5,'Accepted observed tool contract')")
+                (id,tenant_id,subject_type,subject_id,subject_version_hash,action,actor,reason,created_at)
+                VALUES ($1,$2,'tool_version',$3,$4,'approved',$5,'Accepted observed tool contract',clock_timestamp())")
                 .bind(Uuid::new_v4()).bind(&review.tenant_id).bind(review.tool_id)
                 .bind(&review.observed_hash).bind(actor).execute(&mut *tx).await?;
         }

@@ -559,6 +559,183 @@ async fn initial_mismatch_and_keep_blocked_are_durable_exact_decisions() {
     assert_eq!(repaired.approved_hash, before);
 }
 
+fn annotation_approval_fixture(tenant: &str, approved: &str) -> ImportServer {
+    ImportServer {
+        tenant_id: tenant.into(),
+        name: "docs".into(),
+        transport: "http".into(),
+        runtime_target: json!({"url":"http://example.test/mcp"}),
+        classification_mode: "mcp_annotations".into(),
+        tools: vec![ImportTool {
+            name: "search".into(),
+            approved_behavior_hash: Some(approved.into()),
+            risk: "low".into(),
+            side_effects: false,
+            pii: false,
+            discriminator: None,
+            operations: vec![],
+        }],
+    }
+}
+
+#[tokio::test]
+async fn approval_reconciliation_exposes_a_manifest_rollback() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("approval-rollback-{}", Uuid::new_v4());
+    let importer = ManifestImporter::new(pool.clone());
+    importer
+        .import_atomic(&tenant, &[annotation_approval_fixture(&tenant, "a")], false)
+        .await
+        .unwrap();
+    let store = PgCatalogStore::new(pool.clone());
+    let candidate = json!({"description":"Accepted replacement"});
+    store
+        .observe_against_approval(&tenant, "docs", "search", "b", &candidate, false, Some("a"))
+        .await
+        .unwrap();
+    let pending = store.get(&tenant, "docs", "search").await.unwrap().unwrap();
+    assert!(store.approve(&pending, "operator").await.unwrap());
+    importer
+        .import_atomic(&tenant, &[annotation_approval_fixture(&tenant, "b")], false)
+        .await
+        .unwrap();
+    let accepted = store.get(&tenant, "docs", "search").await.unwrap().unwrap();
+    assert!(!accepted.quarantined);
+    importer
+        .import_atomic(&tenant, &[annotation_approval_fixture(&tenant, "a")], false)
+        .await
+        .unwrap();
+    store
+        .observe_against_approval(&tenant, "docs", "search", "b", &candidate, false, Some("a"))
+        .await
+        .unwrap();
+    let rolled_back = store.get(&tenant, "docs", "search").await.unwrap().unwrap();
+    assert!(
+        rolled_back.quarantined && rolled_back.decided_at.is_none(),
+        "reactivating an older approval must expose the withheld replacement for review"
+    );
+    assert_eq!(rolled_back.approved_hash, "a");
+    assert_eq!(rolled_back.observed_hash, "b");
+    assert!(rolled_back.generation > accepted.generation);
+    assert_eq!(store.pending_count(&tenant, None).await.unwrap(), 1);
+    sqlx::query("DELETE FROM tenants WHERE id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn approval_reconciliation_preserves_comparison_during_repeated_delayed_observations() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("approval-comparison-{}", Uuid::new_v4());
+    let importer = ManifestImporter::new(pool.clone());
+    importer
+        .import_atomic(&tenant, &[annotation_approval_fixture(&tenant, "a")], false)
+        .await
+        .unwrap();
+    let store = PgCatalogStore::new(pool.clone());
+    let accepted_contract = json!({"description":"Retained accepted replacement"});
+    store
+        .observe_against_approval(
+            &tenant,
+            "docs",
+            "search",
+            "b",
+            &accepted_contract,
+            false,
+            Some("a"),
+        )
+        .await
+        .unwrap();
+    let pending = store.get(&tenant, "docs", "search").await.unwrap().unwrap();
+    assert!(store.approve(&pending, "operator").await.unwrap());
+    let replacement = json!({"description":"Next replacement"});
+    for _ in 0..2 {
+        store
+            .observe_against_approval(
+                &tenant,
+                "docs",
+                "search",
+                "c",
+                &replacement,
+                false,
+                Some("a"),
+            )
+            .await
+            .unwrap();
+        let current = store.get(&tenant, "docs", "search").await.unwrap().unwrap();
+        assert!(current.quarantined && current.decided_at.is_none());
+        assert_eq!(
+            current.approved_hash, "b",
+            "a delayed manifest cannot replace the accepted baseline"
+        );
+        assert_eq!(
+            current.approved_contract, accepted_contract,
+            "a repeated observation must retain the accepted comparison"
+        );
+    }
+    importer
+        .import_atomic(&tenant, &[annotation_approval_fixture(&tenant, "b")], false)
+        .await
+        .unwrap();
+    store
+        .observe_against_approval(
+            &tenant,
+            "docs",
+            "search",
+            "c",
+            &replacement,
+            false,
+            Some("b"),
+        )
+        .await
+        .unwrap();
+    let converged = store.get(&tenant, "docs", "search").await.unwrap().unwrap();
+    assert!(converged.quarantined);
+    assert_eq!(converged.approved_hash, "b");
+    assert_eq!(converged.approved_contract, accepted_contract);
+    sqlx::query("DELETE FROM tenants WHERE id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn approval_reconciliation_seeds_from_durable_approval_before_a_delayed_session() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("approval-initial-{}", Uuid::new_v4());
+    ManifestImporter::new(pool.clone())
+        .import_atomic(&tenant, &[annotation_approval_fixture(&tenant, "b")], false)
+        .await
+        .unwrap();
+    let store = PgCatalogStore::new(pool.clone());
+    let contract = json!({"description":"Already approved"});
+    store
+        .observe_against_approval(&tenant, "docs", "search", "b", &contract, false, Some("a"))
+        .await
+        .unwrap();
+    let current = store.get(&tenant, "docs", "search").await.unwrap().unwrap();
+    assert!(
+        !current.quarantined,
+        "the first observation must use the accepted catalog version"
+    );
+    assert_eq!(current.approved_hash, "b");
+    assert_eq!(current.approved_contract, contract);
+    sqlx::query("DELETE FROM tenants WHERE id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn exact_annotation_approval_survives_unavailable_stored_comparison() {
     let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
@@ -591,6 +768,14 @@ async fn exact_annotation_approval_survives_unavailable_stored_comparison() {
     let store = PgCatalogStore::new(pool.clone());
     let oversized = json!({"description":"x".repeat(262145)});
     for approved in ["approved", "approved-replacement"] {
+        ManifestImporter::new(pool.clone())
+            .import_atomic(
+                &tenant,
+                &[annotation_approval_fixture(&tenant, approved)],
+                false,
+            )
+            .await
+            .unwrap();
         store
             .observe_against_approval(
                 &tenant,
