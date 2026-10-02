@@ -179,11 +179,12 @@ the chrome moved.
 - The active destination carries `aria-current="page"` on its sidebar
   link, and the active tab carries `aria-current="page"` in the tab bar.
 - The Decisions entry carries the nav's one badge: `static/js/badge.js`
-  fetches the pending count (change requests + pending skill reviews + active break-glass) from
+  fetches the pending count (change requests + pending tool and skill reviews + active break-glass) from
   `GET /badge/decisions`, which caches per tenant for 30s server-side and
-  degrades to "0" for non-admin sessions / absent stores / errors.
+  shows "0" for non-admin sessions or absent stores. Unreadable tool or skill
+  review counts show "?" and link to the queue, which explains unavailable data.
 - The Decisions destination lands on the **merged Queue**
-  (`dashboard_decisions`, `/decisions`): pending change requests, pending skill
+  (`dashboard_decisions`, `/decisions`): pending change requests, pending tool and skill
   reviews, and active break-glass in one inbox. Change requests and break-glass
   have inline approve / deny / revoke forms that
   POST to queue-owned routes (`/decisions/changes/{id}/{approve,deny}`,
@@ -192,8 +193,15 @@ the chrome moved.
   per-surface pages (`change_requests::approve_and_execute_core`,
   `deny_core`, `break_glass::revoke_token_core`) and PRG back to
   `/decisions` — no mutation logic is duplicated. **The queue's sources
-  are exactly the badge's** (pending CRs + pending skill reviews + active break-glass).
-  Pending skill rows link to the exact content review on `/skills/review`.
+  are exactly the badge's** (pending CRs + pending tool and skill reviews + active break-glass).
+  Pending tool rows link to the exact contract comparison on `/servers/tool-changes`;
+  pending skill rows link to the exact content review on `/skills/review`.
+  Review summaries state the changed fields or files. Missing historical tool
+  definitions are shown as unavailable, never reconstructed. Tool decisions
+  approve the exact replacement or record that it stays blocked. Both decisions
+  clear its pending notification; a later definition change reopens review.
+  The comparison page also lists definitions kept blocked, so completed refusal
+  decisions remain discoverable and can later be approved explicitly.
   The inbox
   renders at most eight pending changes because it shows every captured param
   in full; when saturated it links to the paginated Change requests queue.

@@ -44,7 +44,10 @@ pub(crate) async fn servers_page_renders_admin_actions() {
         body.contains("/admin/tools?server=example-messages"),
         "drill-down link missing"
     );
-    assert!(body.contains("Quarantine"), "quarantine column missing");
+    assert!(
+        body.contains("<th>Tool review</th>"),
+        "tool review column missing"
+    );
 }
 
 #[tokio::test]

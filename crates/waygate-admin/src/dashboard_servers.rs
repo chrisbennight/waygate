@@ -75,6 +75,8 @@ struct ServerRow {
     /// Count of tools auto-quarantined by the drift detector. >0 ⇒ the
     /// "clear quarantine" action renders for admins.
     quarantined: usize,
+    pending_reviews: Option<i64>,
+    review_unavailable: bool,
     /// Count of tools published without the output schema this upstream
     /// advertised, because the schema's root was not `type: "object"`.
     /// A non-zero count means the upstream is emitting definitions a strict
@@ -103,7 +105,33 @@ pub(crate) async fn servers_page(
         let enc = urlencode(&m.name);
         let tools_url = format!("{tools_base}?server={enc}");
         let config_url = format!("{config_base}?server={enc}");
+        let (pending_reviews, review_unavailable) =
+            if user.as_ref().is_some_and(|Extension(actor)| {
+                crate::tool_reviews::authorize(
+                    actor,
+                    tenant_ctx
+                        .as_ref()
+                        .map(|Extension(ctx)| ctx.slug.as_str())
+                        .unwrap_or(actor.tenant.as_str()),
+                )
+                .is_ok()
+            }) {
+                match state.servers.tool_reviews.get() {
+                    Some(store) => match store
+                        .pending_count(waygate_core::TenantId::DEFAULT, Some(&m.name))
+                        .await
+                    {
+                        Ok(count) => (Some(count), false),
+                        Err(_) => (None, true),
+                    },
+                    None => (None, false),
+                }
+            } else {
+                (None, false)
+            };
         servers.push(ServerRow {
+            pending_reviews,
+            review_unavailable,
             name: m.name,
             transport: transport_str(&m.transport),
             runtime_status: health.runtime_state.as_str(),
@@ -1845,7 +1873,15 @@ pub(crate) async fn servers_refresh_catalog(
         .refresh_server_catalog(&form.server, actor)
         .await
     {
-        Some(report) => render(&ServerCatalogRefreshResult::from(report)),
+        Some(report) => {
+            state
+                .hitl
+                .decisions_badge_cache
+                .lock()
+                .await
+                .remove(waygate_core::TenantId::DEFAULT);
+            render(&ServerCatalogRefreshResult::from(report))
+        }
         None => (StatusCode::NOT_FOUND, "server was removed during refresh").into_response(),
     }
 }

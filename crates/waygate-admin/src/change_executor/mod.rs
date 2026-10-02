@@ -323,7 +323,8 @@ impl ExecutorRegistry {
 fn builtin_executors() -> Vec<Box<dyn ActionExecutor>> {
     skills::append_executors(local_catalog::append_executors(
         api_key_profiles::append_executors(agent_configs::append_executors(vec![
-            Box::new(tool_reviews::ToolContractApproveExecutor),
+            Box::new(tool_reviews::ToolContractExecutor { reject: false }),
+            Box::new(tool_reviews::ToolContractExecutor { reject: true }),
             Box::new(RateLimitUpdateExecutor),
             Box::new(RateLimitCreateExecutor),
             Box::new(RateLimitDeleteExecutor),

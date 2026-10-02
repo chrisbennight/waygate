@@ -643,6 +643,10 @@ impl EvidenceQueueStats {
     }
 
     fn finish(&self, posture: QueuedEvidencePosture) -> bool {
+        #[allow(
+            deprecated,
+            reason = "try_update requires Rust 1.95; the workspace supports 1.88"
+        )]
         let finished = self
             .pending(posture)
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {

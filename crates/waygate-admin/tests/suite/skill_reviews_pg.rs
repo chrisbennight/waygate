@@ -153,11 +153,16 @@ async fn skill_review_pages_escape_source_and_bind_decisions_to_csrf_and_generat
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains(&name));
         assert!(body.contains("Needs review"));
+        assert!(body.contains("Initial approval required"));
         assert!(body.contains("aria-current=\"page\""));
         if path.starts_with("/t/") {
             assert!(body.contains("/admin/t/default/skills/review?uri="));
         }
     }
+    let (status, decisions) = request(app.clone(), "/t/default/decisions", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(decisions.contains("Initial approval required"));
+    assert!(decisions.contains("Review skill changes"));
     let encoded_uri: String = url::form_urlencoded::byte_serialize(uri.as_bytes()).collect();
     let (status, body) = request(
         app.clone(),
@@ -171,6 +176,7 @@ async fn skill_review_pages_escape_source_and_bind_decisions_to_csrf_and_generat
     assert!(body.contains("/admin/t/default/skills/decision"));
     assert!(body.contains("href=\"https://fixture.test/team/skills\""));
     assert!(body.contains("Runtime compatibility:"));
+    assert!(body.contains("Initial approval required"));
     assert!(body.contains("Not applicable (skill instructions)"));
     assert!(body.contains("optional publisher-reported test information"));
     assert!(!body.contains("execution refused"));

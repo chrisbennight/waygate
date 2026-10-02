@@ -325,3 +325,203 @@ async fn observation_and_approval_race_leaves_newer_contract_blocked() {
         "either ordering must leave the unreviewed replacement blocked"
     );
 }
+
+#[tokio::test]
+async fn initial_mismatch_and_keep_blocked_are_durable_exact_decisions() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("initial-tool-review-{}", Uuid::new_v4());
+    ManifestImporter::new(pool.clone())
+        .import_atomic(
+            &tenant,
+            &[ImportServer {
+                tenant_id: tenant.clone(),
+                name: "docs".into(),
+                transport: "http".into(),
+                runtime_target: json!({"url":"http://example.test/mcp"}),
+                classification_mode: "mcp_annotations".into(),
+                tools: (0..53)
+                    .map(|i| ImportTool {
+                        name: format!("search-{i:02}"),
+                        approved_behavior_hash: Some("a".repeat(64)),
+                        risk: "low".into(),
+                        side_effects: false,
+                        pii: false,
+                        discriminator: None,
+                        operations: vec![],
+                    })
+                    .collect(),
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    let store = PgCatalogStore::new(pool.clone());
+    let before = "a".repeat(64);
+    let changed = json!({"description":"Changed documentation search"});
+    for i in 0..53 {
+        store
+            .observe_against_approval(
+                &tenant,
+                "docs",
+                &format!("search-{i:02}"),
+                "b",
+                &changed,
+                false,
+                Some(&before),
+            )
+            .await
+            .unwrap();
+    }
+    let first = store
+        .get(&tenant, "docs", "search-00")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        first.quarantined,
+        "a first mismatched observation must not become its own approval"
+    );
+    assert!(
+        first.approved_contract.is_null(),
+        "unknown previous contents must not be invented"
+    );
+    assert_eq!(first.approved_hash, before);
+    assert_eq!(
+        store.pending_count(&tenant, Some("docs")).await.unwrap(),
+        53
+    );
+    assert_eq!(
+        store.pending_count("another-tenant", None).await.unwrap(),
+        0
+    );
+    let page = store.pending_after(&tenant, None).await.unwrap();
+    assert_eq!(page.len(), 50);
+    let last = page.last().unwrap();
+    let next = store
+        .pending_after(&tenant, Some((&last.server, &last.tool)))
+        .await
+        .unwrap();
+    assert_eq!(next.len(), 3);
+    assert!(next
+        .iter()
+        .all(|r| !page.iter().any(|old| old.tool_id == r.tool_id)));
+    assert!(store.reject(&first, "operator").await.unwrap());
+    assert_eq!(store.pending_count(&tenant, None).await.unwrap(), 52);
+    assert!(store
+        .blocked_after(&tenant, None, true)
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.tool_id == first.tool_id && r.decided_at.is_some()));
+    assert!(!store
+        .pending(&tenant)
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.tool_id == first.tool_id));
+    store
+        .observe_against_approval(
+            &tenant,
+            "docs",
+            "search-00",
+            "b",
+            &changed,
+            false,
+            Some(&before),
+        )
+        .await
+        .unwrap();
+    let kept = store
+        .get(&tenant, "docs", "search-00")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(kept.quarantined && kept.decided_at.is_some());
+    assert_eq!(
+        kept.generation, first.generation,
+        "repeated observation preserves the recorded decision"
+    );
+    store
+        .observe_against_approval(
+            &tenant,
+            "docs",
+            "search-00",
+            "c",
+            &json!({"description":"Newer"}),
+            false,
+            Some(&before),
+        )
+        .await
+        .unwrap();
+    let newer = store
+        .get(&tenant, "docs", "search-00")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(newer.quarantined && newer.decided_at.is_none());
+    assert!(!store.reject(&first, "operator").await.unwrap());
+    assert!(!store.approve(&first, "operator").await.unwrap());
+    assert!(store.approve(&newer, "operator").await.unwrap());
+    assert!(
+        !store.reject(&newer, "operator").await.unwrap(),
+        "a stale keep-blocked form cannot revoke acceptance"
+    );
+    let pending_race = store
+        .get(&tenant, "docs", "search-02")
+        .await
+        .unwrap()
+        .unwrap();
+    let replacement = json!({"description":"Concurrent replacement"});
+    let (observation, rejection) = tokio::join!(
+        store.observe_against_approval(
+            &tenant,
+            "docs",
+            "search-02",
+            "c",
+            &replacement,
+            false,
+            Some(&before)
+        ),
+        store.reject(&pending_race, "operator"),
+    );
+    observation.unwrap();
+    rejection.unwrap();
+    let raced = store
+        .get(&tenant, "docs", "search-02")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(raced.observed_hash, "c");
+    assert!(
+        raced.quarantined && raced.decided_at.is_none(),
+        "a concurrent decision cannot hide a newer candidate"
+    );
+    // Repair an older runtime observation that incorrectly seeded itself as approved.
+    store
+        .observe(&tenant, "docs", "search-01", "b", &changed, false)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tool_contract_reviews SET approved_hash=observed_hash,approved_contract=observed_contract,quarantined=false WHERE tool_id=$1")
+        .bind(page[1].tool_id).execute(&pool).await.unwrap();
+    store
+        .observe_against_approval(
+            &tenant,
+            "docs",
+            "search-01",
+            "b",
+            &changed,
+            false,
+            Some(&before),
+        )
+        .await
+        .unwrap();
+    let repaired = store
+        .get(&tenant, "docs", "search-01")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(repaired.quarantined && repaired.approved_contract.is_null());
+    assert_eq!(repaired.approved_hash, before);
+}

@@ -10,6 +10,7 @@
             const n = (await r.text()).trim();
             if (n && n !== "0") {
                 el.textContent = n;
+                if (n === "?") el.title = "Tool or skill review counts are unavailable. Open Decisions for details.";
                 el.hidden = false;
             }
         } catch (_) {

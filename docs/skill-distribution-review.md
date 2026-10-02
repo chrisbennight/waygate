@@ -8,7 +8,9 @@ metadata is an optional publisher-reported test result, never an access decision
 
 The Skills page in the dashboard shows the configured catalog, candidate
 status, approved serving version, exact file inventory and content comparisons.
-Pending candidates also appear in Decisions and the overview. Only approved
+Pending candidates also appear in Decisions and the overview, with a short
+summary of changed instructions, metadata, or supporting files. New skills
+are identified as requiring initial approval. Only approved
 contents are available through skill tools, prompts, the Skills extension,
 resource reads, or Code Mode skill-script selection. Missing or unavailable
 review storage denies skill distribution while the rest of the gateway remains

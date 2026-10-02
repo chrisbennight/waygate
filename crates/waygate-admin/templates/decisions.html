@@ -11,7 +11,7 @@
 </header>
 
 {# The merged decisions queue: control surfaces that need an
-   operator decision — pending skill reviews, change requests, and active break-glass
+   operator decision — pending tool and skill reviews, change requests, and active break-glass
    (review/revoke) — in one inbox. Matches the sidebar Decisions badge's
    sources. Actions are inline and POST to queue-owned routes that reuse
    the same mutation cores as the per-surface pages, then PRG back here. #}
@@ -59,7 +59,7 @@
                 (set <code>GATEWAY_DATABASE_URL</code>). Pending change
                 requests and active break-glass tokens would appear here.
             {% else %}
-                No pending change requests, skill reviews, or active break-glass tokens.
+                No pending change requests, tool or skill reviews, or active break-glass tokens.
                 New items appear here and on the Decisions badge in the
                 sidebar.
             {% endif %}
@@ -114,7 +114,7 @@
                 {% when None %}{% endmatch %}
                 <div class="row-actions">
                     {# Change request: approve (confirm) + deny (reason). #}
-                    {% match i.skill_review_rel %}{% when Some with (url) %}<a class="btn btn--sm" href="{{ self.chrome.nav_url(url) }}">Review skill changes</a>{% when None %}{% endmatch %}
+                    {% match i.content_review_rel %}{% when Some with (url) %}<a class="btn btn--sm" href="{{ self.chrome.nav_url(url) }}">{{ i.review_label }}</a>{% when None %}{% endmatch %}
                     {% match i.cr_approve_rel %}{% when Some with (approve_rel) %}
                     {% if i.approval_blocked %}
                     <button type="button" class="btn btn--sm btn-primary" disabled>Approval unavailable</button>
@@ -151,9 +151,10 @@
             </li>
             {% endfor %}
         </ul>
-        {% if changes_saturated || break_glass_saturated %}
+        {% if changes_saturated || break_glass_saturated || tools_saturated %}
         <p class="table-hint">
             Showing the first items.
+            {% if tools_saturated %}Continue through all candidates on <a href="{{ self.chrome.nav_url("/servers/tool-changes") }}">Tool changes</a>.{% endif %}
             {% if changes_saturated %}More pending change requests on the <a href="{{ self.chrome.nav_url("/changes") }}">Change requests</a> tab.{% endif %}
             {% if break_glass_saturated %}More active tokens on the <a href="{{ self.chrome.nav_url("/break_glass") }}">Break-glass</a> tab.{% endif %}
         </p>

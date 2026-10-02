@@ -115,7 +115,10 @@ impl UpstreamPool {
                     manifest.classification_mode,
                     crate::ClassificationMode::McpAnnotations
                 );
-            if !self.quarantine_threshold.covers(class.risk, side_effects)
+            let annotation_mode =
+                manifest.classification_mode == crate::ClassificationMode::McpAnnotations;
+            if !annotation_mode
+                && !self.quarantine_threshold.covers(class.risk, side_effects)
                 && store
                     .get(waygate_core::TenantId::DEFAULT, name, &class.name)
                     .await?
@@ -124,13 +127,15 @@ impl UpstreamPool {
                 continue;
             }
             let changed = store
-                .observe(
+                .observe_against_approval(
                     waygate_core::TenantId::DEFAULT,
                     name,
                     &class.name,
                     &hash,
                     &contract,
                     self.quarantine_threshold.covers(class.risk, side_effects),
+                    annotation_mode
+                        .then_some(class.approved_behavior_hash.as_deref().unwrap_or("")),
                 )
                 .await?;
             if let Some(review) = store
