@@ -23,6 +23,7 @@ pub mod catalog;
 pub mod catalog_changes;
 pub mod client_schema;
 pub mod compat;
+mod count_bounds;
 pub mod disclosed;
 pub mod discovery;
 pub mod error;

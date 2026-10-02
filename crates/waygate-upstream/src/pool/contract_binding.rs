@@ -576,7 +576,7 @@ impl UpstreamPool {
             };
             snapshot
                 .with_operation_classifications(manifest_discriminator.clone(), operations)
-                .with_published_definition(definition)
+                .with_published_definition_and_task_support(definition, published.native_tasks)
         };
         let Some(catalog) = self.catalog.as_ref() else {
             return ResolvedInvocationTool::Ready(fallback(&mut published, manifest_facts, true));
@@ -752,7 +752,10 @@ impl UpstreamPool {
                 ResolvedInvocationTool::Ready(
                     snapshot
                         .with_operation_classifications(def.discriminator, operations)
-                        .with_published_definition(definition),
+                        .with_published_definition_and_task_support(
+                            definition,
+                            published.native_tasks,
+                        ),
                 )
             }
             Ok(waygate_catalog::ResolvedTool::Quarantined { .. }) => {

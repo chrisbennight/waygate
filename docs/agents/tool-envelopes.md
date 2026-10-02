@@ -29,3 +29,20 @@ upstream API imposes a page limit, send its supported count and report the
 requested, effective, and returned counts. Compute continuation from the page
 actually requested upstream; a clamped page is not evidence that the collection
 ended.
+
+For read-only FastMCP tools with a simple wrapped text result, a positive integer
+`limit` and a declared native maximum, the gateway admits larger requested
+counts and clamps them immediately before dispatch. The published limit schema
+retains its minimum and default and identifies the native maximum under
+`x-mcp-result-count`. Schemas with references, additional count constraints, and
+connections with native Tasks support retain their native contract. A different
+stored input or output contract also retains its authority over validation;
+count projection requires agreement with the published source contract.
+
+An adjusted response includes `_gateway_counts.limit` with `requested`,
+`effective`, `upstreamMaximum`, `returned`, and `clamped`. `returned` is null
+because free text does not provide a reliable row count. The original text is
+preserved. The count report follows the complete result through response
+inspection and file delivery. Acquisition budgets, such as extraction counts,
+retain their limits. A changed native ceiling invalidates a cached invocation
+contract before dispatch.

@@ -17,6 +17,7 @@ pub(super) struct PublishedToolContract {
     pub(super) definition: Option<Tool>,
     /// Original descriptor before client-compatibility schema normalization.
     pub(super) advertised_definition: Option<Tool>,
+    pub(super) native_tasks: bool,
     pub(super) input_schema: Option<Value>,
     pub(super) output_schema: Option<Value>,
     pub(super) tool_annotations: Option<Value>,
@@ -57,6 +58,7 @@ pub(super) fn connection_tool_contract(
     // changes only the client-facing contract, not what the upstream advertised.
     contract.behavior_hash = advertised.behavior_hash;
     contract.advertised_definition = advertised.definition;
+    contract.native_tasks = super::tasks::supported(connection);
     Some(contract)
 }
 
@@ -90,6 +92,7 @@ pub(super) fn contract_from_tool(tool: &Tool) -> PublishedToolContract {
     PublishedToolContract {
         definition: Some(tool.clone()),
         advertised_definition: Some(tool.clone()),
+        native_tasks: false,
         behavior_hash,
         input_schema: Some(Value::Object((*tool.input_schema).clone())),
         output_schema: tool
