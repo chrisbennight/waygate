@@ -1169,7 +1169,25 @@ impl InvocationToolSnapshot {
             if let Some((_, input)) = definition
                 .as_ref()
                 .zip(self.input_schema.as_deref())
-                .and_then(|(tool, input)| crate::count_bounds::CountBound::project(tool, input))
+                .and_then(|(tool, input)| {
+                    let source_input = Value::Object(crate::tool_schema::portable_schema_object(
+                        tool.input_schema.as_ref(),
+                    )?);
+                    let source_output = tool.output_schema.as_ref().and_then(|output| {
+                        crate::tool_schema::portable_schema_object(output.as_ref())
+                            .map(Value::Object)
+                    });
+                    // The adapter changes one admitted contract. A different
+                    // stored contract keeps its authority over validation.
+                    if &source_input != input
+                        || self
+                            .output_schema()
+                            .is_some_and(|output| Some(output) != source_output.as_ref())
+                    {
+                        return None;
+                    }
+                    crate::count_bounds::CountBound::project(tool, input)
+                })
             {
                 self.source_input_schema_hash =
                     Some(waygate_catalog::validator_schema_hash(&serde_json::json!({

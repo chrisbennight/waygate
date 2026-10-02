@@ -13,6 +13,8 @@ use crate::catalog::{InvocationContractIdentity, InvocationToolSnapshot, Upstrea
 struct CountCatalog {
     maximum: u64,
     side_effects: bool,
+    stored_maximum: Option<u64>,
+    closed_stored_output: bool,
     calls: Mutex<Vec<Map<String, Value>>>,
 }
 
@@ -47,8 +49,25 @@ impl CountCatalog {
     fn snapshot(&self) -> InvocationToolSnapshot {
         let mut facts = self.tool_facts("connector", "search");
         facts.side_effects = self.side_effects;
-        InvocationToolSnapshot::manifest_fallback(facts, true)
-            .with_published_definition(Some(self.tool()))
+        let tool = self.tool();
+        let mut input = json!(tool.input_schema);
+        if let Some(maximum) = self.stored_maximum {
+            input["properties"]["limit"]["maximum"] = maximum.into();
+        }
+        let mut output = json!(tool.output_schema.as_ref().unwrap());
+        if self.closed_stored_output {
+            output["additionalProperties"] = false.into();
+        }
+        InvocationToolSnapshot::manifest_fallback_with_contract(
+            facts,
+            true,
+            None,
+            Some(input),
+            Some(output),
+            None,
+            None,
+        )
+        .with_published_definition(Some(tool))
     }
 }
 
@@ -92,6 +111,8 @@ fn service(maximum: u64, side_effects: bool) -> (DefaultInvocationService, Arc<C
     let catalog = Arc::new(CountCatalog {
         maximum,
         side_effects,
+        stored_maximum: None,
+        closed_stored_output: false,
         calls: Mutex::default(),
     });
     let service =
@@ -205,6 +226,73 @@ async fn native_count_ceiling_changes_invalidate_admitted_contracts() {
         .await
         .is_err());
     assert!(current.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stored_ceiling_does_not_hide_live_ceiling_changes_from_cached_calls() {
+    let (_, previous) = service(1024, false);
+    let expected = previous.snapshot().contract_identity();
+    let current = Arc::new(CountCatalog {
+        maximum: 512,
+        side_effects: false,
+        stored_maximum: Some(1024),
+        closed_stored_output: false,
+        calls: Mutex::default(),
+    });
+    assert_ne!(expected, current.snapshot().contract_identity());
+    let service =
+        DefaultInvocationService::new(current.clone(), Arc::new(AllowAllGate), Arc::new(NullSink));
+    assert!(service
+        .invoke(
+            None,
+            request(json!({"query":"fixture","limit":2048})).with_expected_contract(expected)
+        )
+        .await
+        .is_err());
+    assert!(current.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn closed_stored_output_keeps_counts_within_the_admitted_contract() {
+    let catalog = Arc::new(CountCatalog {
+        maximum: 1024,
+        side_effects: false,
+        stored_maximum: None,
+        closed_stored_output: true,
+        calls: Mutex::default(),
+    });
+    let published =
+        crate::discovery::CatalogTool::from_upstream_snapshot("connector", catalog.snapshot())
+            .unwrap();
+    assert_eq!(
+        published.definition.input_schema["properties"]["limit"]["maximum"],
+        1024
+    );
+    let output = json!(published.definition.output_schema.as_ref().unwrap());
+    let validator = jsonschema::validator_for(&output).unwrap();
+    assert!(validator.is_valid(&json!({"result":"original result"})));
+    assert!(!validator.is_valid(&json!({
+        "result":"original result", "_gateway_counts":{"limit":{}}
+    })));
+    let service =
+        DefaultInvocationService::new(catalog.clone(), Arc::new(AllowAllGate), Arc::new(NullSink));
+    assert!(service
+        .invoke(None, request(json!({"query":"fixture","limit":2048})))
+        .await
+        .is_err());
+    assert!(catalog.calls.lock().unwrap().is_empty());
+    let response = service
+        .invoke(None, request(json!({"query":"fixture","limit":10})))
+        .await
+        .unwrap();
+    let InvocationResponse::Unary(result) = response else {
+        panic!("unary result")
+    };
+    assert_eq!(
+        result.structured_content.unwrap(),
+        json!({"result":"original result"})
+    );
+    assert_eq!(catalog.calls.lock().unwrap().len(), 1);
 }
 
 #[derive(Default)]
