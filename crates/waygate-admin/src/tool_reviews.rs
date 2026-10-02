@@ -21,6 +21,9 @@ pub struct ToolReviewParams {
     /// On-disk manifest set hash shown with the review. Required when accepting an annotation-mode replacement; omitted when keeping it blocked.
     #[serde(default)]
     pub manifest_hash: String,
+    /// Administrator-selected gateway risk, required when initially accepting a tool without a manifest classification.
+    #[serde(default)]
+    pub risk: Option<waygate_core::RiskTier>,
 }
 
 pub(crate) fn authorize(actor: &Principal, tenant: &str) -> Result<(), ApiError> {
@@ -129,12 +132,26 @@ pub(crate) async fn approve_core(
         }) {
             return Err(ApiError::Conflict("The replacement has invalid or changed annotation metadata; refresh and review the upstream".into()));
         }
-        let tool = manifest
-            .tools
-            .iter()
-            .find(|t| t.name == params.tool)
-            .ok_or(ApiError::NotFound("Tool is no longer classified"))?;
-        if tool.approved_behavior_hash.as_deref() != Some(&review.observed_hash) {
+        let tool = manifest.tools.iter().find(|t| t.name == params.tool);
+        let initial_classification = if tool.is_none() {
+            let risk = params.risk.ok_or_else(|| {
+                ApiError::BadRequest(
+                    "Select a gateway risk classification before initially approving this tool"
+                        .into(),
+                )
+            })?;
+            // Annotation mode derives behavior and sensitivity from the
+            // reviewed descriptor. Its manifest stores risk and approval only.
+            let mut classification =
+                waygate_upstream::ToolClassification::new(params.tool.clone(), risk, false, false);
+            classification.approved_behavior_hash = Some(review.observed_hash.clone());
+            Some(classification)
+        } else {
+            None
+        };
+        if tool.and_then(|tool| tool.approved_behavior_hash.as_deref())
+            != Some(&review.observed_hash)
+        {
             let manifests = state.servers.manifest_store.require()?;
             crate::dashboard_servers::patch_and_publish(
                 state,
@@ -150,12 +167,16 @@ pub(crate) async fn approve_core(
                     ) {
                         return Err("Classification mode changed; reload the review".into());
                     }
-                    let tool = manifest
-                        .tools
-                        .iter_mut()
-                        .find(|t| t.name == params.tool)
-                        .ok_or("Tool is no longer classified")?;
-                    tool.approved_behavior_hash = Some(review.observed_hash.clone());
+                    if let Some(tool) = manifest.tools.iter_mut().find(|t| t.name == params.tool) {
+                        if initial_classification.is_some() {
+                            return Err("Tool classification changed; reload the review".into());
+                        }
+                        tool.approved_behavior_hash = Some(review.observed_hash.clone());
+                    } else if let Some(classification) = initial_classification {
+                        manifest.tools.push(classification);
+                    } else {
+                        return Err("Tool is no longer classified".into());
+                    }
                     Ok(())
                 },
             )
@@ -267,6 +288,8 @@ pub struct ToolReviewCandidate {
     pub observed_contract: Option<serde_json::Value>,
     /// Whether change review currently blocks this tool.
     pub quarantined: bool,
+    /// No definition has been accepted; initial approval requires an administrator-selected gateway risk classification.
+    pub initial_approval_required: bool,
     /// Tenant-relative dashboard comparison path.
     pub review_path: String,
 }
@@ -374,6 +397,7 @@ async fn read_context_impl(
                 approved_contract: selected.then_some(review.approved_contract),
                 observed_contract: selected.then_some(review.observed_contract),
                 quarantined: review.quarantined,
+                initial_approval_required: review.approved_hash.is_empty(),
             })
             .collect(),
     })

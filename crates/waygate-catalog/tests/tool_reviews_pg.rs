@@ -818,3 +818,101 @@ async fn exact_annotation_approval_survives_unavailable_stored_comparison() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn observation_waiting_for_reconciliation_does_not_lock_the_tool_identity() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("review-locks-{}", Uuid::new_v4());
+    let server = ImportServer {
+        tenant_id: tenant.clone(),
+        name: "fixture".into(),
+        transport: "http".into(),
+        runtime_target: json!({"url":"http://example.test/mcp"}),
+        classification_mode: "manifest".into(),
+        tools: vec![ImportTool {
+            name: "later-tool".into(),
+            approved_behavior_hash: None,
+            risk: "low".into(),
+            side_effects: false,
+            pii: false,
+            discriminator: None,
+            operations: vec![],
+        }],
+    };
+    ManifestImporter::new(pool.clone())
+        .import_atomic(&tenant, &[server], false)
+        .await
+        .unwrap();
+    PgCatalogStore::new(pool.clone())
+        .observe(
+            &tenant,
+            "fixture",
+            "later-tool",
+            "baseline",
+            &json!({"description":"baseline"}),
+            true,
+        )
+        .await
+        .unwrap();
+    let application_name = format!("review-observer-{}", Uuid::new_v4());
+    let observer_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            pool.connect_options()
+                .as_ref()
+                .clone()
+                .application_name(&application_name),
+        )
+        .await
+        .unwrap();
+    let mut import_tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gateway-catalog-manifest-reconcile'), hashtext($1))")
+        .bind(&tenant).execute(&mut *import_tx).await.unwrap();
+    sqlx::query("SELECT singleton FROM catalog_discovery_generation FOR UPDATE")
+        .fetch_one(&mut *import_tx)
+        .await
+        .unwrap();
+    let observed_tenant = tenant.clone();
+    let observed_pool = observer_pool.clone();
+    let observer = tokio::spawn(async move {
+        PgCatalogStore::new(observed_pool)
+            .observe(
+                &observed_tenant,
+                "fixture",
+                "later-tool",
+                "candidate",
+                &json!({"description":"candidate"}),
+                true,
+            )
+            .await
+    });
+    let queued = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock')")
+                .bind(&application_name).fetch_one(&pool).await.unwrap();
+            if waiting { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await;
+    let identity_lock = sqlx::query("SELECT t.id FROM mcp_tools t JOIN mcp_servers s ON s.id=t.server_id WHERE s.tenant_id=$1 AND s.name='fixture' AND t.name='later-tool' FOR UPDATE OF t NOWAIT")
+        .bind(&tenant).fetch_one(&mut *import_tx).await;
+    import_tx.rollback().await.unwrap();
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(5), observer)
+        .await
+        .unwrap()
+        .unwrap();
+    observer_pool.close().await;
+    sqlx::query("DELETE FROM tenants WHERE id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    queued.expect("observer must reach a database lock wait");
+    assert!(
+        identity_lock.is_ok(),
+        "a queued observer must let reconciliation lock the later tool identity: {identity_lock:?}"
+    );
+    assert!(observed.unwrap());
+}

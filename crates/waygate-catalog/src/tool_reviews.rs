@@ -185,6 +185,22 @@ impl PgCatalogStore {
         approved_hash: Option<&str>,
     ) -> Result<bool, CatalogError> {
         let mut tx = self.pool.begin().await?;
+        crate::import::lock_tenant_catalog(&mut tx, tenant).await?;
+        if approved_hash == Some("") {
+            // Retain an advertised, unapproved identity without creating a
+            // version, classification, or admission grant.
+            sqlx::query(
+                "INSERT INTO mcp_tools (id,server_id,name)
+                SELECT $1,id,$2 FROM mcp_servers WHERE tenant_id=$3 AND name=$4
+                ON CONFLICT (server_id,name) DO NOTHING",
+            )
+            .bind(Uuid::now_v7())
+            .bind(tool)
+            .bind(tenant)
+            .bind(server)
+            .execute(&mut *tx)
+            .await?;
+        }
         let id: Option<Uuid> = sqlx::query_scalar(
             "SELECT t.id FROM mcp_tools t JOIN mcp_servers s ON s.id=t.server_id
              WHERE s.tenant_id=$1 AND s.name=$2 AND t.name=$3 FOR UPDATE OF t",

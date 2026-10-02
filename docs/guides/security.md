@@ -113,8 +113,9 @@ automatic quarantine. This detects a changed contract, not whether its text is
 malicious. Response-content inspection is a separate control.
 
 Open **Servers → Review tool changes**. Select the affected tool to compare
-its previously accepted contract with the observed replacement. **Keep
-quarantined** leaves the block in place. **Approve this replacement** refreshes
+its previously accepted contract with the observed replacement. **Keep blocked**
+records a decision and leaves the block in place. **Approve this replacement**
+refreshes
 the upstream and accepts only the exact reviewed generation; if it changed
 again, reopen the comparison. Other tools remain available under their existing
 policies. Annotation-mode acceptance also updates the approved behavior hash
@@ -123,13 +124,19 @@ applies that reviewed hash across replicas.
 
 Changes are observed during catalog refresh and reconnect, including scheduled
 refresh. Annotation mode also verifies the current descriptor before dispatch.
-The first observation establishes the comparison baseline. This workflow does
+New tools on annotation-native upstreams appear as **Initial approval required**.
+Choose the gateway risk classification when approving their exact definitions;
+**Keep blocked** records the decision without assigning a classification.
+
+For previously approved tools, the first observation establishes the comparison
+baseline. This workflow does
 not add upstream change-notification handling or inspect a server's internal
 implementation.
 
 Durable review needs `GATEWAY_DATABASE_URL`. The accepted and current contracts
 are bounded to 256 KiB each in storage. Larger contracts retain their exact hash
-and quarantine, but cannot be compared or approved. Reduce the contract upstream
+and any existing approval, but a new
+replacement cannot be compared or approved. Reduce the contract upstream
 and refresh to review it; reverting to a previous contract does not clear the
 block. Other tools remain reviewable. Database failures refuse protected admission. Existing quarantines survive restart, reconnect, and the upstream's
 Clear quarantine control. Without a database, the existing process-local

@@ -248,6 +248,7 @@ struct ApprovalForm {
     observed_hash: String,
     manifest_hash: String,
     action: Option<String>,
+    risk: Option<String>,
 }
 async fn approve(
     State(state): State<Arc<AdminState>>,
@@ -276,12 +277,23 @@ async fn approve(
     ) {
         return error.into_response();
     }
+    let risk = match form.risk.as_deref().filter(|risk| !risk.is_empty()) {
+        Some(risk) => match waygate_core::RiskTier::parse(risk) {
+            Some(risk) => Some(risk),
+            None => {
+                return ApiError::BadRequest("Invalid gateway risk classification".into())
+                    .into_response()
+            }
+        },
+        None => None,
+    };
     let params = ToolReviewParams {
         server: form.server,
         tool: form.tool,
         generation: form.generation,
         observed_hash: form.observed_hash,
         manifest_hash: form.manifest_hash,
+        risk,
     };
     let result = match form.action.as_deref().unwrap_or("approve") {
         "approve" => {

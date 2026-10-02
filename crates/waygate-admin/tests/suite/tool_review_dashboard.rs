@@ -48,20 +48,29 @@ impl rmcp::ServerHandler for ReviewUpstream {
 
 #[tokio::test]
 async fn dashboard_acceptance_refreshes_and_restores_the_reviewed_tool() {
-    acceptance_workflow(false, false).await;
+    acceptance_workflow(false, false, false).await;
 }
 
 #[tokio::test]
 async fn annotation_acceptance_updates_the_manifest_source_of_truth() {
-    acceptance_workflow(true, false).await;
+    acceptance_workflow(true, false, false).await;
 }
 
 #[tokio::test]
 async fn startup_mismatch_is_discoverable_and_can_be_kept_blocked_then_approved() {
-    acceptance_workflow(true, true).await;
+    acceptance_workflow(true, true, false).await;
 }
 
-async fn acceptance_workflow(annotation_mode: bool, startup_mismatch: bool) {
+#[tokio::test]
+async fn unclassified_annotation_tool_requires_initial_review_and_operator_risk() {
+    acceptance_workflow(true, true, true).await;
+}
+
+async fn acceptance_workflow(
+    annotation_mode: bool,
+    startup_mismatch: bool,
+    initial_approval: bool,
+) {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
@@ -156,6 +165,9 @@ async fn acceptance_workflow(annotation_mode: bool, startup_mismatch: bool) {
                 false,
             ));
     }
+    if initial_approval {
+        manifest.tools.clear();
+    }
     let initial_manifests = BTreeMap::from([(manifest.name.clone(), manifest.clone())]);
     let dir = std::env::temp_dir().join(format!("waygate-tool-review-{}", uuid::Uuid::new_v4()));
     if annotation_mode {
@@ -232,6 +244,28 @@ async fn acceptance_workflow(annotation_mode: bool, startup_mismatch: bool) {
             .unwrap()
             .unwrap();
         assert!(initial.quarantined && initial.approved_contract.is_null());
+        if initial_approval {
+            assert!(initial.approved_hash.is_empty());
+            let context = waygate_admin::change_context::read_action_context(
+                &state,
+                "default",
+                "tool_contract.approve",
+                json!({"server":server,"tool":"search"}),
+            )
+            .await
+            .unwrap();
+            let waygate_admin::change_context::ActionContext::ToolReview(context) = context.context
+            else {
+                panic!("wrong review context");
+            };
+            assert!(context.reviews[0].initial_approval_required);
+            let classifications: i64 = sqlx::query_scalar("SELECT count(*) FROM mcp_tool_versions v JOIN mcp_tools t ON t.id=v.tool_id JOIN mcp_servers s ON s.id=t.server_id WHERE s.name=$1")
+                .bind(&server).fetch_one(&db).await.unwrap();
+            assert_eq!(
+                classifications, 0,
+                "observation must not assign a classification or approval"
+            );
+        }
         assert!(!matches!(
             pool.resolve_invocation_tool("default", &server, "search")
                 .await,
@@ -256,7 +290,9 @@ async fn acceptance_workflow(annotation_mode: bool, startup_mismatch: bool) {
                 "{path} must lead to review"
             );
             assert!(
-                html.contains("need review") || html.contains("previous definition unavailable"),
+                html.contains("need review")
+                    || html.contains("previous definition unavailable")
+                    || (initial_approval && html.contains("Initial approval required")),
                 "{path} must identify pending review"
             );
         }
@@ -397,6 +433,23 @@ async fn acceptance_workflow(annotation_mode: bool, startup_mismatch: bool) {
     assert!(html.contains("Keep blocked") && html.contains("Approve this replacement"));
     if !startup_mismatch {
         assert!(html.contains("Description changed"));
+    } else if initial_approval {
+        assert!(html.contains("Initial approval required"));
+        assert!(html.contains("Gateway risk classification"));
+        assert!(html.contains("name=\"risk\""));
+        let missing_risk = Request::builder()
+            .method("POST").uri("/t/default/servers/tool-changes/approve")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!("csrf=dev-csrf&server={server}&tool=search&generation={}&observed_hash={}&manifest_hash={manifest_hash}",review.generation,review.observed_hash))).unwrap();
+        assert_eq!(
+            app.clone().oneshot(missing_risk).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert!(
+            state.read_manifest_set_from_disk().unwrap().unwrap().0[&server]
+                .tools
+                .is_empty()
+        );
     }
     if let Some(tool) = sibling.write().unwrap().as_mut() {
         tool.description = Some("x".repeat(262145).into());
@@ -406,7 +459,7 @@ async fn acceptance_workflow(annotation_mode: bool, startup_mismatch: bool) {
         Request::builder()
         .method("POST").uri("/t/default/servers/tool-changes/approve")
         .header("content-type", "application/x-www-form-urlencoded")
-        .body(Body::from(format!("csrf=dev-csrf&server={server}&tool=search&generation={}&observed_hash={}&manifest_hash={manifest_hash}",review.generation,review.observed_hash))).unwrap()
+        .body(Body::from(format!("csrf=dev-csrf&server={server}&tool=search&generation={}&observed_hash={}&manifest_hash={manifest_hash}{}",review.generation,review.observed_hash,if initial_approval { "&risk=high" } else { "" }))).unwrap()
     };
     let response = app.clone().oneshot(submit(&review)).await.unwrap();
     assert_eq!(
@@ -466,6 +519,11 @@ async fn acceptance_workflow(annotation_mode: bool, startup_mismatch: bool) {
             current[&server].tools[0].approved_behavior_hash.as_deref(),
             Some(review.observed_hash.as_str())
         );
+        if initial_approval {
+            assert_eq!(current[&server].tools.len(), 1);
+            assert_eq!(current[&server].tools[0].risk, waygate_core::RiskTier::High);
+            assert!(!current[&server].tools[0].side_effects && !current[&server].tools[0].pii);
+        }
         pool.reload_manifests(&current).await;
     }
     assert!(matches!(
@@ -473,6 +531,19 @@ async fn acceptance_workflow(annotation_mode: bool, startup_mismatch: bool) {
             .await,
         ResolvedInvocationTool::Ready(_)
     ));
+    if initial_approval {
+        let ResolvedInvocationTool::Ready(snapshot) = pool
+            .resolve_invocation_tool("default", &server, "search")
+            .await
+        else {
+            panic!("initially accepted tool must resolve");
+        };
+        assert_eq!(snapshot.facts().risk, waygate_core::RiskTier::High);
+        assert!(
+            !snapshot.facts().side_effects && snapshot.facts().pii,
+            "native behavior and sensitivity still come from the reviewed metadata"
+        );
+    }
     pool.call_tool(&server, "search", None, None, None)
         .await
         .unwrap();

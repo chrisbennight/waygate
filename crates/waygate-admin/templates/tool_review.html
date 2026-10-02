@@ -31,6 +31,10 @@
 <input type="hidden" name="generation" value="{{ r.generation }}"><input type="hidden" name="observed_hash" value="{{ r.observed_hash }}">
 <input type="hidden" name="manifest_hash" value="{{ manifest_hash }}">
 <p>Acceptance applies only to this replacement. A newer change requires a new review.</p>
+{% if r.approved_hash.is_empty() %}
+<div class="form-field"><label class="form-label" for="tool-risk">Gateway risk classification</label>
+<select class="form-select" id="tool-risk" name="risk"><option value="">Select risk for initial approval</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></div>
+{% endif %}
 {% if r.decided_at.is_none() %}<button class="btn btn-secondary" type="submit" name="action" value="reject">Keep blocked</button>{% endif %}
 {% if !r.observed_contract.is_null() %}<button class="btn btn-primary" type="submit" name="action" value="approve">Approve this replacement</button>{% endif %}
 </form>
