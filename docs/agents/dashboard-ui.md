@@ -183,6 +183,7 @@ the chrome moved.
   `GET /badge/decisions`, which caches per tenant for 30s server-side and
   shows "0" for non-admin sessions or absent stores. Unreadable tool or skill
   review counts show "?" and link to the queue, which explains unavailable data.
+  Inline catalog refresh also reports pending tool reviews and updates the badge.
 - The Decisions destination lands on the **merged Queue**
   (`dashboard_decisions`, `/decisions`): pending change requests, pending tool and skill
   reviews, and active break-glass in one inbox. Change requests and break-glass

@@ -28,3 +28,5 @@
     or inventory was committed. Reload this overview for current status.
 </div>
 {% endif %}
+{% match pending_reviews %}{% when Some with (pending) %}{% if *pending > 0 %}<p class="callout callout--warn">{{ pending }} tool definition{% if *pending != 1 %}s{% endif %} need{% if *pending == 1 %}s{% endif %} review. <a href="{{ review_url }}">Review tool changes</a>.</p>{% endif %}{% when None %}{% endmatch %}
+{% if review_unavailable %}<p class="callout callout--warn">Tool review state is unavailable. <a href="{{ review_url }}">Open tool reviews</a>.</p>{% endif %}

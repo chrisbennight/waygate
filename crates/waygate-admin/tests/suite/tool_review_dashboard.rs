@@ -359,6 +359,14 @@ async fn acceptance_workflow(annotation_mode: bool, startup_mismatch: bool) {
         .await
         .unwrap();
     assert!(response.status().is_success() || response.status().is_redirection());
+    assert_eq!(
+        response.headers().get("HX-Trigger").unwrap(),
+        "tool-reviews-changed"
+    );
+    let refresh_html = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let refresh_html = std::str::from_utf8(&refresh_html).unwrap();
+    assert!(refresh_html.contains("need review") || refresh_html.contains("needs review"));
+    assert!(refresh_html.contains("/admin/t/default/servers/tool-changes"));
     let review = store
         .get("default", &server, "search")
         .await

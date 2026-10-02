@@ -468,6 +468,39 @@ async fn initial_mismatch_and_keep_blocked_are_durable_exact_decisions() {
         !store.reject(&newer, "operator").await.unwrap(),
         "a stale keep-blocked form cannot revoke acceptance"
     );
+    let accepted = store
+        .get(&tenant, "docs", "search-00")
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .observe_against_approval(
+            &tenant,
+            "docs",
+            "search-00",
+            "c",
+            &json!({"description":"Newer"}),
+            false,
+            Some(&before),
+        )
+        .await
+        .unwrap();
+    let after_delayed_reload = store
+        .get(&tenant, "docs", "search-00")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !after_delayed_reload.quarantined,
+        "an older live manifest cannot undo a completed exact approval"
+    );
+    assert_eq!(after_delayed_reload.generation, accepted.generation);
+    assert_eq!(after_delayed_reload.approved_hash, accepted.approved_hash);
+    assert_eq!(
+        after_delayed_reload.approved_contract,
+        accepted.approved_contract
+    );
+    assert_eq!(after_delayed_reload.decided_at, accepted.decided_at);
     let pending_race = store
         .get(&tenant, "docs", "search-02")
         .await

@@ -231,12 +231,16 @@ impl PgCatalogStore {
         .execute(&mut *tx)
         .await?;
         let previous = sqlx::query(
-            "SELECT observed_hash, approved_hash, quarantined FROM tool_contract_reviews WHERE tool_id=$1 FOR UPDATE",
+            "SELECT observed_hash, approved_hash, quarantined, decided_at FROM tool_contract_reviews WHERE tool_id=$1 FOR UPDATE",
         ).bind(id).fetch_one(&mut *tx).await?;
         let old: String = previous.get("observed_hash");
         // Repair observations recorded before annotation admission supplied its
-        // approval. Preserve a genuine accepted baseline when its hash matches.
+        // approval. A recorded decision wins over a live manifest that can lag
+        // its persisted replacement during asynchronous reload.
         let repair_baseline = approval_mismatch
+            && previous
+                .get::<Option<OffsetDateTime>, _>("decided_at")
+                .is_none()
             && (previous.get::<String, _>("approved_hash") != baseline_hash
                 || !previous.get::<bool, _>("quarantined"));
         if repair_baseline {
