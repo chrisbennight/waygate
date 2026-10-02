@@ -448,6 +448,7 @@ async fn decisions_badge(
             .unwrap_or((0, false)),
         None => (0, false),
     };
+    let mut review_unavailable = false;
     let pending_skills = if state.hitl.reviewed_skills.get().is_some() {
         crate::dashboard_skills::current_reviews(&state, &tenant)
             .await
@@ -459,12 +460,31 @@ async fn decisions_badge(
                     })
                     .count()
             })
-            .unwrap_or(0)
+            .unwrap_or_else(|_| {
+                review_unavailable = true;
+                0
+            })
     } else {
         0
     };
-    let total = break_glass + pending_changes + pending_skills;
-    let label = if bg_saturated || cr_saturated {
+    let pending_tools = if tenant == waygate_core::TenantId::DEFAULT {
+        match state.servers.tool_reviews.get() {
+            Some(store) => match store.pending_count(&tenant, None).await {
+                Ok(count) => count as usize,
+                Err(_) => {
+                    review_unavailable = true;
+                    0
+                }
+            },
+            None => 0,
+        }
+    } else {
+        0
+    };
+    let total = break_glass + pending_changes + pending_skills + pending_tools;
+    let label = if review_unavailable {
+        "?".into()
+    } else if bg_saturated || cr_saturated {
         format!("{total}+")
     } else {
         total.to_string()

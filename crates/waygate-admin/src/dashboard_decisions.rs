@@ -1,6 +1,7 @@
 //! Decisions queue — the merged "what needs you now" inbox.
 //! Unifies the control surfaces that require an operator decision:
 //!
+//! - **Pending tool definitions** — compare and decide on the exact replacement.
 //! - **Pending skill contents** — review the complete candidate before distribution.
 //! - **Pending change requests** — a human must approve (and execute) or
 //!   deny (with a reason). The decision action.
@@ -26,7 +27,7 @@
 //! is duplicated: these handlers are thin auth+CSRF+parse wrappers over
 //! the same cores the per-surface dashboard forms and the REST API call.
 //!
-//! Security posture mirrors the badge and the three source pages:
+//! Security posture mirrors the badge and the source pages:
 //! `mcp:admin` + non-peer (`overview_break_glass_admin`), and the data is
 //! always scoped to the **principal's** tenant, never `tenant_ctx` — an
 //! operator-controlled value that must never leak another tenant's rows.
@@ -75,7 +76,7 @@ pub fn router() -> Router<Arc<AdminState>> {
 /// plain-language line; the inline form fields (`approve_rel` etc.) are
 /// queue-owned action paths so the post returns to the queue.
 struct InboxItem {
-    /// `"change request"` | `"break-glass"` | `"skill review"`.
+    /// `"change request"` | `"break-glass"` | `"skill"` | `"tool"`.
     kind: &'static str,
     /// Decision-contract severity: `"warn"` (a pending change awaiting a
     /// decision) | `"critical"` (an active override bypassing policy).
@@ -116,7 +117,8 @@ struct InboxItem {
     /// denial remains available so the queue can be cleared deliberately.
     approval_blocked: bool,
     /// Sort key — newest first.
-    skill_review_rel: Option<String>,
+    content_review_rel: Option<String>,
+    review_label: &'static str,
     created_unix: i64,
 }
 
@@ -127,13 +129,14 @@ struct DecisionsPage {
     chrome: PageChrome,
     /// `true` when the principal lacks `mcp:admin` (or is a peer
     /// assertion). The template renders a scope card and NO queue data,
-    /// matching the three source pages' posture.
+    /// matching the source pages' posture.
     insufficient_scope: bool,
     items: Vec<InboxItem>,
     /// A source fetch hit its cap — the template nudges toward the owning
     /// tab for the remainder (mirrors the badge's `N+`).
     changes_saturated: bool,
     break_glass_saturated: bool,
+    tools_saturated: bool,
     /// `true` when neither the change-request nor break-glass store is
     /// wired (dev / no DB): a distinct "not configured" line, not the
     /// benign "nothing pending" empty state.
@@ -179,13 +182,16 @@ async fn decisions_page(
 
     let cr_store = state.hitl.change_requests.get();
     let bg_store = state.policy.break_glass.get();
-    let stores_unconfigured =
-        cr_store.is_none() && bg_store.is_none() && state.hitl.reviewed_skills.get().is_none();
+    let stores_unconfigured = cr_store.is_none()
+        && bg_store.is_none()
+        && state.hitl.reviewed_skills.get().is_none()
+        && state.servers.tool_reviews.get().is_none();
 
     let mut items: Vec<InboxItem> = Vec::new();
     let mut changes_saturated = false;
     let mut break_glass_saturated = false;
     let mut load_error = false;
+    let mut tools_saturated = false;
     // Per-load budget for the ≤500-row effect replays, shared across the pending
     // change rows (mirrors the /changes queue cap).
     let mut previews_left = crate::dashboard_changes::POLICY_PREVIEW_CAP;
@@ -260,7 +266,8 @@ async fn decisions_page(
                             manifest_preview: previews.manifest,
                             effect_preview_acknowledgement_required,
                             approval_blocked,
-                            skill_review_rel: None,
+                            content_review_rel: None,
+                            review_label: "",
                             created_unix: c.created_at.unix_timestamp(),
                         });
                     }
@@ -298,7 +305,8 @@ async fn decisions_page(
                             manifest_preview: None,
                             effect_preview_acknowledgement_required: false,
                             approval_blocked: false,
-                            skill_review_rel: None,
+                            content_review_rel: None,
+                            review_label: "",
                             created_unix: t.created_at.unix_timestamp(),
                         });
                     }
@@ -315,7 +323,7 @@ async fn decisions_page(
                             kind: "skill",
                             severity: "warn",
                             summary: review.skill_uri.clone(),
-                            handle: "Unapproved content".into(),
+                            handle: crate::dashboard_skills::review_trigger(&review),
                             params_pretty: None,
                             approval_requirement: None,
                             age_rel: format_ts_rel(review.updated_at),
@@ -327,14 +335,52 @@ async fn decisions_page(
                             manifest_preview: None,
                             effect_preview_acknowledgement_required: false,
                             approval_blocked: false,
-                            skill_review_rel: Some(crate::dashboard_skills::review_url(
+                            content_review_rel: Some(crate::dashboard_skills::review_url(
                                 &review.skill_uri,
                             )),
+                            review_label: "Review skill changes",
                             created_unix: review.updated_at.unix_timestamp(),
                         });
                     }
                 }
                 Err(_) => load_error = true,
+            }
+        }
+        if tenant == waygate_core::TenantId::DEFAULT {
+            if let Some(store) = state.servers.tool_reviews.get() {
+                match store.pending(&tenant).await {
+                    Ok(reviews) => {
+                        tools_saturated = reviews.len() == 50;
+                        for review in reviews {
+                            items.push(InboxItem {
+                                kind: "tool",
+                                severity: "warn",
+                                summary: format!("{} · {}", review.server, review.tool),
+                                handle: crate::dashboard_tool_reviews::trigger(&review),
+                                params_pretty: None,
+                                approval_requirement: None,
+                                age_rel: format_ts_rel(review.observed_at),
+                                age_abs: format_ts_abs(review.observed_at),
+                                cr_approve_rel: None,
+                                cr_deny_rel: None,
+                                bg_revoke_rel: None,
+                                policy_preview: None,
+                                manifest_preview: None,
+                                effect_preview_acknowledgement_required: false,
+                                approval_blocked: false,
+                                content_review_rel: Some(
+                                    crate::dashboard_tool_reviews::review_url(
+                                        &review.server,
+                                        &review.tool,
+                                    ),
+                                ),
+                                review_label: "Review tool changes",
+                                created_unix: review.observed_at.unix_timestamp(),
+                            });
+                        }
+                    }
+                    Err(_) => load_error = true,
+                }
             }
         }
         // Newest first — consistent with the activity feed.
@@ -355,6 +401,7 @@ async fn decisions_page(
         items,
         changes_saturated,
         break_glass_saturated,
+        tools_saturated,
         stores_unconfigured,
         load_error,
         flash_ok: q.ok,

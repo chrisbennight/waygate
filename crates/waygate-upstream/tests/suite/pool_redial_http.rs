@@ -135,6 +135,10 @@ impl ServerHandler for DynamicCatalogUpstream {
             .with_protocol_version(ProtocolVersion::LATEST)
     }
 
+    #[allow(
+        deprecated,
+        reason = "try_update requires Rust 1.95; the workspace supports 1.88"
+    )]
     async fn list_tools(
         &self,
         request: Option<PaginatedRequestParams>,

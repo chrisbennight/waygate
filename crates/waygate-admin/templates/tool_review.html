@@ -3,18 +3,19 @@
 <section class="page-section">
 <header class="page-header"><h1 class="page-title">Tool changes</h1></header>
 <p class="muted">Review an upstream's changed contract before restoring the tool.</p>
+<p><a href="{{ self.chrome.nav_url("/servers/tool-changes") }}">Awaiting review</a> · <a href="{{ self.chrome.nav_url("/servers/tool-changes?include_decided=true") }}">All blocked definitions</a></p>
 {% match review %}{% when Some with (r) %}
 <div class="card">
 <h2 class="card-title skills-source">{{ r.server }} · {{ r.tool }}</h2>
-{% if r.quarantined %}<p><span class="chip chip--bad">Quarantined</span> Hidden from discovery. Calls blocked.</p>
+<p><strong>{{ trigger }}</strong></p>
+{% if r.quarantined %}<p><span class="chip chip--warn">{% if r.decided_at.is_some() %}Kept blocked{% else %}Needs review{% endif %}</span> Hidden from discovery. Calls blocked.</p>
 {% else %}<p><span class="chip chip--ok">Accepted</span> This contract passed change review. Existing configuration and access policies still apply.</p>{% endif %}
 {% if r.observed_contract.is_null() %}<p>Observed {{ observed_at }}.</p>
 {% else %}<p>Observed {{ observed_at }}. Review the changed contract fields below.</p>{% endif %}
-<details><summary>Contract identity</summary><p class="mono skills-source">{{ r.observed_hash }}</p></details>
+<details><summary>Contract identity</summary><p class="mono skills-source">Approved: {{ r.approved_hash }}</p><p class="mono skills-source">Observed: {{ r.observed_hash }}</p></details>
 </div>
 {% if r.observed_contract.is_null() %}
-<div class="card"><p>The tool contract exceeds the review storage limit. Its identity and quarantine are retained, but the comparison is unavailable. Reduce the contract upstream and refresh before approval.</p>
-<a class="btn btn-secondary" href="{{ self.chrome.nav_url("/servers/tool-changes") }}">Keep quarantined</a></div>
+<div class="card"><p>The tool contract exceeds the review storage limit. Its identity is retained, but the comparison is unavailable. {% if r.quarantined %}Reduce the contract upstream and refresh before approval.{% else %}Its existing approval remains in effect.{% endif %}</p></div>
 {% endif %}
 {% for change in changes %}
 <section class="page-section"><h2 class="section-heading">{{ change.name }}</h2>
@@ -23,23 +24,28 @@
 <section><h3 class="card-title">Observed replacement</h3><pre class="skills-content" tabindex="0">{{ change.after }}</pre></section>
 </div></section>
 {% endfor %}
-{% if r.quarantined && !r.observed_contract.is_null() %}
+{% if r.quarantined %}
 <form class="card" method="post" action="{{ self.chrome.nav_url("/servers/tool-changes/approve") }}">
 <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
 <input type="hidden" name="server" value="{{ r.server }}"><input type="hidden" name="tool" value="{{ r.tool }}">
 <input type="hidden" name="generation" value="{{ r.generation }}"><input type="hidden" name="observed_hash" value="{{ r.observed_hash }}">
 <input type="hidden" name="manifest_hash" value="{{ manifest_hash }}">
 <p>Acceptance applies only to this replacement. A newer change requires a new review.</p>
-<a class="btn btn-secondary" href="{{ self.chrome.nav_url("/servers/tool-changes") }}">Keep quarantined</a>
-<button class="btn btn-primary" type="submit">Approve this replacement</button>
+{% if r.approved_hash.is_empty() %}
+<div class="form-field"><label class="form-label" for="tool-risk">Gateway risk classification</label>
+<select class="form-select" id="tool-risk" name="risk"><option value="">Select risk for initial approval</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></div>
+{% endif %}
+{% if r.decided_at.is_none() %}<button class="btn btn-secondary" type="submit" name="action" value="reject">Keep blocked</button>{% endif %}
+{% if !r.observed_contract.is_null() %}<button class="btn btn-primary" type="submit" name="action" value="approve">Approve this replacement</button>{% endif %}
 </form>
 {% endif %}
 {% when None %}
-<div class="card"><h2 class="card-title">Awaiting review</h2>
-{% if rows.is_empty() %}<p>No tools are awaiting change review.</p>{% else %}
-<p>Showing up to 50 recent quarantined tools.</p>
-<ul>{% for row in rows %}<li><a href="{{ self.chrome.nav_url(row.url) }}">{{ row.server }} · {{ row.tool }}</a></li>{% endfor %}</ul>
-{% endif %}</div>
+<div class="card"><h2 class="card-title">{% if include_decided %}Blocked definitions{% else %}Awaiting review{% endif %}</h2>
+{% if rows.is_empty() %}<p>{% if include_decided %}No blocked definitions on this page.{% else %}No tools are awaiting change review.{% endif %}</p>{% else %}
+<p>{{ pending_count }} tools need review.</p>
+<ul>{% for row in rows %}<li><a href="{{ self.chrome.nav_url(row.url) }}">{{ row.server }} · {{ row.tool }}</a> — {{ row.status }} · {{ row.trigger }}</li>{% endfor %}</ul>
+{% endif %}
+{% match next %}{% when Some with (url) %}<a class="btn btn-secondary" href="{{ self.chrome.nav_url(url) }}">Next tool reviews</a>{% when None %}{% endmatch %}</div>
 {% endmatch %}
 </section>
 {% endblock %}

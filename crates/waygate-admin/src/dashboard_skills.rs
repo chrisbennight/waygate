@@ -77,6 +77,53 @@ pub(crate) fn review_url(uri: &str) -> String {
     format!("/skills/review?uri={}", urlencode(uri))
 }
 
+pub(crate) fn review_trigger(review: &SkillReview) -> String {
+    let Some(serving) = &review.serving else {
+        return "Initial approval required".into();
+    };
+    let mut triggers = Vec::new();
+    if serving.skill().frontmatter != review.candidate.skill().frontmatter {
+        triggers.push("Skill metadata changed");
+    }
+    let before: BTreeMap<_, _> = serving
+        .skill()
+        .resources
+        .iter()
+        .map(|file| (&file.uri, file))
+        .collect();
+    let after: BTreeMap<_, _> = review
+        .candidate
+        .skill()
+        .resources
+        .iter()
+        .map(|file| (&file.uri, file))
+        .collect();
+    if before.get(&review.skill_uri) != after.get(&review.skill_uri) {
+        triggers.push("Instructions changed");
+    }
+    if after.keys().any(|uri| !before.contains_key(uri)) {
+        triggers.push("Files added");
+    }
+    if before.keys().any(|uri| !after.contains_key(uri)) {
+        triggers.push("Files removed");
+    }
+    if before.iter().any(|(uri, file)| {
+        *uri != &review.skill_uri && after.get(uri).is_some_and(|other| other != file)
+    }) {
+        triggers.push("Supporting files changed");
+    }
+    if serving.source().origin != review.candidate.source().origin
+        || serving.source().reference != review.candidate.source().reference
+    {
+        triggers.push("Source changed");
+    }
+    if triggers.is_empty() {
+        "Approved content".into()
+    } else {
+        triggers.join("; ")
+    }
+}
+
 fn status(review: &SkillReview) -> &'static str {
     if review.quarantined {
         "Quarantined"
@@ -94,6 +141,7 @@ struct SkillRow {
     description: String,
     status: &'static str,
     delivery: &'static str,
+    trigger: String,
     url: String,
 }
 
@@ -218,6 +266,7 @@ async fn skills_page(
                         .unwrap_or_default()
                         .into(),
                     status: status(&review),
+                    trigger: review_trigger(&review),
                     delivery: delivery_status(&review, available.as_ref()),
                     url: review_url(&review.skill_uri),
                 });
@@ -282,6 +331,10 @@ struct ReviewPage {
     can_approve: bool,
     source_url: Option<String>,
     compatibility: String,
+    trigger: String,
+    metadata_before: String,
+    metadata_after: String,
+    metadata_changed: bool,
 }
 
 fn source_url(candidate: &ReviewCandidate) -> Option<String> {
@@ -454,6 +507,20 @@ async fn review_page(
             csrf.map(|Extension(c)| c.0).unwrap_or_default(),
         ),
         state: status(&review),
+        trigger: review_trigger(&review),
+        metadata_before: review
+            .serving
+            .as_ref()
+            .map(|serving| {
+                serde_json::to_string_pretty(&serving.skill().frontmatter)
+                    .expect("skill metadata serializes")
+            })
+            .unwrap_or_else(|| "No previous approval".into()),
+        metadata_after: serde_json::to_string_pretty(&review.candidate.skill().frontmatter)
+            .expect("skill metadata serializes"),
+        metadata_changed: review.serving.as_ref().is_none_or(|serving| {
+            serving.skill().frontmatter != review.candidate.skill().frontmatter
+        }),
         can_reject: review.candidate_status == CandidateStatus::Pending,
         can_approve: review.candidate_status != CandidateStatus::Approved || review.quarantined,
         source_url: source_url(&review.candidate),
@@ -538,5 +605,107 @@ async fn decide(
         ))
         .into_response(),
         Err(error) => error.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod review_trigger_tests {
+    use super::*;
+    use waygate_skills::{
+        verify_in_memory_catalog, CatalogManifest, CatalogSkill, CatalogSourceIdentity,
+        SkillResourceDescriptor, CATALOG_SCHEMA_VERSION,
+    };
+
+    fn candidate(instructions: &str, description: &str, files: &[(&str, &str)]) -> ReviewCandidate {
+        let uri = "skill://fixture/review-fixture/SKILL.md";
+        let main =
+            format!("---\nname: review-fixture\ndescription: {description}\n---\n{instructions}\n");
+        let mut contents = BTreeMap::new();
+        let mut resources = Vec::new();
+        for (path, text) in
+            std::iter::once(("SKILL.md", main.as_str())).chain(files.iter().copied())
+        {
+            let file_uri = format!("skill://fixture/review-fixture/{path}");
+            let bytes = text.as_bytes().to_vec();
+            resources.push(SkillResourceDescriptor {
+                uri: file_uri.clone(),
+                source_path: format!("review-fixture/{path}"),
+                source_object: waygate_skills::sha256_digest(&bytes),
+                size: bytes.len() as u64,
+                media_type: if path == "SKILL.md" {
+                    "text/markdown"
+                } else {
+                    "text/plain"
+                }
+                .into(),
+            });
+            contents.insert(file_uri, bytes);
+        }
+        let snapshot = verify_in_memory_catalog(
+            CatalogSourceIdentity {
+                origin: "git+https://fixture.test/skills".into(),
+                reference: "main".into(),
+                resolved_digest: waygate_skills::sha256_digest(main.as_bytes()),
+                resolved_tree_digest: waygate_skills::sha256_digest(main.as_bytes()),
+            },
+            CatalogManifest {
+                schema_version: CATALOG_SCHEMA_VERSION,
+                skills: vec![CatalogSkill {
+                    uri: uri.into(),
+                    frontmatter: serde_json::from_value(
+                        serde_json::json!({"name":"review-fixture","description":description}),
+                    )
+                    .unwrap(),
+                    resources,
+                }],
+            },
+            contents,
+        )
+        .unwrap();
+        ReviewCandidate::from_snapshot(&snapshot, uri).unwrap()
+    }
+
+    #[test]
+    fn summaries_identify_initial_review_and_actual_content_changes() {
+        let before = candidate(
+            "Original instructions",
+            "Original description",
+            &[("removed.txt", "old"), ("changed.txt", "before")],
+        );
+        let after = candidate(
+            "Replacement instructions",
+            "Changed description",
+            &[("added.txt", "new"), ("changed.txt", "after")],
+        );
+        let mut review = SkillReview {
+            tenant_id: "default".into(),
+            source_key: before.source_key(),
+            skill_uri: before.skill().uri.clone(),
+            generation: 1,
+            candidate: before.clone(),
+            serving: None,
+            candidate_status: CandidateStatus::Pending,
+            quarantined: false,
+            updated_at: time::OffsetDateTime::UNIX_EPOCH,
+        };
+        assert_eq!(review_trigger(&review), "Initial approval required");
+        review.serving = Some(before.clone());
+        review.candidate = after;
+        let trigger = review_trigger(&review);
+        for expected in [
+            "Instructions changed",
+            "Skill metadata changed",
+            "Files added",
+            "Files removed",
+            "Supporting files changed",
+        ] {
+            assert!(
+                trigger.contains(expected),
+                "{trigger} must identify {expected}"
+            );
+        }
+        assert!(!trigger.contains("Source changed"));
+        review.candidate = before;
+        assert_eq!(review_trigger(&review), "Approved content");
     }
 }

@@ -2,6 +2,7 @@
 {% block main %}
 <header class="page-header"><h1 class="page-title">Skill review</h1><span class="chip">{{ state }}</span></header>
 <a href="{{ self.chrome.nav_url("/skills") }}">Back to Skills</a>
+<p><strong>{{ trigger }}</strong></p>
 <div class="form-field"><label class="form-label" for="skill-uri">Skill URI</label><input id="skill-uri" class="form-input mono" readonly value="{{ review.skill_uri }}"></div>
 {% match source_url %}{% when Some with (url) %}<p><a href="{{ url }}" rel="noreferrer">View candidate at its Git source</a></p>{% when None %}{% endmatch %}
 <p><strong>Runtime compatibility:</strong> {{ compatibility }}</p>
@@ -12,6 +13,7 @@
 <section class="card"><h2 class="section-heading">Approved for clients</h2>{% match review.serving %}{% when Some with (serving) %}<p class="mono skills-source">{{ serving.content_digest() }}</p><p class="mono skills-source">{{ serving.source().resolved_digest }}</p>{% if review.quarantined %}<p>Delivery is blocked by quarantine.</p>{% else %}<p>Remains available while a replacement awaits review, when its exact source files can be retrieved.</p>{% endif %}{% when None %}<p>No version has been approved.</p>{% endmatch %}</section>
 <section class="card"><h2 class="section-heading">Candidate</h2><p class="mono skills-source">{{ review.candidate.content_digest() }}</p><p class="mono skills-source">{{ review.candidate.source().origin }}</p><p class="mono skills-source">{{ review.candidate.source().reference }} · {{ review.candidate.source().resolved_digest }}</p></section>
 </div>
+{% if metadata_changed %}<section class="page-section"><h2 class="section-heading">Skill metadata</h2><div class="skills-comparison"><section><h3>Approved</h3><pre class="skills-content" tabindex="0">{{ metadata_before }}</pre></section><section><h3>Candidate</h3><pre class="skills-content" tabindex="0">{{ metadata_after }}</pre></section></div></section>{% endif %}
 <section class="page-section"><h2 class="section-heading">File changes</h2><p class="section-kicker">Select each changed file to compare its exact contents. Object identities, sizes, and media types are part of the reviewed inventory.</p>
 <div class="card card--table skills-inventory"><table class="data-table" aria-label="Complete skill file inventory"><thead><tr><th>File</th><th>Change</th><th>Approved</th><th>Candidate</th><th>Candidate Code Mode compatibility</th></tr></thead><tbody>{% for file in files %}<tr><td><a href="{{ self.chrome.nav_url(file.url) }}">{{ file.path }}</a></td><td>{{ file.change }}</td><td class="mono">{{ file.before }}</td><td class="mono">{{ file.after }}</td><td>{{ file.execution }}</td></tr>{% endfor %}</tbody></table></div></section>
 <section class="page-section"><h2 class="section-heading">Content comparison</h2><p class="mono skills-source">{{ file }}</p><p class="section-kicker">Source content is displayed as plain text and never executed by this page.</p><div class="skills-comparison"><section><h3>Approved</h3><pre class="skills-content" tabindex="0">{{ before_text }}</pre></section><section><h3>Candidate</h3><pre class="skills-content" tabindex="0">{{ after_text }}</pre></section></div></section>

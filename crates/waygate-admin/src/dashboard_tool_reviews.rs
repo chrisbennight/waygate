@@ -39,11 +39,17 @@ pub(crate) fn review_url(server: &str, tool: &str) -> String {
 struct ReviewQuery {
     server: Option<String>,
     tool: Option<String>,
+    after_server: Option<String>,
+    after_tool: Option<String>,
+    #[serde(default)]
+    include_decided: bool,
 }
 struct PendingRow {
     server: String,
     tool: String,
     url: String,
+    trigger: String,
+    status: &'static str,
 }
 struct FieldChange {
     name: String,
@@ -59,6 +65,34 @@ struct ReviewPage {
     changes: Vec<FieldChange>,
     manifest_hash: String,
     observed_at: String,
+    trigger: String,
+    pending_count: i64,
+    next: Option<String>,
+    include_decided: bool,
+}
+
+pub(crate) fn trigger(review: &waygate_catalog::tool_reviews::ToolReview) -> String {
+    if !review.quarantined {
+        return "Approved definition".into();
+    }
+    if review.approved_hash.is_empty() {
+        return "Initial approval required".into();
+    }
+    if review.approved_contract.is_null() {
+        return "Definition differs from approval; previous definition unavailable".into();
+    }
+    if review.observed_contract.is_null() {
+        return "Definition changed; comparison unavailable".into();
+    }
+    let fields = changes(review)
+        .into_iter()
+        .map(|change| format!("{} changed", change.name))
+        .collect::<Vec<_>>();
+    if fields.is_empty() {
+        "Definition differs from approval".into()
+    } else {
+        fields.join("; ")
+    }
 }
 
 fn changes(review: &waygate_catalog::tool_reviews::ToolReview) -> Vec<FieldChange> {
@@ -79,7 +113,11 @@ fn changes(review: &waygate_catalog::tool_reviews::ToolReview) -> Vec<FieldChang
     keys.into_iter()
         .filter(|key| review.approved_contract.get(key) != review.observed_contract.get(key))
         .map(|key| FieldChange {
-            before: text(review.approved_contract.get(&key)),
+            before: if review.approved_contract.is_null() {
+                "Previous definition unavailable".into()
+            } else {
+                text(review.approved_contract.get(&key))
+            },
             after: text(review.observed_contract.get(&key)),
             name: match key.as_str() {
                 "description" => "Description",
@@ -124,12 +162,42 @@ async fn page(
         ),
         _ => None,
     };
-    let rows = store
-        .pending(actor.tenant.as_str())
+    let after = match (&query.after_server, &query.after_tool) {
+        (Some(server), Some(tool)) => Some((server.as_str(), tool.as_str())),
+        (None, None) => None,
+        _ => {
+            return Err(ApiError::BadRequest(
+                "Both review page cursor fields are required".into(),
+            ))
+        }
+    };
+    let candidates = store
+        .blocked_after(actor.tenant.as_str(), after, query.include_decided)
         .await
-        .map_err(tool_reviews::unavailable)?
+        .map_err(tool_reviews::unavailable)?;
+    // The following page can be empty if another administrator decides its
+    // candidates before navigation; no remaining review is silently omitted.
+    let next = if candidates.len() == 50 {
+        candidates.last().map(|r| {
+            format!(
+                "/servers/tool-changes?after_server={}&after_tool={}&include_decided={}",
+                urlencode(&r.server),
+                urlencode(&r.tool),
+                query.include_decided
+            )
+        })
+    } else {
+        None
+    };
+    let rows = candidates
         .into_iter()
         .map(|r| PendingRow {
+            trigger: trigger(&r),
+            status: if r.decided_at.is_some() {
+                "Kept blocked"
+            } else {
+                "Needs review"
+            },
             url: review_url(&r.server, &r.tool),
             server: r.server,
             tool: r.tool,
@@ -146,6 +214,13 @@ async fn page(
         .map(|r| waygate_core::fmt::format_ts_abs(r.observed_at))
         .unwrap_or_default();
     let page = ReviewPage {
+        next,
+        include_decided: query.include_decided,
+        trigger: review.as_ref().map(trigger).unwrap_or_default(),
+        pending_count: store
+            .pending_count(actor.tenant.as_str(), None)
+            .await
+            .map_err(tool_reviews::unavailable)?,
         observed_at,
         chrome: PageChrome::build(
             &state,
@@ -172,6 +247,8 @@ struct ApprovalForm {
     generation: i64,
     observed_hash: String,
     manifest_hash: String,
+    action: Option<String>,
+    risk: Option<String>,
 }
 async fn approve(
     State(state): State<Arc<AdminState>>,
@@ -200,14 +277,32 @@ async fn approve(
     ) {
         return error.into_response();
     }
+    let risk = match form.risk.as_deref().filter(|risk| !risk.is_empty()) {
+        Some(risk) => match waygate_core::RiskTier::parse(risk) {
+            Some(risk) => Some(risk),
+            None => {
+                return ApiError::BadRequest("Invalid gateway risk classification".into())
+                    .into_response()
+            }
+        },
+        None => None,
+    };
     let params = ToolReviewParams {
         server: form.server,
         tool: form.tool,
         generation: form.generation,
         observed_hash: form.observed_hash,
         manifest_hash: form.manifest_hash,
+        risk,
     };
-    match tool_reviews::approve_core(&state, actor.tenant.as_str(), &actor, &params).await {
+    let result = match form.action.as_deref().unwrap_or("approve") {
+        "approve" => {
+            tool_reviews::approve_core(&state, actor.tenant.as_str(), &actor, &params).await
+        }
+        "reject" => tool_reviews::reject_core(&state, actor.tenant.as_str(), &actor, &params).await,
+        _ => return ApiError::BadRequest("Unknown tool review decision".into()).into_response(),
+    };
+    match result {
         Ok(_) => Redirect::to(&tenant_ctx::nav_url(
             tenant.as_ref().map(|Extension(t)| t),
             &review_url(&params.server, &params.tool),

@@ -48,7 +48,7 @@
     <table class="data-table">
         <caption class="sr-only">Configured upstream MCP servers</caption>
         <thead>
-            <tr><th class="exp-col"><span class="sr-only">Expand</span></th><th>Name</th><th>Transport</th><th>Protocol</th><th>Status</th><th>Lanes</th><th>Recovery</th><th>Published / classified</th><th>Quarantine</th><th>Output schemas</th><th>URL</th></tr>
+            <tr><th class="exp-col"><span class="sr-only">Expand</span></th><th>Name</th><th>Transport</th><th>Protocol</th><th>Status</th><th>Lanes</th><th>Recovery</th><th>Published / classified</th><th>Tool review</th><th>Output schemas</th><th>URL</th></tr>
         </thead>
         <tbody>
         {% for s in servers %}
@@ -82,7 +82,7 @@
                 <td class="mono">{{ s.connected_lanes }} / {{ s.total_lanes }}</td>
                 <td><span class="mono">{{ s.last_error_class }}</span><br><span class="muted" title="Last success: {{ s.last_success_at }}">next: {{ s.next_retry_at }}</span></td>
                 <td class="mono">{{ s.published_tool_count }} / {{ s.classified_tool_count }}</td>
-                <td>{% if s.quarantined > 0 %}{% if is_admin %}<a class="chip chip--warn" href="{{ self.chrome.nav_url("/servers/tool-changes") }}">{{ s.quarantined }} quarantined</a>{% else %}<span class="chip chip--warn">{{ s.quarantined }} quarantined</span>{% endif %}{% else %}<span class="muted">–</span>{% endif %}</td>
+                <td>{% match s.pending_reviews %}{% when Some with (pending) %}{% if *pending > 0 %}<p><a class="chip chip--warn" href="{{ self.chrome.nav_url("/servers/tool-changes") }}">{{ pending }} need review</a></p>{% endif %}{% when None %}{% endmatch %}{% if s.review_unavailable %}<p class="chip chip--warn">Review state unavailable</p>{% endif %}{% if s.quarantined > 0 %}{% if is_admin %}<a class="chip chip--warn" href="{{ self.chrome.nav_url("/servers/tool-changes?include_decided=true") }}">{{ s.quarantined }} blocked</a>{% else %}<span class="chip chip--warn">{{ s.quarantined }} quarantined</span>{% endif %}{% else %}<span class="muted">–</span>{% endif %}</td>
                 {# A tool whose advertised output schema had a non-object root
                    is published without an output contract. Flagged on the row
                    because a strict MCP client rejects an ENTIRE tools/list

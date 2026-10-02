@@ -61,6 +61,17 @@ use uuid::Uuid;
 
 use crate::types::CatalogError;
 
+/// Keep identity and discovery-generation writes in the same order across
+/// manifest import and live contract observation.
+pub(crate) async fn lock_tenant_catalog(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant: &str,
+) -> Result<(), CatalogError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gateway-catalog-manifest-reconcile'), hashtext($1))")
+        .bind(tenant).execute(&mut **tx).await?;
+    Ok(())
+}
+
 const AUTO_QUARANTINE_REASON: &str =
     "auto-quarantined: server absent from the reconciled manifest set";
 const AUTO_RESTORE_REASON: &str = "auto-restored: server returned to the reconciled manifest set";
@@ -234,6 +245,7 @@ impl ManifestImporter {
     /// server rolls back alone and the rest of the batch continues.
     async fn import_one(&self, server: &ImportServer) -> Result<u64, CatalogError> {
         let mut tx = self.pool.begin().await.map_err(CatalogError::Database)?;
+        lock_tenant_catalog(&mut tx, &server.tenant_id).await?;
         // CLI / operator import: an explicit `--import-manifests` run is an
         // operator action that re-affirms the server as live (preserve_status =
         // false) — the pre-existing behavior.
@@ -286,14 +298,7 @@ impl ManifestImporter {
         // Fleet replicas may reconcile the same accepted generation at once.
         // Serialize this tenant's reconcile transactions so the idempotent
         // approval-evidence check below cannot race and append duplicates.
-        sqlx::query(
-            "SELECT pg_advisory_xact_lock(\
-                hashtext('gateway-catalog-manifest-reconcile'), hashtext($1))",
-        )
-        .bind(tenant_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(CatalogError::Database)?;
+        lock_tenant_catalog(&mut tx, tenant_id).await?;
         let mut stats = ImportStats::default();
         for server in servers {
             let tool_count = Self::import_one_in_tx(&mut tx, server, ImportMode::Reconcile).await?;

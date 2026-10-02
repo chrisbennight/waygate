@@ -106,35 +106,42 @@ impl UpstreamPool {
             return Ok(());
         };
         for tool in tools {
-            let Some(class) = manifest.tools.iter().find(|class| class.name == tool.name) else {
+            let annotation_mode =
+                manifest.classification_mode == crate::ClassificationMode::McpAnnotations;
+            let class = manifest.tools.iter().find(|class| class.name == tool.name);
+            if class.is_none() && !annotation_mode {
                 continue;
-            };
+            }
             let (hash, contract) = review_contract(tool, manifest.classification_mode);
-            let side_effects = class.side_effects
-                || matches!(
-                    manifest.classification_mode,
-                    crate::ClassificationMode::McpAnnotations
-                );
-            if !self.quarantine_threshold.covers(class.risk, side_effects)
+            let side_effects = class.is_some_and(|class| class.side_effects) || annotation_mode;
+            let block_changes = class
+                .is_some_and(|class| self.quarantine_threshold.covers(class.risk, side_effects));
+            if !annotation_mode
+                && !block_changes
                 && store
-                    .get(waygate_core::TenantId::DEFAULT, name, &class.name)
+                    .get(waygate_core::TenantId::DEFAULT, name, tool.name.as_ref())
                     .await?
                     .is_none()
             {
                 continue;
             }
             let changed = store
-                .observe(
+                .observe_against_approval(
                     waygate_core::TenantId::DEFAULT,
                     name,
-                    &class.name,
+                    tool.name.as_ref(),
                     &hash,
                     &contract,
-                    self.quarantine_threshold.covers(class.risk, side_effects),
+                    block_changes,
+                    annotation_mode.then_some(
+                        class
+                            .and_then(|class| class.approved_behavior_hash.as_deref())
+                            .unwrap_or(""),
+                    ),
                 )
                 .await?;
             if let Some(review) = store
-                .get(waygate_core::TenantId::DEFAULT, name, &class.name)
+                .get(waygate_core::TenantId::DEFAULT, name, tool.name.as_ref())
                 .await?
             {
                 let mut quarantined = entry
@@ -142,9 +149,9 @@ impl UpstreamPool {
                     .write()
                     .expect("upstream quarantine lock poisoned");
                 if review.quarantined {
-                    quarantined.insert(class.name.clone());
+                    quarantined.insert(tool.name.to_string());
                 } else {
-                    quarantined.remove(&class.name);
+                    quarantined.remove(tool.name.as_ref());
                 }
                 waygate_telemetry::metrics::set_tool_quarantined(name, quarantined.len() as i64);
             }
@@ -152,12 +159,12 @@ impl UpstreamPool {
                 if let (Some(evidence), Some(review)) = (
                     &self.evidence,
                     store
-                        .get(waygate_core::TenantId::DEFAULT, name, &class.name)
+                        .get(waygate_core::TenantId::DEFAULT, name, tool.name.as_ref())
                         .await?,
                 ) {
                     let reports = [DriftReport {
-                        tool: class.name.clone(),
-                        risk: Some(class.risk),
+                        tool: tool.name.to_string(),
+                        risk: class.map(|class| class.risk),
                         side_effects,
                         quarantined: review.quarantined,
                     }];

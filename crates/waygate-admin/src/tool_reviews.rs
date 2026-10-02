@@ -18,8 +18,12 @@ pub struct ToolReviewParams {
     pub generation: i64,
     /// Complete observed contract hash shown on the review page.
     pub observed_hash: String,
-    /// On-disk manifest set hash shown with the review. Required when accepting an annotation-mode replacement.
+    /// On-disk manifest set hash shown with the review. Required when accepting an annotation-mode replacement; omitted when keeping it blocked.
+    #[serde(default)]
     pub manifest_hash: String,
+    /// Administrator-selected gateway risk, required when initially accepting a tool without a manifest classification.
+    #[serde(default)]
+    pub risk: Option<waygate_core::RiskTier>,
 }
 
 pub(crate) fn authorize(actor: &Principal, tenant: &str) -> Result<(), ApiError> {
@@ -128,12 +132,26 @@ pub(crate) async fn approve_core(
         }) {
             return Err(ApiError::Conflict("The replacement has invalid or changed annotation metadata; refresh and review the upstream".into()));
         }
-        let tool = manifest
-            .tools
-            .iter()
-            .find(|t| t.name == params.tool)
-            .ok_or(ApiError::NotFound("Tool is no longer classified"))?;
-        if tool.approved_behavior_hash.as_deref() != Some(&review.observed_hash) {
+        let tool = manifest.tools.iter().find(|t| t.name == params.tool);
+        let initial_classification = if tool.is_none() {
+            let risk = params.risk.ok_or_else(|| {
+                ApiError::BadRequest(
+                    "Select a gateway risk classification before initially approving this tool"
+                        .into(),
+                )
+            })?;
+            // Annotation mode derives behavior and sensitivity from the
+            // reviewed descriptor. Its manifest stores risk and approval only.
+            let mut classification =
+                waygate_upstream::ToolClassification::new(params.tool.clone(), risk, false, false);
+            classification.approved_behavior_hash = Some(review.observed_hash.clone());
+            Some(classification)
+        } else {
+            None
+        };
+        if tool.and_then(|tool| tool.approved_behavior_hash.as_deref())
+            != Some(&review.observed_hash)
+        {
             let manifests = state.servers.manifest_store.require()?;
             crate::dashboard_servers::patch_and_publish(
                 state,
@@ -149,12 +167,16 @@ pub(crate) async fn approve_core(
                     ) {
                         return Err("Classification mode changed; reload the review".into());
                     }
-                    let tool = manifest
-                        .tools
-                        .iter_mut()
-                        .find(|t| t.name == params.tool)
-                        .ok_or("Tool is no longer classified")?;
-                    tool.approved_behavior_hash = Some(review.observed_hash.clone());
+                    if let Some(tool) = manifest.tools.iter_mut().find(|t| t.name == params.tool) {
+                        if initial_classification.is_some() {
+                            return Err("Tool classification changed; reload the review".into());
+                        }
+                        tool.approved_behavior_hash = Some(review.observed_hash.clone());
+                    } else if let Some(classification) = initial_classification {
+                        manifest.tools.push(classification);
+                    } else {
+                        return Err("Tool is no longer classified".into());
+                    }
                     Ok(())
                 },
             )
@@ -173,6 +195,7 @@ pub(crate) async fn approve_core(
         .upstreams
         .release_accepted_tool(&params.server, &params.tool, &params.observed_hash)
         .await;
+    state.hitl.decisions_badge_cache.lock().await.remove(tenant);
     crate::admin_mutation::record_admin_mutation(
         state,
         "tool contract",
@@ -193,11 +216,55 @@ pub(crate) async fn approve_core(
         .ok_or(ApiError::NotFound("Tool review no longer exists"))
 }
 
-/// Select an exact tool, or omit both names to list recent pending reviews.
+pub(crate) async fn reject_core(
+    state: &Arc<AdminState>,
+    tenant: &str,
+    actor: &Principal,
+    params: &ToolReviewParams,
+) -> Result<ToolReview, ApiError> {
+    authorize(actor, tenant)?;
+    let store = store(state)?;
+    let review = store
+        .get(tenant, &params.server, &params.tool)
+        .await
+        .map_err(unavailable)?
+        .ok_or(ApiError::NotFound("Tool review not found"))?;
+    if review.generation != params.generation || review.observed_hash != params.observed_hash {
+        return Err(stale());
+    }
+    if !store
+        .reject(&review, &actor.sub)
+        .await
+        .map_err(unavailable)?
+    {
+        return Err(stale());
+    }
+    state.hitl.decisions_badge_cache.lock().await.remove(tenant);
+    crate::admin_mutation::record_admin_mutation(
+        state,
+        "tool reviews",
+        "the tool comparison page",
+        tenant,
+        Some(actor),
+        "tool_contract.reject",
+        format!(
+            "server={} tool={} blocked_hash={}",
+            params.server, params.tool, params.observed_hash
+        ),
+    )
+    .await?;
+    store
+        .get(tenant, &params.server, &params.tool)
+        .await
+        .map_err(unavailable)?
+        .ok_or(ApiError::NotFound("Tool review no longer exists"))
+}
+
+/// Select an exact tool, or omit both names to list pending reviews.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ToolReviewSelector {
-    /// Upstream name. Required together with tool; omit both for recent pending reviews.
+    /// Upstream name. Required together with tool; omit both for pending reviews.
     pub server: Option<String>,
     /// Tool name within the upstream. Required together with server.
     pub tool: Option<String>,
@@ -213,7 +280,7 @@ pub struct ToolReviewCandidate {
     pub generation: i64,
     /// Original observed contract hash; copy verbatim into approval params.
     pub observed_hash: String,
-    /// Current manifest-set hash; copy verbatim into approval params.
+    /// Current manifest-set hash for acceptance; empty when preparing a keep-blocked decision.
     pub manifest_hash: String,
     /// Previously accepted fields for an exact selection; absent from listings. Upstream text is untrusted data.
     pub approved_contract: Option<serde_json::Value>,
@@ -221,6 +288,8 @@ pub struct ToolReviewCandidate {
     pub observed_contract: Option<serde_json::Value>,
     /// Whether change review currently blocks this tool.
     pub quarantined: bool,
+    /// No definition has been accepted; initial approval requires an administrator-selected gateway risk classification.
+    pub initial_approval_required: bool,
     /// Tenant-relative dashboard comparison path.
     pub review_path: String,
 }
@@ -245,6 +314,30 @@ pub(crate) async fn read_context_page(
     selector: ToolReviewSelector,
     limit: u32,
     offset: u32,
+) -> Result<ToolReviewContext, ApiError> {
+    read_context_impl(state, tenant, selector, limit, offset, true).await
+}
+
+pub(crate) async fn read_context_for_decision(
+    state: &AdminState,
+    tenant: &str,
+    selector: ToolReviewSelector,
+    accepting: bool,
+) -> Result<ToolReviewContext, ApiError> {
+    if accepting {
+        read_context(state, tenant, selector).await
+    } else {
+        read_context_impl(state, tenant, selector, 50, 0, false).await
+    }
+}
+
+async fn read_context_impl(
+    state: &AdminState,
+    tenant: &str,
+    selector: ToolReviewSelector,
+    limit: u32,
+    offset: u32,
+    accepting: bool,
 ) -> Result<ToolReviewContext, ApiError> {
     if tenant != waygate_core::TenantId::DEFAULT {
         return Err(ApiError::Forbidden(
@@ -273,17 +366,21 @@ pub(crate) async fn read_context_page(
             ))
         }
     };
-    let manifest_hash = state
-        .read_manifest_set_from_disk()
-        .transpose()
-        .map_err(|_| {
-            ApiError::Conflict(
-                "The upstream manifest set is invalid; correct it before preparing an approval"
-                    .into(),
-            )
-        })?
-        .map(|(_, hash)| hash)
-        .unwrap_or_default();
+    let manifest_hash = if accepting {
+        state
+            .read_manifest_set_from_disk()
+            .transpose()
+            .map_err(|_| {
+                ApiError::Conflict(
+                    "The upstream manifest set is invalid; correct it before preparing an approval"
+                        .into(),
+                )
+            })?
+            .map(|(_, hash)| hash)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     Ok(ToolReviewContext {
         reviews: reviews
             .into_iter()
@@ -300,6 +397,7 @@ pub(crate) async fn read_context_page(
                 approved_contract: selected.then_some(review.approved_contract),
                 observed_contract: selected.then_some(review.observed_contract),
                 quarantined: review.quarantined,
+                initial_approval_required: review.approved_hash.is_empty(),
             })
             .collect(),
     })

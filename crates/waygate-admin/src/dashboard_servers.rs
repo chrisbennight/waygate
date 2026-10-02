@@ -75,6 +75,8 @@ struct ServerRow {
     /// Count of tools auto-quarantined by the drift detector. >0 ⇒ the
     /// "clear quarantine" action renders for admins.
     quarantined: usize,
+    pending_reviews: Option<i64>,
+    review_unavailable: bool,
     /// Count of tools published without the output schema this upstream
     /// advertised, because the schema's root was not `type: "object"`.
     /// A non-zero count means the upstream is emitting definitions a strict
@@ -103,7 +105,33 @@ pub(crate) async fn servers_page(
         let enc = urlencode(&m.name);
         let tools_url = format!("{tools_base}?server={enc}");
         let config_url = format!("{config_base}?server={enc}");
+        let (pending_reviews, review_unavailable) =
+            if user.as_ref().is_some_and(|Extension(actor)| {
+                crate::tool_reviews::authorize(
+                    actor,
+                    tenant_ctx
+                        .as_ref()
+                        .map(|Extension(ctx)| ctx.slug.as_str())
+                        .unwrap_or(actor.tenant.as_str()),
+                )
+                .is_ok()
+            }) {
+                match state.servers.tool_reviews.get() {
+                    Some(store) => match store
+                        .pending_count(waygate_core::TenantId::DEFAULT, Some(&m.name))
+                        .await
+                    {
+                        Ok(count) => (Some(count), false),
+                        Err(_) => (None, true),
+                    },
+                    None => (None, false),
+                }
+            } else {
+                (None, false)
+            };
         servers.push(ServerRow {
+            pending_reviews,
+            review_unavailable,
             name: m.name,
             transport: transport_str(&m.transport),
             runtime_status: health.runtime_state.as_str(),
@@ -197,6 +225,9 @@ pub(crate) struct ServerActionForm {
 #[derive(Template)]
 #[template(path = "server_catalog_refresh_result.html")]
 struct ServerCatalogRefreshResult {
+    pending_reviews: Option<i64>,
+    review_unavailable: bool,
+    review_url: String,
     ok: bool,
     failed: bool,
     superseded: bool,
@@ -213,6 +244,9 @@ struct ServerCatalogRefreshResult {
 impl From<CatalogRefreshReport> for ServerCatalogRefreshResult {
     fn from(report: CatalogRefreshReport) -> Self {
         Self {
+            pending_reviews: None,
+            review_unavailable: false,
+            review_url: crate::tenant_ctx::nav_url(None, "/servers/tool-changes"),
             ok: matches!(
                 report.outcome,
                 CatalogRefreshOutcome::Updated | CatalogRefreshOutcome::Unchanged
@@ -1817,6 +1851,7 @@ pub(crate) async fn servers_refresh_catalog(
     State(state): State<Arc<AdminState>>,
     user: Option<Extension<Principal>>,
     csrf: Option<Extension<CsrfToken>>,
+    tenant_ctx: Option<Extension<TenantContext>>,
     Form(form): Form<ServerActionForm>,
 ) -> Response {
     if let Err(error) = crate::scope::require_admin_extension(user.as_ref().map(|Extension(p)| p)) {
@@ -1845,7 +1880,34 @@ pub(crate) async fn servers_refresh_catalog(
         .refresh_server_catalog(&form.server, actor)
         .await
     {
-        Some(report) => render(&ServerCatalogRefreshResult::from(report)),
+        Some(report) => {
+            state
+                .hitl
+                .decisions_badge_cache
+                .lock()
+                .await
+                .remove(waygate_core::TenantId::DEFAULT);
+            let mut result = ServerCatalogRefreshResult::from(report);
+            let context = tenant_ctx.as_ref().map(|Extension(context)| context);
+            let tenant = context
+                .map(|context| context.slug.as_str())
+                .unwrap_or(actor.tenant.as_str());
+            if crate::tool_reviews::authorize(actor, tenant).is_ok() {
+                if let Some(store) = state.servers.tool_reviews.get() {
+                    match store.pending_count(tenant, Some(&form.server)).await {
+                        Ok(count) => result.pending_reviews = Some(count),
+                        Err(_) => result.review_unavailable = true,
+                    }
+                }
+            }
+            result.review_url = crate::tenant_ctx::nav_url(context, "/servers/tool-changes");
+            let mut response = render(&result);
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static("tool-reviews-changed"),
+            );
+            response
+        }
         None => (StatusCode::NOT_FOUND, "server was removed during refresh").into_response(),
     }
 }

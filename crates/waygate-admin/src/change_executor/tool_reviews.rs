@@ -1,11 +1,19 @@
 //! Tool contract acceptance uses the dashboard's exact-version mutation.
 use super::*;
-use crate::tool_reviews::{approve_core, read_context, ToolReviewParams, ToolReviewSelector};
-pub(super) struct ToolContractApproveExecutor;
+use crate::tool_reviews::{
+    approve_core, read_context_for_decision, reject_core, ToolReviewParams, ToolReviewSelector,
+};
+pub(super) struct ToolContractExecutor {
+    pub(super) reject: bool,
+}
 #[async_trait]
-impl ActionExecutor for ToolContractApproveExecutor {
+impl ActionExecutor for ToolContractExecutor {
     fn action_type(&self) -> &'static str {
-        "tool_contract.approve"
+        if self.reject {
+            "tool_contract.reject"
+        } else {
+            "tool_contract.approve"
+        }
     }
     fn requires_target_etag(&self) -> bool {
         true
@@ -19,13 +27,14 @@ impl ActionExecutor for ToolContractApproveExecutor {
     ) -> Result<Option<String>, ExecError> {
         let params: ToolReviewParams = serde_json::from_value(params.clone())
             .map_err(|error| ExecError::BadParams(error.to_string()))?;
-        let context = read_context(
+        let context = read_context_for_decision(
             state,
             tenant_id,
             ToolReviewSelector {
                 server: Some(params.server),
                 tool: Some(params.tool),
             },
+            !self.reject,
         )
         .await
         .map_err(map_core_error)?;
@@ -35,7 +44,7 @@ impl ActionExecutor for ToolContractApproveExecutor {
             .ok_or_else(|| ExecError::Precondition("Tool review not found".into()))?;
         if candidate.generation != params.generation
             || candidate.observed_hash != params.observed_hash
-            || candidate.manifest_hash != params.manifest_hash
+            || (!self.reject && candidate.manifest_hash != params.manifest_hash)
         {
             return Err(ExecError::Precondition(
                 "The tool or manifest changed; read the current action context and review it again"
@@ -56,9 +65,12 @@ impl ActionExecutor for ToolContractApproveExecutor {
     ) -> Result<ExecOutcome, ExecError> {
         let params: ToolReviewParams = serde_json::from_value(params.clone())
             .map_err(|error| ExecError::BadParams(error.to_string()))?;
-        let review = approve_core(state, tenant_id, actor, &params)
-            .await
-            .map_err(map_core_error)?;
+        let review = if self.reject {
+            reject_core(state, tenant_id, actor, &params).await
+        } else {
+            approve_core(state, tenant_id, actor, &params).await
+        }
+        .map_err(map_core_error)?;
         Ok(ExecOutcome::result(
             serde_json::json!({"server":review.server,"tool":review.tool,"observed_hash":review.observed_hash,"quarantined":review.quarantined}),
         ))

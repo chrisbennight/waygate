@@ -401,6 +401,28 @@ pub(crate) async fn overview(
         }
     }
 
+    if overview_break_glass_admin(user_principal)
+        && approvals_tenant == waygate_core::TenantId::DEFAULT
+    {
+        if let Some(store) = state.servers.tool_reviews.get() {
+            match store.pending_count(&approvals_tenant, None).await {
+                Ok(pending) if pending > 0 => attention_items.push(AttentionItem {
+                    severity: "warn",
+                    label: format!("{pending} tool definitions need review"),
+                    hint: "Review the observed changes and approve or keep them blocked.",
+                    href: nav_for_attention("/servers/tool-changes"),
+                }),
+                Err(_) => attention_items.push(AttentionItem {
+                    severity: "warn",
+                    label: "Tool reviews are unavailable".into(),
+                    hint: "Review state could not be read.",
+                    href: nav_for_attention("/servers/tool-changes"),
+                }),
+                Ok(_) => {}
+            }
+        }
+    }
+
     // Figures + "what changed" feed. One 48h hourly
     // histogram feeds all three deltas so they agree on the window;
     // the feed is three cheap category-filtered queries merged by
