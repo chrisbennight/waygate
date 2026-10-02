@@ -2,28 +2,42 @@ name: quickstart
 
 on:
   pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   tutorial:
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     env:
       POSTGRES_PASSWORD: dev
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - name: Start the documented demonstration
+      - name: Select changed components
+        id: scope
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash scripts/ci-scope.sh
+      - if: steps.scope.outputs.quickstart == 'true'
+        name: Start the documented demonstration
         run: docker compose up --build --wait
-      - name: Discover, call, and verify a policy refusal
+      - if: steps.scope.outputs.quickstart == 'true'
+        name: Discover, call, and verify a policy refusal
         run: python3 examples/quickstart/check.py
       - name: Show demonstration logs on failure
-        if: failure()
+        if: steps.scope.outputs.quickstart == 'true' && (failure())
         run: docker compose logs gateway demo-upstream demo-issuer
       - name: Remove the disposable demonstration
-        if: always()
+        if: steps.scope.outputs.quickstart == 'true' && (always())
         run: docker compose down --volumes

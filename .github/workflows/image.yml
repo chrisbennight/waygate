@@ -19,6 +19,9 @@ concurrency:
 
 jobs:
   test:
+    outputs:
+      image: ${{ steps.scope.outputs.image }}
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     env:
       # Avoid generating and caching incremental state for disposable CI builds.
@@ -34,7 +37,17 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Run repository source guards
+      - name: Select changed components
+        id: scope
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash scripts/ci-scope.sh
+      - name: Check for committed credentials
+        run: bash scripts/check-secrets.sh
+      - if: steps.scope.outputs.guards == 'true'
+        name: Run repository source guards
         run: |
           set -euo pipefail
           bash scripts/check-migrations.sh
@@ -62,35 +75,61 @@ jobs:
           bash scripts/check-unused-deps.sh
           bash scripts/check-no-plan-citations.sh
           bash scripts/check-licenses.sh
-          bash scripts/check-secrets.sh
+      - if: steps.scope.outputs.rust_scope != 'none' || steps.scope.outputs.licenses == 'true'
+        name: Install repository Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Verify the browser bundle
+        if: steps.scope.outputs.browser == 'true'
+        run: |
+          set -euo pipefail
+          npm ci --prefix crates/waygate-admin/codemirror
+          bash crates/waygate-admin/codemirror/build.sh --check
+
+      - name: Check documentation
+        if: steps.scope.outputs.docs == 'true' && steps.scope.outputs.guards != 'true'
+        run: |
+          set -euo pipefail
+          bash scripts/check-doc-anchors.sh
+          bash scripts/check-licenses.sh
+          bash scripts/check-no-plan-citations.sh
+
+      - name: Test repository scripts
+        if: steps.scope.outputs.tooling == 'true'
+        run: |
+          set -euo pipefail
           node --test scripts/report-tool-context.test.mjs scripts/dashboard-badge.test.mjs
           python3 -m unittest discover -s scripts -p 'test_release_*.py'
 
-      - name: Install repository Rust toolchain
-        run: rustup show active-toolchain
-
-      - name: Verify generated notices and browser bundle
+      - if: steps.scope.outputs.licenses == 'true'
+        name: Verify generated license notices
         run: |
           set -euo pipefail
           cargo fetch --locked
           cargo install cargo-about --version 0.9.1 --locked --features cli
           bash scripts/generate-rust-licenses.sh --check
-          npm ci --prefix crates/waygate-admin/codemirror
-          bash crates/waygate-admin/codemirror/build.sh --check
-
-      - name: Check formatting
+      - if: steps.scope.outputs.rust_scope != 'none'
+        name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Install pinned cargo-nextest
+      - if: steps.scope.outputs.rust_scope != 'none'
+        name: Install pinned cargo-nextest
         run: bash scripts/ensure-nextest.sh
 
-      - name: Lint workspace
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - env:
+          CARGO_CHECK_SCOPE: ${{ steps.scope.outputs.rust_scope }}
+        if: steps.scope.outputs.rust_scope != 'none'
+        name: Lint workspace
+        run: bash scripts/ci-cargo.sh clippy --all-targets --locked -- -D warnings
 
-      - name: Compile workspace tests
+      - env:
+          CARGO_CHECK_SCOPE: ${{ steps.scope.outputs.rust_scope }}
+        if: steps.scope.outputs.rust_scope != 'none'
+        name: Compile workspace tests
         # Use the same Cargo graph for compilation and execution below.
-        run: cargo nextest run --workspace --locked --profile ci --no-run
-      - name: Check tool-definition size limits
+        run: bash scripts/ci-cargo.sh nextest run --locked --profile ci --no-run
+      - if: steps.scope.outputs.rust_scope == 'workspace'
+        name: Check tool-definition size limits
         # The workspace test build already compiles this example with the
         # workspace's dependency features. Run it without another Cargo build.
         shell: bash
@@ -99,7 +138,8 @@ jobs:
           "${CARGO_TARGET_DIR:-target}/debug/examples/tool_context_projection" |
             node scripts/report-tool-context.mjs --budget scripts/fixtures/tool-context/standard-budget.json -
 
-      - name: Start test database
+      - if: steps.scope.outputs.rust_scope == 'workspace'
+        name: Start test database
         run: |
           set -euo pipefail
           name="gateway-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -118,16 +158,25 @@ jobs:
           sudo docker logs "$name" >&2
           exit 1
 
-      - name: Test workspace
-        run: cargo nextest run --workspace --locked --profile ci
-      - name: Test workspace documentation
-        run: cargo test --doc --workspace --locked
+      - env:
+          CARGO_CHECK_SCOPE: ${{ steps.scope.outputs.rust_scope }}
+        if: steps.scope.outputs.rust_scope != 'none'
+        name: Test workspace
+        run: bash scripts/ci-cargo.sh nextest run --locked --profile ci
+      - env:
+          CARGO_CHECK_SCOPE: ${{ steps.scope.outputs.rust_scope }}
+        if: steps.scope.outputs.rust_scope == 'workspace'
+        name: Test workspace documentation
+        run: bash scripts/ci-cargo.sh test --doc --locked
 
-      - name: Check workspace
-        run: cargo check --workspace
+      - env:
+          CARGO_CHECK_SCOPE: ${{ steps.scope.outputs.rust_scope }}
+        if: steps.scope.outputs.rust_scope != 'none'
+        name: Check workspace
+        run: bash scripts/ci-cargo.sh check --locked
 
       - name: Stop test database
-        if: always()
+        if: steps.scope.outputs.rust_scope == 'workspace' && (always())
         run: sudo docker rm -f -v "${PG_CONTAINER:-}" >/dev/null 2>&1 || true
 
       - name: Report runner resources
@@ -137,8 +186,9 @@ jobs:
           free -h
 
   verify-image:
-    if: github.event_name != 'push'
+    if: github.event_name != 'push' && needs.test.outputs.image == 'true'
     needs: test
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -160,8 +210,9 @@ jobs:
         run: ./scripts/smoke-gateway-image.sh
 
   publish-image:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && needs.test.outputs.image == 'true'
     needs: test
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     concurrency:
       group: gateway-image-publication

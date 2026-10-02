@@ -48,7 +48,7 @@ package writers, and configure private package read access separately. These
 hosting settings are not enabled by committing a workflow file.
 
 The [helper release workflow](../.github/workflows/release-mcp-files.yml)
-builds Linux amd64/arm64, Windows amd64, and macOS arm64 artifacts on PRs,
+builds Linux amd64/arm64, Windows amd64, and macOS arm64 artifacts on relevant PRs,
 manual dispatches, and `mcp-files-v<version>` tag pushes. Only tag pushes publish.
 The tag and workspace version must agree. Native runners verify
 their executable, and the publication job collects checked artifacts, verifies SHA-256 checksums, and
@@ -112,13 +112,25 @@ run pytest, or use the included public-index uv lock. The scanner uses the
 Infrastructure-specific mirrors, cache addresses, and runner labels belong in
 the consuming deployment's configuration.
 
+Every PR first checks whether it contains a Renovate image update. That check
+uses the existing image parser and does not fetch KEV data or invoke Grype.
+CI installs Grype and scans only when that check finds image pairs. Scanner
+unit tests run when the scanner or its workflow changes.
+
 ## Generated assets and source checks
 
-The image workflow runs source guards, formatting, Clippy, workspace tests with
-an isolated Postgres instance, doctests, and workspace checks before building
-and smoke-testing the optimized image. Postgres starts after test compilation;
-source tests and image smoke use the same pinned database image. Source guards
-include the secret scanner.
+The image workflow selects checks from the Git merge-base diff on a PR and the
+push diff on main. Gateway source changes run source guards, formatting, Clippy,
+workspace tests with an isolated Postgres instance, doctests, and workspace
+checks. Helper-only changes run the helper crate checks without a database.
+Documentation updates run documentation checks. License regeneration and the
+CodeMirror bundle check run when their inputs change. Manual and release runs
+select all components.
+
+Image inputs build and smoke-test the optimized image before publication.
+Postgres starts after source test compilation; source tests and image smoke
+use the same pinned database image. Every PR runs the secret scanner.
+An unrelated documentation or helper update does not publish a gateway image.
 
 Install `cargo-about` 0.9.1 with `cargo install cargo-about --version 0.9.1 --locked --features cli`
 and fetch locked dependencies with `cargo fetch --locked`. After changing Rust

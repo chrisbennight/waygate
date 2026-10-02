@@ -310,7 +310,11 @@ def extract_pairs_for_file(base_sha: str, head_sha: str, path: str) -> list[Imag
     return extract_compose_pairs(base_sha, head_sha, path)
 
 
-def main() -> int:
+def main(*, check_only: bool = False) -> int:
+    output = os.environ.get("GITHUB_OUTPUT")
+    if check_only and output:
+        with Path(output).open("a") as handle:
+            handle.write("scan-required=false\n")
     event = load_event()
     if not is_renovate_pr(event):
         log("Not a Renovate PR; skipping threat gate")
@@ -334,6 +338,12 @@ def main() -> int:
 
     if not pairs:
         log("No container image updates detected in this Renovate PR")
+        return 0
+
+    if check_only:
+        if output:
+            with Path(output).open("a") as handle:
+                handle.write("scan-required=true\n")
         return 0
 
     # Defer KEV fetch until we know there are container pairs to scan.
@@ -445,4 +455,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if sys.argv[1:] not in ([], ["--check-only"]):
+        raise SystemExit("usage: scanner.py [--check-only]")
+    sys.exit(main(check_only=sys.argv[1:] == ["--check-only"]))
