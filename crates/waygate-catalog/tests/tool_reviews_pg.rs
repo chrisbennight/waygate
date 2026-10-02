@@ -525,3 +525,78 @@ async fn initial_mismatch_and_keep_blocked_are_durable_exact_decisions() {
     assert!(repaired.quarantined && repaired.approved_contract.is_null());
     assert_eq!(repaired.approved_hash, before);
 }
+
+#[tokio::test]
+async fn exact_annotation_approval_survives_unavailable_stored_comparison() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("approved-large-tool-{}", Uuid::new_v4());
+    ManifestImporter::new(pool.clone())
+        .import_atomic(
+            &tenant,
+            &[ImportServer {
+                tenant_id: tenant.clone(),
+                name: "docs".into(),
+                transport: "http".into(),
+                runtime_target: json!({"url":"http://example.test/mcp"}),
+                classification_mode: "mcp_annotations".into(),
+                tools: vec![ImportTool {
+                    name: "search".into(),
+                    approved_behavior_hash: Some("approved".into()),
+                    risk: "low".into(),
+                    side_effects: false,
+                    pii: false,
+                    discriminator: None,
+                    operations: vec![],
+                }],
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    let store = PgCatalogStore::new(pool.clone());
+    let oversized = json!({"description":"x".repeat(262145)});
+    for approved in ["approved", "approved-replacement"] {
+        store
+            .observe_against_approval(
+                &tenant,
+                "docs",
+                "search",
+                approved,
+                &oversized,
+                false,
+                Some(approved),
+            )
+            .await
+            .unwrap();
+        let review = store.get(&tenant, "docs", "search").await.unwrap().unwrap();
+        assert!(review.observed_contract.is_null());
+        assert_eq!(review.approved_hash, approved);
+        assert!(
+            !review.quarantined,
+            "comparison storage cannot override exact annotation approval"
+        );
+        assert_eq!(store.pending_count(&tenant, None).await.unwrap(), 0);
+    }
+    store
+        .observe_against_approval(
+            &tenant,
+            "docs",
+            "search",
+            "unapproved",
+            &oversized,
+            false,
+            Some("approved-replacement"),
+        )
+        .await
+        .unwrap();
+    let review = store.get(&tenant, "docs", "search").await.unwrap().unwrap();
+    assert!(review.quarantined && review.decided_at.is_none());
+    assert_eq!(store.pending_count(&tenant, None).await.unwrap(), 1);
+    sqlx::query("DELETE FROM tenants WHERE id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+}

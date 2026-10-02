@@ -15,7 +15,7 @@
 <details><summary>Contract identity</summary><p class="mono skills-source">Approved: {{ r.approved_hash }}</p><p class="mono skills-source">Observed: {{ r.observed_hash }}</p></details>
 </div>
 {% if r.observed_contract.is_null() %}
-<div class="card"><p>The tool contract exceeds the review storage limit. Its identity and quarantine are retained, but the comparison is unavailable. Reduce the contract upstream and refresh before approval.</p></div>
+<div class="card"><p>The tool contract exceeds the review storage limit. Its identity is retained, but the comparison is unavailable. {% if r.quarantined %}Reduce the contract upstream and refresh before approval.{% else %}Its existing approval remains in effect.{% endif %}</p></div>
 {% endif %}
 {% for change in changes %}
 <section class="page-section"><h2 class="section-heading">{{ change.name }}</h2>

@@ -208,6 +208,8 @@ impl PgCatalogStore {
         .fetch_one(&mut *tx)
         .await?;
         let unavailable = contract.is_null();
+        // A missing optional comparison cannot override an exact annotation approval.
+        let storage_requires_review = unavailable && approved_hash.is_none();
         let approval_mismatch = approved_hash.is_some_and(|approved| approved != hash);
         let baseline_hash = approved_hash.unwrap_or(hash);
         let baseline = if approval_mismatch {
@@ -225,7 +227,7 @@ impl PgCatalogStore {
         .bind(&baseline)
         .bind(hash)
         .bind(&contract)
-        .bind(unavailable || approval_mismatch)
+        .bind(storage_requires_review || approval_mismatch)
         .execute(&mut *tx)
         .await?;
         let previous = sqlx::query(
@@ -247,7 +249,7 @@ impl PgCatalogStore {
         if old != hash {
             let blocked = previous.get::<bool, _>("quarantined")
                 || block_changes
-                || unavailable
+                || storage_requires_review
                 || approval_mismatch;
             sqlx::query(
                 "UPDATE tool_contract_reviews SET observed_hash=$2, observed_contract=$3,
