@@ -42,6 +42,12 @@ projection never guesses a more specific type and never adds or removes an
 accepted instance. Fixing the source server remains preferred because its
 direct clients need the same portability.
 
+Read-only wrapped text tools can also publish the executable result-count
+projection described in the [upstream envelope guide](tool-envelopes.md).
+That contract admits larger positive counts, clamps to the native ceiling at
+dispatch, and reports the adjustment with the result. Governance continues to
+bind the reviewed upstream definition and the admitted count contract.
+
 An explicit [client schema compatibility](../client-schema-compatibility.md)
 profile is the exception for `tools/list`: selected clients can receive a broader
 generation schema with the removed constraints documented in the description.

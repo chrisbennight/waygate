@@ -490,6 +490,7 @@ struct InvocationContext<'a> {
     /// moves the value. The orchestrator takes the arguments out of the
     /// `InvocationRequest` once and stashes them here.
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    count_adjustment: Option<crate::count_bounds::CountAdjustment>,
     /// MRTR round-trip state (SEP-2322), taken from the request once like
     /// `arguments`: the caller's retry payload flows to the upstream
     /// verbatim, and the caller's declared capabilities gate whether an
@@ -734,6 +735,7 @@ impl InvocationService for DefaultInvocationService {
             operation_classified: false,
             pip_facts: None,
             arguments,
+            count_adjustment: None,
             mrtr,
             latency_ms: None,
             authz_policy_ids: Vec::new(),
@@ -857,7 +859,7 @@ impl InvocationService for DefaultInvocationService {
             return result.map(InvocationResponse::Unary);
         }
         self.enter_stage(InvocationStage::Dispatch);
-        let result = match self.dispatch(&mut ctx).await {
+        let mut result = match self.dispatch(&mut ctx).await {
             Ok(rmcp::model::CallToolResponse::Complete(result)) => Ok(result),
             // `admit_pause` owns the full pause admission contract —
             // reserved-key collision, caller answerability, response
@@ -908,6 +910,13 @@ impl InvocationService for DefaultInvocationService {
         // propagates), so validate_output never runs on a
         // blocked response — the same semantics for
         // the blocked path.
+        // Count reports follow the native result through inspection,
+        // validation and retained delivery, including the caller's size bound.
+        if let Ok(result) = result.as_mut() {
+            if let Some(adjustment) = ctx.count_adjustment.take() {
+                adjustment.attach(result);
+            }
+        }
         self.enter_stage(InvocationStage::InspectResponse);
         let result = self.inspect_response(&mut ctx, result).await;
         // validate_output can still reject a redacted response
@@ -1693,7 +1702,10 @@ impl DefaultInvocationService {
         ctx: &mut InvocationContext<'_>,
     ) -> Result<rmcp::model::CallToolResponse, InvocationError> {
         let started = std::time::Instant::now();
-        let args = ctx.arguments.take();
+        let mut args = ctx.arguments.take();
+        ctx.count_adjustment = args
+            .as_mut()
+            .and_then(|args| ctx.tool_snapshot().clamp_count(args));
         // An approval grant covers one submission. Ordinary MRTR must not
         // create a continuation after consuming it, so elicitation is withheld.
         // Native Tasks remain available: each input update has its own current
@@ -2181,3 +2193,6 @@ fn elapsed_ms(started: std::time::Instant) -> i64 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod count_tests;

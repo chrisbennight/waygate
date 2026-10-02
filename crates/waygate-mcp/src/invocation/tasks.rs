@@ -144,6 +144,7 @@ impl DefaultInvocationService {
             operation_classified: false,
             pip_facts: None,
             arguments: Some(route.operation_arguments.clone()),
+            count_adjustment: None,
             mrtr: crate::catalog::ToolCallMrtr::default(),
             latency_ms: None,
             authz_policy_ids: vec![],

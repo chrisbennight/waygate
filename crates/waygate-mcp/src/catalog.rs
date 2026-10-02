@@ -694,10 +694,11 @@ pub struct InvocationToolSnapshot {
     /// build this admission. Discovery consumes this copy rather than joining
     /// a separately listed definition to governance facts after an await.
     published_definition: Option<Arc<Tool>>,
+    count_projected: bool,
     input_schema: Option<Arc<Value>>,
-    /// Hash of the exact source schema when admission produced a usable
-    /// validation-equivalent projection. Durable bindings use this value so a
-    /// wire-only spelling change does not invalidate a paused execution.
+    /// Identity of argument admission and dispatch. Equivalent spelling
+    /// projections retain the source hash; count projections bind their
+    /// native ceiling and result metadata contract.
     source_input_schema_hash: Option<String>,
     /// A schema was supplied at admission but could not be projected into the
     /// self-contained MCP input contract. This differs from a legacy manifest
@@ -974,6 +975,7 @@ impl InvocationToolSnapshot {
                 schema_hash,
             },
             published_definition: None,
+            count_projected: false,
             input_schema,
             source_input_schema_hash,
             input_schema_unavailable,
@@ -1091,6 +1093,7 @@ impl InvocationToolSnapshot {
                 approved_behavior_hash,
             },
             published_definition: None,
+            count_projected: false,
             input_schema,
             source_input_schema_hash,
             input_schema_unavailable,
@@ -1114,6 +1117,7 @@ impl InvocationToolSnapshot {
             facts,
             authority: ResolutionAuthority::SyntheticModel,
             published_definition: None,
+            count_projected: false,
             input_schema: None,
             source_input_schema_hash: None,
             input_schema_unavailable: false,
@@ -1161,8 +1165,38 @@ impl InvocationToolSnapshot {
                 }
             }
         }
+        if !self.facts.side_effects && self.discriminator.is_none() {
+            if let Some((_, input)) = definition
+                .as_ref()
+                .zip(self.input_schema.as_deref())
+                .and_then(|(tool, input)| crate::count_bounds::CountBound::project(tool, input))
+            {
+                self.source_input_schema_hash =
+                    Some(waygate_catalog::validator_schema_hash(&serde_json::json!({
+                        "inputSchema":input,
+                        "countMetadataSchema":crate::count_bounds::CountBound::metadata_schema()
+                    })));
+                self.input_schema = Some(Arc::new(input));
+                self.count_projected = true;
+            }
+        }
         self.published_definition = definition.map(Arc::new);
         self
+    }
+
+    /// Convert the admitted requested count immediately before native dispatch.
+    pub(crate) fn clamp_count(
+        &self,
+        arguments: &mut serde_json::Map<String, Value>,
+    ) -> Option<crate::count_bounds::CountAdjustment> {
+        if !self.count_projected {
+            return None;
+        }
+        crate::count_bounds::CountBound::from_projected_input(
+            self.input_schema()
+                .expect("admitted count projection has an input schema"),
+        )
+        .clamp(arguments)
     }
 
     /// Exact upstream definition captured with this admitted snapshot.
@@ -1310,10 +1344,19 @@ impl InvocationToolSnapshot {
     /// Response contract for discovery. An upstream declaration does not
     /// enable additional gateway output validation for legacy integrations.
     pub fn described_output_schema(&self) -> Option<Value> {
-        self.output_schema().cloned().or_else(|| {
+        let mut schema = self.output_schema().cloned().or_else(|| {
             let schema = self.published_definition()?.output_schema.as_ref()?;
             crate::tool_schema::portable_schema_object(schema.as_ref()).map(Value::Object)
-        })
+        })?;
+        if self.count_projected {
+            if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+                properties.insert(
+                    "_gateway_counts".into(),
+                    crate::count_bounds::CountBound::metadata_schema(),
+                );
+            }
+        }
+        Some(schema)
     }
 
     /// Standard MCP annotations admitted with this invocation.
