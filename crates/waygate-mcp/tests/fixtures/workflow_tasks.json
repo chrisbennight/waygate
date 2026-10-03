@@ -76,6 +76,10 @@
       "expected": "pre-pr-review"
     },
     {
+      "query": "skill://fixture/nonexistent/SKILL.md",
+      "expected": null
+    },
+    {
       "query": "quantum entanglement",
       "expected": null
     }

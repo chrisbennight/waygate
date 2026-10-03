@@ -644,9 +644,11 @@ impl SkillTools {
                 })
                 .collect();
             matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.uri.cmp(&b.1.uri)));
-            if matches.iter().any(|(_, skill)| {
-                skill.name.eq_ignore_ascii_case(exact_query) || skill.uri == exact_query
-            }) {
+            if exact_query.starts_with("skill://")
+                || matches.iter().any(|(_, skill)| {
+                    skill.name.eq_ignore_ascii_case(exact_query) || skill.uri == exact_query
+                })
+            {
                 matches.retain(|(_, skill)| {
                     skill.name.eq_ignore_ascii_case(exact_query) || skill.uri == exact_query
                 });

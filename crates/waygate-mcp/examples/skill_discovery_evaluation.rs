@@ -193,11 +193,7 @@ async fn evaluate(tools: &SkillTools) -> Result<Value> {
             after_candidate.and_then(|skill| skill["name"].as_str()) == task.expected.as_deref();
         let after_time =
             (after_valid && after_load.is_some()).then(|| after_start.elapsed().as_micros());
-        ensure!(
-            before_valid && after_valid,
-            "fixture selection failed for {}",
-            task.query
-        );
+        ensure!(after_valid, "fixture selection failed for {}", task.query);
         let mut recheck_bytes = None;
         let mut recovery_bytes = None;
         let mut supporting_bytes = None;

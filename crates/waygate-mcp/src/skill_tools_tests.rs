@@ -57,6 +57,26 @@ async fn workflow_search_limits_pages_without_losing_query_or_access_binding() {
     assert!(all["next_cursor"].is_null());
 }
 
+#[tokio::test]
+async fn unavailable_exact_skill_uri_never_falls_back_to_related_metadata() {
+    let catalog = loaded_catalog_with_snapshot(workflow_fixture::snapshot("A")).await;
+    let snapshot = catalog.current().unwrap();
+    let reviews = Arc::new(waygate_test_support::skills::SkillReviewFixture::default());
+    let principal = read_principal();
+    reviews.approve(principal.tenant.as_str(), &snapshot);
+    let tools = SkillTools::new(GatewayServer::new(Arc::new(EmptyCatalog))
+        .with_skill_catalog(Some(catalog.clone()))
+        .with_reviewed_skills(Some(waygate_test_support::skills::reviewed_catalog(catalog, reviews.clone()))));
+    let uri = "skill://fixture/transfer-mcp-files/SKILL.md";
+    assert_eq!(invoke(&tools, "search", json!({"query":uri})).await["skills"].as_array().unwrap().len(), 1);
+    let candidate = waygate_skills::review::ReviewCandidate::from_snapshot(&snapshot, uri).unwrap();
+    reviews.quarantine(principal.tenant.as_str(), &candidate.source_key(), uri);
+    for query in [uri, "skill://fixture/nonexistent/SKILL.md"] {
+        assert!(invoke(&tools, "search", json!({"query":query})).await["skills"].as_array().unwrap().is_empty());
+    }
+    assert!(!invoke(&tools, "search", json!({"query":"skill"})).await["skills"].as_array().unwrap().is_empty());
+}
+
 fn read_principal() -> Principal {
     let mut principal = principal_hiding_collision();
     principal.scopes = vec!["mcp:read".into()];
