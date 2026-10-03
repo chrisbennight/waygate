@@ -143,7 +143,7 @@ fn add_tools(
         text.push_str(tool.name.as_ref());
         if let Some(desc) = tool.description.as_deref() {
             text.push(' ');
-            text.push_str(desc);
+            text.push_str(crate::discovery::operation_description(desc));
         }
         writer.add_document(doc!(
             fields.server => server,
@@ -452,7 +452,11 @@ pub fn matches(tool: &Tool, filters: Option<&OperationFilters>) -> bool {
         let desc_hit = tool
             .description
             .as_deref()
-            .map(|d| d.to_ascii_lowercase().contains(&q))
+            .map(|d| {
+                crate::discovery::operation_description(d)
+                    .to_ascii_lowercase()
+                    .contains(&q)
+            })
             .unwrap_or(false);
         if !(name_hit || desc_hit) {
             return false;
@@ -579,6 +583,38 @@ mod tests {
         .unwrap();
         assert!(idx.search("example-messages", "", 10).unwrap().is_none());
         assert!(idx.search("example-messages", "   ", 10).unwrap().is_none());
+    }
+
+    #[test]
+    fn shared_guidance_is_excluded_from_index_and_fallback() {
+        let idx = SearchIndex::new().unwrap();
+        let descriptions = [
+            tool(
+                "read_temperature",
+                &format!(
+                    "{}\n\nRead a room temperature.",
+                    crate::server::skill_tools::GUIDANCE
+                ),
+            ),
+            tool(
+                "search_mail",
+                &format!(
+                    "{}\n\nSearch mail by sender.",
+                    crate::server::skill_tools::GUIDANCE
+                ),
+            ),
+        ];
+        idx.replace_server("example", &descriptions).unwrap();
+        assert_eq!(
+            idx.search("example", "search", 10).unwrap().unwrap(),
+            vec!["search_mail"]
+        );
+        let filters = OperationFilters {
+            query: Some("search".into()),
+            ..Default::default()
+        };
+        assert!(!matches(&descriptions[0], Some(&filters)));
+        assert!(matches(&descriptions[1], Some(&filters)));
     }
 
     #[test]

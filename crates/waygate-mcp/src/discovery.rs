@@ -648,13 +648,47 @@ fn document_terms(tool: &CatalogTool) -> Vec<String> {
     }
     if let Some(description) = tool.definition.description.as_deref() {
         terms.extend(tokens(
-            &description
+            &operation_description(description)
                 .chars()
                 .take(MAX_RANKING_TEXT_CHARS)
                 .collect::<String>(),
         ));
     }
     terms
+}
+
+/// Operation-specific text for retrieval and previews. Some client adapters
+/// repeat connection instructions before every tool. Remove only the gateway's
+/// exact known instruction blocks; preserve the published contract for inspection.
+pub fn operation_description(mut description: &str) -> &str {
+    loop {
+        let previous = description;
+        for guidance in [
+            crate::server::skill_tools::GUIDANCE,
+            crate::server::FULL_CATALOG_INSTRUCTIONS,
+        ] {
+            if let Some(rest) = description.strip_prefix(guidance) {
+                if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                    description = rest.trim_start();
+                }
+            }
+        }
+        if description == previous {
+            return description;
+        }
+    }
+}
+
+/// Bounded preview shared by direct, Code Mode, and compatibility discovery.
+/// This is never an input contract or a replacement for exact inspection.
+pub fn compact_tool_description(description: Option<&str>) -> Option<String> {
+    const MAX_DESCRIPTION_CHARS: usize = 480;
+    description.map(|description| {
+        operation_description(description)
+            .chars()
+            .take(MAX_DESCRIPTION_CHARS)
+            .collect()
+    })
 }
 
 fn tokens(value: &str) -> Vec<String> {
@@ -698,6 +732,83 @@ mod tests {
         )
         .with_title("Title")
         .annotate(ToolAnnotations::new().read_only(true))
+    }
+
+    #[test]
+    fn shared_instructions_do_not_turn_every_operation_into_a_search_hit() {
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/discovery_tasks.json")).unwrap();
+        let fixtures = fixtures.as_array().unwrap();
+        let catalog: Vec<_> = fixtures
+            .iter()
+            .map(|fixture| {
+                let source = fixture["source"].as_str().unwrap();
+                let name = fixture["name"].as_str().unwrap();
+                let description = format!(
+                    "{} {}\n\n{}",
+                    crate::server::skill_tools::GUIDANCE,
+                    crate::server::FULL_CATALOG_INSTRUCTIONS,
+                    fixture["purpose"].as_str().unwrap()
+                );
+                let mut definition = tool(name);
+                definition.description = Some(description.into());
+                CatalogTool::upstream(
+                    source,
+                    &definition,
+                    ToolFacts {
+                        server: source.into(),
+                        name: name.into(),
+                        risk: RiskTier::Low,
+                        side_effects: false,
+                        pii: false,
+                        requires_approval: false,
+                        requires_approval_known: true,
+                    },
+                )
+                .unwrap()
+            })
+            .collect();
+        assert!(catalog.iter().all(|tool| tool
+            .definition
+            .description
+            .as_deref()
+            .unwrap()
+            .contains("search")));
+        assert_eq!(rank_visible_tools("search", catalog.clone()).len(), 1);
+        for fixture in fixtures {
+            let Some(query) = fixture["query"].as_str() else {
+                continue;
+            };
+            let ranked = rank_visible_tools(query, catalog.clone());
+            assert_eq!(
+                ranked[0].identity.qualified_name(),
+                fixture["expected"].as_str().unwrap(),
+                "{query}"
+            );
+        }
+        assert!(rank_visible_tools("quantum entanglement", catalog).is_empty());
+    }
+
+    #[test]
+    fn previews_preserve_unknown_text_and_exact_definitions() {
+        let consequences = "Requires approval. Sending a message changes external state.";
+        assert_eq!(operation_description(consequences), consequences);
+        assert_eq!(
+            operation_description("For reusable workflows, use some other workflow."),
+            "For reusable workflows, use some other workflow."
+        );
+        let original = format!(
+            "{}\n\n{}",
+            crate::server::skill_tools::GUIDANCE,
+            "界".repeat(1_000)
+        );
+        let definition = tool("unicode");
+        let mut definition = definition;
+        definition.description = Some(original.clone().into());
+        let preview = compact_tool_description(definition.description.as_deref()).unwrap();
+        assert_eq!(preview.chars().count(), 480);
+        assert_eq!(definition.description.as_deref(), Some(original.as_str()));
+        assert_eq!(compact_tool_description(None), None);
     }
 
     #[test]

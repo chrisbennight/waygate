@@ -41,7 +41,12 @@ creating an ownership cycle.
 
 Search uses a deterministic BM25-style lexical baseline over only the visible
 records. Exact fully-qualified queries resolve exactly; other queries search
-source names, tool names, titles, and bounded title/description prefixes.
+source names, tool names, titles, and bounded operation-description prefixes.
+The gateway's exact shared connection instructions, when repeated at the start
+of a description by an adapter, are excluded from previews and ranking.
+Operation-specific restrictions and consequences remain in the exact contract.
+Shared workflow guidance remains available in connection instructions and the
+skill tools. Unknown instruction text is never removed by this projection.
 Continuation cursors are authenticated, expire after a bounded interval, and
 bind the server-selected position to the caller's safe authorization claims,
 normalized query, and exact ranked governed view. They carry no authority:
@@ -59,6 +64,45 @@ the same deployment key and binds the caller, query, position, expiry, and
 exact ranked authorized view. A catalog, definition, or policy-visibility
 change therefore rejects a continuation rather than combining pages from
 different generations.
+
+## Compact client workflow
+
+Search for the task with a small result count, for example:
+
+```json
+{"query":"run a remote command over SSH","limit":5}
+```
+
+Read only `tools[].name`, `source_kind`, `source`, `tool`, and the preview needed
+to select a candidate. Pass that candidate's `source_kind`, `source`, and `tool`
+as `name` to `gateway-discovery.inspect`; then build arguments from the exact
+returned definition. An exact fully-qualified query selects an already-known
+operation. An empty result means no visible lexical match: reformulate with an
+operation-specific term or known source, rather than dumping the catalog.
+
+Code Mode follows the same sequence: `codemode.search` with a bounded `limit`,
+then `codemode.describe` with the returned `binding.connector` and
+`binding.operation` as `operation_id`. The returned `description` contains
+the complete operation documentation, including text
+beyond the search preview. Retain the complete response and its
+`document_hash`. To recheck a retained contract, pass that hash to describe;
+the gateway still resolves and authorizes the tool before returning unchanged.
+If complete instructions or schemas were lost during compaction, omit the hash
+and reload. A hash alone cannot supply the contract. Direct clients invalidate
+cached discovery on catalog change notifications and restart rejected cursors;
+invocation always rechecks current admission and authorization.
+
+Compatibility clients can request `detail: "nameDescription"` and a bounded
+`limit` on `<server>.searchTools`, then use the selected name's `#input` handle
+with `mode: "types"`. Compact descriptions have a character budget on all
+search surfaces. Compatibility `detail: "full"`, exact inspection, and ordinary
+`tools/list` retain complete descriptions and schemas.
+
+Some client adapters prepend server instructions to every tool in their local
+catalog. Filtering those full descriptions for `search` can therefore match
+unrelated operations. Prefer the compact search tools. If local catalog access
+is needed to locate a discovery tool, filter exact names and print only those
+names before loading selected schemas; avoid serializing the full catalog.
 
 ## Catalog lifecycle
 
@@ -176,6 +220,7 @@ Run the deterministic evaluation from the repository root:
 ```sh
 cargo run -p waygate-mcp --example discovery_evaluation
 cargo run -p waygate-mcp --example retrieval_strategy_evaluation
+cargo run -p waygate-mcp --example discovery_context_evaluation
 ```
 
 The command uses the production authorization-after-filtering ranker against a
@@ -205,6 +250,14 @@ task missing one or more required definitions from the working set remains
 visible in the report without turning the provisional result limit into a
 release threshold. Capture the JSON before and after a retrieval change and
 compare the same scenarios.
+
+`discovery_context_evaluation` reproduces shared-guidance broad matches on a
+synthetic catalog and compares their descriptor bytes with bounded previews
+and one selected contract for remote commands, pull-request review, CI jobs,
+mail search, and image retrieval. It also reports no-match behavior. Its call
+counts model search followed by inspection, and elapsed times measure local
+ranking and encoding only. It does not claim faster agent decisions or actual
+client truncation; compare response bytes with the client's own context budget.
 
 Authorization isolation, exact inspection, and add, description-change, and
 remove behavior are separate deterministic product contracts. The gateway

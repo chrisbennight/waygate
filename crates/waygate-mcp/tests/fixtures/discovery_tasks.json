@@ -1,0 +1,10 @@
+[
+  {"source":"ssh","name":"execute_command","purpose":"Execute a remote shell command on a host over SSH.","query":"run a remote command over SSH","expected":"ssh.execute_command"},
+  {"source":"aerb","name":"review_github_pr","purpose":"Review a GitHub pull request and return an automated code review job.","query":"review this pull request","expected":"aerb.review_github_pr"},
+  {"source":"github","name":"list_workflow_runs","purpose":"List CI workflow jobs and runs for a repository.","query":"find failed CI workflow jobs","expected":"github.list_workflow_runs"},
+  {"source":"gmail","name":"search_messages","purpose":"Search mail messages by sender, subject or text.","query":"search mail by sender","expected":"gmail.search_messages"},
+  {"source":"garage","name":"fetch_image","purpose":"Retrieve an image object from storage.","query":"retrieve an image","expected":"garage.fetch_image"},
+  {"source":"home","name":"read_temperature","purpose":"Read the current room temperature."},
+  {"source":"network","name":"list_devices","purpose":"List connected network devices."},
+  {"source":"calendar","name":"list_events","purpose":"List upcoming calendar events."}
+]

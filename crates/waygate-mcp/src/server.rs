@@ -70,7 +70,7 @@ const RESOURCE_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(30);
 /// the transferred bytes.
 pub const DEFAULT_RESOURCE_RESPONSE_MAX_BYTES: usize = 4 * 1024 * 1024;
 const RESOURCE_INSPECTION_BLOCKED_ERROR: &str = "response_inspection_blocked";
-const FULL_CATALOG_INSTRUCTIONS: &str =
+pub(crate) const FULL_CATALOG_INSTRUCTIONS: &str =
     "Call tools as `<server>.<toolName>`; the authorized catalog is in `tools/list`.";
 const LEGACY_SEARCH_INSTRUCTIONS: &str =
     "Use `<server>.searchTools` to discover tools or schemas; call results as `<server>.<toolName>`.";
