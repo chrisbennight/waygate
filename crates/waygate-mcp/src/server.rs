@@ -2275,6 +2275,49 @@ impl GatewayServer {
         }
     }
 
+    /// Probe discovery access without recording a denied invocation for each
+    /// catalog or resource omitted from an enumeration.
+    async fn skill_catalog_permit(
+        &self,
+        principal: &Principal,
+        snapshot: &waygate_skills::SkillCatalogSnapshot,
+    ) -> Option<Vec<String>> {
+        if profile_blocks_resources(principal, GATEWAY_SKILLS_SERVER) {
+            return None;
+        }
+        match self
+            .authz
+            .authorize_skill_list(principal, &skill_catalog_facts(snapshot))
+            .await
+        {
+            AuthzVerdict::Allow { policy_ids } => Some(policy_ids),
+            _ => None,
+        }
+    }
+
+    async fn skill_resource_permitted(
+        &self,
+        principal: &Principal,
+        snapshot: &waygate_skills::SkillCatalogSnapshot,
+        identity: &waygate_skills::SkillResourceIdentity,
+    ) -> bool {
+        if profile_blocks_resources(principal, GATEWAY_SKILLS_SERVER) {
+            return false;
+        }
+        let descriptor = snapshot
+            .resource(&identity.resource_uri)
+            .expect("verified identity belongs to this snapshot");
+        self.authz
+            .authorize_skill_fetch(principal, &skill_resource_fetch_facts(snapshot, descriptor))
+            .await
+            .is_allow()
+            && self
+                .authz
+                .authorize_skill_read(principal, &skill_resource_facts(identity))
+                .await
+                .is_allow()
+    }
+
     async fn record_skill_catalog_list(
         &self,
         principal: &Principal,
@@ -2455,6 +2498,15 @@ impl GatewayServer {
                     self.record_gateway_skill_read(principal, &identity, policy_ids, AuditOutcome::Denied, Some("Skill distribution was refused after the initial authorization audit; no content was released")).await;
                 }
                 return Err(error);
+            }
+            if let Some(principal) = principal {
+                if !self
+                    .skill_resource_permitted(principal, snapshot, &identity)
+                    .await
+                {
+                    self.record_gateway_skill_read(principal, &identity, &[], AuditOutcome::Denied, Some("Skill access was revoked during acquisition or inspection; no content was released")).await;
+                    return Err(unadvertised_resource());
+                }
             }
         }
         access.map(Some)
@@ -4255,6 +4307,15 @@ impl ServerHandler for GatewayServer {
                         }
                         return Err(error);
                     }
+                    if let Some(principal) = principal.as_ref() {
+                        if !self
+                            .skill_resource_permitted(principal, &snapshot, &identity)
+                            .await
+                        {
+                            self.record_gateway_skill_read(principal, &identity, &[], AuditOutcome::Denied, Some("Skill access was refused during metadata delivery; no content was released")).await;
+                            return Err(unadvertised_resource());
+                        }
+                    }
                 }
                 result
             };
@@ -4634,6 +4695,9 @@ impl ServerHandler for GatewayServer {
                 info.instructions.unwrap_or_default()
             ));
         }
+        info = skill_tools::SkillTools::new(self.clone())
+            .project_info(info, principal_from_ctx(&ctx).as_ref())
+            .await;
         if self.root_composition_active(&client) {
             info.instructions = Some(format!(
                 "{} {}",
@@ -4713,7 +4777,12 @@ impl ServerHandler for GatewayServer {
                 crate::client_schema::GUIDANCE
             ));
         }
-        std::future::ready(Ok(info))
+        let principal = principal_from_ctx(&context);
+        async move {
+            Ok(skill_tools::SkillTools::new(self.clone())
+                .project_info(info, principal.as_ref())
+                .await)
+        }
     }
 
     async fn list_prompts(
@@ -4813,10 +4882,9 @@ impl ServerHandler for GatewayServer {
             }
         }
         // Native file-transfer support is deliberately NOT advertised here
-        // yet. This method is the single server-capability projection point —
-        // the legacy initialize result and the stateless `server/discover`
-        // response both derive from it — so when the file-transfer standard
-        // (or its extension registration) settles a server-side capability
+        // yet. Initialize and stateless `server/discover` derive their defaults
+        // here, then filter skill availability for the caller. When the file-transfer
+        // standard (or its extension registration) settles a server-side capability
         // shape, it is populated in exactly one place. Emitting an invented
         // shape early would teach clients an experiment as if it were the
         // standard and force this server to carry both forever. Until then,
