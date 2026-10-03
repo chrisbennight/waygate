@@ -112,6 +112,10 @@ jobs:
         if: steps.scope.outputs.synthetic_fixtures == 'true' && steps.scope.outputs.guards != 'true'
         run: bash scripts/check-synthetic-policy-fixtures.sh
 
+      - name: Test client metadata
+        if: steps.scope.outputs.client_metadata == 'true' && steps.scope.outputs.rust_scope != 'workspace'
+        run: cargo test --locked -p waygate-test-client --test cimd_doc
+
       - name: Check shipped dashboard assets
         if: steps.scope.outputs.admin_assets == 'true' && steps.scope.outputs.rust_scope != 'workspace'
         run: |
