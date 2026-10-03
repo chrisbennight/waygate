@@ -43,7 +43,9 @@ produces only metadata and instructions to load the selected workflow from the
 gateway. It never copies the workflow body, references, or helpers.
 
 Save the structured result of `gateway-skills.search` as JSON with a `skills`
-array. Combine all desired pages first, or select the workflows to expose. Then:
+array. Combine all desired pages first, or select the workflows to expose.
+Search descriptions are previews; use a selected complete load's skill metadata
+if the native menu needs its full discovery description. Then:
 
 ```sh
 python3 scripts/generate-skill-shims.py catalog.json generated-skills

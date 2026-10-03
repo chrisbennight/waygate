@@ -3,6 +3,60 @@ use crate::builtin::BuiltinTools;
 use crate::audit::EvidenceRecorder;
 use crate::server::skill_tools::{surface_catalog, SkillTools};
 
+#[path = "../examples/support/workflow_fixture.rs"]
+mod workflow_fixture;
+
+#[tokio::test]
+async fn workflow_search_returns_compact_candidates_and_exact_matches() {
+    let catalog = loaded_catalog_with_snapshot(workflow_fixture::snapshot("A")).await;
+    let tools = SkillTools::new(GatewayServer::new(Arc::new(EmptyCatalog)).with_approved_skill_fixture(Some(catalog)));
+    for task in workflow_fixture::fixture().tasks {
+        let found = invoke(&tools, "search", json!({"query":task.query,"limit":3})).await;
+        let skills = found["skills"].as_array().unwrap();
+        assert!(skills.len() <= 3);
+        assert_eq!(skills.first().and_then(|skill| skill["name"].as_str()), task.expected.as_deref());
+        for skill in skills {
+            assert!(skill["description"].as_str().unwrap().chars().count() <= 480);
+            assert!(skill.get("instructions").is_none() && skill.get("files").is_none());
+        }
+    }
+    for query in ["pre-pr-review", "skill://fixture/pre-pr-review/SKILL.md"] {
+        let found = invoke(&tools, "search", json!({"query":query})).await;
+        assert_eq!(found["skills"].as_array().unwrap().len(), 1);
+        let skill = &found["skills"][0];
+        let loaded = invoke(&tools, "load", json!({"uri":skill["uri"],"revision":skill["revision"]})).await;
+        assert!(loaded["skill"]["description"].as_str().unwrap().len() > skill["description"].as_str().unwrap().len());
+        assert!(loaded["instructions"].as_str().unwrap().contains("Synthetic workflow instructions"));
+    }
+}
+
+#[tokio::test]
+async fn workflow_search_limits_pages_without_losing_query_or_access_binding() {
+    let tools = SkillTools::new(GatewayServer::with_authz(Arc::new(EmptyCatalog), Arc::new(SelectiveSkillGate::default())).with_approved_skill_fixture(Some(loaded_catalog_with_snapshot(discovery_snapshot()).await)));
+    let mut cursor = Value::Null;
+    let mut names = Vec::new();
+    loop {
+        let mut arguments = json!({"query":"workflow","limit":3});
+        if !cursor.is_null() { arguments["cursor"] = cursor.clone(); }
+        let page = invoke(&tools, "search", arguments).await;
+        assert!(page["skills"].as_array().unwrap().len() <= 3);
+        names.extend(page["skills"].as_array().unwrap().iter().map(|skill| skill["name"].as_str().unwrap().to_owned()));
+        cursor = page["next_cursor"].clone();
+        if cursor.is_null() { break; }
+        assert!(tools.call("search", args(json!({"query":"different","limit":3,"cursor":cursor})), Some(&read_principal())).await.is_err());
+    }
+    assert_eq!(names, (0..21).map(|i| format!("workflow-{i:02}")).collect::<Vec<_>>());
+    for query in ["read-denied", "skill://catalog/fetch-denied/SKILL.md"] {
+        assert!(invoke(&tools,"search",json!({"query":query})).await["skills"].as_array().unwrap().is_empty());
+    }
+    for value in [json!({"limit":0}), json!({"limit":-1}), json!({"limit":"3"})] {
+        assert!(tools.call("search", args(value), Some(&read_principal())).await.is_err());
+    }
+    let all = invoke(&tools, "search", json!({"limit":1000})).await;
+    assert_eq!(all["skills"].as_array().unwrap().len(), 21);
+    assert!(all["next_cursor"].is_null());
+}
+
 fn read_principal() -> Principal {
     let mut principal = principal_hiding_collision();
     principal.scopes = vec!["mcp:read".into()];
