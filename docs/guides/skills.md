@@ -7,8 +7,10 @@ needed. Local workflow copies are not required for MCP delivery.
 
 ## Follow one revision
 
-1. Search `gateway-skills.search` with a task description. Follow `next_cursor`
-   when more results are available.
+1. Search `gateway-skills.search` with a task description and a small `limit`,
+   or select an exact skill with `name` and omit `query`. Missing or inaccessible
+   name selectors return no candidates. Follow `next_cursor` when more candidates are
+   needed. Search descriptions are previews; complete instructions come from load.
 2. Pass a selected result's exact `uri` and `revision` to `gateway-skills.load`.
 3. Read its instructions and file inventory. Load supporting files with
    `gateway-skills.read_file`, using the same revision and returned file URI.
@@ -21,9 +23,11 @@ using `skill_script` and `skill_revision`, plus separate `input`. The gateway
 loads its verified source without a download/re-upload round trip or putting
 the helper text in model context. See [Code Mode](code-mode.md).
 
-Keep the complete load and its `document_hash` together. On another load of
-that URI, pass the hash as `known_document_hash` while retaining any required
-revision pin. An unchanged authorized document returns `unchanged: true`, URI,
+Keep the complete load and its `document_hash` together and reuse the instructions
+during the task. When a freshness check is needed, pass the hash as
+`known_document_hash` while retaining the complete response and required revision
+pin. If instructions were lost during compaction or a hand-off, omit the hash
+and reload completely before continuing. An unchanged authorized document returns `unchanged: true`, URI,
 revision, and hash without repeating instructions or the inventory. Changed
 content or caller facts return a complete load with a new hash; unavailable or
 quarantined content is refused. Omit the hash to refresh completely. The gateway

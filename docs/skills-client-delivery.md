@@ -8,8 +8,16 @@ use its existing verified catalog and individual resource reader.
 ## Discover and use a workflow
 
 1. Call `gateway-skills.search` with a short task description, such as
-   `{"query":"review pull request"}`. Omit `query` to list all workflows.
-   Follow `next_cursor` with the same query until it is absent.
+   `{"query":"review pull request","limit":3}`. For strict name selection, use
+   `{"name":"pre-pr-review","limit":3}` and omit `query`; a missing or inaccessible
+   name returns no candidates. Task queries narrow available exact-name matches
+   and otherwise rank metadata. A returned URI used as the query always selects
+   only that accessible URI. Descriptions are previews bounded
+   to 480 characters; ranking still uses complete discovery metadata.
+   Select a fitting candidate without opening several workflows. Follow
+   `next_cursor` with the same query or name selector and revision only when more candidates are
+   needed. Omit `query` and `name` to list all workflows and follow every page for a complete
+   inventory. `limit` is a positive page size and defaults to 20.
 2. Call `gateway-skills.load` with the returned `uri` and `revision`.
    Read `instructions` and consult `files` for references, templates and helpers.
 3. Call `gateway-skills.read_file` with a file's exact `uri` and the loaded
@@ -18,6 +26,48 @@ use its existing verified catalog and individual resource reader.
 4. If the workflow invokes another skill, find it with search using the same `revision`, then load it using
    the calling workflow's revision. A newer search result does not authorize
    substituting a newer revision during an active task.
+
+## Retain complete instructions
+
+Keep the complete load response together: instructions, file inventory, URI,
+revision, and `document_hash`. Reuse those instructions during later task steps.
+Read only the supporting references required by the selected workflow, using
+their exact inventory URIs and the same revision.
+
+When a freshness check is needed, call `gateway-skills.load` with that URI,
+revision, and `known_document_hash`. An authorized, inspected unchanged response
+contains `unchanged: true`, `uri`, `revision`, and `document_hash`; it omits
+instructions and the file inventory. Check that its identity matches the
+retained response before reusing the complete instructions. A complete response
+replaces the retained content. Current access checks still apply on every call.
+
+Hand-offs and compaction must distinguish retained metadata from available
+instructions. Preserve the complete response in client memory or a governed
+artifact when reliable, and keep the exact file inventory with it. If only the
+hash or a summary survives, omit `known_document_hash` and request a full load
+before continuing. A hash cannot recover instructions. Never accept an
+`unchanged` response when the corresponding complete response is unavailable.
+An unavailable revision requires explicit rediscovery and reassessment.
+
+The executable [client retention example](../crates/waygate-mcp/examples/support/skill_client.rs)
+demonstrates both states, exact supporting-file selection, and revision checks.
+It is an in-memory example, not an automatic integration with a client's
+compaction system. The [offline comparison](../crates/waygate-mcp/examples/skill_discovery_evaluation.rs)
+runs it through the production handlers:
+
+```sh
+cargo run --locked -p waygate-mcp --example skill_discovery_evaluation
+cargo test --locked -p waygate-mcp --example skill_discovery_evaluation
+```
+
+The fixture adapts published discovery descriptions with synthetic instructions
+and files. It covers task descriptions, overlapping workflows, exact names and
+URIs, and no-match queries. The legacy search projection is rebuilt from a
+currently authorized list; both paths use the same initial load handler.
+The report measures candidates, search calls before selection, response bytes,
+redundant full loads, and local time to usable fixture instructions. Subsequent
+reuse and necessary recovery after losing content are reported separately.
+Elapsed times exclude network and model decisions and do not prove agent speed.
 
 The tool and prompt methods require `mcp:read` or `mcp:admin`, in addition to
 the applicable catalog/resource policy and profile checks. Search, skill lists,

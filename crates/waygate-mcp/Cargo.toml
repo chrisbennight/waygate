@@ -77,3 +77,7 @@ harness = false
 [[example]]
 name = "retrieval_strategy_evaluation"
 test = true
+
+[[example]]
+name = "skill_discovery_evaluation"
+test = true

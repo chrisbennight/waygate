@@ -1,0 +1,93 @@
+{
+  "metadata_source_revision": "sha256:bba813e328d063f8a2eea869e3bdddd794fbb571dfce7fb0834154d383407145",
+  "skills": [
+    {
+      "name": "pr-and-monitor",
+      "description": "Commit and push the current branch, open a PR, then monitor CI and automated review through merge. Adjudicate every finding while preserving product intent: automated review supplies evidence as a critic rather than an architect, the client owns disposition and remediation, and reviewer-driven machinery carries an escalating proof burden as maintenance surface grows. Treat review labels as annotations, page only when a concrete human-only decision or authority is required and no autonomous work remains, and merge when enforced gates and disposition requirements are satisfied. Trigger on \"/pr-and-monitor\", \"commit and ship this\", \"push + monitor the PR\", \"ship this work\", \"open a PR and watch it\", or explicit authorization to ship autonomously.",
+      "version": "0.5.0"
+    },
+    {
+      "name": "pre-pr-review",
+      "description": "Pre-flight self-review of a PR's diff against eight recurring shipped-bug patterns — race windows, claim drift, side-effects-before-validation, swallowed cleanup failures, eager failure coupling, secrets/exposure surface, declared-but-unused dependencies, and doc drift from moved/renamed code (a mechanical docgate gate run on every PR, plus a whole-tree read-for-intent sweep for stale references in docs and source doc comments). Run before creating a PR through its forge MCP or before pushing follow-up commits to an open PR. Trigger on \"/pre-pr-review\", \"review my diff before pushing\", \"self-review before PR\", \"automated review pre-flight\", \"preflight check the PR\", \"did I leave any docs stale after this rename\", or after finishing a substantive change when the user is about to open or update a PR.",
+      "version": "0.2.0"
+    },
+    {
+      "name": "gateway-tasks",
+      "description": "Wait for long-running MCP gateway work with durable Tasks or Code Mode and keep routine status checks outside model context. Use when an existing gateway job, CI run, review, or remote operation needs completion handling without repeated model polling.",
+      "version": "0.1.0"
+    },
+    {
+      "name": "transfer-mcp-files",
+      "description": "Upload local files or publish upstream artifacts to the homelab MCP gateway, and download gateway-owned files to local disk without placing their bytes in model context. Use when a user asks to upload, attach, deliver, retrieve, publish, or download a file through the MCP gateway; when an upstream tool returns a confined artifact path; when a tool accepts or returns an mcp-file URI; or when another skill needs a source_file for Code Mode.",
+      "version": "0.1.1"
+    },
+    {
+      "name": "triage-renovate",
+      "description": "Triage open Renovate PRs across the user's Gitea repos under `bennight/`, then drive them to merged one PR at a time. Find the ones blocked by `needs coverage` labels, broken CI, or failing/broken tests; group them by project; write coverage and/or test-fix PRs against the corresponding local checkout under `~/projects/`; commit, push, open one PR per project, and monitor CI + automated review. Then, working a single PR end-to-end, update its branch from base and merge it once the gate is green before starting the next — both the coverage/fix PRs this skill creates and the Renovate bump PRs themselves (renovate-companion stays a fallback). Sequential is deliberate — rebasing every PR at once re-staleizes them on each merge so none ever completes. A direct invocation is standing authorization for the full loop; stop only at a genuine deadlock. Trigger when the user says \"/triage-renovate\", \"triage renovate\", \"look at the open renovate PRs\", or similar.",
+      "version": "0.3.0"
+    },
+    {
+      "name": "codex-queue",
+      "description": "Run an authorized long local command and notify its existing Codex session once through codex queue, avoiding repeated model polling. Use for slow builds, tests, or other noninteractive jobs that can safely continue after the turn ends.",
+      "version": "0.1.0"
+    },
+    {
+      "name": "printable-workflow",
+      "description": "Model, inspect, render, and deliver 3D projects through the homelab Printable MCP. Use for Blender scenes, organic or procedural geometry, OpenSCAD or CadQuery models, render comparisons, and optional print preparation. Keeps files and detailed results outside model context where supported; does not require a printer for modeling or rendering.",
+      "version": "0.1.2"
+    },
+    {
+      "name": "update-pr-from-base",
+      "description": "Update open Gitea PRs that are behind their base branch by merging the base INTO the PR head (leaves the PR open — equivalent of the \"Update branch by merge\" UI button). Defaults to all open PRs under `bennight/` on the user's Gitea instance, with optional scoping by repo, PR number, or author. Trigger when the user says \"/update-pr-from-base\", \"update PRs against main\", \"rebase the renovate PRs against main\", \"update branch by merge for these PRs\", or similar.",
+      "version": "0.2.0"
+    }
+  ],
+  "tasks": [
+    {
+      "query": "ship this pull request through CI and automated review",
+      "expected": "pr-and-monitor"
+    },
+    {
+      "query": "review my diff before pushing",
+      "expected": "pre-pr-review"
+    },
+    {
+      "query": "triage Renovate dependency updates",
+      "expected": "triage-renovate"
+    },
+    {
+      "query": "run long local tests and notify this Codex session",
+      "expected": "codex-queue"
+    },
+    {
+      "query": "wait for remote gateway jobs without repeated polling",
+      "expected": "gateway-tasks"
+    },
+    {
+      "query": "download an MCP file to local disk",
+      "expected": "transfer-mcp-files"
+    },
+    {
+      "query": "pre-pr-review",
+      "name": "pre-pr-review",
+      "expected": "pre-pr-review"
+    },
+    {
+      "query": "skill://fixture/pre-pr-review/SKILL.md",
+      "expected": "pre-pr-review"
+    },
+    {
+      "query": "skill://fixture/nonexistent/SKILL.md",
+      "expected": null
+    },
+    {
+      "query": "nonexistent-skill",
+      "name": "nonexistent-skill",
+      "expected": null
+    },
+    {
+      "query": "quantum entanglement",
+      "expected": null
+    }
+  ]
+}
