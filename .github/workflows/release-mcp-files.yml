@@ -15,7 +15,7 @@ permissions:
   contents: read
 concurrency:
   group: release-mcp-files-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CARGO_ZIGBUILD_VERSION: 0.23.0
   ZIGLANG_VERSION: 0.16.0
@@ -28,12 +28,21 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Resolve version
+      - name: Select changed components
+        id: scope
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash scripts/ci-scope.sh
+      - if: steps.scope.outputs.helper == 'true'
+        name: Resolve version
         id: release
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: python3 scripts/helper_release.py
-      - name: Install Rust
+      - if: steps.scope.outputs.helper == 'true'
+        name: Install Rust
         run: |
           set -euo pipefail
           if ! command -v rustup >/dev/null; then
@@ -47,14 +56,16 @@ jobs:
             x86_64-unknown-linux-musl \
             aarch64-unknown-linux-musl \
             x86_64-pc-windows-gnu
-      - name: Install cargo-zigbuild
+      - if: steps.scope.outputs.helper == 'true'
+        name: Install cargo-zigbuild
         run: |
           set -euo pipefail
           python3 -m venv /tmp/zigvenv
           /tmp/zigvenv/bin/pip install --quiet \
             "cargo-zigbuild==${CARGO_ZIGBUILD_VERSION}" \
             "ziglang==${ZIGLANG_VERSION}"
-      - name: Build
+      - if: steps.scope.outputs.helper == 'true'
+        name: Build
         run: |
           set -euo pipefail
           export PATH="/tmp/zigvenv/bin:$PATH"
@@ -62,7 +73,8 @@ jobs:
             --target x86_64-unknown-linux-musl \
             --target aarch64-unknown-linux-musl \
             --target x86_64-pc-windows-gnu
-      - name: Verify the native artifact runs
+      - if: steps.scope.outputs.helper == 'true'
+        name: Verify the native artifact runs
         env:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
@@ -72,7 +84,8 @@ jobs:
           "$bin" --version
           bash scripts/verify-mcp-files-version.sh "$bin"
           "$bin" thumbprint --config-dir "$(mktemp -d)" | grep -Eq '^[A-Za-z0-9_-]{43}$'
-      - name: Stage artifacts
+      - if: steps.scope.outputs.helper == 'true'
+        name: Stage artifacts
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -83,7 +96,8 @@ jobs:
           cd dist
           for f in *; do sha256sum "$f" > "$f.sha256"; done
           ls -l
-      - name: Retain verified artifacts
+      - if: steps.scope.outputs.helper == 'true'
+        name: Retain verified artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: mcp-files-linux-windows
@@ -101,12 +115,21 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Resolve version
+      - name: Select changed components
+        id: scope
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash scripts/ci-scope.sh
+      - if: steps.scope.outputs.helper == 'true'
+        name: Resolve version
         id: release
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: python3 scripts/helper_release.py
-      - name: Ensure a Rust toolchain
+      - if: steps.scope.outputs.helper == 'true'
+        name: Ensure a Rust toolchain
         run: |
           set -euo pipefail
           if ! command -v rustup >/dev/null; then
@@ -116,13 +139,15 @@ jobs:
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
           rustup show active-toolchain || rustup toolchain install
-      - name: Build
+      - if: steps.scope.outputs.helper == 'true'
+        name: Build
         run: |
           set -euo pipefail
           rustup target add aarch64-apple-darwin
           cargo build -p waygate-files-helper --release --locked \
             --target aarch64-apple-darwin
-      - name: Verify the artifact runs
+      - if: steps.scope.outputs.helper == 'true'
+        name: Verify the artifact runs
         env:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
@@ -131,7 +156,8 @@ jobs:
           "$bin" --version
           bash scripts/verify-mcp-files-version.sh "$bin"
           "$bin" thumbprint --config-dir "$(mktemp -d)" | grep -Eq '^[A-Za-z0-9_-]{43}$'
-      - name: Stage artifacts
+      - if: steps.scope.outputs.helper == 'true'
+        name: Stage artifacts
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -139,7 +165,8 @@ jobs:
           cd dist
           for f in *; do shasum -a 256 "$f" > "$f.sha256"; done
           ls -l
-      - name: Retain verified artifacts
+      - if: steps.scope.outputs.helper == 'true'
+        name: Retain verified artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: mcp-files-macos
@@ -151,6 +178,7 @@ jobs:
     needs:
       - linux-windows
       - macos
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     permissions:
       contents: write

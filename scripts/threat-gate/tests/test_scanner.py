@@ -285,6 +285,32 @@ def test_threat_gate_skips_kev_fetch_when_no_container_changes(tmp_path, monkeyp
     assert rc == 0
 
 
+@pytest.mark.parametrize(
+    ("candidate", "required"),
+    [("FROM python:3.13\nRUN true\n", "false"), ("FROM python:3.14\n", "true")],
+)
+def test_relevance_check_uses_real_image_changes_without_scanning(
+    tmp_path, monkeypatch, candidate, required
+):
+    repo = _init_repo(tmp_path)
+    base = _commit_file(repo, "Dockerfile", "FROM python:3.13\n", "base")
+    head = _commit_file(repo, "Dockerfile", candidate, "candidate")
+    event = _write_renovate_event(tmp_path, base, head)
+    output = tmp_path / "outputs"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("a relevance check must not fetch KEV or invoke the image scanner")
+
+    monkeypatch.setattr(tg, "fetch_cisa_kev", forbidden)
+    monkeypatch.setattr(tg, "scan_image", forbidden)
+    monkeypatch.setenv("GITEA_EVENT_PATH", str(event))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.chdir(repo)
+    assert tg.main(check_only=True) == 0
+    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert outputs == {"scan-required": required}
+
+
 def test_threat_gate_dedups_same_image_across_files(tmp_path, monkeypatch):
     """A bump that touches multiple compose files with the same image
     pin (e.g. vllm's docker-compose.yml + docker-compose-desktop.yml)

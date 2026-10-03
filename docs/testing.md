@@ -12,6 +12,19 @@ That limit is a test-runner safeguard, not a latency acceptance criterion.
 A deliberately injected database lock timeout may force an error, but must not
 put a performance deadline on the successful transaction.
 
+CI keeps the same check jobs and selects work from the changed files. Gateway
+source and shared Rust dependency changes run the workspace checks. The
+independent `mcp-files` crate runs its own checks on helper-only changes without
+starting Postgres. Documentation, generated licenses, browser assets, image
+smoke, the quickstart, and helper platform builds each use their own inputs.
+Manual and release runs select all components. Unselected work is skipped; it
+does not establish coverage for that component.
+
+Dashboard CSS, fonts and icons run the existing style and rendering tests without
+starting Postgres or testing the whole workspace. The shell/YAML parser that
+inspected Docker cleanup commands has been removed; image smoke runs retain their
+explicit container and volume cleanup.
+
 ## Explicit wall-clock checks
 
 Tests marked `#[ignore = "wall-clock integration check; ..."]` are excluded
