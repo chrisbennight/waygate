@@ -284,11 +284,8 @@ async fn skill_tools_and_prompts_preserve_denial_and_inspection() {
         .with_approved_skill_fixture(Some(catalog.clone()));
     let tools = SkillTools::new(reader);
     let principal = read_principal();
-    assert!(!tools.list_tools(Some(&principal)).await.is_empty());
-    assert!(tools
-        .call("search", args(json!({})), Some(&principal))
-        .await
-        .is_err());
+    assert!(tools.list_tools(Some(&principal)).await.is_empty());
+    assert_eq!(invoke(&tools, "search", json!({})).await["skills"], json!([]));
     assert!(tools
         .call(
             "load",
@@ -306,7 +303,7 @@ async fn skill_tools_and_prompts_preserve_denial_and_inspection() {
         )
         .await
         .is_err());
-    assert!(tools.prompts(None, Some(&principal)).await.is_err());
+    assert!(tools.prompts(None, Some(&principal)).await.unwrap().prompts.is_empty());
     let reader =
         GatewayServer::new(Arc::new(EmptyCatalog)).with_approved_skill_fixture(Some(loaded_catalog().await));
     let tools = SkillTools::new(reader.clone());
@@ -427,14 +424,18 @@ async fn file_inventory_and_cross_skill_search_keep_the_loaded_revision() {
 }
 
 #[tokio::test]
-async fn configured_tools_and_prompt_capability_survive_cold_start() {
+async fn skill_discovery_becomes_available_after_cold_start() {
     let catalog = Arc::new(ReloadableSkillCatalog::default());
-    let reader =
-        GatewayServer::new(Arc::new(EmptyCatalog)).with_approved_skill_fixture(Some(catalog.clone()));
+    let reviews = Arc::new(waygate_test_support::skills::SkillReviewFixture::default());
+    let reader = GatewayServer::new(Arc::new(EmptyCatalog))
+        .with_skill_catalog(Some(catalog.clone()))
+        .with_reviewed_skills(Some(waygate_test_support::skills::reviewed_catalog(catalog.clone(), reviews.clone())));
     let tools = SkillTools::new(reader.clone());
     let before = tools.list_tools(Some(&read_principal())).await;
-    assert!(!before.is_empty());
-    assert!(reader.get_info().capabilities.prompts.is_some());
+    assert!(before.is_empty());
+    let info = tools.project_info(reader.get_info(), Some(&read_principal())).await;
+    assert!(info.capabilities.prompts.is_none());
+    assert!(!info.instructions.unwrap().contains(skill_tools::GUIDANCE));
     assert!(tools
         .call("search", args(json!({})), Some(&read_principal()))
         .await
@@ -443,8 +444,11 @@ async fn configured_tools_and_prompt_capability_survive_cold_start() {
         .refresh(&StaticSkillSource(skill_snapshot()))
         .await
         .unwrap();
-    assert_eq!(before, tools.list_tools(Some(&read_principal())).await);
-    assert!(reader.get_info().capabilities.prompts.is_some());
+    reviews.approve(read_principal().tenant.as_str(), &catalog.current().unwrap());
+    assert!(!tools.list_tools(Some(&read_principal())).await.is_empty());
+    let info = tools.project_info(reader.get_info(), Some(&read_principal())).await;
+    assert!(info.capabilities.prompts.is_some());
+    assert!(info.instructions.unwrap().contains(skill_tools::GUIDANCE));
     assert!(tools
         .call("search", args(json!({})), Some(&read_principal()))
         .await
@@ -512,6 +516,147 @@ impl crate::authz::AuthzGate for ListPermitGate {
         AuthzVerdict::Allow {
             policy_ids: vec!["permit-fixture".into()],
         }
+    }
+    async fn authorize_skill_fetch(&self, principal: &Principal, facts: &crate::authz::SkillAccessFacts) -> AuthzVerdict {
+        crate::authz::AuthzGate::authorize_skill_fetch(&crate::authz::AllowAllGate, principal, facts).await
+    }
+    async fn authorize_skill_read(&self, principal: &Principal, facts: &crate::authz::SkillAccessFacts) -> AuthzVerdict {
+        crate::authz::AuthzGate::authorize_skill_read(&crate::authz::AllowAllGate, principal, facts).await
+    }
+}
+
+#[derive(Default)]
+struct SelectiveSkillGate {
+    revoked: std::sync::atomic::AtomicBool,
+    denied_digest: Option<String>,
+}
+
+fn selection_verdict(allowed: bool) -> AuthzVerdict {
+    if allowed {
+        AuthzVerdict::Allow { policy_ids: vec!["skill-selection".into()] }
+    } else {
+        AuthzVerdict::Deny { reason: "resource outside skill grant".into(), policy_ids: vec!["skill-selection".into()], reasons: Vec::new() }
+    }
+}
+
+#[async_trait]
+impl crate::authz::AuthzGate for SelectiveSkillGate {
+    async fn may_discover_server(&self, _: &Principal, _: &str) -> bool { true }
+    async fn authorize_tool_call(&self, _: &waygate_core::Facts) -> AuthzVerdict { selection_verdict(true) }
+    async fn authorize_skill_list(&self, _: &Principal, _: &crate::authz::SkillAccessFacts) -> AuthzVerdict { selection_verdict(true) }
+    async fn authorize_skill_fetch(&self, _: &Principal, facts: &crate::authz::SkillAccessFacts) -> AuthzVerdict {
+        selection_verdict(!facts.resource_uri.as_deref().unwrap().contains("fetch-denied"))
+    }
+    async fn authorize_skill_read(&self, _: &Principal, facts: &crate::authz::SkillAccessFacts) -> AuthzVerdict {
+        assert!(facts.content_digest.is_some(), "read decisions require verified content");
+        selection_verdict(!self.revoked.load(Ordering::SeqCst)
+            && !facts.resource_uri.as_deref().unwrap().contains("read-denied")
+            && (self.denied_digest.is_none() || facts.content_digest != self.denied_digest))
+    }
+}
+
+fn discovery_snapshot() -> SkillCatalogSnapshot {
+    let names: Vec<_> = (0..21).map(|i| format!("workflow-{i:02}"))
+        .chain(["read-denied".into(), "fetch-denied".into()]).collect();
+    let mut bodies = BTreeMap::new();
+    let mut skills = Vec::new();
+    for name in names {
+        let uri = format!("skill://catalog/{name}/SKILL.md");
+        let description = if name.ends_with("denied") { "workflow workflow workflow" } else { "Workflow" };
+        let body = format!("---\nname: {name}\ndescription: {description}\n---\n# Workflow\n").into_bytes();
+        skills.push(CatalogSkill {
+            uri: uri.clone(),
+            frontmatter: json!({"name":name,"description":description}).as_object().unwrap().clone(),
+            resources: vec![SkillResourceDescriptor {
+                uri: uri.clone(), source_path: format!("{name}/SKILL.md"),
+                source_object: waygate_skills::sha256_digest(&body), size: body.len() as u64, media_type: "text/markdown".into(),
+            }],
+        });
+        bodies.insert(uri, body);
+    }
+    waygate_skills::verify_in_memory_catalog(skill_snapshot().source().clone(),
+        CatalogManifest { schema_version: CATALOG_SCHEMA_VERSION, skills }, bodies).unwrap()
+}
+
+#[tokio::test]
+async fn partial_skill_access_filters_every_discovery_page_before_ranking() {
+    let catalog = loaded_catalog_with_snapshot(discovery_snapshot()).await;
+    let sink = Arc::new(crate::audit::InMemorySink::new());
+    let reader = GatewayServer::with_deps(Arc::new(EmptyCatalog), Arc::new(SelectiveSkillGate::default()), sink.clone())
+        .with_approved_skill_fixture(Some(catalog));
+    let tools = SkillTools::new(reader.clone());
+    let first = invoke(&tools, "search", json!({"query":"workflow"})).await;
+    assert_eq!(first["skills"].as_array().unwrap().len(), 20);
+    assert_eq!(first["skills"][0]["name"], "workflow-00");
+    let second = invoke(&tools, "search", json!({"query":"workflow","cursor":first["next_cursor"]})).await;
+    assert_eq!(second["skills"].as_array().unwrap().len(), 1);
+    assert_eq!(second["skills"][0]["name"], "workflow-20");
+    assert!(second["next_cursor"].is_null());
+    let listed = tools.custom_list(Value::Null, Some(&read_principal()), true).await.unwrap();
+    assert_eq!(listed["skills"].as_array().unwrap().len(), 21);
+    assert!(!listed.to_string().contains("denied"));
+    let prompts = tools.prompts(None, Some(&read_principal())).await.unwrap();
+    assert_eq!(prompts.prompts.len(), 20);
+    assert!(!serde_json::to_string(&prompts).unwrap().contains("denied"));
+    let more = tools.prompts(prompts.next_cursor.as_deref(), Some(&read_principal())).await.unwrap();
+    assert_eq!(more.prompts.len(), 1);
+    assert!(more.next_cursor.is_none());
+    assert_eq!(tools.list_tools(Some(&read_principal())).await.len(), 3);
+    let info = tools.project_info(reader.get_info(), Some(&read_principal())).await;
+    assert!(info.capabilities.prompts.is_some());
+    assert!(info.instructions.unwrap().contains(skill_tools::GUIDANCE));
+    assert!(sink.snapshot().await.iter().all(|event| event.outcome == AuditOutcome::Success), "omissions are visibility probes, not denied invocations");
+    for name in ["read-denied", "fetch-denied"] {
+        assert!(tools.call("load", args(json!({"uri":format!("skill://catalog/{name}/SKILL.md")})), Some(&read_principal())).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn file_inventory_uses_verified_read_permissions() {
+    let catalog = loaded_catalog_with_snapshot(workflow_snapshot("Demo instructions")).await;
+    let gate = SelectiveSkillGate { denied_digest: Some(waygate_skills::sha256_digest(&[0,128,255])), ..Default::default() };
+    let tools = SkillTools::new(GatewayServer::with_authz(Arc::new(EmptyCatalog), Arc::new(gate))
+        .with_approved_skill_fixture(Some(catalog)));
+    let loaded = invoke(&tools, "load", json!({"uri":"skill://catalog/demo/SKILL.md"})).await;
+    assert_eq!(loaded["files"].as_array().unwrap().len(), 1);
+    assert_eq!(loaded["files"][0]["path"], "SKILL.md");
+    assert!(tools.call("read_file", args(json!({"uri":"skill://catalog/demo/assets/sample.bin","revision":loaded["skill"]["revision"]})), Some(&read_principal())).await.is_err());
+}
+
+struct RevokeSkillAfterAudit {
+    inner: crate::audit::InMemorySink,
+    gate: Arc<SelectiveSkillGate>,
+    action: &'static str,
+}
+
+#[async_trait]
+impl EvidenceRecorder for RevokeSkillAfterAudit {
+    async fn record_required(&self, event: AuditEvent) -> Result<uuid::Uuid, crate::audit::EvidenceError> { self.inner.record_required(event).await }
+    async fn record_chained_best_effort(&self, event: AuditEvent) {
+        let revoke = event.action == self.action && event.outcome == AuditOutcome::Success;
+        self.inner.record_chained_best_effort(event).await;
+        if revoke { self.gate.revoked.store(true, Ordering::SeqCst); }
+    }
+    async fn record_best_effort(&self, event: AuditEvent) { self.inner.record_best_effort(event).await; }
+}
+
+#[tokio::test]
+async fn skill_revocation_during_audit_prevents_discovery_and_read_release() {
+    for (action, operation) in [(LIST_SKILLS_ACTION, "search"), (LIST_SKILLS_ACTION, "load"), (READ_SKILL_ACTION, "read")] {
+        let gate = Arc::new(SelectiveSkillGate::default());
+        let sink = Arc::new(RevokeSkillAfterAudit { inner: crate::audit::InMemorySink::new(), gate: gate.clone(), action });
+        let reader = GatewayServer::with_deps(Arc::new(EmptyCatalog), gate, sink.clone())
+            .with_approved_skill_fixture(Some(loaded_catalog().await));
+        let tools = SkillTools::new(reader.clone());
+        let result = if operation == "search" {
+            tools.call("search", args(json!({})), Some(&read_principal())).await.map(|_| ())
+        } else if operation == "load" {
+            tools.call("load", args(json!({"uri":"skill://catalog/demo/SKILL.md"})), Some(&read_principal())).await.map(|_| ())
+        } else {
+            reader.read_verified_skill_resource("skill://catalog/demo/SKILL.md", Some(&read_principal()), true).await.map(|_| ())
+        };
+        assert!(result.is_err());
+        assert_eq!(sink.inner.snapshot().await.last().unwrap().outcome, AuditOutcome::Denied);
     }
 }
 

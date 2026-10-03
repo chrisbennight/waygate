@@ -94,11 +94,14 @@ content without relying on commit metadata returned by the API. Resource
 evidence additionally carries the repository path and Git blob identity. When
 bytes are actually read, the gateway computes their SHA-256 content digest
 before the access decision and reuses those same verified bytes for the
-response. The gateway does not fetch every supporting file merely to compute
-SHA-256 values for discovery.
-Instead it advertises the SEP-2640 `resources: "dynamic"` form. This is the
+response. Catalog search and skill lists use the already verified root digests
+without fetching supporting files. `skills/get` advertises the SEP-2640
+`resources: "dynamic"` form. This is the
 standards-compatible way to preserve progressive disclosure when the backing
 source does not already provide the extension's SHA-256 resource manifest.
+Workflow load separately verifies fetch-permitted supporting files to evaluate
+content-bound read policies before advertising their file inventory. See
+[client delivery](skills-client-delivery.md) for its limits and deadline.
 
 Configured commit and tree pins constrain new catalog observations. Recovery of
 an approved historical revision instead verifies the exact commit and tree in
@@ -158,7 +161,8 @@ approved contents when those files remain available. See
 
 
 The gateway advertises the experimental
-`io.modelcontextprotocol/skills` extension only while a snapshot exists.
+`io.modelcontextprotocol/skills` extension only when the caller can access an
+approved skill from a verified snapshot.
 `skills/list` and `skills/get` expose validated frontmatter and the dynamic
 resource declaration. Individual files use ordinary MCP `resources/read` and
 retain their media type. Explicit upstream URI reservations cannot overlap the

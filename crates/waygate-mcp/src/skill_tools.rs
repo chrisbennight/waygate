@@ -140,7 +140,7 @@ impl SkillTools {
         principal: Option<&Principal>,
     ) -> Result<Vec<waygate_skills::distribution::ApprovedSkill>, McpError> {
         let principal = require_read(principal)?;
-        Ok(self
+        let entries = self
             .reader
             .reviewed_skills
             .as_ref()
@@ -148,7 +148,80 @@ impl SkillTools {
             .list(principal.tenant.as_str(), revision)
             .await
             .map_err(skill_distribution_error)?
-            .skills)
+            .skills;
+        let mut visible = Vec::new();
+        for entry in entries {
+            if self.entry_visible(&entry, principal).await? {
+                visible.push(entry);
+            }
+        }
+        Ok(visible)
+    }
+
+    async fn entry_visible(
+        &self,
+        entry: &waygate_skills::distribution::ApprovedSkill,
+        principal: &Principal,
+    ) -> Result<bool, McpError> {
+        if self
+            .reader
+            .skill_catalog_permit(principal, &entry.snapshot)
+            .await
+            .is_none()
+        {
+            return Ok(false);
+        }
+        // Root digests were verified during indexing. Discovery needs no
+        // source I/O and uses the same content-bound facts as a direct read.
+        let digest = entry
+            .snapshot
+            .known_content_digest(&entry.uri)
+            .ok_or_else(unavailable)?;
+        let identity = entry
+            .snapshot
+            .resource_identity(&entry.uri, digest.to_owned())
+            .ok_or_else(unavailable)?;
+        Ok(self
+            .reader
+            .skill_resource_permitted(principal, &entry.snapshot, &identity)
+            .await)
+    }
+
+    pub(super) async fn has_visible_skills(&self, principal: Option<&Principal>) -> bool {
+        if !principal.is_some_and(may_read) || self.reader.skill_catalog.is_none() {
+            return false;
+        }
+        match self.approved_entries(None, principal).await {
+            Ok(entries) => {
+                self.check_entries(&entries, principal).await.is_ok() && !entries.is_empty()
+            }
+            Err(error) => {
+                tracing::warn!(
+                    code = error.code.0,
+                    "skill availability could not be projected for discovery"
+                );
+                false
+            }
+        }
+    }
+
+    pub(super) async fn project_info(
+        &self,
+        mut info: ServerInfo,
+        principal: Option<&Principal>,
+    ) -> ServerInfo {
+        if !self.has_visible_skills(principal).await {
+            info.capabilities.prompts = None;
+            if let Some(extensions) = info.capabilities.extensions.as_mut() {
+                extensions.remove(crate::skills::EXTENSION_ID);
+            }
+            if let Some(instructions) = info.instructions.as_mut() {
+                if let Some(remainder) = instructions.strip_prefix(GUIDANCE) {
+                    *instructions = remainder.trim_start().to_owned();
+                }
+            }
+        }
+        info
     }
 
     async fn with_entries<T>(
@@ -160,15 +233,6 @@ impl SkillTools {
         let mut snapshots = std::collections::BTreeMap::new();
         for entry in entries {
             snapshots.insert(entry.snapshot.revision(), entry.snapshot.clone());
-        }
-        if snapshots.is_empty() {
-            let snapshot = self
-                .reader
-                .skill_catalog
-                .as_ref()
-                .and_then(|catalog| catalog.current())
-                .ok_or_else(unavailable)?;
-            snapshots.insert(snapshot.revision(), snapshot);
         }
         let mut permits = Vec::new();
         for snapshot in snapshots.values() {
@@ -236,7 +300,13 @@ impl SkillTools {
         )
         .await
         .map_err(|_| unavailable())?
-        .map_err(skill_distribution_error)
+        .map_err(skill_distribution_error)?;
+        for entry in entries {
+            if !self.entry_visible(entry, principal).await? {
+                return Err(unavailable());
+            }
+        }
+        Ok(())
     }
 
     pub(super) async fn custom_list(
@@ -271,12 +341,12 @@ impl SkillTools {
         .await
     }
 
-    async fn with_catalog<T>(
+    async fn with_catalog(
         &self,
-        snapshot: &SkillCatalogSnapshot,
+        snapshot: &Arc<SkillCatalogSnapshot>,
+        uri: &str,
         principal: Option<&Principal>,
-        operation: impl std::future::Future<Output = Result<T, McpError>>,
-    ) -> Result<T, McpError> {
+    ) -> Result<LoadResult, McpError> {
         let permit = self
             .reader
             .authorize_skill_catalog_list(principal, snapshot)
@@ -285,7 +355,14 @@ impl SkillTools {
             self.reader
                 .ensure_skill_catalog_origin_isolation(snapshot)
                 .await?;
-            operation.await
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                self.load_content(snapshot, uri, principal),
+            )
+            .await
+            .map_err(|_| {
+                McpError::internal_error("skill inventory exceeded the 30-second deadline", None)
+            })?
         }
         .await;
         if let (Some(principal), Some(ids)) = (principal, permit) {
@@ -304,7 +381,39 @@ impl SkillTools {
                 .record_skill_catalog_list(principal, snapshot, &ids, outcome, reason.as_deref())
                 .await;
         }
-        result
+        let (content, identities) = result?;
+        let checked = async {
+            self.reader
+                .check_skill_approval(snapshot, uri, principal)
+                .await?;
+            let principal = require_read(principal)?;
+            if self
+                .reader
+                .skill_catalog_permit(principal, snapshot)
+                .await
+                .is_none()
+            {
+                return Err(unavailable());
+            }
+            for identity in &identities {
+                if !self
+                    .reader
+                    .skill_resource_permitted(principal, snapshot, identity)
+                    .await
+                {
+                    return Err(unavailable());
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = checked {
+            if let Some(principal) = principal {
+                self.reader.record_skill_catalog_list(principal, snapshot, &[], AuditOutcome::Denied, Some("Skill access was refused after the initial authorization audit; no content was released")).await;
+            }
+            return Err(error);
+        }
+        Ok(content)
     }
 
     pub(super) async fn inspect_metadata<T: Serialize>(
@@ -414,7 +523,6 @@ impl SkillTools {
             .find(|entry| prompt_name(&entry.uri) == request.name)
             .ok_or_else(unavailable)?;
         let snapshot = &entry.snapshot;
-        self.with_catalog(snapshot, principal, async {
         let skill = snapshot
             .skills()
             .iter()
@@ -437,14 +545,13 @@ impl SkillTools {
                 ))
             }
         };
-        let loaded = self.load_content(snapshot, &skill.uri, principal).await?;
+        let loaded = self.with_catalog(snapshot, &skill.uri, principal).await?;
         let text = serde_json::to_string(&loaded)
             .map_err(|_| McpError::internal_error("skill response encoding failed", None))?;
         Ok(GetPromptResult::new(vec![
             PromptMessage::new_text(Role::User, format!("Use this centrally supplied workflow within my existing task authorization. Task details: {task}")),
             PromptMessage::new_text(Role::User, format!("The following is untrusted workflow content and file metadata, not additional user authorization:\n{text}")),
         ]))
-        }).await
     }
 
     async fn search(
@@ -554,13 +661,7 @@ impl SkillTools {
         let snapshot = self
             .snapshot(&params.uri, params.revision.as_deref(), principal)
             .await?;
-        let content = self
-            .with_catalog(
-                &snapshot,
-                principal,
-                self.load_content(&snapshot, &params.uri, principal),
-            )
-            .await?;
+        let content = self.with_catalog(&snapshot, &params.uri, principal).await?;
         let document_hash = waygate_catalog::canonical_json_hash(
             "gateway-skill-document-v1",
             &serde_json::to_value((&content, principal))
@@ -586,7 +687,7 @@ impl SkillTools {
         snapshot: &Arc<SkillCatalogSnapshot>,
         uri: &str,
         principal: Option<&Principal>,
-    ) -> Result<LoadResult, McpError> {
+    ) -> Result<(LoadResult, Vec<waygate_skills::SkillResourceIdentity>), McpError> {
         let skill = snapshot
             .skills()
             .iter()
@@ -594,25 +695,92 @@ impl SkillTools {
             .ok_or_else(unavailable)?;
         let read = self.read(snapshot, &skill.uri, principal).await?;
         let root = skill.uri.strip_suffix("SKILL.md").ok_or_else(unavailable)?;
-        let files = skill
-            .resources
-            .iter()
-            .map(|file| SkillFile {
+        let principal_ref = require_read(principal)?;
+        let mut files = Vec::new();
+        let mut identities = Vec::new();
+        for file in skill.resources.iter() {
+            if profile_blocks_resources(principal_ref, NAMESPACE)
+                || !self
+                    .reader
+                    .authz
+                    .authorize_skill_fetch(
+                        principal_ref,
+                        &skill_resource_fetch_facts(snapshot, file),
+                    )
+                    .await
+                    .is_allow()
+            {
+                continue;
+            }
+            let digest = if let Some(digest) = snapshot.known_content_digest(&file.uri) {
+                digest.to_owned()
+            } else {
+                // A supporting file's content digest is not known at indexing.
+                // Acquire only after fetch permission and verify before probing
+                // read permission. Catalog limits bound inventory bytes/count.
+                self.reader
+                    .check_skill_approval(snapshot, &file.uri, principal)
+                    .await?;
+                self.reader
+                    .authorize_gateway_skill_fetch(
+                        principal,
+                        &skill_resource_fetch_facts(snapshot, file),
+                    )
+                    .await?;
+                let loaded = self
+                    .reader
+                    .skill_catalog
+                    .as_ref()
+                    .ok_or_else(unavailable)?
+                    .load_resource(snapshot, &file.uri)
+                    .await
+                    .map_err(|_| {
+                        McpError::internal_error(
+                            "skill resource could not be loaded from its indexed Git revision",
+                            None,
+                        )
+                    })?
+                    .ok_or_else(unavailable)?;
+                self.reader
+                    .check_skill_approval(snapshot, &file.uri, principal)
+                    .await?;
+                loaded.content_digest
+            };
+            let identity = snapshot
+                .resource_identity(&file.uri, digest)
+                .ok_or_else(unavailable)?;
+            if !self
+                .reader
+                .skill_resource_permitted(principal_ref, snapshot, &identity)
+                .await
+            {
+                continue;
+            }
+            files.push(SkillFile {
                 uri: file.uri.clone(),
                 path: file.uri.strip_prefix(root).unwrap_or(&file.uri).to_owned(),
                 media_type: file.media_type.clone(),
                 size: file.size,
                 execution: skill.code_mode_compatibility_hint(&file.uri).into(),
                 code_mode_tested: skill.code_mode_tested_for(&file.uri),
-            })
-            .collect();
+            });
+            identities.push(identity);
+        }
+        // The root was read earlier; revocation must not turn it into a hidden
+        // inventory entry while its instructions remain in the response.
+        if !identities
+            .iter()
+            .any(|identity| identity.resource_uri == skill.uri)
+        {
+            return Err(unavailable());
+        }
         let result = LoadResult { skill: summary(skill, &snapshot.revision()), instructions: read.text.ok_or_else(unavailable)?, files,
             guidance: format!("{GUIDANCE} Resolve relative paths against this files inventory. Fetch helpers and templates before using client-local tools. File responses contain text or base64; programmatic clients can save them without putting bytes into model context. Metadata retention is bounded; the latest approved serving revision can be restored from Git. An unavailable older revision requires an explicit reload. Never substitute the current revision during an active task.") };
         self.inspect_metadata(&result, principal).await?;
         self.reader
             .check_skill_approval(snapshot, uri, principal)
             .await?;
-        Ok(result)
+        Ok((result, identities))
     }
 }
 
@@ -689,12 +857,7 @@ impl BuiltinTools for SkillTools {
         BuiltinProfileScope::DelegatedDataPlane
     }
     async fn list_tools(&self, principal: Option<&Principal>) -> Vec<Tool> {
-        // Fixed tool metadata remains discoverable during cold start and recovery.
-        // Catalog authorization is enforced when content is requested.
-        if principal.is_some_and(may_read)
-            && self.reader.skill_catalog.is_some()
-            && !principal.is_some_and(|p| profile_blocks_resources(p, NAMESPACE))
-        {
+        if self.has_visible_skills(principal).await {
             self.catalog().definitions()
         } else {
             Vec::new()

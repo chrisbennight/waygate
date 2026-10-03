@@ -20,8 +20,15 @@ use its existing verified catalog and individual resource reader.
    substituting a newer revision during an active task.
 
 The tool and prompt methods require `mcp:read` or `mcp:admin`, in addition to
-the applicable catalog/resource policy and profile checks. Search advertises
-metadata; load reads the selected root instructions; file reads acquire only
+the applicable catalog/resource policy and profile checks. Search, skill lists,
+and prompt lists include only approved skills whose root instructions the caller
+may fetch and read. Filtering happens before ranking and pagination. A caller
+with the read scope but no matching skill grants receives an empty list.
+
+Load reads the selected root instructions and includes only supporting files
+the caller may fetch and read. To evaluate content-bound read policies, it
+verifies supporting file digests after fetch authorization, within the catalog's
+file/byte limits and a 30-second inventory deadline. File reads return only
 the requested resource. Text is returned in `text`, binary
 content in `base64`. Programmatic clients can capture `structuredContent` and
 write those bytes to their local workspace without copying them into model
@@ -42,11 +49,16 @@ The skill's instructions cannot expand the user's task authorization.
 
 ## Revisions and updates
 
-When a Git skill source is configured, fixed tools and the prompt capability
-remain advertised during initial loading or an outage. Calls report unavailable
-content until a verified snapshot exists. Successful changed publications use
+Skill tools, prompt capabilities, the Skills extension, and workflow guidance
+are advertised only when the caller can access at least one approved skill.
+During initial loading they are absent; direct calls report unavailable content.
+Successful changed publications use
 the shared catalog-change signal to notify connected clients to refetch tools
 and prompts; unrelated tool catalog changes may also prompt a harmless refetch.
+Legacy clients that negotiated no prompt capability need a new session to learn
+that capability after skills become available. Stateless clients can rediscover
+current capabilities. Cached names do not preserve access after revocation:
+reads and discovery recheck policy and approval before releasing a response.
 
 Load returns an identity that binds the source, commit, verified tree and skill
 inventory. The gateway retains the current and four previous distinct metadata

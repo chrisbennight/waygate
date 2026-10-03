@@ -2,8 +2,8 @@
 
 Skills package task instructions with references, templates, and optional
 helpers. The gateway serves a reviewed Git-backed catalog so a client can load
-one workflow and only the supporting files it needs. Local workflow copies are
-not required for MCP delivery.
+one workflow, discover the files it may read, and request their contents as
+needed. Local workflow copies are not required for MCP delivery.
 
 ## Follow one revision
 

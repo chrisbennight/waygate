@@ -664,9 +664,55 @@ async fn codemode_only_client_allowlist_hides_upstream_declarations() {
 }
 
 #[tokio::test]
-async fn configured_skills_notify_an_already_connected_prompt_client() {
+async fn accessible_skills_notify_an_already_connected_prompt_client() {
     let mut principal = wire_principal();
     principal.scopes.push("mcp:read".into());
+    use waygate_skills::{
+        CatalogManifest, CatalogSkill, CatalogSourceIdentity, SkillResourceDescriptor,
+    };
+    let uri = "skill://catalog/demo/SKILL.md".to_owned();
+    let body = b"---\nname: demo\ndescription: Demo skill\n---\n# Demo\n".to_vec();
+    let snapshot = waygate_skills::verify_in_memory_catalog(
+        CatalogSourceIdentity {
+            origin: "git+https://git.example/team/skills".into(),
+            reference: "main".into(),
+            resolved_digest: format!("git-sha1:{}", "a".repeat(40)),
+            resolved_tree_digest: format!("git-sha1:{}", "b".repeat(40)),
+        },
+        CatalogManifest {
+            schema_version: waygate_skills::CATALOG_SCHEMA_VERSION,
+            skills: vec![CatalogSkill {
+                uri: uri.clone(),
+                frontmatter: json!({"name":"demo","description":"Demo skill"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                resources: vec![SkillResourceDescriptor {
+                    uri: uri.clone(),
+                    source_path: "demo/SKILL.md".into(),
+                    source_object: waygate_skills::sha256_digest(&body),
+                    size: body.len() as u64,
+                    media_type: "text/markdown".into(),
+                }],
+            }],
+        },
+        std::collections::BTreeMap::from([(uri, body)]),
+    )
+    .unwrap();
+    struct Source(waygate_skills::SkillCatalogSnapshot);
+    #[async_trait]
+    impl waygate_skills::SkillCatalogSource for Source {
+        async fn load(
+            &self,
+        ) -> Result<waygate_skills::SkillCatalogSnapshot, waygate_skills::SkillSourceError>
+        {
+            Ok(self.0.clone())
+        }
+    }
+    let catalog = Arc::new(waygate_skills::ReloadableSkillCatalog::default());
+    catalog.refresh(&Source(snapshot)).await.unwrap();
+    let reviewed =
+        waygate_test_support::skills::approved_catalog(catalog.clone(), principal.tenant.as_str());
     let epoch = ToolCatalogEpoch::new();
     let session_ct = CancellationToken::new();
     let server = {
@@ -677,9 +723,8 @@ async fn configured_skills_notify_an_already_connected_prompt_client() {
                 .with_allowed_hosts(vec![ALLOWED_HOST.to_string()]),
             move || {
                 GatewayServer::new(Arc::new(DemoCatalog::default()))
-                    .with_skill_catalog(Some(Arc::new(
-                        waygate_skills::ReloadableSkillCatalog::default(),
-                    )))
+                    .with_skill_catalog(Some(catalog.clone()))
+                    .with_reviewed_skills(Some(reviewed.clone()))
                     .with_tool_catalog_epoch(&epoch)
             },
             Some(principal),
@@ -696,7 +741,7 @@ async fn configured_skills_notify_an_already_connected_prompt_client() {
     client
         .list_prompts(None)
         .await
-        .expect("prompt capability exists before the first snapshot");
+        .expect("accessible approved skills are exposed through prompts");
     epoch.mark_changed();
     tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
         .await
