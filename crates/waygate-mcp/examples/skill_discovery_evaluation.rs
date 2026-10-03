@@ -175,7 +175,11 @@ async fn evaluate(tools: &SkillTools) -> Result<Value> {
         };
 
         let after_start = Instant::now();
-        let after_search = call(tools, "search", json!({"query":task.query,"limit":3})).await?;
+        let search_arguments = match task.name.as_deref() {
+            Some(name) => json!({"name":name,"limit":3}),
+            None => json!({"query":task.query,"limit":3}),
+        };
+        let after_search = call(tools, "search", search_arguments).await?;
         let after_candidate = after_search["skills"].as_array().unwrap().first();
         let after_load = if let Some(skill) = after_candidate {
             Some(
@@ -229,7 +233,7 @@ async fn evaluate(tools: &SkillTools) -> Result<Value> {
             ensure!(retained.complete()? == loaded, "full recovery failed");
         }
         reports.push(json!({
-            "query":task.query,"expected":task.expected,
+            "query":task.query,"name":task.name,"expected":task.expected,
             "before":{"search_calls_before_selection":1,"candidates":before_search["skills"].as_array().unwrap().len(),"search_bytes":bytes(&before_search),"load_bytes":before_load.as_ref().map(bytes),"redundant_full_loads":usize::from(before_reload.is_some()),"repeat_load_bytes":before_reload.as_ref().map(bytes),"valid_selection":before_valid,"time_to_usable_instructions_microseconds":before_time},
             "after":{"search_calls_before_selection":1,"candidates":after_search["skills"].as_array().unwrap().len(),"search_bytes":bytes(&after_search),"load_bytes":after_load.as_ref().map(bytes),"redundant_full_loads":0,"freshness_response_bytes":recheck_bytes,"necessary_recovery_bytes":recovery_bytes,"supporting_file_reads":usize::from(supporting_bytes.is_some()),"supporting_response_bytes":supporting_bytes,"valid_selection":after_valid,"time_to_usable_instructions_microseconds":after_time}
         }));

@@ -11,7 +11,11 @@ async fn workflow_search_returns_compact_candidates_and_exact_matches() {
     let catalog = loaded_catalog_with_snapshot(workflow_fixture::snapshot("A")).await;
     let tools = SkillTools::new(GatewayServer::new(Arc::new(EmptyCatalog)).with_approved_skill_fixture(Some(catalog)));
     for task in workflow_fixture::fixture().tasks {
-        let found = invoke(&tools, "search", json!({"query":task.query,"limit":3})).await;
+        let arguments = match task.name.as_deref() {
+            Some(name) => json!({"name":name,"limit":3}),
+            None => json!({"query":task.query,"limit":3}),
+        };
+        let found = invoke(&tools, "search", arguments).await;
         let skills = found["skills"].as_array().unwrap();
         assert!(skills.len() <= 3);
         assert_eq!(skills.first().and_then(|skill| skill["name"].as_str()), task.expected.as_deref());
@@ -49,7 +53,7 @@ async fn workflow_search_limits_pages_without_losing_query_or_access_binding() {
     for query in ["read-denied", "skill://catalog/fetch-denied/SKILL.md"] {
         assert!(invoke(&tools,"search",json!({"query":query})).await["skills"].as_array().unwrap().is_empty());
     }
-    for value in [json!({"limit":0}), json!({"limit":-1}), json!({"limit":"3"})] {
+    for value in [json!({"limit":0}), json!({"limit":-1}), json!({"limit":"3"}), json!({"name":""}), json!({"name":"x".repeat(65)}), json!({"name":"workflow-00","query":"workflow"})] {
         assert!(tools.call("search", args(value), Some(&read_principal())).await.is_err());
     }
     let all = invoke(&tools, "search", json!({"limit":1000})).await;
@@ -75,6 +79,14 @@ async fn unavailable_exact_skill_uri_never_falls_back_to_related_metadata() {
         assert!(invoke(&tools, "search", json!({"query":query})).await["skills"].as_array().unwrap().is_empty());
     }
     assert!(!invoke(&tools, "search", json!({"query":"skill"})).await["skills"].as_array().unwrap().is_empty());
+    let name = "pre-pr-review";
+    assert_eq!(invoke(&tools, "search", json!({"name":name})).await["skills"].as_array().unwrap().len(), 1);
+    let uri = "skill://fixture/pre-pr-review/SKILL.md";
+    let candidate = waygate_skills::review::ReviewCandidate::from_snapshot(&snapshot, uri).unwrap();
+    reviews.quarantine(principal.tenant.as_str(), &candidate.source_key(), uri);
+    assert!(invoke(&tools, "search", json!({"name":name})).await["skills"].as_array().unwrap().is_empty());
+    assert!(invoke(&tools, "search", json!({"name":"nonexistent-skill"})).await["skills"].as_array().unwrap().is_empty());
+    assert!(!invoke(&tools, "search", json!({"query":"workflow"})).await["skills"].as_array().unwrap().is_empty());
 }
 
 fn read_principal() -> Principal {

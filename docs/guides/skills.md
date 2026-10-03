@@ -8,7 +8,8 @@ needed. Local workflow copies are not required for MCP delivery.
 ## Follow one revision
 
 1. Search `gateway-skills.search` with a task description and a small `limit`,
-   or use an exact skill name. Follow `next_cursor` when more candidates are
+   or select an exact skill with `name` and omit `query`. Missing or inaccessible
+   name selectors return no candidates. Follow `next_cursor` when more candidates are
    needed. Search descriptions are previews; complete instructions come from load.
 2. Pass a selected result's exact `uri` and `revision` to `gateway-skills.load`.
 3. Read its instructions and file inventory. Load supporting files with

@@ -22,6 +22,8 @@ pub struct Metadata {
 pub struct Task {
     pub query: String,
     pub expected: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 pub fn fixture() -> Fixture {

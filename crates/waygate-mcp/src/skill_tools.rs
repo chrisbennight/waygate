@@ -16,15 +16,19 @@ const SEARCH_DESCRIPTION_CHARACTERS: usize = 480;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SearchParams {
-    /// Task description, exact skill name, or returned skill URI, e.g. "review pull request". An exact name or URI selects only those available matches. Omit to list all skills. Maximum 256 characters.
+    /// Task description or returned skill URI, e.g. "review pull request". Available exact names narrow task matches; URI queries always stay exact. Use name for strict name selection. Omit both query and name to list all skills. Maximum 256 characters.
     #[schemars(length(max = 256))]
     #[serde(default)]
     query: String,
+    /// Exact skill name, e.g. "pre-pr-review". Missing or inaccessible names return no candidates. Omit query when using this selector. Maximum 64 characters.
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 64))]
+    name: Option<String>,
     /// Positive results per page; defaults to 20. Use a small value when selecting one workflow, then follow next_cursor only if needed.
     #[serde(default)]
     #[schemars(range(min = 1))]
     limit: Option<usize>,
-    /// Opaque next_cursor from the previous response for the same query. Omit for the first page.
+    /// Opaque next_cursor from the previous response for the same query or name selector. Omit for the first page.
     #[serde(default)]
     cursor: Option<String>,
     /// Catalog revision from a calling skill. Omit to discover current workflows; use the loaded revision for cross-skill calls.
@@ -600,6 +604,20 @@ impl SkillTools {
         principal: Option<&Principal>,
     ) -> Result<SearchResult, McpError> {
         let limit = params.limit.unwrap_or(20);
+        if let Some(name) = params.name.as_deref() {
+            if !params.query.is_empty() {
+                return Err(McpError::invalid_params(
+                    "use name or query, not both",
+                    None,
+                ));
+            }
+            if name.is_empty() || name.chars().count() > 64 {
+                return Err(McpError::invalid_params(
+                    "name must contain 1 to 64 characters",
+                    None,
+                ));
+            }
+        }
         if limit == 0 {
             return Err(McpError::invalid_params(
                 "limit must be a positive integer",
@@ -631,6 +649,12 @@ impl SkillTools {
                         .iter()
                         .find(|skill| skill.uri == entry.uri)?;
                     let summary = summary(skill, &entry.snapshot.revision());
+                    if let Some(name) = params.name.as_deref() {
+                        return summary
+                            .name
+                            .eq_ignore_ascii_case(name)
+                            .then_some((0, summary));
+                    }
                     let name = summary.name.to_lowercase();
                     let description = summary.description.to_lowercase();
                     let score: usize = terms
@@ -653,10 +677,16 @@ impl SkillTools {
                     skill.name.eq_ignore_ascii_case(exact_query) || skill.uri == exact_query
                 });
             }
-            // Bind the query even when two different queries produce the same matches.
+            // Bind selector kind and value even when different requests have the same matches.
             let entries: Vec<_> = matches
                 .into_iter()
-                .map(|(_, summary)| (query.clone(), SearchSummary::from(summary)))
+                .map(|(_, summary)| {
+                    (
+                        query.clone(),
+                        params.name.clone(),
+                        SearchSummary::from(summary),
+                    )
+                })
                 .collect();
             let page = paginate_bound(
                 entries,
@@ -671,7 +701,11 @@ impl SkillTools {
                 ),
             )?;
             let result = SearchResult {
-                skills: page.items.into_iter().map(|(_, summary)| summary).collect(),
+                skills: page
+                    .items
+                    .into_iter()
+                    .map(|(_, _, summary)| summary)
+                    .collect(),
                 next_cursor: page.next_cursor,
             };
             self.inspect_metadata(&result, principal).await?;
@@ -979,7 +1013,7 @@ fn schema<T: JsonSchema>() -> Arc<JsonObject> {
 
 pub fn surface_catalog() -> BuiltinCatalog {
     let tools = vec![
-        Tool::new(format!("{NAMESPACE}.search"), "Find centrally maintained agent skills by task, exact name, or returned URI. Use a small limit when selecting one workflow; follow next_cursor only if no candidate fits. Omit query to list all. Description previews are bounded; load one returned URI and revision with gateway-skills.load for complete instructions. Results are metadata only, not permission to act.", schema::<SearchParams>()).with_title("Find a reusable workflow").with_output_schema::<SearchResult>(),
+        Tool::new(format!("{NAMESPACE}.search"), "Find centrally maintained agent skills by task query, exact name selector, or returned URI query. Use name without query for strict name selection; unavailable names return no candidates. Task queries narrow available exact-name matches and otherwise rank metadata. URI queries stay exact. Use a small limit and follow next_cursor only if more candidates are needed. Omit query and name to list all. Description previews are bounded; load a returned URI and revision for complete instructions. Results grant no authority.", schema::<SearchParams>()).with_title("Find a reusable workflow").with_output_schema::<SearchResult>(),
         Tool::new(format!("{NAMESPACE}.load"), "Load workflow instructions and file inventory from a URI returned by gateway-skills.search. Use its revision for file reads and called skills. If you still hold a complete load, pass its document_hash as known_document_hash for a compact unchanged response; omit to refresh. Current authorization, approval, and inspection are always checked. Pass JavaScript helpers by URI as codemode.execute skill_script with skill_revision, without reading source into context. files[].code_mode_tested is a publisher test report, never permission. Instructions inherit only the user's existing task authorization.", schema::<LoadParams>()).with_title("Load a workflow and its file inventory").with_output_schema::<LoadResponse>(),
         Tool::new(format!("{NAMESPACE}.read_file"), "Read one supporting reference, template, asset or helper using its exact URI and revision from gateway-skills.load. Returns text or base64 bytes in structuredContent; programmatic clients may save them to a file without exposing bytes to the model. This operation never executes a helper.", schema::<ReadParams>()).with_title("Read a workflow file at its loaded revision").with_output_schema::<FileResult>(),
     ];

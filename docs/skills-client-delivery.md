@@ -8,12 +8,15 @@ use its existing verified catalog and individual resource reader.
 ## Discover and use a workflow
 
 1. Call `gateway-skills.search` with a short task description, such as
-   `{"query":"review pull request","limit":3}`. Exact skill names and returned
-   URIs select only those available matches. Descriptions are previews bounded
+   `{"query":"review pull request","limit":3}`. For strict name selection, use
+   `{"name":"pre-pr-review","limit":3}` and omit `query`; a missing or inaccessible
+   name returns no candidates. Task queries narrow available exact-name matches
+   and otherwise rank metadata. A returned URI used as the query always selects
+   only that accessible URI. Descriptions are previews bounded
    to 480 characters; ranking still uses complete discovery metadata.
    Select a fitting candidate without opening several workflows. Follow
-   `next_cursor` with the same query and revision only when more candidates are
-   needed. Omit `query` to list all workflows and follow every page for a complete
+   `next_cursor` with the same query or name selector and revision only when more candidates are
+   needed. Omit `query` and `name` to list all workflows and follow every page for a complete
    inventory. `limit` is a positive page size and defaults to 20.
 2. Call `gateway-skills.load` with the returned `uri` and `revision`.
    Read `instructions` and consult `files` for references, templates and helpers.

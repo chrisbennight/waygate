@@ -69,6 +69,7 @@
     },
     {
       "query": "pre-pr-review",
+      "name": "pre-pr-review",
       "expected": "pre-pr-review"
     },
     {
@@ -77,6 +78,11 @@
     },
     {
       "query": "skill://fixture/nonexistent/SKILL.md",
+      "expected": null
+    },
+    {
+      "query": "nonexistent-skill",
+      "name": "nonexistent-skill",
       "expected": null
     },
     {
