@@ -29,9 +29,10 @@ A SHA tag is a source locator, not a promise of byte-for-byte reproducible build
 
 The publication job is serialized across main and release runs, including the
 registry checks and writes. CI must be the sole writer of these package tags:
-GHCR does not enforce conditional tag updates. Do not write tags manually alongside this workflow. GitHub can replace an older pending
-job in a concurrency group; rerun a canceled release after the active publisher
-finishes. Running publication jobs are not canceled by newer runs.
+GHCR does not enforce conditional tag updates. Do not write tags manually
+alongside this workflow. The native publication queue retains pending jobs
+instead of replacing an older release with a newer run. Running publication
+jobs are not canceled by newer runs.
 
 A version image that already exists stops publication instead of being replaced.
 On interrupted publication, inspect the version image, its source/release labels,
