@@ -47,7 +47,7 @@ else
       *.md) docs=true ;;
       crates/waygate-files-helper/*)
         if [[ "$rust_scope" == none ]]; then rust_scope=helper; fi
-        helper=true; docs=true ;;
+        helper=true; guards=true; docs=true ;;
       crates/waygate-test-client/*|crates/waygate-test-support/*)
         rust_scope=workspace; guards=true; docs=true ;;
       crates/waygate-admin/codemirror/*|crates/waygate-admin/static/js/codemirror.bundle.js) browser=true; docs=true; image=true; quickstart=true ;;
