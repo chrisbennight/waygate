@@ -5764,7 +5764,7 @@ fn summary(name: &str, tool: &CatalogTool) -> Option<ConnectorSummary> {
             operation: tool.identity.name.clone(),
             name: name.to_owned(),
         },
-        description: tool.definition.description.as_deref().map(str::to_owned),
+        description: waygate_mcp::compact_tool_description(tool.definition.description.as_deref()),
         identity: catalog_identity(tool)?,
         governance: Governance::from_admission(&tool.facts, Some(&tool.authorization)),
     })
@@ -6449,7 +6449,7 @@ struct ConnectorSummary {
     name: String,
     /// Unambiguous connector and operation selector for `codemode.describe`.
     binding: ConnectorBinding,
-    /// Published operation description.
+    /// Bounded operation preview; use `codemode.describe` for the exact contract.
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     /// Immutable authority and schema-version identity.
@@ -6466,6 +6466,9 @@ struct DescribeResponse {
     binding: ConnectorBinding,
     /// Immutable authority and schema-version identity.
     identity: SnapshotIdentity,
+    /// Complete published operation documentation, including consequences and restrictions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     /// Exact admitted JSON Schema for connector input.
     input_schema: Value,
     /// Response schema supplied by the governed catalog or upstream declaration.
@@ -6875,6 +6878,10 @@ fn connector_contract_with_authorization(
             name: format!("{server}.{tool_name}"),
         },
         identity: identity(snapshot),
+        description: snapshot
+            .published_definition()
+            .and_then(|tool| tool.description.as_deref())
+            .map(str::to_owned),
         input_schema,
         output_schema: snapshot
             .described_output_schema()
@@ -6903,6 +6910,7 @@ fn connector_contract_for_tool(tool: &CatalogTool) -> Option<DescribeResponse> {
                 name: tool.identity.qualified_name(),
             },
             identity: catalog_identity(tool)?,
+            description: tool.definition.description.as_deref().map(str::to_owned),
             input_schema: Value::Object(tool.definition.input_schema.as_ref().clone()),
             output_schema: tool
                 .definition
@@ -9421,6 +9429,52 @@ mod tests {
         let found = &structured(&result)["tools"][0];
         assert_eq!(found["description"], "email read operation");
         assert_eq!(found["identity"]["catalog_schema_hash"], "hash-email-read");
+        let described = tools
+            .describe(
+                &reader(),
+                DescribeParams {
+                    name: Some("email.read".into()),
+                    connector: None,
+                    operation: None,
+                    known_document_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            structured(&described)["description"],
+            "email read operation"
+        );
+    }
+
+    #[test]
+    fn search_preview_is_bounded_and_full_definition_remains_available() {
+        let description = format!(
+            "{}\n\n{}",
+            waygate_mcp::server::skill_tools::GUIDANCE,
+            "界".repeat(1_000)
+        );
+        let record = CatalogTool::builtin(
+            "gateway-test",
+            Tool::new(
+                "gateway-test.read",
+                description.clone(),
+                schema_obj(json!({"type":"object"})),
+            ),
+            RiskTier::Low,
+            false,
+            false,
+        );
+        let preview = summary("gateway-test.read", &record).unwrap();
+        assert_eq!(preview.description.unwrap().chars().count(), 480);
+        assert_eq!(preview.binding.connector, "gateway-test");
+        assert_eq!(preview.binding.operation, "read");
+        let complete = connector_contract_for_tool(&record).unwrap();
+        assert_eq!(complete.description.as_deref(), Some(description.as_str()));
+        assert_eq!(
+            record.definition.description.as_deref(),
+            Some(description.as_str())
+        );
     }
 
     #[tokio::test]

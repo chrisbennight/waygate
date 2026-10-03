@@ -22,9 +22,9 @@ use waygate_oidc::session::{self, HasExp, SessionKey};
 
 use waygate_core::RiskTier;
 use waygate_mcp::{
-    rank_visible_tools, AuthorizedCatalog, BuiltinCatalog, BuiltinProfileScope,
-    BuiltinSurfaceDescriptor, BuiltinTools, CatalogAuthorization, CatalogChannel, CatalogTool,
-    CatalogToolSource, ToolCatalogEpoch,
+    compact_tool_description, rank_visible_tools, AuthorizedCatalog, BuiltinCatalog,
+    BuiltinProfileScope, BuiltinSurfaceDescriptor, BuiltinTools, CatalogAuthorization,
+    CatalogChannel, CatalogTool, CatalogToolSource, ToolCatalogEpoch,
 };
 use waygate_oidc::{Principal, Scope};
 
@@ -35,6 +35,7 @@ const DEFAULT_LIMIT: usize = 20;
 const MAX_QUERY_LENGTH: usize = 256;
 const MAX_CURSOR_LENGTH: usize = 1_024;
 const MAX_SUMMARY_TITLE_CHARS: usize = 160;
+#[cfg(test)]
 const MAX_SUMMARY_DESCRIPTION_CHARS: usize = 480;
 const CURSOR_KIND: &str = "gateway-discovery-search-v2";
 const CURSOR_LIFETIME_SECONDS: i64 = 5 * 60;
@@ -515,10 +516,7 @@ impl ToolSummary {
             source: tool.identity.source.name().to_owned(),
             tool: tool.identity.name,
             title: compact_optional(tool.definition.title.as_deref(), MAX_SUMMARY_TITLE_CHARS),
-            description: compact_optional(
-                tool.definition.description.as_deref(),
-                MAX_SUMMARY_DESCRIPTION_CHARS,
-            ),
+            description: compact_tool_description(tool.definition.description.as_deref()),
             governance,
         }
     }
@@ -1526,7 +1524,11 @@ mod tests {
 
     #[test]
     fn compact_summary_bounds_prose_without_truncating_identity() {
-        let long_description = "word ".repeat(MAX_SUMMARY_DESCRIPTION_CHARS * 2);
+        let long_description = format!(
+            "{}\n\n{}",
+            waygate_mcp::server::skill_tools::GUIDANCE,
+            "word ".repeat(MAX_SUMMARY_DESCRIPTION_CHARS * 2)
+        );
         let long_name = "n".repeat(MAX_QUERY_LENGTH * 2);
         let record = CatalogTool::builtin(
             "gateway-test",
@@ -1541,7 +1543,17 @@ mod tests {
             false,
         );
 
+        let exact = InspectResponse::from_tool(record.clone());
+        assert_eq!(
+            exact.definition["description"],
+            record.definition.description.as_deref().unwrap()
+        );
         let summary = ToolSummary::from_tool(record);
+        assert!(!summary
+            .description
+            .as_deref()
+            .unwrap()
+            .contains("gateway-skills"));
         assert_eq!(summary.tool, long_name);
         assert_eq!(
             summary.title.unwrap().chars().count(),

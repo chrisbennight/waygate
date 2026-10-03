@@ -206,6 +206,8 @@ impl OperationDescriptor {
         match detail {
             Detail::Full => {}
             Detail::NameDescription => {
+                self.description =
+                    crate::discovery::compact_tool_description(self.description.as_deref());
                 self.resource_type = None;
                 self.action = None;
                 self.scope = None;
@@ -288,6 +290,22 @@ mod tests {
             output_type: Some("Out".into()),
             side_effects: Some(false),
         }
+    }
+
+    #[test]
+    fn compact_description_bounds_guidance_without_changing_full_contract() {
+        let original = format!(
+            "{}\n\n{}",
+            crate::server::skill_tools::GUIDANCE,
+            "界".repeat(1_000)
+        );
+        let mut descriptor = sample();
+        descriptor.description = Some(original.clone());
+        let full = descriptor.clone().project(Detail::Full);
+        let compact = descriptor.project(Detail::NameDescription);
+        assert_eq!(full.description.as_deref(), Some(original.as_str()));
+        assert_eq!(compact.description.unwrap().chars().count(), 480);
+        assert_eq!(full.input_type.as_deref(), Some("In"));
     }
 
     #[test]

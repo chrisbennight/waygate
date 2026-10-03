@@ -57,8 +57,8 @@ pub use catalog::{SharedCatalog, UpstreamCatalog};
 pub use catalog_changes::ToolCatalogEpoch;
 pub use disclosed::DisclosedTools;
 pub use discovery::{
-    rank_visible_tools, AuthorizedCatalog, BuiltinRegistry, CatalogAuthorization, CatalogChannel,
-    CatalogTool, CatalogToolIdentity, CatalogToolSource,
+    compact_tool_description, rank_visible_tools, AuthorizedCatalog, BuiltinRegistry,
+    CatalogAuthorization, CatalogChannel, CatalogTool, CatalogToolIdentity, CatalogToolSource,
 };
 pub use error::{Error, Result};
 pub use index::{SearchIndex, SearchIndexHealth};
