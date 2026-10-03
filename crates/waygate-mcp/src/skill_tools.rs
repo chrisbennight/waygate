@@ -516,8 +516,18 @@ impl SkillTools {
         principal: Option<&Principal>,
     ) -> Result<rmcp::model::GetPromptResult, McpError> {
         use rmcp::model::{GetPromptResult, PromptMessage, Role};
-        require_read(principal)?;
-        let entries = self.approved_entries(None, principal).await?;
+        let principal_ref = require_read(principal)?;
+        // Named requests must reach the governed reader so denials are audited
+        // and step-up requirements are returned to the caller.
+        let entries = self
+            .reader
+            .reviewed_skills
+            .as_ref()
+            .ok_or_else(unavailable)?
+            .list(principal_ref.tenant.as_str(), None)
+            .await
+            .map_err(skill_distribution_error)?
+            .skills;
         let entry = entries
             .iter()
             .find(|entry| prompt_name(&entry.uri) == request.name)

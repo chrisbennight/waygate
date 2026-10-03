@@ -529,6 +529,7 @@ impl crate::authz::AuthzGate for ListPermitGate {
 struct SelectiveSkillGate {
     revoked: std::sync::atomic::AtomicBool,
     denied_digest: Option<String>,
+    read_step_up: bool,
 }
 
 fn selection_verdict(allowed: bool) -> AuthzVerdict {
@@ -549,6 +550,13 @@ impl crate::authz::AuthzGate for SelectiveSkillGate {
     }
     async fn authorize_skill_read(&self, _: &Principal, facts: &crate::authz::SkillAccessFacts) -> AuthzVerdict {
         assert!(facts.content_digest.is_some(), "read decisions require verified content");
+        if self.read_step_up {
+            return AuthzVerdict::StepUpRequired {
+                required_scope: "mcp:admin".into(),
+                reason: "skill read requires elevated scope".into(),
+                policy_ids: vec!["skill-selection".into()],
+            };
+        }
         selection_verdict(!self.revoked.load(Ordering::SeqCst)
             && !facts.resource_uri.as_deref().unwrap().contains("read-denied")
             && (self.denied_digest.is_none() || facts.content_digest != self.denied_digest))
@@ -608,7 +616,24 @@ async fn partial_skill_access_filters_every_discovery_page_before_ranking() {
     assert!(sink.snapshot().await.iter().all(|event| event.outcome == AuditOutcome::Success), "omissions are visibility probes, not denied invocations");
     for name in ["read-denied", "fetch-denied"] {
         assert!(tools.call("load", args(json!({"uri":format!("skill://catalog/{name}/SKILL.md")})), Some(&read_principal())).await.is_err());
+        let before = sink.snapshot().await.len();
+        let request = serde_json::from_value(json!({"name":format!("gateway-skills:catalog:{name}")})).unwrap();
+        assert!(tools.prompt(request, Some(&read_principal())).await.is_err());
+        let events = sink.snapshot().await;
+        assert!(events[before..].iter().any(|event| event.outcome == AuditOutcome::Denied));
     }
+}
+
+#[tokio::test]
+async fn named_prompt_requests_preserve_read_step_up_and_audit() {
+    let sink = Arc::new(crate::audit::InMemorySink::new());
+    let gate = SelectiveSkillGate { read_step_up: true, ..Default::default() };
+    let tools = SkillTools::new(GatewayServer::with_deps(Arc::new(EmptyCatalog), Arc::new(gate), sink.clone())
+        .with_approved_skill_fixture(Some(loaded_catalog().await)));
+    let request = serde_json::from_value(json!({"name":"gateway-skills:catalog:demo"})).unwrap();
+    let error = tools.prompt(request, Some(&read_principal())).await.unwrap_err();
+    assert_eq!(error.data.unwrap()["required_scope"], "mcp:admin");
+    assert!(sink.snapshot().await.iter().any(|event| event.action == READ_SKILL_ACTION && event.outcome == AuditOutcome::StepUpRequired));
 }
 
 #[tokio::test]
