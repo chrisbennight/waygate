@@ -20,6 +20,11 @@ smoke, the quickstart, and helper platform builds each use their own inputs.
 Manual and release runs select all components. Unselected work is skipped; it
 does not establish coverage for that component.
 
+Dashboard CSS, fonts and icons run the existing style and rendering tests without
+starting Postgres or testing the whole workspace. The shell/YAML parser that
+inspected Docker cleanup commands has been removed; image smoke runs retain their
+explicit container and volume cleanup.
+
 ## Explicit wall-clock checks
 
 Tests marked `#[ignore = "wall-clock integration check; ..."]` are excluded

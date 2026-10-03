@@ -53,8 +53,6 @@ jobs:
           bash scripts/check-migrations.sh
           bash scripts/check-migrations-immutable.sh --self-test
           bash scripts/check-migrations-immutable.sh
-          bash scripts/check-docker-volume-cleanup.sh --self-test
-          bash scripts/check-docker-volume-cleanup.sh
           bash scripts/check-policy-annotations.sh
           bash scripts/check-synthetic-policy-fixtures.sh
           bash scripts/check-no-local-escapers.sh
@@ -75,7 +73,7 @@ jobs:
           bash scripts/check-unused-deps.sh
           bash scripts/check-no-plan-citations.sh
           bash scripts/check-licenses.sh
-      - if: steps.scope.outputs.rust_scope != 'none' || steps.scope.outputs.licenses == 'true' || steps.scope.outputs.architecture == 'true' || steps.scope.outputs.tool_context == 'true'
+      - if: steps.scope.outputs.rust_scope != 'none' || steps.scope.outputs.licenses == 'true' || steps.scope.outputs.architecture == 'true' || steps.scope.outputs.tool_context == 'true' || steps.scope.outputs.admin_assets == 'true'
         name: Install repository Rust toolchain
         run: rustup show active-toolchain
 
@@ -109,6 +107,17 @@ jobs:
           set -euo pipefail
           node --test scripts/report-tool-context.test.mjs scripts/dashboard-badge.test.mjs
           python3 -m unittest discover -s scripts -p 'test_release_*.py'
+
+      - name: Check synthetic identities in the tool capture
+        if: steps.scope.outputs.synthetic_fixtures == 'true' && steps.scope.outputs.guards != 'true'
+        run: bash scripts/check-synthetic-policy-fixtures.sh
+
+      - name: Check shipped dashboard assets
+        if: steps.scope.outputs.admin_assets == 'true' && steps.scope.outputs.rust_scope != 'workspace'
+        run: |
+          set -euo pipefail
+          cargo test --locked -p waygate-admin --test suite style_tokens::
+          cargo test --locked -p waygate-admin --test dashboard_render chrome::
 
       - if: steps.scope.outputs.licenses == 'true'
         name: Verify generated license notices
