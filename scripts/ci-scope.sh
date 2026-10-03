@@ -64,8 +64,8 @@ else
         docs=true; licenses=true; image=true; quickstart=true; helper=true ;;
       scripts/helper_release.py|scripts/verify-mcp-files-version.sh|.github/workflows/release-mcp-files.yml)
         helper=true; tooling=true ;;
-      scripts/release_policy.py|scripts/publish-gateway-image.py)
-        tooling=true; image=true; quickstart=true ;;
+      scripts/release_policy.py) tooling=true; image=true; quickstart=true; helper=true ;;
+      scripts/publish-gateway-image.py) tooling=true; image=true; quickstart=true ;;
       scripts/test_release_*.py) tooling=true ;;
       scripts/report-tool-context*|scripts/dashboard-badge*|scripts/fixtures/tool-context/*|crates/waygate-admin/static/js/badge.js)
         tooling=true ;;
