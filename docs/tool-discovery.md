@@ -254,10 +254,16 @@ compare the same scenarios.
 `discovery_context_evaluation` reproduces shared-guidance broad matches on a
 synthetic catalog and compares their descriptor bytes with bounded previews
 and one selected contract for remote commands, pull-request review, CI jobs,
-mail search, and image retrieval. It also reports no-match behavior. Its call
-counts model search followed by inspection, and elapsed times measure local
-ranking and encoding only. It does not claim faster agent decisions or actual
-client truncation; compare response bytes with the client's own context budget.
+mail search, and image retrieval. Both paths use the same ranker to select a
+candidate and validate fixture arguments against its returned schema. The
+report compares modeled discovery calls, response bytes, and measured local
+time to a valid fixture selection. It also applies a simulated per-response
+byte budget: a truncated JSON result cannot supply a complete contract.
+Use `--response-budget-bytes` after Cargo's `--` separator to choose that budget;
+an additional unbounded baseline keeps successful-selection timing available
+when the bounded baseline is truncated. The report includes no-match behavior.
+These are deterministic client measurements, not independent model choices,
+production latency, or actual client truncation.
 
 Authorization isolation, exact inspection, and add, description-change, and
 remove behavior are separate deterministic product contracts. The gateway

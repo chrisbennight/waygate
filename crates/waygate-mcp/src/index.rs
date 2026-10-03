@@ -588,33 +588,42 @@ mod tests {
     #[test]
     fn shared_guidance_is_excluded_from_index_and_fallback() {
         let idx = SearchIndex::new().unwrap();
-        let descriptions = [
-            tool(
-                "read_temperature",
-                &format!(
-                    "{}\n\nRead a room temperature.",
-                    crate::server::skill_tools::GUIDANCE
+        for instructions in [
+            crate::server::FULL_CATALOG_INSTRUCTIONS,
+            crate::server::LEGACY_SEARCH_INSTRUCTIONS,
+            crate::server::CODEMODE_ONLY_INSTRUCTIONS,
+            crate::client_schema::GUIDANCE,
+        ] {
+            let descriptions = [
+                tool(
+                    "read_temperature",
+                    &format!(
+                        "{} {}\n\nRead a room temperature.",
+                        crate::server::skill_tools::GUIDANCE,
+                        instructions
+                    ),
                 ),
-            ),
-            tool(
-                "search_mail",
-                &format!(
-                    "{}\n\nSearch mail by sender.",
-                    crate::server::skill_tools::GUIDANCE
+                tool(
+                    "search_mail",
+                    &format!(
+                        "{} {}\n\nSearch mail by sender.",
+                        crate::server::skill_tools::GUIDANCE,
+                        instructions
+                    ),
                 ),
-            ),
-        ];
-        idx.replace_server("example", &descriptions).unwrap();
-        assert_eq!(
-            idx.search("example", "search", 10).unwrap().unwrap(),
-            vec!["search_mail"]
-        );
-        let filters = OperationFilters {
-            query: Some("search".into()),
-            ..Default::default()
-        };
-        assert!(!matches(&descriptions[0], Some(&filters)));
-        assert!(matches(&descriptions[1], Some(&filters)));
+            ];
+            idx.replace_server("example", &descriptions).unwrap();
+            assert_eq!(
+                idx.search("example", "search", 10).unwrap().unwrap(),
+                vec!["search_mail"]
+            );
+            let filters = OperationFilters {
+                query: Some("search".into()),
+                ..Default::default()
+            };
+            assert!(!matches(&descriptions[0], Some(&filters)));
+            assert!(matches(&descriptions[1], Some(&filters)));
+        }
     }
 
     #[test]
