@@ -77,12 +77,11 @@ struct ServerRow {
     quarantined: usize,
     pending_reviews: Option<i64>,
     review_unavailable: bool,
-    /// Count of tools published without the output schema this upstream
+    /// Tools published without the output schema this upstream
     /// advertised, because the schema's root was not `type: "object"`.
-    /// A non-zero count means the upstream is emitting definitions a strict
-    /// MCP client would discard the whole catalog over; the row flags it so
-    /// an operator sees it without filtering the activity log.
-    rejected_output_schemas: usize,
+    /// Each entry identifies the tool and rejected root type so an operator
+    /// can inspect the cause without filtering the activity log.
+    rejected_output_schemas: Vec<crate::servers::OutputSchemaRejectionView>,
 }
 
 pub(crate) async fn servers_page(
@@ -157,7 +156,11 @@ pub(crate) async fn servers_page(
             tools_url,
             config_url,
             quarantined: health.quarantined_tool_count,
-            rejected_output_schemas: health.rejected_output_schema_count,
+            rejected_output_schemas: status
+                .rejected_output_schemas
+                .iter()
+                .map(crate::servers::OutputSchemaRejectionView::from)
+                .collect(),
         });
     }
     let tenant_ctx = tenant_ctx.map(|Extension(c)| c);
@@ -2023,6 +2026,78 @@ mod catalog_refresh_result_tests {
         assert!(html.contains("Reload this overview for current status"));
         assert!(!html.contains("still publishes"));
         assert!(!html.contains("7 tools"));
+    }
+}
+
+#[cfg(test)]
+mod output_schema_rejection_tests {
+    use super::*;
+
+    struct RejectedServer {
+        name: String,
+        rejected_output_schemas: Vec<crate::servers::OutputSchemaRejectionView>,
+    }
+
+    #[derive(Template)]
+    #[template(path = "output_schema_rejections.html")]
+    struct RejectionsFragment {
+        s: RejectedServer,
+    }
+
+    #[test]
+    fn rejection_disclosure_identifies_each_tool_and_teaches_recovery() {
+        let rejections = [("skill", "absent"), ("search", "array")]
+            .into_iter()
+            .map(|(tool, observed_type)| {
+                crate::servers::OutputSchemaRejectionView::from(
+                    &waygate_upstream::RejectedOutputSchema {
+                        tool: tool.to_owned(),
+                        observed_type: observed_type.to_owned(),
+                    },
+                )
+            })
+            .collect();
+        let html = RejectionsFragment {
+            s: RejectedServer {
+                name: "example".to_owned(),
+                rejected_output_schemas: rejections,
+            },
+        }
+        .render()
+        .expect("diagnostic disclosure renders");
+
+        assert!(html.contains("<details"));
+        assert!(html.contains("<summary>"));
+        assert!(html.contains("2 rejected"));
+        assert!(html.contains("example.skill"));
+        assert!(html.contains("example.search"));
+        assert!(html.contains("outputSchema.type is `absent`"));
+        assert!(html.contains("outputSchema.type is `array`"));
+        assert!(html.contains("MCP requires `object`"));
+        assert!(html.contains("tool remains callable"));
+        assert!(html.contains("refresh the server catalog"));
+    }
+
+    #[test]
+    fn rejection_disclosure_escapes_upstream_text() {
+        let rejected = waygate_upstream::RejectedOutputSchema {
+            tool: "<script>tool</script>".to_owned(),
+            observed_type: "<img src=x onerror=alert(1)>".to_owned(),
+        };
+        let html = RejectionsFragment {
+            s: RejectedServer {
+                name: "example".to_owned(),
+                rejected_output_schemas: vec![crate::servers::OutputSchemaRejectionView::from(
+                    &rejected,
+                )],
+            },
+        }
+        .render()
+        .expect("upstream text renders as escaped text");
+        assert!(!html.contains("<script>"));
+        assert!(!html.contains("<img"));
+        assert!(html.contains("&#60;script&#62;") || html.contains("&lt;script&gt;"));
+        assert!(html.contains("&#60;img") || html.contains("&lt;img"));
     }
 }
 

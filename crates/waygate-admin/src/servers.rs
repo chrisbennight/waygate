@@ -88,6 +88,8 @@ pub struct ServerSummary {
     /// a non-zero count means the upstream is emitting definitions a strict
     /// MCP client would reject the entire catalog over.
     pub rejected_output_schema_count: usize,
+    /// Current output-schema refusals for published tools, one per tool.
+    pub rejected_output_schemas: Vec<OutputSchemaRejectionView>,
     /// Distinct MCP protocol generations negotiated by this upstream's
     /// connected lanes (sorted; usually one, two mid-migration, empty when
     /// every lane is down).
@@ -101,6 +103,28 @@ pub struct ServerDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     pub classifications: Vec<ToolClassification>,
+}
+
+/// Diagnostic for an optional upstream output schema omitted at publication.
+#[derive(Debug, Clone, Serialize, JsonSchema, ToSchema)]
+pub struct OutputSchemaRejectionView {
+    /// Unqualified upstream tool name whose output schema was rejected.
+    pub tool: String,
+    /// Declared root type, or `absent` when outputSchema.type was omitted.
+    /// When lanes disagree, this is the first rejecting lane's observation.
+    pub observed_type: String,
+    /// Rejected field, required type, publication effect, and recovery steps.
+    pub reason: String,
+}
+
+impl From<&waygate_upstream::RejectedOutputSchema> for OutputSchemaRejectionView {
+    fn from(rejected: &waygate_upstream::RejectedOutputSchema) -> Self {
+        Self {
+            tool: rejected.tool.clone(),
+            observed_type: rejected.observed_type.clone(),
+            reason: rejected.reason(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -153,6 +177,11 @@ async fn list_servers(State(state): State<Arc<AdminState>>) -> ApiResult<Json<Ve
             published_tool_count: status.health.published_tool_count,
             quarantined_tool_count: status.health.quarantined_tool_count,
             rejected_output_schema_count: status.health.rejected_output_schema_count,
+            rejected_output_schemas: status
+                .rejected_output_schemas
+                .iter()
+                .map(OutputSchemaRejectionView::from)
+                .collect(),
             protocol_versions: status.health.protocol_versions,
         })
         .collect();

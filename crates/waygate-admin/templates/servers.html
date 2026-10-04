@@ -88,7 +88,7 @@
                    because a strict MCP client rejects an ENTIRE tools/list
                    response over one such tool — the upstream needs fixing even
                    though the gateway keeps serving its tools. #}
-                <td>{% if s.rejected_output_schemas > 0 %}<span class="chip chip--bad" title="Tools published without the output schema this upstream advertised: the root was not type: &quot;object&quot;, so it cannot describe a structuredContent object. The tools stay callable; fix the upstream definitions.">{{ s.rejected_output_schemas }} rejected</span>{% else %}<span class="muted">–</span>{% endif %}</td>
+                <td>{% if !s.rejected_output_schemas.is_empty() %}{% include "output_schema_rejections.html" %}{% else %}<span class="muted">–</span>{% endif %}</td>
                 <td class="mono muted">{% match s.url %}{% when Some with (url) %}{{ url }}{% when None %}–{% endmatch %}</td>
             </tr>
             <tr class="cfg-row" id="cfg-row-{{ loop.index }}" hidden>

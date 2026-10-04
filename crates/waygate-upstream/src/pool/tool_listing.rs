@@ -174,16 +174,26 @@ fn report(server: &str, rejected: &[RejectedOutputSchema], total: usize) {
 /// One tool whose advertised output schema was refused, retained so the
 /// operator can see which upstream published it and what it sent instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RejectedOutputSchema {
+pub struct RejectedOutputSchema {
     /// Unqualified upstream tool name.
-    pub(super) tool: String,
+    pub tool: String,
     /// The root `type` the upstream declared, rendered for an operator:
     /// a JSON type name, or `absent` when the root omitted `type`
     /// entirely (the shape an untagged/internally tagged enum produces).
-    pub(super) observed_type: String,
+    pub observed_type: String,
 }
 
 impl RejectedOutputSchema {
+    /// Explain the rejected field and the effect on the published contract.
+    pub fn reason(&self) -> String {
+        format!(
+            "outputSchema.type is `{}`; MCP requires `object` at the schema root. \
+             The tool remains callable with its output schema omitted. \
+             Fix the upstream output schema, then refresh the server catalog.",
+            self.observed_type
+        )
+    }
+
     /// Build one directly, for tests that exercise the refusal record's
     /// ordering rather than the listing that produces these.
     #[cfg(test)]

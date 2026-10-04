@@ -2328,6 +2328,7 @@ use session_identity::{
     install_catalog_probe_identity, refuse_identityless_tiers, CellClearGuard,
     SerializerDepthGuard, UpstreamSessionBundle,
 };
+pub use tool_listing::RejectedOutputSchema;
 
 #[cfg(test)]
 mod tests;

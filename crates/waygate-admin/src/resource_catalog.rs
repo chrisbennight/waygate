@@ -459,18 +459,20 @@ async fn list_server(
     // Join runtime only onto catalog rows already visible to this tenant. The
     // pool is gateway-wide; iterating it directly here would disclose server
     // names the tenant-scoped catalog did not authorize this caller to see.
-    let runtime: BTreeMap<String, waygate_upstream::UpstreamHealth> = state
+    let runtime: BTreeMap<String, waygate_upstream::UpstreamStatus> = state
         .upstreams
-        .health_snapshot()
+        .status_snapshot()
         .await
         .into_iter()
-        .map(|health| (health.name.clone(), health))
+        .map(|status| (status.health.name.clone(), status))
         .collect();
     let rows = page(all, offset, limit)
         .into_iter()
         .map(|s| {
-            let health = runtime.get(&s.name);
-            to_value(server_row(s, health))
+            let status = runtime
+                .get(&s.name)
+                .map(|status| (&status.health, status.rejected_output_schemas.as_slice()));
+            to_value(server_row(s, status))
         })
         .collect();
     Ok(ReadPage {
@@ -1105,6 +1107,12 @@ struct ServerRow {
     /// Runtime tools withheld because drift policy quarantined them; null with
     /// no runtime entry.
     drift_quarantined_tool_count: Option<usize>,
+    /// Published tools whose optional output schema was rejected; null with
+    /// no loaded runtime entry.
+    rejected_output_schema_count: Option<usize>,
+    /// Current per-tool rejected root types, reasons, and recovery steps.
+    /// Null with no loaded runtime entry; empty when none are rejected.
+    rejected_output_schemas: Option<Vec<crate::servers::OutputSchemaRejectionView>>,
     /// `global` | `tenant_only`.
     visibility: String,
     owner: Option<String>,
@@ -1112,8 +1120,12 @@ struct ServerRow {
 
 fn server_row(
     s: waygate_catalog::CatalogServerSummary,
-    runtime: Option<&waygate_upstream::UpstreamHealth>,
+    status: Option<(
+        &waygate_upstream::UpstreamHealth,
+        &[waygate_upstream::RejectedOutputSchema],
+    )>,
 ) -> ServerRow {
+    let runtime = status.map(|(health, _)| health);
     let catalog_status = enum_str(&s.status);
     ServerRow {
         id: s.id.to_string(),
@@ -1131,6 +1143,13 @@ fn server_row(
         breaker: runtime.map(|h| h.breaker.as_str().to_owned()),
         published_tool_count: runtime.map(|h| h.published_tool_count),
         drift_quarantined_tool_count: runtime.map(|h| h.quarantined_tool_count),
+        rejected_output_schema_count: runtime.map(|h| h.rejected_output_schema_count),
+        rejected_output_schemas: status.map(|(_, rejections)| {
+            rejections
+                .iter()
+                .map(crate::servers::OutputSchemaRejectionView::from)
+                .collect()
+        }),
         visibility: enum_str(&s.visibility),
         owner: s.owner,
     }
@@ -1686,7 +1705,7 @@ mod tests {
             protocol_versions: Vec::new(),
         };
 
-        let row = serde_json::to_value(server_row(catalog, Some(&runtime)))
+        let row = serde_json::to_value(server_row(catalog, Some((&runtime, &[]))))
             .expect("serialize observable server row");
         assert_eq!(row["catalog_status"], "live");
         assert_eq!(row["runtime_status"], "disconnected");
@@ -1695,6 +1714,59 @@ mod tests {
         assert_eq!(row["configured_lanes"], 4);
         assert_eq!(row["breaker"], "closed");
         assert_eq!(row["drift_quarantined_tool_count"], 2);
+        assert_eq!(row["rejected_output_schema_count"], 0);
+        assert_eq!(row["rejected_output_schemas"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn server_rejection_projection_matches_the_advertised_row_schema() {
+        let catalog = || waygate_catalog::CatalogServerSummary {
+            id: Uuid::nil(),
+            tenant_id: "default".into(),
+            name: "example".into(),
+            transport: "http".into(),
+            status: waygate_catalog::CatalogServerStatus::Live,
+            visibility: waygate_catalog::CatalogVisibility::TenantOnly,
+            owner: None,
+        };
+        let runtime = waygate_upstream::UpstreamHealth {
+            name: "example".into(),
+            runtime_state: waygate_upstream::UpstreamRuntimeState::Connected,
+            last_success_at: None,
+            last_error_class: None,
+            next_retry_at: None,
+            connected: true,
+            breaker: waygate_upstream::BreakerState::Closed,
+            connected_lanes: 1,
+            total_lanes: 1,
+            published_tool_count: 1,
+            quarantined_tool_count: 0,
+            rejected_output_schema_count: 1,
+            protocol_versions: Vec::new(),
+        };
+        let rejections = [waygate_upstream::RejectedOutputSchema {
+            tool: "skill".into(),
+            observed_type: "absent".into(),
+        }];
+        let row = to_value(server_row(catalog(), Some((&runtime, &rejections))));
+        assert_eq!(row["rejected_output_schema_count"], 1);
+        assert_eq!(row["rejected_output_schemas"][0]["tool"], "skill");
+        assert_eq!(row["rejected_output_schemas"][0]["observed_type"], "absent");
+        assert!(row["rejected_output_schemas"][0]["reason"]
+            .as_str()
+            .expect("readable reason")
+            .contains("outputSchema.type"));
+        let unloaded = to_value(server_row(catalog(), None));
+        assert!(unloaded["rejected_output_schema_count"].is_null());
+        assert!(unloaded["rejected_output_schemas"].is_null());
+
+        let entry = resource_catalog()
+            .into_iter()
+            .find(|entry| entry.resource_type == "server")
+            .expect("server discovery schema");
+        let validator = jsonschema::validator_for(&entry.row_schema).expect("valid row schema");
+        assert!(validator.is_valid(&row));
+        assert!(validator.is_valid(&unloaded));
     }
 
     async fn empty_state() -> AdminState {

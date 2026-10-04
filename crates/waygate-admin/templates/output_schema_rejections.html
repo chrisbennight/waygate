@@ -1,0 +1,8 @@
+<details class="disclosure">
+    <summary><span class="chip chip--bad">{{ s.rejected_output_schemas.len() }} rejected</span><span class="sr-only"> output schemas for {{ s.name }}; show details</span></summary>
+    <ul class="disclosure-pane">
+    {% for rejection in s.rejected_output_schemas %}
+        <li><code>{{ s.name }}.{{ rejection.tool }}</code>: {{ rejection.reason }}</li>
+    {% endfor %}
+    </ul>
+</details>

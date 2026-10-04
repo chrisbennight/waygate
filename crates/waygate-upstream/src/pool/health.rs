@@ -214,6 +214,10 @@ pub(super) struct ServedRefusals {
 pub struct UpstreamStatus {
     pub manifest: UpstreamManifest,
     pub health: UpstreamHealth,
+    /// Current refusals for published tools, from the same lane snapshot as
+    /// the health count. A tool appears once; the first rejecting lane's root
+    /// type is retained when connected lanes disagree.
+    pub rejected_output_schemas: Vec<super::tool_listing::RejectedOutputSchema>,
 }
 
 fn serialize_breaker_state<S: serde::Serializer>(
@@ -384,7 +388,8 @@ impl UpstreamPool {
             // different sets. Reading one lane could then under-report a
             // live refusal — and silently under-reporting is the one
             // failure mode this whole surface exists to prevent.
-            let rejected_output_schema_count = rejected_union(&guards, &quarantined).served.len();
+            let rejected_output_schemas = rejected_union(&guards, &quarantined).served;
+            let rejected_output_schema_count = rejected_output_schemas.len();
             let mut protocol_versions: Vec<String> = guards
                 .iter()
                 .filter_map(|guard| guard.as_ref())
@@ -423,6 +428,7 @@ impl UpstreamPool {
             out.push(UpstreamStatus {
                 manifest: manifest.clone(),
                 health,
+                rejected_output_schemas,
             });
         }
         out

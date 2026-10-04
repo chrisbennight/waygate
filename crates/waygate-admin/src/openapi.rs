@@ -147,6 +147,7 @@ use crate::upstream_sessions;
     components(schemas(
         ApiErrorBody,
         servers::ServerSummary,
+        servers::OutputSchemaRejectionView,
         builtins::BuiltinSurfaceView,
         builtins::BuiltinToolView,
         servers::ServerDetail,
