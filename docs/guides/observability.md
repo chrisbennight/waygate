@@ -28,6 +28,30 @@ Positive explicit counts are honored. Responses report the requested count and
 the applied SQL limit; counts beyond the database integer range saturate to that
 range. Tenant scope, filters, and audit retention still determine available rows.
 
+## Inspect rejected output schemas
+
+On **Servers**, expand the **Output schemas** rejection count to see each
+affected tool, the root type the upstream declared, and the recovery steps.
+`absent` means the schema omitted its root `type` field. These diagnostics cover
+published tools whose output schema lacks the required `type: "object"` root;
+the tools remain callable with that optional schema omitted. Fix the upstream
+definition and refresh its catalog from the server's Overview panel.
+
+Over MCP, call `gateway-observe.describe_resource` with
+`{"resource_type":"server"}`, then `gateway-observe.read_resource` with the
+same argument. Each visible server row includes `rejected_output_schema_count`
+and `rejected_output_schemas`, containing the unqualified tool name,
+`observed_type`, and `reason`. These are current observations on the replica
+serving the request, collected across its connected lanes. When lanes disagree,
+the first rejecting lane's root type is shown. Both fields are null when the
+catalog row has no loaded runtime entry; an empty list means no current refusals.
+
+Historical events are available through `gateway-observe.query_audit` with
+`{"server":"example","category":"upstream_health","since":"2w"}`.
+Look for `UpstreamOutputSchemaRejected`. Audit retention and best-effort delivery
+can limit that history. `gateway-control.refresh_server_catalog` is the
+admin-authorized recovery action after the upstream definition is corrected.
+
 ## Configure the signals
 
 For a reproducible starting point, run the [quickstart checker](../../examples/quickstart/README.md).

@@ -29,8 +29,8 @@ pub use pool::health::{CandidateObservation, UpstreamErrorClass, UpstreamRuntime
 pub use pool::reload::resource_shape_change_requires_restart;
 pub use pool::{
     list_all_tools, CatalogFreshnessTrigger, CatalogRefreshOutcome, CatalogRefreshReport,
-    ExchangeBundle, ListedCatalog, ObservedContracts, ObservedToolContract, ReloadReport,
-    ScheduledCatalogRefresh, UpstreamHealth, UpstreamPool, UpstreamStatus,
+    ExchangeBundle, ListedCatalog, ObservedContracts, ObservedToolContract, RejectedOutputSchema,
+    ReloadReport, ScheduledCatalogRefresh, UpstreamHealth, UpstreamPool, UpstreamStatus,
 };
 pub use transport::{default_auto_lifecycle, legacy_bridge_lifecycle};
 

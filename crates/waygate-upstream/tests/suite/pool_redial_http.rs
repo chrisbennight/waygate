@@ -825,6 +825,10 @@ async fn non_object_rooted_output_schema_is_stripped_without_dropping_the_catalo
     // And the operator can see it without reading logs.
     let health = pool.health_snapshot().await;
     assert_eq!(health[0].rejected_output_schema_count, 1);
+    let status = pool.status_snapshot().await;
+    assert_eq!(status[0].rejected_output_schemas.len(), 1);
+    assert_eq!(status[0].rejected_output_schemas[0].tool, "reddit_search");
+    assert_eq!(status[0].rejected_output_schemas[0].observed_type, "array");
 }
 
 /// Wait for an `UpstreamOutputSchemaRejected` row naming `tool`, or fail.
@@ -957,6 +961,7 @@ async fn a_withheld_tool_is_not_counted_as_published_without_a_contract() {
         health.health.rejected_output_schema_count, 0,
         "a withheld tool must not be reported as published without an output contract",
     );
+    assert!(health.rejected_output_schemas.is_empty());
     assert_eq!(rejected_gauge("unclassified-mock"), Some(0));
 }
 
@@ -1409,6 +1414,13 @@ async fn a_refusal_on_any_lane_is_reported_even_when_lanes_diverge() {
         "a refusal still held by a later lane must not be dropped because \
          an earlier lane is clean",
     );
+    let status = pool.status_snapshot().await;
+    assert_eq!(
+        status[0].rejected_output_schemas.len(),
+        status[0].health.rejected_output_schema_count,
+    );
+    assert_eq!(status[0].rejected_output_schemas[0].tool, "reddit_search");
+    assert_eq!(status[0].rejected_output_schemas[0].observed_type, "array");
     await_rejected_output_schema_row(&sink, "reddit_search").await;
 }
 

@@ -226,6 +226,7 @@ async fn server_summary_documents_runtime_health_fields() {
         "published_tool_count",
         "quarantined_tool_count",
         "rejected_output_schema_count",
+        "rejected_output_schemas",
     ] {
         assert!(
             properties.get(field).is_some(),
