@@ -1,26 +1,7 @@
 //! Settings page — `/admin/t/{tenant}/settings`.
 //!
-//! Read-only operator view of frozen-at-boot gateway
-//! configuration: deployment posture, JWKS lifecycle, RFC 7662
-//! token-introspection summary, and a capability-flag grid
-//! summarising which optional substrates are wired (DB-backed
-//! stores, built-in AS, federated peers, …).
-//!
-//! ## What's NOT here (deferred, intentional)
-//!
-//! - **Live mutations** — Settings is read-only. Every knob the
-//!   page surfaces is an env-var read at boot; changing it
-//!   requires a restart. Hot-reload (SIGHUP) lives on the
-//!   policy/catalog paths, not on system config.
-//! - **Per-store deep-link drawers** — each capability has its
-//!   own page already (Catalog, RBAC, SCIM, Federation, …); the
-//!   Settings capability grid is a one-line green/red overview,
-//!   not a re-implementation of those pages.
-//! - **JWKS key rotation UI** — operators rotate by adding a new
-//!   `kid` to `GATEWAY_IDENTITY_JWT_KEYS`, flipping
-//!   `GATEWAY_IDENTITY_JWT_ACTIVE`, and restarting. The page
-//!   shows the current kid set + active marker; the rotation
-//!   runbook lives in [`docs/agents/identity.md`].
+//! Editable gateway-wide response delivery defaults, plus read-only boot
+//! configuration, identity summaries, and capability status.
 //!
 //! ## Admin gate
 //!
@@ -35,10 +16,10 @@
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::State;
-use axum::http::HeaderMap;
-use axum::response::Response;
-use axum::routing::get;
+use axum::extract::{Form, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::{Extension, Router};
 use waygate_oidc::{AuthMethod, Principal, Scope};
 
@@ -75,6 +56,7 @@ struct SettingsPage {
     /// insufficient-scope card and skips every settings
     /// section.
     insufficient_scope: bool,
+    response: ResponseSettingsPanel,
 
     /// Frozen-at-boot snapshot — see [`SystemInfo`].
     system: Arc<SystemInfo>,
@@ -117,12 +99,15 @@ struct CapabilityRow {
 }
 
 pub fn router() -> Router<Arc<AdminState>> {
-    Router::new().route("/settings", get(settings_page))
+    Router::new()
+        .route("/settings", get(settings_page))
+        .route("/settings/responses", post(response_settings_save))
 }
 
 async fn settings_page(
     State(state): State<Arc<AdminState>>,
     user: Option<Extension<Principal>>,
+    csrf: Option<Extension<crate::auth::CsrfToken>>,
     tenant_ctx: Option<Extension<TenantContext>>,
     headers: HeaderMap,
 ) -> Response {
@@ -139,6 +124,14 @@ async fn settings_page(
     };
 
     let page = SettingsPage {
+        response: response_settings_panel(
+            &state,
+            user_principal,
+            tenant_ctx.as_ref(),
+            csrf.as_ref().map(|Extension(c)| c.0.as_str()).unwrap_or(""),
+            String::new(),
+        )
+        .await,
         chrome: PageChrome::build(
             &state,
             "Settings",
@@ -157,6 +150,143 @@ async fn settings_page(
         overview_change_feed_actions: state.dashboard.overview_change_feed_actions.clone(),
     };
     render(&page)
+}
+
+/// Gateway-wide edits require an administrator of the default tenant, viewed
+/// in that tenant. A tenant-local administrator cannot change other tenants.
+pub(crate) fn require_global_settings_admin(
+    principal: Option<&Principal>,
+    tenant: Option<&TenantContext>,
+) -> Result<(), crate::error::ApiError> {
+    crate::scope::require_admin_extension(principal)?;
+    if principal.is_some_and(|p| p.tenant.as_str() != waygate_core::TenantId::DEFAULT)
+        || tenant.is_some_and(|t| t.slug != waygate_core::TenantId::DEFAULT)
+    {
+        return Err(crate::error::ApiError::Forbidden(
+            "gateway-wide settings require the default tenant administrator",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Template)]
+#[template(path = "response_settings.html")]
+struct ResponseSettingsPanel {
+    available: bool,
+    form_url: String,
+    csrf: String,
+    threshold: usize,
+    effective: usize,
+    revision: i64,
+    environment_override: bool,
+    editable: bool,
+    message: String,
+}
+
+async fn response_settings_panel(
+    state: &AdminState,
+    principal: Option<&Principal>,
+    tenant: Option<&TenantContext>,
+    csrf: &str,
+    mut message: String,
+) -> ResponseSettingsPanel {
+    let result = state.response_settings.get().await;
+    let available = result.is_ok();
+    let settings = match result {
+        Ok(settings) => settings,
+        Err(error) => {
+            tracing::error!(%error, "response settings could not be loaded");
+            message =
+                "Response settings are unavailable. Reopen Settings after the database recovers."
+                    .to_owned();
+            Default::default()
+        }
+    };
+    let environment_override = state.response_settings.environment_override();
+    ResponseSettingsPanel {
+        available,
+        form_url: crate::tenant_ctx::nav_url(tenant, "/settings/responses"),
+        csrf: csrf.to_owned(),
+        threshold: settings.inline_response_threshold_bytes.get(),
+        effective: environment_override
+            .unwrap_or(settings.inline_response_threshold_bytes)
+            .get(),
+        revision: settings.revision,
+        environment_override: environment_override.is_some(),
+        editable: available
+            && state.response_settings.writable()
+            && require_global_settings_admin(principal, tenant).is_ok(),
+        message,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ResponseSettingsForm {
+    csrf: String,
+    revision: i64,
+    inline_response_threshold_bytes: String,
+}
+
+async fn response_settings_save(
+    State(state): State<Arc<AdminState>>,
+    user: Option<Extension<Principal>>,
+    csrf: Option<Extension<crate::auth::CsrfToken>>,
+    tenant: Option<Extension<TenantContext>>,
+    Form(form): Form<ResponseSettingsForm>,
+) -> Response {
+    let principal = user.as_ref().map(|Extension(p)| p);
+    let tenant = tenant.as_ref().map(|Extension(t)| t);
+    if let Err(error) = require_global_settings_admin(principal, tenant) {
+        return error.into_response();
+    }
+    if !crate::dashboard::activity_csrf_ok(csrf.as_ref(), &form.csrf) {
+        return (StatusCode::FORBIDDEN, "csrf mismatch").into_response();
+    }
+    let threshold = form
+        .inline_response_threshold_bytes
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|value| i64::try_from(*value).is_ok())
+        .and_then(std::num::NonZeroUsize::new);
+    let message = match threshold {
+        None => "Enter a positive whole byte count no larger than 9223372036854775807.".to_owned(),
+        Some(threshold) => match state
+            .response_settings
+            .update(
+                form.revision,
+                threshold,
+                principal
+                    .expect("admin gate requires a principal")
+                    .sub
+                    .as_str(),
+            )
+            .await
+        {
+            Ok(_) => {
+                if let Err(error) = crate::admin_mutation::record_admin_mutation(
+                    &state,
+                    "response_settings",
+                    "Settings → Response delivery",
+                    waygate_core::TenantId::DEFAULT,
+                    principal,
+                    "response_settings.update",
+                    format!("inline_response_threshold_bytes={threshold}"),
+                )
+                .await
+                {
+                    return error.into_response();
+                }
+                "Saved. New tool calls use this default unless a server or environment override applies.".to_owned()
+            }
+            Err(error @ (waygate_dashboard_stores::response_settings::ResponseSettingsError::Conflict | waygate_dashboard_stores::response_settings::ResponseSettingsError::Unavailable)) => error.to_string(),
+            Err(error) => {
+                tracing::error!(%error, "response settings save failed");
+                "Response settings could not be saved. Reopen Settings and try again.".to_owned()
+            },
+        },
+    };
+    render(&response_settings_panel(&state, principal, tenant, &form.csrf, message).await)
 }
 
 /// Authorization gate for the Settings dashboard page. Same
@@ -335,6 +465,17 @@ mod tests {
     #[test]
     fn settings_admin_gate_blocks_missing_principal() {
         assert!(!principal_has_dashboard_admin(None));
+    }
+
+    #[test]
+    fn global_settings_refuse_tenant_local_administrators() {
+        let mut principal = principal_with(vec!["mcp:admin"], AuthMethod::Oauth);
+        assert!(require_global_settings_admin(Some(&principal), None).is_ok());
+        principal.tenant = waygate_core::TenantId::parse("other").unwrap();
+        assert!(require_global_settings_admin(Some(&principal), None).is_err());
+        assert!(require_global_settings_admin(None, None).is_err());
+        let peer = principal_with(vec!["mcp:admin"], AuthMethod::PeerAssertion);
+        assert!(require_global_settings_admin(Some(&peer), None).is_err());
     }
 
     #[test]

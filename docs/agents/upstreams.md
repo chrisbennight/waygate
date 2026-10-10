@@ -271,6 +271,16 @@ Code Mode reachability requirement.
 
 ## Scope
 
+`inline_response_threshold_bytes` is an optional positive integer at the server
+level. It overrides `GATEWAY_INLINE_RESPONSE_THRESHOLD_BYTES` for every tool
+on that upstream; omission inherits the saved app default from Settings →
+Response delivery (initially 16 KiB), unless the environment variable overrides
+it. Edit the server override in Servers → server configuration → Responses.
+Manifest reload applies the override
+without reconnecting, while admitted calls retain their manifest snapshot.
+See [large structured responses](../file-transfer.md#large-structured-tool-responses)
+for the byte measurement and file-delivery conditions.
+
 This document covers:
 
 - The `UpstreamManifest` schema: `name`, `transport` (HTTP / SSE / stdio),

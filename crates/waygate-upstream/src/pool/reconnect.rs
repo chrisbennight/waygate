@@ -501,6 +501,7 @@ mod tests {
         UpstreamManifest {
             classification_mode: Default::default(),
             approval_mode: Default::default(),
+            inline_response_threshold_bytes: None,
             name: name.to_owned(),
             transport: Transport::Stdio,
             protocol: Default::default(),
@@ -521,6 +522,7 @@ mod tests {
         UpstreamManifest {
             classification_mode: Default::default(),
             approval_mode: Default::default(),
+            inline_response_threshold_bytes: None,
             name: name.to_owned(),
             transport: Transport::Http,
             protocol: Default::default(),

@@ -682,6 +682,8 @@ pub struct AdminState {
     /// secrets (introspection client_secret is elided), so
     /// every field is safe to render in HTML.
     pub system: Arc<SystemInfo>,
+    pub response_settings:
+        Arc<waygate_dashboard_stores::response_settings::ResponseSettingsService>,
     /// See [`IdentityPlane`].
     pub identity: IdentityPlane,
     /// See [`PolicyPlane`].
@@ -808,6 +810,14 @@ pub struct IntrospectionSummary {
 }
 
 impl AdminState {
+    pub fn with_response_settings(
+        mut self,
+        settings: Arc<waygate_dashboard_stores::response_settings::ResponseSettingsService>,
+    ) -> Self {
+        self.response_settings = settings;
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         upstreams: Arc<UpstreamPool>,
@@ -831,6 +841,7 @@ impl AdminState {
             // `new()` arg list. `waygate-server` always
             // overrides via `.with_system_info(...)`.
             system: Arc::new(SystemInfo::unknown()),
+            response_settings: Arc::new(waygate_dashboard_stores::response_settings::ResponseSettingsService::new(None, None)),
             identity: IdentityPlane {
                 api_keys: Capability::new("api-key store not configured", api_keys),
                 // Default OFF; main.rs enables via

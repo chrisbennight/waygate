@@ -1,4 +1,5 @@
-//! Small per-tenant dashboard-backing stores, one module each.
+//! Small dashboard-backing stores, one module each. Most are tenant-scoped;
+//! response delivery settings are gateway-wide and also read by the runtime.
 //!
 //! Each module is a self-contained store: row/domain types, an
 //! `#[async_trait]` store trait, the Pg impl over its own table, and its
@@ -14,4 +15,5 @@ pub mod activity_saved_views;
 pub mod agent_config;
 pub mod inspection_rules;
 pub mod playground_scenarios;
+pub mod response_settings;
 pub mod scim_provisioning_log;

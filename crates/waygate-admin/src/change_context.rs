@@ -178,7 +178,7 @@ pub struct LiveManifestContext {
     /// Zero-based item offset requested by the caller.
     pub offset: u32,
     /// Complete current manifest when `selector.server_name` was supplied.
-    pub selected: Option<waygate_upstream::UpstreamManifest>,
+    pub selected: Option<Box<waygate_upstream::UpstreamManifest>>,
     /// Whether the on-disk hash matches the active published ledger snapshot.
     pub ledger: LedgerMatch,
 }
@@ -470,7 +470,7 @@ async fn read_live_manifests(
         server_names,
         limit,
         offset,
-        selected,
+        selected: selected.map(Box::new),
         ledger,
     })
 }

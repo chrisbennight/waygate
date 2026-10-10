@@ -533,6 +533,7 @@ fn manifest_at(addr: std::net::SocketAddr, mode: ClassificationMode) -> Upstream
     UpstreamManifest {
         classification_mode: mode,
         approval_mode: Default::default(),
+        inline_response_threshold_bytes: None,
         name: "mock".into(),
         transport: Transport::Http,
         protocol: Default::default(),

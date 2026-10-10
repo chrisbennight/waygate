@@ -191,6 +191,7 @@ async fn fixture(
         command: None,
         classification_mode: Default::default(),
         approval_mode: Default::default(),
+        inline_response_threshold_bytes: None,
         tools: names
             .iter()
             .map(|name| ToolClassification::new(name, RiskTier::Low, false, false))

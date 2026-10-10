@@ -142,6 +142,82 @@ pub(crate) async fn settings_page_renders_at_both_mounts() {
     }
 }
 
+#[tokio::test]
+pub(crate) async fn response_settings_save_persists_default_and_shows_environment_precedence() {
+    use std::num::NonZeroUsize;
+    use waygate_dashboard_stores::response_settings::{
+        ResponseSettingsService, ResponseSettingsStore,
+    };
+    use waygate_test_support::response_settings::InMemoryResponseSettingsStore;
+    for environment in [None, NonZeroUsize::new(131072)] {
+        let store = Arc::new(InMemoryResponseSettingsStore::default());
+        let evidence = Arc::new(waygate_mcp::audit::InMemorySink::new());
+        let mut state = base_admin_state().with_response_settings(Arc::new(
+            ResponseSettingsService::new(Some(store.clone()), environment),
+        ));
+        state.evidence = evidence.clone();
+        let app = dashboard_router(Arc::new(state), DashboardAuth::Disabled);
+        for path in ["/settings", "/t/default/settings"] {
+            let (_, body) = body_of(app.clone(), path).await;
+            assert!(body.contains("Save default"));
+            assert!(body.contains("value=\"16384\""));
+        }
+        let (status, body) = super::servers::post_body(
+            app.clone(),
+            "/settings/responses",
+            "csrf=dev-csrf&revision=0&inline_response_threshold_bytes=65536",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("Saved."), "{body}");
+        let records = evidence.snapshot_with_posture().await;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].event.action, "response_settings.update");
+        assert_eq!(
+            records[0].posture,
+            waygate_mcp::audit::EvidencePosture::Required
+        );
+        assert!(body.contains("value=\"65536\""));
+        assert!(body.contains(&format!(
+            "<strong>{} bytes</strong>",
+            environment.map(NonZeroUsize::get).unwrap_or(65536)
+        )));
+        assert_eq!(
+            store
+                .get()
+                .await
+                .unwrap()
+                .inline_response_threshold_bytes
+                .get(),
+            65536
+        );
+        let (_, stale) = super::servers::post_body(
+            app.clone(),
+            "/settings/responses",
+            "csrf=dev-csrf&revision=0&inline_response_threshold_bytes=1",
+        )
+        .await;
+        assert!(stale.contains("reopen Settings"));
+        for invalid in ["0", "-1", "1.5", "9223372036854775808", "abc"] {
+            let (_, body) = super::servers::post_body(
+                app.clone(),
+                "/settings/responses",
+                &format!("csrf=dev-csrf&revision=1&inline_response_threshold_bytes={invalid}"),
+            )
+            .await;
+            assert!(body.contains("Enter a positive whole byte count"));
+        }
+        assert_eq!(store.get().await.unwrap().revision, 1);
+        let (status, _) = super::servers::post_body(
+            app,
+            "/settings/responses",
+            "csrf=wrong&revision=1&inline_response_threshold_bytes=1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+}
+
 /// System sidebar group force-opens on /settings
 /// (contains_active behavior).
 #[tokio::test]

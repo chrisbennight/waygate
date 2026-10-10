@@ -15,6 +15,7 @@ fn stdio_manifest(name: &str, command: Vec<String>) -> UpstreamManifest {
     UpstreamManifest {
         classification_mode: Default::default(),
         approval_mode: Default::default(),
+        inline_response_threshold_bytes: None,
         name: name.to_owned(),
         transport: Transport::Stdio,
         protocol: Default::default(),

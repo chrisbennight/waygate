@@ -8,10 +8,7 @@
     {% endif %}
 </header>
 
-{# Frozen-at-boot gateway configuration: deployment posture,
-   JWKS lifecycle, token-introspection summary, and a
-   capability-flag grid. Read-only — mutations require a
-   restart with updated env vars. #}
+
 
 {% if insufficient_scope %}
 <div class="card">
@@ -23,6 +20,17 @@
     </div>
 </div>
 {% else %}
+
+{% let form_url = response.form_url %}
+{% let available = response.available %}
+{% let csrf = response.csrf %}
+{% let threshold = response.threshold %}
+{% let effective = response.effective %}
+{% let revision = response.revision %}
+{% let environment_override = response.environment_override %}
+{% let editable = response.editable %}
+{% let message = response.message %}
+{% include "response_settings.html" %}
 
 <section class="page-section" aria-label="System">
     <h2 class="section-heading">System</h2>

@@ -512,10 +512,13 @@ mod tests {
             mcp_ping_interval: Some(std::time::Duration::from_secs(120)),
             upstream_call_timeout: Some(std::time::Duration::from_secs(300)),
             resource_response_max_bytes: waygate_mcp::DEFAULT_RESOURCE_RESPONSE_MAX_BYTES,
-            file_storage_dir: None,
-            file_retention: crate::file_transfer_config::FileRetention::DEFAULT,
-            file_max_bytes: None,
-            file_transfer_concurrency: 8,
+            file_transfer: crate::file_transfer_config::FileTransferConfig {
+                storage_dir: None,
+                retention: crate::file_transfer_config::FileRetention::DEFAULT,
+                max_bytes: None,
+                concurrency: 8,
+                inline_response_threshold_bytes: None,
+            },
             mrtr_state_key: None,
             upstream_task_retention_seconds: 129600,
             api_keys: None,
@@ -547,6 +550,7 @@ mod tests {
         UpstreamManifest {
             classification_mode: Default::default(),
             approval_mode: Default::default(),
+            inline_response_threshold_bytes: None,
             name: name.to_owned(),
             transport: Transport::Http,
             protocol: Default::default(),
@@ -721,6 +725,7 @@ mod tests {
             UpstreamManifest {
                 classification_mode: Default::default(),
                 approval_mode: Default::default(),
+                inline_response_threshold_bytes: None,
                 name: "example-messages".into(),
                 transport: Transport::Http,
                 protocol: Default::default(),

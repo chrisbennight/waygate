@@ -459,6 +459,8 @@ struct InvocationContext<'a> {
     /// MCP stage reads facts, approval identity, and schemas from this one
     /// snapshot; no stage re-resolves governed tool state after admission.
     tool_snapshot: Option<InvocationToolSnapshot>,
+    /// Effective server/global response threshold captured before dispatch.
+    inline_response_threshold_bytes: Option<usize>,
     /// The admitted classification refined for the operation THIS call selects.
     ///
     /// Held beside the snapshot rather than written into it. The snapshot's own
@@ -730,6 +732,7 @@ impl InvocationService for DefaultInvocationService {
             tool: req.tool.as_str(),
             invocation_id: uuid::Uuid::new_v4(),
             tool_snapshot: None,
+            inline_response_threshold_bytes: None,
             effective_facts: None,
             operation: None,
             operation_classified: false,
@@ -971,6 +974,22 @@ impl DefaultInvocationService {
             .await
         {
             ResolvedInvocationTool::Ready(snapshot) => {
+                ctx.inline_response_threshold_bytes = if ctx.principal.is_some()
+                    && ctx.response_delivery == waygate_invocation::ResponseDelivery::File
+                {
+                    match snapshot.inline_response_threshold_bytes() {
+                        Some(value) => Some(value.get()),
+                        None => match &self.file_output_processor {
+                            Some(processor) => processor
+                                .resolve_inline_response_threshold_bytes()
+                                .await
+                                .map_err(InvocationError::Upstream)?,
+                            None => None,
+                        },
+                    }
+                } else {
+                    None
+                };
                 let authority = snapshot.authority().id();
                 let schema_hash = match snapshot.authority() {
                     ResolutionAuthority::Catalog { schema_hash, .. } => Some(schema_hash.as_str()),

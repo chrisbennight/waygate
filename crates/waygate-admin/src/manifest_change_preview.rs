@@ -1403,6 +1403,7 @@ mod tests {
         UpstreamManifest {
             classification_mode: ClassificationMode::McpAnnotations,
             approval_mode: Default::default(),
+            inline_response_threshold_bytes: None,
             name: "anno".into(),
             transport: waygate_upstream::Transport::Http,
             protocol: Default::default(),
@@ -1877,6 +1878,7 @@ mod tests {
             waygate_upstream::UpstreamManifest {
                 classification_mode: ClassificationMode::Manifest,
                 approval_mode: Default::default(),
+                inline_response_threshold_bytes: None,
                 name: "anno".into(),
                 transport: waygate_upstream::Transport::Http,
                 protocol: Default::default(),

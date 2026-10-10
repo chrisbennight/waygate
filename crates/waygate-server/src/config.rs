@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 
 use crate::client_tool_projection;
 use crate::database::DatabasePoolConfig;
-use crate::file_transfer_config::{FileRetention, FileTransferConfig};
+use crate::file_transfer_config::FileTransferConfig;
 use waygate_upstream::{Transport, UpstreamManifest};
 
 mod codemode;
@@ -259,18 +259,8 @@ pub struct Config {
     /// separate file-transfer limit because the MCP response carries only a
     /// bounded descriptor.
     pub resource_response_max_bytes: usize,
-    /// Shared directory used for gateway-owned file bytes. Unset keeps file
-    /// transfer authority available but does not advertise or process file
-    /// outputs.
-    pub file_storage_dir: Option<PathBuf>,
-    /// How long a completed file reference remains available for refreshed
-    /// download authorization, per retention class.
-    pub file_retention: FileRetention,
-    /// Optional operator/storage-provider byte limit. Unset means the gateway
-    /// adds no file-size ceiling of its own.
-    pub file_max_bytes: Option<u64>,
-    /// File streams use a separate pool from ordinary tool calls.
-    pub file_transfer_concurrency: usize,
+    /// Gateway file storage, response-delivery threshold, retention, and admission.
+    pub file_transfer: FileTransferConfig,
     pub upstream_task_retention_seconds: u64,
     pub mrtr_state_key: Option<String>, // see `crate::continuation_key`
     /// Static API-key validator config. `Some` ⇒ the bearer middleware
@@ -1003,10 +993,7 @@ impl Config {
             mcp_ping_interval,
             upstream_call_timeout,
             resource_response_max_bytes,
-            file_storage_dir: file_transfer.storage_dir,
-            file_retention: file_transfer.retention,
-            file_max_bytes: file_transfer.max_bytes,
-            file_transfer_concurrency: file_transfer.concurrency,
+            file_transfer,
             upstream_task_retention_seconds: waygate_core::env::u64_in(
                 "GATEWAY_UPSTREAM_TASK_RETENTION_SECONDS",
                 waygate_mcp::tasks::DEFAULT_RETENTION_SECONDS,
@@ -1711,10 +1698,13 @@ mod tests {
             mcp_ping_interval: None,
             upstream_call_timeout: None,
             resource_response_max_bytes: waygate_mcp::DEFAULT_RESOURCE_RESPONSE_MAX_BYTES,
-            file_storage_dir: None,
-            file_retention: FileRetention::DEFAULT,
-            file_max_bytes: None,
-            file_transfer_concurrency: 8,
+            file_transfer: crate::file_transfer_config::FileTransferConfig {
+                storage_dir: None,
+                retention: crate::file_transfer_config::FileRetention::DEFAULT,
+                max_bytes: None,
+                concurrency: 8,
+                inline_response_threshold_bytes: None,
+            },
             upstream_task_retention_seconds: 129600,
             mrtr_state_key: None,
             api_keys: None,

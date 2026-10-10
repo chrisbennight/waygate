@@ -511,6 +511,7 @@ fn page_routes(state: Arc<AdminState>) -> Router<()> {
             post(server_classifications_save),
         )
         .route("/servers/config/session", post(server_session_save))
+        .route("/servers/config/responses", post(server_responses_save))
         .route("/servers/config/identity", post(server_identity_save))
         .route("/servers/reconnect", post(servers_reconnect))
         .route("/servers/catalog/refresh", post(servers_refresh_catalog))
@@ -632,7 +633,7 @@ fn page_routes(state: Arc<AdminState>) -> Router<()> {
         .merge(crate::dashboard_scopes::router())
         // Read-only unified Groups page.
         .merge(crate::dashboard_groups::router())
-        // Settings page (read-only deployment posture +
+        // Settings page (response delivery defaults + deployment posture +
         // JWKS lifecycle + introspection summary +
         // capability-flag grid).
         .merge(crate::dashboard_settings::router())

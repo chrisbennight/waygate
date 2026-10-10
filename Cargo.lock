@@ -6662,6 +6662,7 @@ dependencies = [
  "waygate-admin",
  "waygate-apikeys",
  "waygate-core",
+ "waygate-dashboard-stores",
  "waygate-invocation",
  "waygate-manifest-store",
  "waygate-manifest-types",

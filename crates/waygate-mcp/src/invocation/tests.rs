@@ -91,6 +91,7 @@ mod retained_response_pipeline_tests {
         published: AtomicUsize,
         discarded: AtomicUsize,
         threshold: Option<usize>,
+        live_threshold: Option<Arc<AtomicUsize>>,
         origins: std::sync::Mutex<Vec<RecordedOrigin>>,
         fail: bool,
         fail_publish: bool,
@@ -99,7 +100,10 @@ mod retained_response_pipeline_tests {
     #[async_trait::async_trait]
     impl crate::files::FileOutputProcessor for RetainedFiles {
         fn inline_response_threshold_bytes(&self) -> Option<usize> {
-            self.threshold
+            self.live_threshold
+                .as_ref()
+                .map(|value| value.load(Ordering::SeqCst))
+                .or(self.threshold)
         }
 
         fn retained_response_max_bytes(&self) -> Option<usize> {
@@ -582,6 +586,106 @@ mod retained_response_pipeline_tests {
     }
 
     #[tokio::test]
+    async fn server_response_threshold_overrides_the_default_for_every_tool() {
+        let original = large_inline_result();
+        let size = serde_json::to_vec(&original).unwrap().len();
+        for global_threshold in [1, size] {
+            for (server, retained) in [
+                ("compact", true),
+                ("inline", false),
+                ("inherit", global_threshold < size),
+            ] {
+                for tool in ["search", "extract"] {
+                    let files = Arc::new(RetainedFiles {
+                        threshold: Some(global_threshold),
+                        ..Default::default()
+                    });
+                    let catalog = Arc::new(RetainedCatalog {
+                        inline: Some(original.clone()),
+                        response_thresholds: std::collections::BTreeMap::from([
+                            (
+                                "compact".into(),
+                                std::num::NonZeroUsize::new(size - 1).unwrap(),
+                            ),
+                            (
+                                "inline".into(),
+                                std::num::NonZeroUsize::new(size + 1).unwrap(),
+                            ),
+                        ]),
+                        ..Default::default()
+                    });
+                    let service = DefaultInvocationService::new(
+                        catalog,
+                        Arc::new(AllowAllGate),
+                        Arc::new(NullSink),
+                    )
+                    .with_file_output_processor(Some(files.clone()));
+                    let InvocationResponse::Unary(result) = service
+                        .invoke(
+                            Some(&principal_with_profile(None)),
+                            InvocationRequest::new(server, tool),
+                        )
+                        .await
+                        .unwrap()
+                    else {
+                        panic!("unary")
+                    };
+                    assert_eq!(
+                        files.published.load(Ordering::SeqCst),
+                        usize::from(retained),
+                        "{server}.{tool} default={global_threshold}"
+                    );
+                    if retained {
+                        assert_eq!(
+                            result.structured_content.unwrap()["_gateway_delivery"]
+                                ["delivery_status"],
+                            "file"
+                        );
+                    } else {
+                        assert_eq!(
+                            serde_json::to_vec(&result).unwrap(),
+                            serde_json::to_vec(&original).unwrap()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn global_response_threshold_is_captured_before_dispatch() {
+        for (initial, updated, first_retained) in [(1, usize::MAX, true), (usize::MAX, 1, false)] {
+            let threshold = Arc::new(AtomicUsize::new(initial));
+            let files = Arc::new(RetainedFiles {
+                live_threshold: Some(threshold.clone()),
+                ..Default::default()
+            });
+            let catalog = Arc::new(RetainedCatalog {
+                inline: Some(large_inline_result()),
+                threshold_during_dispatch: Some((threshold, updated)),
+                ..Default::default()
+            });
+            let service =
+                DefaultInvocationService::new(catalog, Arc::new(AllowAllGate), Arc::new(NullSink))
+                    .with_file_output_processor(Some(files.clone()));
+            for retained in [first_retained, updated == 1] {
+                files.published.store(0, Ordering::SeqCst);
+                service
+                    .invoke(
+                        Some(&principal_with_profile(None)),
+                        InvocationRequest::new("connector", "search"),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    files.published.load(Ordering::SeqCst),
+                    usize::from(retained)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn inline_retention_cannot_bypass_schema_or_response_inspection() {
         for block_inspection in [false, true] {
             let files = Arc::new(RetainedFiles {
@@ -668,6 +772,8 @@ mod retained_response_pipeline_tests {
     const BODY: &str = "failure here";
 
     struct RetainedCatalog {
+        response_thresholds: std::collections::BTreeMap<String, std::num::NonZeroUsize>,
+        threshold_during_dispatch: Option<(Arc<AtomicUsize>, usize)>,
         reads: AtomicUsize,
         calls: AtomicUsize,
         inline: Option<CallToolResult>,
@@ -691,6 +797,8 @@ mod retained_response_pipeline_tests {
                 reads: AtomicUsize::new(0),
                 calls: AtomicUsize::new(0),
                 inline: None,
+                response_thresholds: Default::default(),
+                threshold_during_dispatch: None,
                 declared_bytes: None,
                 output_schema: None,
                 missing_envelope_field: None,
@@ -923,17 +1031,22 @@ mod retained_response_pipeline_tests {
             tool: &str,
         ) -> crate::catalog::ResolvedInvocationTool {
             use crate::catalog::{InvocationToolSnapshot, ResolvedInvocationTool};
-            ResolvedInvocationTool::Ready(if let Some(schema) = &self.output_schema {
-                InvocationToolSnapshot::catalog(
-                    self.tool_facts(server, tool),
-                    uuid::Uuid::from_u128(1),
-                    "retained-contract".into(),
-                    Some(json!({"type":"object"})),
-                    Some(schema.clone()),
-                )
-            } else {
-                InvocationToolSnapshot::manifest_fallback(self.tool_facts(server, tool), true)
-            })
+            ResolvedInvocationTool::Ready(
+                if let Some(schema) = &self.output_schema {
+                    InvocationToolSnapshot::catalog(
+                        self.tool_facts(server, tool),
+                        uuid::Uuid::from_u128(1),
+                        "retained-contract".into(),
+                        Some(json!({"type":"object"})),
+                        Some(schema.clone()),
+                    )
+                } else {
+                    InvocationToolSnapshot::manifest_fallback(self.tool_facts(server, tool), true)
+                }
+                .with_inline_response_threshold_bytes(
+                    self.response_thresholds.get(server).copied(),
+                ),
+            )
         }
 
         async fn list_servers(&self) -> Vec<String> {
@@ -961,6 +1074,9 @@ mod retained_response_pipeline_tests {
             _admitted: Option<&crate::catalog::InvocationContractIdentity>,
         ) -> Result<CallToolResult, ErrorData> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some((threshold, value)) = &self.threshold_during_dispatch {
+                threshold.store(*value, Ordering::SeqCst);
+            }
             if let Some(result) = &self.inline {
                 return Ok(result.clone());
             }
@@ -1143,6 +1259,8 @@ mod retained_response_pipeline_tests {
     async fn actual_body_over_the_caller_budget_uses_the_stable_limit_error() {
         const LARGER_BODY: &str = "failure here grew";
         let catalog = Arc::new(RetainedCatalog {
+            response_thresholds: Default::default(),
+            threshold_during_dispatch: None,
             reads: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
             inline: None,
@@ -1189,6 +1307,8 @@ mod retained_response_pipeline_tests {
     #[tokio::test]
     async fn predecode_transport_cap_uses_the_stable_limit_error() {
         let catalog = Arc::new(RetainedCatalog {
+            response_thresholds: Default::default(),
+            threshold_during_dispatch: None,
             reads: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
             inline: None,
@@ -1235,6 +1355,8 @@ mod retained_response_pipeline_tests {
     #[tokio::test]
     async fn failed_recovery_identifies_the_operation_and_resource() {
         let catalog = Arc::new(RetainedCatalog {
+            response_thresholds: Default::default(),
+            threshold_during_dispatch: None,
             reads: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
             inline: None,
@@ -1328,6 +1450,8 @@ mod retained_response_pipeline_tests {
     #[tokio::test]
     async fn side_effecting_call_materializes_the_complete_response() {
         let catalog = Arc::new(RetainedCatalog {
+            response_thresholds: Default::default(),
+            threshold_during_dispatch: None,
             reads: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
             inline: None,

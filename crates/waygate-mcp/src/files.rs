@@ -164,8 +164,14 @@ pub const RETAINED_DELIVERY_META_KEY: &str = "io.cacahuate.mcp-gateway/retained-
 pub trait FileOutputProcessor: Send + Sync + 'static {
     /// Opt in to retaining larger successful structured results instead of
     /// putting their complete wire envelope in direct-client model context.
+    /// An upstream server's admitted threshold overrides this global default.
     fn inline_response_threshold_bytes(&self) -> Option<usize> {
         None
+    }
+
+    /// Resolve the global default once when a tool call is admitted.
+    async fn resolve_inline_response_threshold_bytes(&self) -> Result<Option<usize>, McpError> {
+        Ok(self.inline_response_threshold_bytes())
     }
 
     fn retained_response_max_bytes(&self) -> Option<usize> {

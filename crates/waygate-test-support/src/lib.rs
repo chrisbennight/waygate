@@ -20,6 +20,7 @@
 pub mod admin;
 pub mod mocks;
 pub mod pg;
+pub mod response_settings;
 
 pub mod skills;
 pub mod task_routes;

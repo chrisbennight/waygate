@@ -27,6 +27,8 @@ pub struct ReloadReport {
     /// connection replacement. Kept separate from connection shape so a
     /// policy-only reload is observable and never misreported as a no-op.
     pub session_policy_updated: Vec<String>,
+    /// Upstreams whose response-file threshold changed without replacing sessions.
+    pub response_policy_updated: Vec<String>,
     /// Upstreams whose connection-shape changed (transport / url / command /
     /// auth / mtls / session) and were re-dialed or REBUILT live (no restart),
     /// adopting the new shape with a fresh identity cell, a re-resolved bearer,
@@ -131,6 +133,7 @@ impl ReloadReport {
         self.classifications_updated.is_empty()
             && self.identity_updated.is_empty()
             && self.session_policy_updated.is_empty()
+            && self.response_policy_updated.is_empty()
             && self.redialed.is_empty()
             && self.redial_failed.is_empty()
             && self.resource_shape_restart_required.is_empty()
@@ -149,6 +152,7 @@ impl ReloadReport {
     ///     refused before mutation to preserve backend/routing atomicity.
     ///
     /// `classifications_updated`, `identity_updated`, `session_policy_updated`,
+    /// `response_policy_updated`,
     /// `redialed` (including the
     /// slot-resize rebuilds that retired the old `transport_changed` bucket), AND
     /// `added` / `removed` are all applied in place / live, so a reload touching
@@ -2589,6 +2593,13 @@ impl UpstreamPool {
                     // concurrent newer reload's state as the baseline and then
                     // overwriting it past a shape-only-looking CAS.
                     let from_shape = needs_redial.then(|| guard.clone());
+                    if guard.inline_response_threshold_bytes
+                        != new_manifest.inline_response_threshold_bytes
+                    {
+                        report.response_policy_updated.push(name.clone());
+                        guard.inline_response_threshold_bytes =
+                            new_manifest.inline_response_threshold_bytes;
+                    }
                     // Apply the tool classification in place for ALL paths,
                     // including a resize. Classification is a
                     // hot, catalog-cataloged field that is NOT coupled to the
@@ -3169,6 +3180,7 @@ impl UpstreamPool {
         report.classifications_updated.sort();
         report.identity_updated.sort();
         report.session_policy_updated.sort();
+        report.response_policy_updated.sort();
         report
     }
 }

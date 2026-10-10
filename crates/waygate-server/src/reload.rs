@@ -1235,6 +1235,7 @@ pub(crate) async fn reload_once(deps: &ReloadDeps) {
                     updated = ?report.classifications_updated,
                     identity_updated = ?report.identity_updated,
                     session_policy_updated = ?report.session_policy_updated,
+                    response_policy_updated = ?report.response_policy_updated,
                     redialed = ?report.redialed,
                     redial_failed = ?report.redial_failed,
                     resource_shape_restart_required = ?report.resource_shape_restart_required,
@@ -1291,7 +1292,7 @@ pub(crate) async fn reload_once(deps: &ReloadDeps) {
                 "no changes".to_owned()
             } else {
                 format!(
-                    "added={} removed={} redialed={} redial_failed={} resource_shape_restart_required={} classifications_updated={} identity_updated={} session_policy_updated={}",
+                    "added={} removed={} redialed={} redial_failed={} resource_shape_restart_required={} classifications_updated={} identity_updated={} session_policy_updated={} response_policy_updated={}",
                     report.added.len(),
                     report.removed.len(),
                     report.redialed.len(),
@@ -1300,6 +1301,7 @@ pub(crate) async fn reload_once(deps: &ReloadDeps) {
                     report.classifications_updated.len(),
                     report.identity_updated.len(),
                     report.session_policy_updated.len(),
+                    report.response_policy_updated.len(),
                 )
             };
             audit

@@ -58,6 +58,7 @@ fn manifest(name: &str, url: &str, tools: Vec<ToolClassification>) -> UpstreamMa
     UpstreamManifest {
         classification_mode: Default::default(),
         approval_mode: Default::default(),
+        inline_response_threshold_bytes: None,
         name: name.into(),
         transport: Transport::Http,
         protocol: Default::default(),
@@ -144,6 +145,75 @@ async fn reload_hot_applies_explicit_approval_mode() {
         ApprovalMode::PolicyOnly,
         "approval authority must change in place without disrupting the upstream connection",
     );
+}
+
+#[tokio::test]
+async fn reload_hot_applies_response_threshold_without_changing_admitted_calls() {
+    use std::num::NonZeroUsize;
+    use waygate_mcp::catalog::ResolvedInvocationTool;
+
+    let mut manifests = BTreeMap::new();
+    for server in ["example-search", "example-docs"] {
+        manifests.insert(
+            server.to_owned(),
+            manifest(
+                server,
+                "http://unused.test/mcp",
+                vec![
+                    classification("search", RiskTier::Low, false),
+                    classification("extract", RiskTier::Low, false),
+                ],
+            ),
+        );
+    }
+    let pool = UpstreamPool::from_manifests_disconnected(manifests.clone());
+    let ResolvedInvocationTool::Ready(admitted) = pool
+        .resolve_invocation_tool("default", "example-search", "search")
+        .await
+    else {
+        panic!("ready snapshot")
+    };
+    let override_bytes = NonZeroUsize::new(65536);
+    manifests
+        .get_mut("example-search")
+        .unwrap()
+        .inline_response_threshold_bytes = override_bytes;
+    let report = pool.reload_manifests(&manifests).await;
+    assert_eq!(report.response_policy_updated, ["example-search"]);
+    assert!(!report.is_noop());
+    assert!(!report.requires_restart());
+    assert!(report.classifications_updated.is_empty());
+    assert!(report.redialed.is_empty());
+    assert!(report.redial_failed.is_empty());
+    assert!(admitted.inline_response_threshold_bytes().is_none());
+    for (server, expected) in [("example-search", override_bytes), ("example-docs", None)] {
+        for tool in ["search", "extract"] {
+            let ResolvedInvocationTool::Ready(snapshot) =
+                pool.resolve_invocation_tool("default", server, tool).await
+            else {
+                panic!("ready snapshot")
+            };
+            assert_eq!(
+                snapshot.inline_response_threshold_bytes(),
+                expected,
+                "{server}.{tool}"
+            );
+        }
+    }
+    assert!(pool.reload_manifests(&manifests).await.is_noop());
+    manifests
+        .get_mut("example-search")
+        .unwrap()
+        .inline_response_threshold_bytes = None;
+    let report = pool.reload_manifests(&manifests).await;
+    assert_eq!(report.response_policy_updated, ["example-search"]);
+    let ResolvedInvocationTool::Ready(snapshot) = pool
+        .resolve_invocation_tool("default", "example-search", "search")
+        .await
+    else {
+        panic!("ready snapshot")
+    };
+    assert!(snapshot.inline_response_threshold_bytes().is_none());
 }
 
 #[tokio::test]

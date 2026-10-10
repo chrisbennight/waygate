@@ -148,6 +148,7 @@ fn manifest(addr: std::net::SocketAddr, isolation: Option<SessionIsolation>) -> 
     UpstreamManifest {
         classification_mode: Default::default(),
         approval_mode: Default::default(),
+        inline_response_threshold_bytes: None,
         name: "mock".into(),
         transport: Transport::Http,
         // Default `auto` negotiates 2026-07-28 against this mock — MRTR
