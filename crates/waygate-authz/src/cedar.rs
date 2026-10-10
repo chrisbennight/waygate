@@ -295,6 +295,15 @@ impl CedarEngine {
         Ok(decided)
     }
 
+    /// How many decisions this engine has retained. Lets a test assert that a
+    /// repeated question is answered from the cache rather than only that it
+    /// returns the same answer — without that, removing the lookup entirely
+    /// would leave the behavioural tests passing.
+    #[cfg(test)]
+    pub(crate) fn cached_decision_count(&self) -> usize {
+        self.decisions.len()
+    }
+
     /// The uncached decision: one Cedar pass plus the step-up and approval
     /// inferences that a deny may require.
     fn decide_facts(&self, facts: &Facts, strict: bool) -> Result<AuthzResult, CedarError> {

@@ -139,6 +139,7 @@ impl DecisionCache {
             match guard.order.pop_front() {
                 Some(oldest) => {
                     guard.entries.remove(&oldest);
+                    waygate_telemetry::metrics::record_authz_decision_cache_eviction();
                 }
                 None => break,
             }
@@ -971,8 +972,11 @@ mod tests {
             // cache, so this is the uncached answer to the same question.
             let cold = CedarEngine::from_source(DISCRIMINATING_POLICY).expect("policy parses");
             let expected = outcome(cold.evaluate_facts(&facts));
+            let before = cached.cached_decision_count();
             let first = outcome(cached.evaluate_facts(&facts));
+            let after_first = cached.cached_decision_count();
             let second = outcome(cached.evaluate_facts(&facts));
+            let after_second = cached.cached_decision_count();
             assert_eq!(
                 expected, first,
                 "{name}: first answer differs from uncached"
@@ -983,6 +987,23 @@ mod tests {
             );
             if expected.starts_with("ok:") {
                 decided += 1;
+                // Equal answers alone would still hold with no cache at all.
+                // Retaining the new decision and then not deciding again is
+                // what makes removing the lookup a test failure.
+                assert_eq!(
+                    after_first,
+                    before + 1,
+                    "{name}: deciding a new question must retain it",
+                );
+                assert_eq!(
+                    after_second, after_first,
+                    "{name}: asking again must be answered from the retained decision",
+                );
+            } else {
+                assert_eq!(
+                    after_second, before,
+                    "{name}: a failed evaluation must retain nothing",
+                );
             }
         }
         assert!(
@@ -1006,6 +1027,11 @@ mod tests {
         let facts = baseline();
 
         assert!(engine.evaluate_facts(&facts).is_err());
+        assert_eq!(
+            engine.cached_decision_count(),
+            0,
+            "a failure is a property of the attempt, not a decision to retain",
+        );
         assert!(
             engine.evaluate_facts(&facts).is_err(),
             "a failure must not be answered from cache, and must not be \
@@ -1057,12 +1083,22 @@ mod tests {
         facts.action.required_scope = Some("mcp:invoke:high".into());
 
         let first = engine.evaluate_facts(&facts).expect("first evaluation");
-        let second = engine.evaluate_facts(&facts).expect("cached evaluation");
         assert_eq!(first.decision, Decision::StepUpRequired);
+        assert_eq!(
+            engine.cached_decision_count(),
+            1,
+            "the step-up verdict must be the retained entry under test",
+        );
+        let second = engine.evaluate_facts(&facts).expect("cached evaluation");
         assert_eq!(
             second.decision,
             Decision::StepUpRequired,
             "a step-up requirement must not be served back as an allow",
+        );
+        assert_eq!(
+            engine.cached_decision_count(),
+            1,
+            "the second answer must come from that entry, not a fresh decision",
         );
     }
 
@@ -1082,12 +1118,22 @@ mod tests {
         let facts = baseline();
 
         let first = engine.evaluate_facts(&facts).expect("first evaluation");
-        let second = engine.evaluate_facts(&facts).expect("cached evaluation");
         assert_eq!(first.decision, Decision::ApprovalRequired);
+        assert_eq!(
+            engine.cached_decision_count(),
+            1,
+            "the approval verdict must be the retained entry under test",
+        );
+        let second = engine.evaluate_facts(&facts).expect("cached evaluation");
         assert_eq!(
             second.decision,
             Decision::ApprovalRequired,
             "an approval requirement must not be served back as an allow",
+        );
+        assert_eq!(
+            engine.cached_decision_count(),
+            1,
+            "the second answer must come from that entry, not a fresh decision",
         );
     }
 

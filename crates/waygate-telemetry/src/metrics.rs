@@ -73,6 +73,27 @@ pub fn record_authz_decision_cache(hit: bool) {
         .inc();
 }
 
+fn authz_decision_cache_evictions() -> &'static Counter {
+    static M: OnceLock<Counter> = OnceLock::new();
+    M.get_or_init(|| {
+        register_counter_with_registry!(
+            "mcp_authz_decision_cache_evictions_total",
+            "Cedar decisions dropped from a policy set's cache to stay within capacity.",
+            registry()
+        )
+        .expect("register mcp_authz_decision_cache_evictions_total")
+    })
+}
+
+/// Record one capacity eviction.
+///
+/// Counted separately from a lookup outcome, which it is not: without it a
+/// sustained miss rate cannot be told apart from a working set larger than the
+/// cache, and those call for different responses.
+pub fn record_authz_decision_cache_eviction() {
+    authz_decision_cache_evictions().inc();
+}
+
 fn authz_latency() -> &'static Histogram {
     static M: OnceLock<Histogram> = OnceLock::new();
     M.get_or_init(|| {
@@ -1993,6 +2014,8 @@ mod tests {
         record_authz_latency(0.0005);
         record_authz_decision_cache(true);
         record_authz_decision_cache(false);
+        record_authz_decision_cache_eviction();
+        record_authz_decision_cache_eviction();
         record_upstream_call("example-messages", UpstreamOutcome::Ok, 0.042);
         record_upstream_call("example-observability", UpstreamOutcome::Error, 1.5);
         record_upstream_call_failure("example-messages", "initialize");
