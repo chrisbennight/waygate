@@ -6023,6 +6023,7 @@ name = "waygate-authz"
 version = "1.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "cedar-policy",
  "miette",
  "regex",

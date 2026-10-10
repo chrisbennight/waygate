@@ -2,10 +2,19 @@
 //!
 //! At startup we concatenate every `*.cedar` file in a directory (sorted by
 //! filename for deterministic policy ordering) and parse the result as a
-//! single [`PolicySet`]. Every request builds fresh entities from the
-//! runtime [`Principal`] and the resource being acted on; we do not cache
-//! entity material across requests because group membership changes with
-//! each token.
+//! single [`PolicySet`]. Every evaluation builds fresh entities from the
+//! runtime [`Principal`] and the resource being acted on; no entity material
+//! is reused across requests, because group membership changes with each
+//! token.
+//!
+//! Decided verdicts are cached per engine, keyed on the complete fact set, so
+//! a repeated question about an unchanged policy set is answered without
+//! rebuilding entities or re-entering the authorizer. The policy set an engine
+//! holds is immutable, and every policy change constructs a new engine, so the
+//! cache cannot outlive the policies that produced its entries. See
+//! [`crate::decision_cache`] for the keying contract — in particular which
+//! single fact is deliberately not part of the key, and what must change here
+//! if that fact ever becomes decision-relevant.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -114,6 +123,9 @@ pub struct ToolSpec {
 pub struct CedarEngine {
     policies: PolicySet,
     authorizer: Authorizer,
+    /// Verdicts already decided against `policies`. Bound to this engine, so
+    /// installing a new policy set discards them with it.
+    decisions: crate::decision_cache::DecisionCache,
 }
 
 impl CedarEngine {
@@ -152,6 +164,7 @@ impl CedarEngine {
         Ok(Self {
             policies,
             authorizer: Authorizer::new(),
+            decisions: crate::decision_cache::DecisionCache::new(),
         })
     }
 
@@ -260,7 +273,49 @@ impl CedarEngine {
         self.evaluate_facts_inner(facts, true)
     }
 
+    /// Decide `facts`, serving an already-decided identical question from this
+    /// engine's cache.
+    ///
+    /// The cache wraps the whole inference below, not the individual Cedar
+    /// passes, so a deny that reaches the step-up and approval inferences — up
+    /// to four passes — is paid for once per distinct question rather than once
+    /// per ask. Only a successfully decided verdict is retained: an engine
+    /// error is a property of the attempt and is returned without being
+    /// recorded, so a later identical ask re-enters the authorizer and can log
+    /// its own diagnostics.
     fn evaluate_facts_inner(&self, facts: &Facts, strict: bool) -> Result<AuthzResult, CedarError> {
+        let key = crate::decision_cache::DecisionKey::new(facts, strict);
+        if let Some(cached) = self.decisions.get(&key) {
+            waygate_telemetry::metrics::record_authz_decision_cache(true);
+            return Ok(cached);
+        }
+        waygate_telemetry::metrics::record_authz_decision_cache(false);
+        let decided = self.decide_facts(facts, strict)?;
+        self.decisions.insert(key, &decided);
+        Ok(decided)
+    }
+
+    /// How many decisions this engine has retained. Lets a test assert that a
+    /// repeated question is answered from the cache rather than only that it
+    /// returns the same answer — without that, removing the lookup entirely
+    /// would leave the behavioural tests passing.
+    #[cfg(test)]
+    pub(crate) fn cached_decision_count(&self) -> usize {
+        self.decisions.len()
+    }
+
+    /// How many verdicts this engine has answered from its cache. Distinct
+    /// from the retained count: re-deciding an already-retained question
+    /// leaves that count unchanged, so only this shows the lookup is
+    /// load-bearing.
+    #[cfg(test)]
+    pub(crate) fn cached_decisions_served(&self) -> usize {
+        self.decisions.served()
+    }
+
+    /// The uncached decision: one Cedar pass plus the step-up and approval
+    /// inferences that a deny may require.
+    fn decide_facts(&self, facts: &Facts, strict: bool) -> Result<AuthzResult, CedarError> {
         let first = self.evaluate_raw_facts(facts, strict)?;
         if first.decision == Decision::Allow {
             return Ok(first);
@@ -1253,6 +1308,13 @@ fn resource_uid(facts: &Facts) -> Result<EntityUid, CedarError> {
 /// Project gateway-owned runtime and request facts into Cedar context.
 /// Recipient facts are omitted when no argument projection exists, so strict
 /// historical replay reports missing inputs rather than guessing recipients.
+///
+/// The set of attributes published here is what a policy can observe about the
+/// call beyond the principal and resource entities, so it also bounds what the
+/// decision can depend on. [`crate::decision_cache`] relies on that: it omits
+/// the call timestamp from its key precisely because no attribute below carries
+/// it. **Publishing the timestamp here makes it decision-relevant and requires
+/// the cache key to account for it.**
 fn build_context(facts: &Facts) -> Result<Context, CedarError> {
     let mut pairs: Vec<(String, RestrictedExpression)> = Vec::new();
     if facts.action.kind == "CallTool" {

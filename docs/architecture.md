@@ -410,8 +410,10 @@ Where each kind of state lives and how it changes:
   [Tasks](agents/tasks.md#upstream-owned-tasks).
 - **In-memory caches** — JWKS (per-issuer in `waygate-oidc`; per-peer with
   a generation fence in `waygate-federation`), session state, the upstream
-  connection pool, quota buckets. All rebuildable; none is a source of
-  truth.
+  connection pool, quota buckets, and decided Cedar verdicts (bounded, owned
+  by the `CedarEngine` whose policy set produced them, so installing a new
+  policy set discards them rather than invalidating entries). All rebuildable;
+  none is a source of truth.
 - **Environment config** — read once at boot by `from_env()` in
   [`waygate-server/src/config.rs`](../crates/waygate-server/src/config.rs).
   **New `GATEWAY_*` variables are read there, not inline at point of use**
