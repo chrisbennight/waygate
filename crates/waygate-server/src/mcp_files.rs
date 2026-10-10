@@ -21,8 +21,8 @@ use waygate_mcp::files::{file_transfer_failure, invalid_file_request, FileTransf
 use waygate_mcp::{BuiltinCatalog, BuiltinSurfaceDescriptor, BuiltinTools, CatalogTool};
 use waygate_oidc::Principal;
 use waygate_transfer::{
-    FileInspectionStatus, GatewayFileOwner, GatewayFileStorage, NewTransferGrant,
-    TransferAuthority, TransferDigest, TransferDirection, TransferEndpoint, UploadState,
+    GatewayFileOwner, GatewayFileStorage, NewTransferGrant, TransferAuthority, TransferDigest,
+    TransferDirection, TransferEndpoint, UploadState,
 };
 
 use crate::mcp_builtin::{schema_obj, structured};
@@ -135,7 +135,6 @@ impl GatewayFileTools {
                 size: input.size,
                 digest: input.digest.map(Into::into),
             },
-            inspection_status: "uninspectable",
             grant_handle: grant.handle.as_str(),
             credential_exchange: self.credential_exchange(),
             upload: UploadDescriptor {
@@ -243,10 +242,6 @@ impl GatewayFileTools {
                     algorithm: "sha-256".to_owned(),
                     value: URL_SAFE_NO_PAD.encode(file.sha256),
                 }),
-            },
-            inspection_status: match file.inspection_status {
-                FileInspectionStatus::Checked => "checked",
-                FileInspectionStatus::Uninspectable => "uninspectable",
             },
             grant_handle: grant.handle.as_str(),
             credential_exchange: self.credential_exchange(),
@@ -612,8 +607,6 @@ impl From<PrepareFileDigest> for GatewayFileDigest {
 struct PrepareDownloadOutput<'a> {
     /// Stable file metadata. This contains no access credential.
     file: GatewayFileValue,
-    /// `checked` or `uninspectable`; an unsupported scanner is never reported as clean.
-    inspection_status: &'a str,
     /// Opaque identifier the `mcp-files` helper exchanges for a credential. It
     /// is not a bearer credential and is useless without the helper's key, so
     /// relaying it through a tool result is safe.
@@ -630,8 +623,6 @@ struct PrepareDownloadOutput<'a> {
 struct PrepareUploadOutput<'a> {
     /// Stable metadata to retain after the helper completes the upload.
     file: GatewayFileValue,
-    /// Uploads remain `uninspectable` until a configured scanner checks them.
-    inspection_status: &'a str,
     /// Opaque identifier the `mcp-files` helper exchanges for a credential. It
     /// is not a bearer credential and is useless without the helper's key, so
     /// relaying it through a tool result is safe.
@@ -1009,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_download_output_matches_its_schema() {
+    fn prepare_outputs_match_their_schemas_without_inspection_status() {
         let sample = PrepareDownloadOutput {
             file: GatewayFileValue {
                 uri: "mcp-file://gateway/01999999-9999-7999-8999-999999999999".to_owned(),
@@ -1021,7 +1012,6 @@ mod tests {
                     value: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
                 }),
             },
-            inspection_status: "uninspectable",
             grant_handle: "opaque-handle",
             credential_exchange: CredentialExchangeDescriptor {
                 method: "POST",
@@ -1042,16 +1032,53 @@ mod tests {
                 expires_at: "2026-08-10T12:00:00Z".to_owned(),
             },
         };
-        let schema = serde_json::to_value(schemars::schema_for!(PrepareDownloadOutput<'static>))
-            .expect("output schema");
-        let value = serde_json::to_value(sample).expect("sample output");
-        let validator = jsonschema::validator_for(&schema).expect("compile output schema");
-        let errors: Vec<_> = validator.iter_errors(&value).collect();
-        assert!(
-            errors.is_empty(),
-            "output does not match schema: {errors:?}"
-        );
-        assert_eq!(value["inspection_status"], json!("uninspectable"));
+        let download_result = structured(&sample);
+        let upload_sample = PrepareUploadOutput {
+            file: sample.file,
+            grant_handle: sample.grant_handle,
+            credential_exchange: sample.credential_exchange,
+            upload: UploadDescriptor {
+                transport: "https".to_owned(),
+                method: "PUT",
+                url: "https://gateway.example/file-transfers/upload".to_owned(),
+                authorization_scheme: "DPoP",
+                proof_header: "DPoP",
+                content_type: Some("application/pdf".to_owned()),
+                expires_at: "2026-08-10T12:00:00Z".to_owned(),
+            },
+        };
+        let tools = tool_defs();
+        for (name, result) in [
+            ("gateway-files.prepare_download", download_result),
+            ("gateway-files.prepare_upload", structured(&upload_sample)),
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .expect("file tool");
+            let schema = serde_json::to_value(tool.output_schema.as_ref().expect("output schema"))
+                .expect("serialize output schema");
+            let value = result.structured_content.as_ref().expect("sample output");
+            let validator = jsonschema::validator_for(&schema).expect("compile output schema");
+            let errors: Vec<_> = validator.iter_errors(value).collect();
+            assert!(
+                errors.is_empty(),
+                "{name} output does not match schema: {errors:?}"
+            );
+            for serialized in [
+                serde_json::to_string(tool).expect("serialize tool definition"),
+                serde_json::to_string(&result).expect("serialize tool result"),
+            ] {
+                assert!(
+                    !serialized.contains("inspection_status"),
+                    "{name}: {serialized}"
+                );
+                assert!(
+                    !serialized.contains("uninspectable"),
+                    "{name}: {serialized}"
+                );
+            }
+        }
     }
 
     #[test]

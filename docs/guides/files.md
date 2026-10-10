@@ -122,8 +122,8 @@ The helper surface is a gateway enhancement available through ordinary tools.
 The [wire-profile matrix](../file-transfer.md#version-negotiation-matrix)
 explains legacy initialization and per-request capability behavior.
 
-Integrity verification does not mean malware scanning. Files currently report
-`uninspectable` because no file scanner is connected. Response inspection can
+Integrity verification does not mean malware scanning. No file scanner is
+currently connected. File-tool responses contain transfer and integrity
+metadata without a scanner status field. Response inspection can
 replace a retained response before publication, but does not establish file
-scanner coverage. These states remain visible so an operator can apply policy
-appropriate to the actual inspection performed.
+scanner coverage.
