@@ -157,19 +157,31 @@ Metric semantics and operational uses:
 - `mcp_upstream_latency_seconds{server}` — the client-leg duration (semconv
   `mcp.client.operation.duration`). Covers slot checkout, per-call session
   establishment where the upstream dials per call, and dispatch.
-- `mcp_upstream_session_establish_seconds{server}` — the establishment share of
-  the line above: the connect and MCP lifecycle exchange a call runs on, for
-  upstreams that dial per call. Observed per successful dial attempt. A
-  pooled-session upstream establishes nothing per call, so it has **no series
-  here at all** rather than a zero — absence is the answer, which is what makes
-  the two isolation modes comparable. Subtract it from the latency histogram to
-  separate what the upstream cost from what isolation cost.
+- `mcp_upstream_session_establish_seconds{server}` — the connect and MCP
+  lifecycle exchange a call runs on, for upstreams that dial per call. Observed
+  per successful dial attempt. **Read it in absolute terms** — a quantile is
+  directly what per-call isolation costs that upstream, which is the question
+  the isolation choice turns on.
+  Two population caveats, because the obvious ratio against
+  `mcp_upstream_latency_seconds` is not sound:
+  - Task RPCs (`tasks/get`, `tasks/update`, `tasks/cancel`) establish a session
+    on a per-call upstream and are counted here, but the latency histogram
+    covers tool calls only. On an upstream that uses tasks the two series
+    describe different populations, so a ratio can exceed 1 and a difference of
+    their sums can go negative.
+  - An upstream that dialled per call and was later switched to `reuse` keeps
+    the series it already accumulated; those establishments did happen.
+    Attribute by current mode over a window (`rate`/`increase`) rather than
+    over lifetime totals. Only removing the upstream drops the series.
+
+  A pooled-session upstream that has never dialled per call has no series here
+  at all, rather than an exported zero.
 - `mcp_upstream_session_isolation{server,isolation}` — `1` on the resolved mode
   (`per_call` / `reuse`), `0` on the other; both labels are rewritten together
   so a manifest change cannot leave an upstream reading as being in both, and a
   removed upstream is zeroed on every label. Join it on `server` with the two
   histograms above, and with
-  `mcp_upstream_protocol_generation{server,generation}`, to read latency by
+  `gateway_upstream_protocol_generation{server,generation}`, to read latency by
   isolation mode and by negotiated protocol without multiplying histogram
   series for dimensions that do not vary per observation.
 - `mcp_schema_validator_cache_{hits,misses,evictions}_total` and

@@ -601,6 +601,7 @@ impl UpstreamPool {
             .collect();
         waygate_telemetry::metrics::set_upstream_protocol_generations(server, &zeroes);
         waygate_telemetry::metrics::clear_upstream_session_isolation(server);
+        waygate_telemetry::metrics::clear_upstream_session_establish(server);
         waygate_telemetry::metrics::set_upstream_runtime_state(server, None);
     }
 

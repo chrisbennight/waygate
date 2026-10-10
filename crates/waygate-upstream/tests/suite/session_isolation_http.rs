@@ -1806,13 +1806,17 @@ async fn annotation_multi_lane_disagreement_fails_closed() {
 /// on what other tests in this binary recorded.
 #[tokio::test]
 async fn session_establishment_is_reported_only_where_each_call_establishes_one() {
-    fn establish_count(server: &str) -> u64 {
-        let needle = format!("mcp_upstream_session_establish_seconds_count{{server=\"{server}\"}}");
+    // `None` is an absent series and `Some(0)` an exported empty one. The
+    // absence contract needs those distinguished: collapsing both to zero
+    // would let an exported zero-valued histogram satisfy an assertion that
+    // claims no series exists.
+    fn establish_count(server: &str) -> Option<u64> {
         waygate_telemetry::gather_text()
             .lines()
-            .find_map(|line| line.strip_prefix(&needle))
-            .and_then(|rest| rest.trim().parse().ok())
-            .unwrap_or(0)
+            .filter(|line| line.starts_with("mcp_upstream_session_establish_seconds_count{"))
+            .find(|line| line.contains(&format!("server=\"{server}\"")))
+            .and_then(|line| line.rsplit_once(' '))
+            .and_then(|(_, value)| value.trim().parse().ok())
     }
 
     let (per_call_addr, per_call_inits) = spawn_mock_upstream().await;
@@ -1856,14 +1860,14 @@ async fn session_establishment_is_reported_only_where_each_call_establishes_one(
 
     assert_eq!(
         establish_count("establish-per-call"),
-        3,
+        Some(3),
         "each per-call dispatch must report the session it established",
     );
     assert_eq!(
         establish_count("establish-reuse"),
-        0,
+        None,
         "a pooled-session upstream establishes nothing per call, so it must \
-         have no series rather than a zero-valued one",
+         have no series at all rather than an exported zero-valued one",
     );
 }
 

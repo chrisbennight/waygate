@@ -212,6 +212,17 @@ pub fn set_upstream_session_isolation(server: &str, isolation: &str) {
     }
 }
 
+/// Drop a removed upstream's establishment series.
+///
+/// Only for removal, where the upstream no longer exists to report on. A
+/// manifest change that moves a surviving upstream between isolation modes
+/// deliberately keeps its series: those establishments did happen, and erasing
+/// them would destroy history an operator may still be querying. Attribute by
+/// current mode over a window rather than over lifetime totals.
+pub fn clear_upstream_session_establish(server: &str) {
+    let _ = upstream_session_establish().remove_label_values(&[server]);
+}
+
 /// Zero every isolation label for a removed upstream, so it stops reading as
 /// though a mode were still active for it.
 pub fn clear_upstream_session_isolation(server: &str) {
