@@ -17,6 +17,7 @@ use waygate_oidc::Principal;
 pub mod break_glass;
 pub mod break_glass_gate;
 pub mod cedar;
+mod decision_cache;
 pub mod gate;
 pub mod segment;
 

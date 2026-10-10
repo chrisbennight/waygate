@@ -559,6 +559,16 @@ an older execution used. Current Code Mode executions all use direct authority.
 
 ## Policy load & reload semantics
 
+- **Decided verdicts are cached per policy set.** An engine answers a question
+  it has already decided without re-entering Cedar, keyed on the complete fact
+  set the decision was made from. This does not delay a policy change: an
+  engine's policy set is immutable, every load and reload installs a *new*
+  engine, and the cache belongs to the engine — so a published edit is live for
+  the next request and no entry can survive the policies that produced it. The
+  one fact deliberately outside the key is the call timestamp, which is sound
+  only because no policy can observe it; a change that publishes it to the
+  request context has to account for it in the key. See the module
+  documentation on `crates/waygate-authz/src/decision_cache.rs`.
 - **Tenant selection.** The default tenant is file-backed: it loads
   `policies/*.cedar`, using the default tenant's ledger bundle only for recovery.
   Each non-default tenant is ledger-backed and evaluates against its own latest

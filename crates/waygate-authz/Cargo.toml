@@ -12,6 +12,8 @@ waygate-oidc.workspace = true
 waygate-mcp.workspace = true
 waygate-telemetry.workspace = true
 cedar-policy.workspace = true
+# Keys the per-engine decision cache on a complete fact set.
+blake3.workspace = true
 miette.workspace = true
 async-trait.workspace = true
 serde.workspace = true
@@ -36,3 +38,7 @@ serde_json.workspace = true
 # "no side-effecting tool is reachable by a groupless principal"
 # invariant against the real manifest set.
 serde_yaml.workspace = true
+
+[[bench]]
+name = "decision_cache"
+harness = false

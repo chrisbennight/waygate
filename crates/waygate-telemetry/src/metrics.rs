@@ -48,6 +48,31 @@ fn authz_decisions() -> &'static CounterVec {
     })
 }
 
+fn authz_decision_cache() -> &'static CounterVec {
+    static M: OnceLock<CounterVec> = OnceLock::new();
+    M.get_or_init(|| {
+        register_counter_vec_with_registry!(
+            "mcp_authz_decision_cache_total",
+            "Cedar decision lookups against the live policy set, keyed by cache outcome.",
+            &["outcome"],
+            registry()
+        )
+        .expect("register mcp_authz_decision_cache_total")
+    })
+}
+
+/// Record one decision lookup.
+///
+/// `mcp_authz_latency_seconds` is observed at the gate and so covers hits and
+/// misses alike; a miss additionally builds entities and enters the authorizer.
+/// That makes the latency distribution bimodal, and the ratio here is what
+/// separates the two modes.
+pub fn record_authz_decision_cache(hit: bool) {
+    authz_decision_cache()
+        .with_label_values(&[if hit { "hit" } else { "miss" }])
+        .inc();
+}
+
 fn authz_latency() -> &'static Histogram {
     static M: OnceLock<Histogram> = OnceLock::new();
     M.get_or_init(|| {
@@ -1966,6 +1991,8 @@ mod tests {
         record_authz_decision("allow", "low");
         record_authz_decision("deny", "high");
         record_authz_latency(0.0005);
+        record_authz_decision_cache(true);
+        record_authz_decision_cache(false);
         record_upstream_call("example-messages", UpstreamOutcome::Ok, 0.042);
         record_upstream_call("example-observability", UpstreamOutcome::Error, 1.5);
         record_upstream_call_failure("example-messages", "initialize");
