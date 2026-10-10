@@ -24,9 +24,9 @@ with a gateway URI before returning the tool result. A file-aware MCP host can
 use `files/authorizeDownload`; other clients can use
 `gateway-files.prepare_download` and a small helper script.
 
-Files are currently marked `uninspectable` because no scanner is connected.
-A missing scanner does not block a valid download or claim
-that the file was checked.
+No file scanner is currently connected. This does not block a valid download.
+File-tool responses contain transfer and integrity metadata without a scanner
+status field.
 
 The product requirement is simple: a host or ordinary helper must be able to
 move a real file without placing its bytes in MCP JSON-RPC or model context.
@@ -73,9 +73,8 @@ The gateway validates the inspected body against the original upstream schema
 and the final delivery envelope against its own schema. Its byte count describes
 the stored replacement. The adapter reuses
 file ownership, storage budgets, retention, SHA-256 calculation, publication,
-download authorization, and cleanup. File scanner coverage remains reported as
-`uninspectable` until an actual file scanner is installed; response inspection
-does not claim scanner coverage. Unsupported transports, missing resources,
+download authorization, and cleanup. Response inspection does not establish
+file scanner coverage. Unsupported transports, missing resources,
 denied reads, disabled storage, and delivery failures remain explicit.
 
 ## Standards grounding
