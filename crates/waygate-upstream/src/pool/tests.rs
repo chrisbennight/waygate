@@ -67,6 +67,7 @@ fn shape_manifest(transport: Transport, concurrency: Option<usize>) -> UpstreamM
     UpstreamManifest {
         classification_mode: Default::default(),
         approval_mode: Default::default(),
+        inline_response_threshold_bytes: None,
         name: "x".into(),
         transport,
         protocol: Default::default(),
@@ -320,6 +321,7 @@ fn pool_with_manifest_tool() -> UpstreamPool {
         UpstreamManifest {
             classification_mode: Default::default(),
             approval_mode: Default::default(),
+            inline_response_threshold_bytes: None,
             name: "example-messages".into(),
             transport: Transport::Http,
             protocol: Default::default(),
@@ -346,6 +348,7 @@ fn annotation_native_tool_facts_stay_conservative_until_policy_enforcement() {
         UpstreamManifest {
             classification_mode: crate::ClassificationMode::McpAnnotations,
             approval_mode: Default::default(),
+            inline_response_threshold_bytes: None,
             name: "komodo".into(),
             transport: Transport::Http,
             protocol: Default::default(),
@@ -407,11 +410,24 @@ async fn resolve_invocation_tool_prefers_catalog_live() {
         err: false,
     });
     let pool = pool_with_manifest_tool().with_catalog(catalog);
+    let threshold = std::num::NonZeroUsize::new(64 * 1024);
+    let mut manifests: BTreeMap<_, _> = pool
+        .manifests()
+        .into_iter()
+        .map(|manifest| (manifest.name.clone(), manifest))
+        .collect();
+    manifests
+        .get_mut("example-messages")
+        .expect("configured server")
+        .inline_response_threshold_bytes = threshold;
+    let report = pool.reload_manifests(&manifests).await;
+    assert_eq!(report.response_policy_updated, ["example-messages"]);
     let snapshot = expect_snapshot(
         pool.resolve_invocation_tool("default", "example-messages", "send")
             .await,
     );
     let facts = snapshot.facts();
+    assert_eq!(snapshot.inline_response_threshold_bytes(), threshold);
     assert_eq!(facts.risk, RiskTier::Low, "catalog Live risk must win");
     assert!(!facts.side_effects, "catalog Live side_effects must win");
     assert!(facts.pii, "catalog Live pii must win");
@@ -469,6 +485,7 @@ async fn catalog_transition_fence_tracks_generation_without_erasing_catalog_over
             UpstreamManifest {
                 classification_mode: Default::default(),
                 approval_mode: Default::default(),
+                inline_response_threshold_bytes: None,
                 name: "example-messages".into(),
                 transport: Transport::Http,
                 protocol: Default::default(),
@@ -958,6 +975,7 @@ fn manifest_with(tier_a_required: bool) -> UpstreamManifest {
     UpstreamManifest {
         classification_mode: Default::default(),
         approval_mode: Default::default(),
+        inline_response_threshold_bytes: None,
         name: "example-messages".into(),
         transport: Transport::Http,
         protocol: Default::default(),
@@ -2127,6 +2145,7 @@ async fn boot_dial_timeout_bounds_a_hung_upstream() {
     let manifest = UpstreamManifest {
         classification_mode: Default::default(),
         approval_mode: Default::default(),
+        inline_response_threshold_bytes: None,
         name: "hung".into(),
         transport: Transport::Stdio,
         protocol: Default::default(),
@@ -3177,6 +3196,7 @@ async fn annotation_generation_mismatch_fails_closed() {
                 manifest_facts: facts(),
                 annotation_mode: true,
                 approval_mode: crate::ApprovalMode::PerCall,
+                inline_response_threshold_bytes: None,
                 approved_behavior_hash: Some(approved.clone()),
                 manifest_version_hash: None,
                 manifest_discriminator: None,
@@ -3275,6 +3295,7 @@ async fn approval_mode_controls_catalog_requirement_independent_of_server_name()
                     manifest_facts: side_effecting_facts(server, tool),
                     annotation_mode: true,
                     approval_mode,
+                    inline_response_threshold_bytes: None,
                     approved_behavior_hash: Some(approved.to_owned()),
                     manifest_version_hash: None,
                     manifest_discriminator: None,
@@ -3362,6 +3383,7 @@ async fn policy_only_manifest_mode_preserves_catalog_side_effect_and_pii_facts()
                 },
                 annotation_mode: false,
                 approval_mode: crate::ApprovalMode::PolicyOnly,
+                inline_response_threshold_bytes: None,
                 approved_behavior_hash: None,
                 manifest_version_hash: Some(version.into()),
                 manifest_discriminator: None,
@@ -3431,6 +3453,7 @@ async fn manifest_fallback_keeps_legacy_snapshot_shape() {
                 manifest_facts: facts(),
                 annotation_mode: false,
                 approval_mode: crate::ApprovalMode::PerCall,
+                inline_response_threshold_bytes: None,
                 approved_behavior_hash: None,
                 manifest_version_hash: None,
                 manifest_discriminator: None,
@@ -3460,6 +3483,7 @@ async fn manifest_fallback_keeps_legacy_snapshot_shape() {
                 manifest_facts: facts(),
                 annotation_mode: true,
                 approval_mode: crate::ApprovalMode::PerCall,
+                inline_response_threshold_bytes: None,
                 approved_behavior_hash: Some("a".repeat(64)),
                 manifest_version_hash: None,
                 manifest_discriminator: None,
@@ -3540,6 +3564,7 @@ async fn annotation_fallback_identity_binds_the_approved_generation() {
                         manifest_facts: facts(),
                         annotation_mode,
                         approval_mode: crate::ApprovalMode::PerCall,
+                        inline_response_threshold_bytes: None,
                         approved_behavior_hash: approved.clone(),
                         manifest_version_hash: None,
                         manifest_discriminator: None,
@@ -3641,6 +3666,7 @@ async fn classification_mode_split_fails_closed() {
                 },
                 annotation_mode: true,
                 approval_mode: crate::ApprovalMode::PerCall,
+                inline_response_threshold_bytes: None,
                 approved_behavior_hash: Some("a".repeat(64)),
                 manifest_version_hash: None,
                 manifest_discriminator: None,
@@ -3684,6 +3710,7 @@ async fn manifest_fallback_snapshot_keeps_its_reviewed_operation_set() {
                 },
                 annotation_mode: false,
                 approval_mode: crate::ApprovalMode::PerCall,
+                inline_response_threshold_bytes: None,
                 approved_behavior_hash: None,
                 manifest_version_hash: None,
                 manifest_discriminator: Some("operation".to_owned()),
@@ -3763,6 +3790,7 @@ async fn annotation_empty_published_contract_fails_closed() {
                 manifest_facts: facts(),
                 annotation_mode: true,
                 approval_mode: crate::ApprovalMode::PerCall,
+                inline_response_threshold_bytes: None,
                 approved_behavior_hash: Some("a".repeat(64)),
                 manifest_version_hash: None,
                 manifest_discriminator: None,
@@ -3785,6 +3813,7 @@ async fn annotation_empty_published_contract_fails_closed() {
                 manifest_facts: facts(),
                 annotation_mode: true,
                 approval_mode: crate::ApprovalMode::PerCall,
+                inline_response_threshold_bytes: None,
                 approved_behavior_hash: Some("a".repeat(64)),
                 manifest_version_hash: None,
                 manifest_discriminator: None,
@@ -3829,6 +3858,7 @@ async fn annotation_mixed_generation_published_contract_fails_closed() {
                 manifest_facts: facts(),
                 annotation_mode: true,
                 approval_mode: crate::ApprovalMode::PerCall,
+                inline_response_threshold_bytes: None,
                 approved_behavior_hash: Some("a".repeat(64)),
                 manifest_version_hash: None,
                 manifest_discriminator: None,

@@ -10,6 +10,7 @@
     {% if updated > 0 %}<span class="chip">{{ updated }} classification update(s)</span>{% endif %}
     {% if identity_updated > 0 %}<span class="chip">{{ identity_updated }} identity/tier update(s)</span>{% endif %}
     {% if session_policy_updated > 0 %}<span class="chip">{{ session_policy_updated }} session policy update(s)</span>{% endif %}
+    {% if response_policy_updated > 0 %}<span class="chip">{{ response_policy_updated }} response threshold update(s)</span>{% endif %}
     {% if redialed > 0 %}<span class="chip">{{ redialed }} connection-shape change(s) — re-dialed/rebuilt live</span>{% endif %}
     {% if redial_failed > 0 %}<span class="chip chip--warn">{{ redial_failed }} re-dial/rebuild failed — kept previous shape</span>{% endif %}
     {% if added > 0 %}<span class="chip">{{ added }} added — dialed live</span>{% endif %}

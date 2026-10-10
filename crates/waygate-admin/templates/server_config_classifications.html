@@ -8,6 +8,8 @@
                 hx-get="{{ config_url }}&tab=session" hx-target="closest .cfg-panel" hx-swap="outerHTML">Session</button>
         <button type="button" class="cfg-tab" role="tab" aria-selected="false"
                 hx-get="{{ config_url }}&tab=identity" hx-target="closest .cfg-panel" hx-swap="outerHTML">Identity &amp; auth</button>
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=responses" hx-target="closest .cfg-panel" hx-swap="outerHTML">Responses</button>
     </nav>
 
     {% if editable %}

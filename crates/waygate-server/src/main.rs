@@ -144,6 +144,17 @@ async fn gateway_main() -> anyhow::Result<()> {
     let (audit_sink, audit_reader, database_pools, mut evidence_queue_handle) =
         build_audit_sink(&cfg).await?;
     let db_pool = database_pools.as_ref().map(DatabasePools::control_pool);
+    let response_settings = Arc::new(
+        waygate_dashboard_stores::response_settings::ResponseSettingsService::new(
+            db_pool.clone().map(|pool| {
+                Arc::new(
+                    waygate_dashboard_stores::response_settings::PgResponseSettingsStore::new(pool),
+                )
+                    as Arc<dyn waygate_dashboard_stores::response_settings::ResponseSettingsStore>
+            }),
+            cfg.file_transfer.inline_response_threshold_bytes,
+        ),
+    );
     // Stamp every audit row with the active OpenTelemetry trace id by wrapping
     // the sink once at its source; all downstream clones (dispatch path, bearer
     // middleware, sweepers) inherit the stamping. `audit_reader` keeps reading
@@ -154,7 +165,7 @@ async fn gateway_main() -> anyhow::Result<()> {
     let transfer_runtime = file_transfer::TransferRuntime::from_pool(
         db_pool.clone(),
         audit_sink.clone(),
-        cfg.file_storage_dir.as_deref(),
+        cfg.file_transfer.storage_dir.as_deref(),
     )
     .await?;
 
@@ -535,9 +546,8 @@ async fn gateway_main() -> anyhow::Result<()> {
         catalog.clone(),
         quota_service.clone(),
         &cfg.public_url,
-        cfg.file_retention,
-        cfg.file_max_bytes,
-        cfg.file_transfer_concurrency,
+        &cfg.file_transfer,
+        response_settings.clone(),
     )?;
     let ct = CancellationToken::new();
     let skills = skills_git::configure(&cfg, &ct, &tool_catalog_epoch, &db_pool)?;
@@ -1733,6 +1743,7 @@ async fn gateway_main() -> anyhow::Result<()> {
         // Settings page. Built above from `cfg` + the
         // already-constructed identity keyring.
         .with_system_info(system_info.clone())
+        .with_response_settings(response_settings)
         // The gateway's OWN built-in MCP namespaces, for the read-only
         // "Built-in surfaces" operator view. Static descriptors sourced from the
         // same modules that serve the tools, so the view can't drift from the
@@ -1857,7 +1868,7 @@ async fn gateway_main() -> anyhow::Result<()> {
             app,
             cfg.public_url.clone(),
             file_transfer_admission.clone(),
-            cfg.file_retention.general,
+            cfg.file_transfer.retention.general,
         )?;
     }
     let as_sweeper_store = if let Some((as_router, store)) = as_router {

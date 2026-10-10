@@ -6,6 +6,7 @@
 //! no dependency on `waygate-upstream`, which sidesteps a cycle and lets tests
 //! use in-memory fakes.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -688,6 +689,7 @@ impl ResolutionAuthority {
 /// snapshot instead of resolving the catalog again after an await.
 #[derive(Debug, Clone)]
 pub struct InvocationToolSnapshot {
+    inline_response_threshold_bytes: Option<NonZeroUsize>,
     facts: ToolFacts,
     authority: ResolutionAuthority,
     /// Exact upstream definition captured with the published contract used to
@@ -727,7 +729,7 @@ pub struct InvocationToolSnapshot {
     discriminator: Option<String>,
     /// Classifications for individual discriminator values. Empty for every
     /// tool classified by name alone.
-    operations: Vec<OperationClassification>,
+    operations: Arc<[OperationClassification]>,
 }
 
 /// Whether a character may appear in an operation name.
@@ -976,6 +978,7 @@ impl InvocationToolSnapshot {
             },
             published_definition: None,
             count_projected: false,
+            inline_response_threshold_bytes: None,
             input_schema,
             source_input_schema_hash,
             input_schema_unavailable,
@@ -987,7 +990,7 @@ impl InvocationToolSnapshot {
             anticipated_sensitive_output,
             output_validator: None,
             discriminator: None,
-            operations: Vec::new(),
+            operations: Arc::from([]),
         }
     }
 
@@ -1094,6 +1097,7 @@ impl InvocationToolSnapshot {
             },
             published_definition: None,
             count_projected: false,
+            inline_response_threshold_bytes: None,
             input_schema,
             source_input_schema_hash,
             input_schema_unavailable,
@@ -1105,7 +1109,7 @@ impl InvocationToolSnapshot {
             anticipated_sensitive_output,
             output_validator: None,
             discriminator: None,
-            operations: Vec::new(),
+            operations: Arc::from([]),
         }
     }
 
@@ -1118,6 +1122,7 @@ impl InvocationToolSnapshot {
             authority: ResolutionAuthority::SyntheticModel,
             published_definition: None,
             count_projected: false,
+            inline_response_threshold_bytes: None,
             input_schema: None,
             source_input_schema_hash: None,
             input_schema_unavailable: false,
@@ -1129,13 +1134,25 @@ impl InvocationToolSnapshot {
             anticipated_sensitive_output: false,
             output_validator: None,
             discriminator: None,
-            operations: Vec::new(),
+            operations: Arc::from([]),
         }
     }
 
     /// Authorization and risk facts admitted for this invocation.
     pub fn facts(&self) -> &ToolFacts {
         &self.facts
+    }
+
+    /// Capture the upstream server's response-delivery setting at admission.
+    #[must_use]
+    pub fn with_inline_response_threshold_bytes(mut self, threshold: Option<NonZeroUsize>) -> Self {
+        self.inline_response_threshold_bytes = threshold;
+        self
+    }
+
+    /// Server-level override admitted with this invocation's manifest snapshot.
+    pub fn inline_response_threshold_bytes(&self) -> Option<NonZeroUsize> {
+        self.inline_response_threshold_bytes
     }
 
     /// Bind the exact upstream definition captured with this resolution.
@@ -1245,7 +1262,7 @@ impl InvocationToolSnapshot {
         operations: Vec<OperationClassification>,
     ) -> Self {
         self.discriminator = discriminator;
-        self.operations = operations;
+        self.operations = operations.into();
         self
     }
 

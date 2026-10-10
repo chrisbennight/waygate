@@ -139,6 +139,7 @@ impl DefaultInvocationService {
             tool: &route.tool,
             invocation_id: uuid::Uuid::new_v4(),
             tool_snapshot: None,
+            inline_response_threshold_bytes: None,
             effective_facts: None,
             operation: None,
             operation_classified: false,

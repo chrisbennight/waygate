@@ -1,0 +1,30 @@
+<section class="page-section response-settings" aria-label="Response delivery">
+    <h2 class="section-heading">Response delivery</h2>
+    <div class="card">
+        {% if available %}
+        <p>Global inline response threshold: <strong>{{ effective }} bytes</strong>.
+           Larger successful structured tool responses are saved as MCP files.</p>
+        {% if environment_override %}
+        <p class="muted"><code>GATEWAY_INLINE_RESPONSE_THRESHOLD_BYTES</code> overrides the saved app default.
+           Upstream server overrides take precedence. Removing the environment override restores the saved default.</p>
+        {% endif %}
+        {% if editable %}
+        <form method="post" action="{{ form_url }}" hx-post="{{ form_url }}"
+              hx-target="closest .response-settings" hx-swap="outerHTML">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="revision" value="{{ revision }}">
+            <label for="global-response-threshold">Saved global default (bytes)</label>
+            <input id="global-response-threshold" type="number" name="inline_response_threshold_bytes"
+                   min="1" step="1" required value="{{ threshold }}">
+            <p class="muted">Starts at 16384 bytes (16 KiB). Changes apply to new calls without restarting.
+               Override for every tool on one server in Servers → server configuration → Responses.</p>
+            <button type="submit" class="btn btn-secondary">Save default</button>
+        </form>
+        {% else %}
+        <p class="muted">Saved global default: {{ threshold }} bytes. Editing requires the gateway database
+           and the default tenant administrator.</p>
+        {% endif %}
+        {% endif %}
+        {% if !message.is_empty() %}<p role="status" aria-live="polite">{{ message }}</p>{% endif %}
+    </div>
+</section>

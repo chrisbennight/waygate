@@ -1,0 +1,35 @@
+<div class="cfg-panel">
+    <nav class="cfg-tabs" role="tablist" aria-label="Server configuration">
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=overview" hx-target="closest .cfg-panel" hx-swap="outerHTML">Overview</button>
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=classifications" hx-target="closest .cfg-panel" hx-swap="outerHTML">Classifications</button>
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=session" hx-target="closest .cfg-panel" hx-swap="outerHTML">Session</button>
+        <button type="button" class="cfg-tab" role="tab" aria-selected="false"
+                hx-get="{{ config_url }}&tab=identity" hx-target="closest .cfg-panel" hx-swap="outerHTML">Identity &amp; auth</button>
+        <button type="button" class="cfg-tab is-active" role="tab" aria-selected="true"
+                hx-get="{{ config_url }}&tab=responses" hx-target="closest .cfg-panel" hx-swap="outerHTML">Responses</button>
+    </nav>
+    <p>Choose the inline response threshold for every tool on <strong>{{ name }}</strong>.
+       Larger successful structured responses are saved as MCP files.</p>
+    <p class="muted">Inherited global threshold: {{ global_threshold }}.
+       Leave blank to inherit it. The server override takes precedence over the environment override and saved app default.</p>
+    {% if editable %}
+    <form method="post" action="{{ save_url }}" hx-post="{{ save_url }}"
+          hx-target="find .response-result" hx-swap="innerHTML">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="server" value="{{ name }}">
+        <input type="hidden" name="base_hash" value="{{ base_hash }}">
+        <label>Server inline response threshold (bytes)
+            <input type="number" name="inline_response_threshold_bytes" min="1" step="1"
+                   value="{{ threshold }}" placeholder="inherit global threshold">
+        </label>
+        <div class="cfg-actions"><button type="submit" class="btn btn--sm btn-secondary">Save &amp; publish</button></div>
+        <div class="response-result" aria-live="polite"></div>
+    </form>
+    {% else %}
+    <p class="muted">{{ readonly_note }}</p>
+    <p>Server override: {% if threshold.is_empty() %}inherit global threshold{% else %}{{ threshold }} bytes{% endif %}.</p>
+    {% endif %}
+</div>

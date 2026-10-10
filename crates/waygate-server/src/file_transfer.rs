@@ -77,9 +77,8 @@ pub(crate) fn build_file_services(
     catalog: SharedCatalog,
     quota: Option<Arc<dyn waygate_quota::QuotaService>>,
     public_url: &str,
-    retention: FileRetention,
-    max_bytes: Option<u64>,
-    max_concurrent_transfers: usize,
+    config: &crate::file_transfer_config::FileTransferConfig,
+    response_settings: Arc<waygate_dashboard_stores::response_settings::ResponseSettingsService>,
 ) -> anyhow::Result<FileServices> {
     // Transfer-mode and inline-constraint admission is schema policy, not
     // storage behavior: a gateway without file storage must still refuse a
@@ -101,16 +100,20 @@ pub(crate) fn build_file_services(
     };
     let public_transport = validate_file_public_url(public_url)?;
     let native_https = public_transport == "https";
-    let admission = FileTransferAdmission::new(max_concurrent_transfers);
-    let processor = Arc::new(OutboundFileProcessor::new(
-        catalog,
-        storage.clone(),
-        runtime.audit.clone(),
-        retention,
-        max_bytes,
-        admission.clone(),
-        native_https,
-    )?);
+    let max_bytes = config.max_bytes;
+    let admission = FileTransferAdmission::new(config.concurrency);
+    let processor = Arc::new(
+        OutboundFileProcessor::new(
+            catalog,
+            storage.clone(),
+            runtime.audit.clone(),
+            config.retention,
+            max_bytes,
+            admission.clone(),
+            native_https,
+        )?
+        .with_response_settings(response_settings),
+    );
     Ok(FileServices {
         input_processor: Some(processor.clone()),
         output_processor: Some(processor),
@@ -368,6 +371,7 @@ pub(crate) struct OutboundFileProcessor {
     max_bytes: Option<u64>,
     admission: FileTransferAdmission,
     native_https: bool,
+    response_settings: Arc<waygate_dashboard_stores::response_settings::ResponseSettingsService>,
     resource_preparation_timeout: Duration,
 }
 
@@ -408,8 +412,21 @@ impl OutboundFileProcessor {
             max_bytes,
             admission,
             native_https,
+            response_settings: Arc::new(
+                waygate_dashboard_stores::response_settings::ResponseSettingsService::new(
+                    None, None,
+                ),
+            ),
             resource_preparation_timeout: resource_file_preparation_timeout(),
         })
+    }
+
+    fn with_response_settings(
+        mut self,
+        settings: Arc<waygate_dashboard_stores::response_settings::ResponseSettingsService>,
+    ) -> Self {
+        self.response_settings = settings;
+        self
     }
 
     async fn discard_resource_batch_bounded(&self, batch_id: uuid::Uuid) {
@@ -1306,8 +1323,15 @@ fn collect_gateway_file_uris(
 
 #[async_trait]
 impl FileOutputProcessor for OutboundFileProcessor {
-    fn inline_response_threshold_bytes(&self) -> Option<usize> {
-        Some(16 * 1024)
+    async fn resolve_inline_response_threshold_bytes(&self) -> Result<Option<usize>, McpError> {
+        self.response_settings
+            .effective_threshold()
+            .await
+            .map(|value| Some(value.get()))
+            .map_err(|error| {
+                tracing::error!(%error, "response delivery settings could not be loaded");
+                McpError::internal_error("response delivery settings are unavailable", None)
+            })
     }
 
     fn retained_response_max_bytes(&self) -> Option<usize> {
@@ -3323,7 +3347,13 @@ mod tests {
             true,
         )
         .unwrap();
-        assert_eq!(processor.inline_response_threshold_bytes(), Some(16 * 1024));
+        assert_eq!(
+            processor
+                .resolve_inline_response_threshold_bytes()
+                .await
+                .unwrap(),
+            Some(16 * 1024)
+        );
         let mut actor = profile_principal(
             Some(vec!["fixture".into()]),
             Some(vec!["fixture.content".into()]),
@@ -3865,6 +3895,7 @@ mod tests {
         let manifest = UpstreamManifest {
             classification_mode: Default::default(),
             approval_mode: Default::default(),
+            inline_response_threshold_bytes: None,
             name: "printable".to_owned(),
             transport: Transport::Http,
             protocol: Default::default(),
@@ -5212,6 +5243,11 @@ mod tests {
             },
             max_bytes: None,
             admission: admission.clone(),
+            response_settings: Arc::new(
+                waygate_dashboard_stores::response_settings::ResponseSettingsService::new(
+                    None, None,
+                ),
+            ),
             resource_preparation_timeout: resource_file_preparation_timeout(),
         });
         let actor = Principal {

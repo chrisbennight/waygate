@@ -589,6 +589,7 @@ mod tests {
         UpstreamManifest {
             classification_mode: Default::default(),
             approval_mode: Default::default(),
+            inline_response_threshold_bytes: None,
             name: name.into(),
             transport,
             protocol: Default::default(),

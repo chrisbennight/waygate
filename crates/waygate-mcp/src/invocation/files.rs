@@ -375,7 +375,7 @@ impl DefaultInvocationService {
         let Some(processor) = self.file_output_processor.as_ref() else {
             return Ok(output);
         };
-        let Some(threshold) = processor.inline_response_threshold_bytes() else {
+        let Some(threshold) = ctx.inline_response_threshold_bytes else {
             return Ok(output);
         };
         if ctx.response_delivery != waygate_invocation::ResponseDelivery::File

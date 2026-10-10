@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -18,6 +19,7 @@ use anyhow::Context;
 /// larger files raise `GATEWAY_FILE_MAX_BYTES`; there is deliberately no
 /// "unlimited" setting, because that is the state this default exists to end.
 pub(crate) const DEFAULT_FILE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+pub(crate) use waygate_dashboard_stores::response_settings::DEFAULT_INLINE_RESPONSE_THRESHOLD_BYTES;
 
 /// Retention windows for stored files. Which window a file gets is decided per
 /// file from its declared sensitivity when it is staged.
@@ -38,12 +40,13 @@ impl FileRetention {
     };
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct FileTransferConfig {
     pub(crate) storage_dir: Option<PathBuf>,
     pub(crate) retention: FileRetention,
     pub(crate) max_bytes: Option<u64>,
     pub(crate) concurrency: usize,
+    pub(crate) inline_response_threshold_bytes: Option<NonZeroUsize>,
 }
 
 impl FileTransferConfig {
@@ -68,6 +71,17 @@ impl FileTransferConfig {
             1..=1024,
             "pick 1 through 1024",
         )?;
+        let inline_response_threshold_bytes =
+            waygate_core::env::optional("GATEWAY_INLINE_RESPONSE_THRESHOLD_BYTES")
+                .map(|_| {
+                    waygate_core::env::u64_in(
+                        "GATEWAY_INLINE_RESPONSE_THRESHOLD_BYTES",
+                        DEFAULT_INLINE_RESPONSE_THRESHOLD_BYTES.get() as u64,
+                        1..=usize::MAX as u64,
+                        "use a positive byte count for the complete serialized MCP tool result",
+                    )
+                })
+                .transpose()?;
         Self::from_values(
             database_configured,
             storage_dir,
@@ -77,6 +91,7 @@ impl FileTransferConfig {
             },
             max_bytes,
             concurrency,
+            inline_response_threshold_bytes,
         )
     }
 
@@ -86,6 +101,7 @@ impl FileTransferConfig {
         retention: FileRetention,
         max_bytes: Option<String>,
         concurrency: u64,
+        inline_response_threshold_bytes: Option<u64>,
     ) -> anyhow::Result<Self> {
         let storage_dir = storage_dir.map(PathBuf::from);
         if storage_dir.is_some() && !database_configured {
@@ -108,6 +124,16 @@ impl FileTransferConfig {
             .or(Some(DEFAULT_FILE_MAX_BYTES));
         let concurrency = usize::try_from(concurrency)
             .context("GATEWAY_FILE_TRANSFER_CONCURRENCY is not representable")?;
+        let inline_response_threshold_bytes = inline_response_threshold_bytes
+            .map(|value| {
+                usize::try_from(value)
+                    .ok()
+                    .and_then(NonZeroUsize::new)
+                    .context(
+                        "GATEWAY_INLINE_RESPONSE_THRESHOLD_BYTES must be a positive byte count",
+                    )
+            })
+            .transpose()?;
         // The secret hint may only shorten a file's life. A secret window above
         // the general one would invert the policy, so it is clamped rather than
         // rejected: a deployment with a short general retention and the secret
@@ -121,6 +147,7 @@ impl FileTransferConfig {
             retention,
             max_bytes,
             concurrency,
+            inline_response_threshold_bytes,
         })
     }
 }
@@ -136,13 +163,14 @@ mod tests {
     #[test]
     fn defaults_bound_the_file_size() {
         let defaults =
-            FileTransferConfig::from_values(false, None, FileRetention::DEFAULT, None, 8)
+            FileTransferConfig::from_values(false, None, FileRetention::DEFAULT, None, 8, None)
                 .expect("default file settings");
         assert!(defaults.storage_dir.is_none());
         assert_eq!(defaults.retention.general, Duration::from_secs(24 * 3600));
         assert_eq!(defaults.retention.secret, Duration::from_secs(300));
         assert_eq!(defaults.max_bytes, Some(DEFAULT_FILE_MAX_BYTES));
         assert_eq!(defaults.concurrency, 8);
+        assert_eq!(defaults.inline_response_threshold_bytes, None);
 
         let error = FileTransferConfig::from_values(
             false,
@@ -150,6 +178,7 @@ mod tests {
             FileRetention::DEFAULT,
             None,
             8,
+            None,
         )
         .expect_err("file storage needs a database")
         .to_string();
@@ -164,6 +193,7 @@ mod tests {
             },
             Some("1099511627776".to_owned()),
             17,
+            Some(64 * 1024),
         )
         .expect("configured file settings");
         assert_eq!(
@@ -181,6 +211,7 @@ mod tests {
             },
             None,
             8,
+            None,
         )
         .expect("short general retention");
         assert_eq!(
@@ -190,5 +221,64 @@ mod tests {
         );
         assert_eq!(configured.max_bytes, Some(1_099_511_627_776));
         assert_eq!(configured.concurrency, 17);
+        assert_eq!(
+            configured.inline_response_threshold_bytes.unwrap().get(),
+            64 * 1024
+        );
+    }
+
+    #[test]
+    fn inline_response_threshold_parses_the_global_environment_setting() {
+        let _guard = crate::config::ENV_GUARD
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let names = [
+            "GATEWAY_FILE_STORAGE_DIR",
+            "GATEWAY_FILE_RETENTION_SECONDS",
+            "GATEWAY_FILE_SECRET_RETENTION_SECONDS",
+            "GATEWAY_FILE_MAX_BYTES",
+            "GATEWAY_FILE_TRANSFER_CONCURRENCY",
+            "GATEWAY_INLINE_RESPONSE_THRESHOLD_BYTES",
+        ];
+        let previous = names.map(std::env::var_os);
+        for name in names {
+            std::env::remove_var(name);
+        }
+        let defaults = FileTransferConfig::from_env(false);
+        std::env::set_var("GATEWAY_INLINE_RESPONSE_THRESHOLD_BYTES", "65536");
+        let configured = FileTransferConfig::from_env(false);
+        let invalid = ["0", "-1", "1.5", "not-a-number"].map(|value| {
+            std::env::set_var("GATEWAY_INLINE_RESPONSE_THRESHOLD_BYTES", value);
+            (value, FileTransferConfig::from_env(false))
+        });
+        for (name, value) in names.into_iter().zip(previous) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        assert_eq!(defaults.unwrap().inline_response_threshold_bytes, None);
+        assert_eq!(
+            configured
+                .unwrap()
+                .inline_response_threshold_bytes
+                .unwrap()
+                .get(),
+            65536
+        );
+        for (value, result) in invalid {
+            let error = result.expect_err(value).to_string();
+            assert!(error.contains("GATEWAY_INLINE_RESPONSE_THRESHOLD_BYTES"));
+        }
+    }
+
+    #[test]
+    fn inline_response_threshold_requires_a_positive_byte_count() {
+        let error =
+            FileTransferConfig::from_values(false, None, FileRetention::DEFAULT, None, 8, Some(0))
+                .expect_err("zero must not silently change response delivery");
+        assert!(error
+            .to_string()
+            .contains("GATEWAY_INLINE_RESPONSE_THRESHOLD_BYTES"));
     }
 }

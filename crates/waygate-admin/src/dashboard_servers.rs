@@ -293,6 +293,7 @@ struct ReloadResultFragment {
     updated: usize,
     identity_updated: usize,
     session_policy_updated: usize,
+    response_policy_updated: usize,
     redialed: usize,
     redial_failed: usize,
     added: usize,
@@ -313,6 +314,7 @@ fn reload_err(message: impl Into<String>) -> Response {
         updated: 0,
         identity_updated: 0,
         session_policy_updated: 0,
+        response_policy_updated: 0,
         redialed: 0,
         redial_failed: 0,
         added: 0,
@@ -496,10 +498,11 @@ pub(crate) async fn servers_reload(
         user.as_ref().map(|Extension(p)| p),
         "dashboard.server.reload",
         format!(
-            "from servers/*.yaml; updated={}; identity_updated={}; session_policy_updated={}; redialed={}; redial_failed={}; added={}; removed={}",
+            "from servers/*.yaml; updated={}; identity_updated={}; session_policy_updated={}; response_policy_updated={}; redialed={}; redial_failed={}; added={}; removed={}",
             report.classifications_updated.len(),
             report.identity_updated.len(),
             report.session_policy_updated.len(),
+            report.response_policy_updated.len(),
             report.redialed.len(),
             report.redial_failed.len(),
             report.added.len(),
@@ -528,6 +531,7 @@ pub(crate) async fn servers_reload(
         updated: report.classifications_updated.len(),
         identity_updated: report.identity_updated.len(),
         session_policy_updated: report.session_policy_updated.len(),
+        response_policy_updated: report.response_policy_updated.len(),
         redialed: report.redialed.len(),
         redial_failed: report.redial_failed.len(),
         added: report.added.len(),
@@ -624,6 +628,7 @@ pub(crate) async fn server_config_fragment(
         None | Some("overview") => "overview",
         Some("classifications") => "classifications",
         Some("session") => "session",
+        Some("responses") => "responses",
         Some("identity") => "identity",
         Some(other) => {
             return (StatusCode::NOT_FOUND, format!("unknown tab: {other}")).into_response();
@@ -650,6 +655,22 @@ pub(crate) async fn server_config_fragment(
     if active_tab == "identity" {
         return render_identity_tab(
             &state, is_admin, csrf_token, tenant_ctx, config_url, &manifest,
+        )
+        .await;
+    }
+    if active_tab == "responses" {
+        let is_global_admin = crate::dashboard_settings::require_global_settings_admin(
+            user.as_ref().map(|Extension(p)| p),
+            tenant_ctx.as_ref(),
+        )
+        .is_ok();
+        return render_responses_tab(
+            &state,
+            is_global_admin,
+            csrf_token,
+            tenant_ctx,
+            config_url,
+            &manifest,
         )
         .await;
     }
@@ -1205,6 +1226,107 @@ pub(crate) async fn server_classifications_save(
              within moments — or click \"Reload manifests\" (top of page) to apply immediately.",
         ),
         Err(msg) => save_banner_err(msg),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "server_config_responses.html")]
+struct ServerResponsesFragment {
+    name: String,
+    config_url: String,
+    save_url: String,
+    csrf_token: String,
+    editable: bool,
+    readonly_note: &'static str,
+    base_hash: String,
+    threshold: String,
+    global_threshold: String,
+}
+
+async fn render_responses_tab(
+    state: &Arc<AdminState>,
+    is_admin: bool,
+    csrf_token: String,
+    tenant: Option<TenantContext>,
+    config_url: String,
+    manifest: &waygate_upstream::UpstreamManifest,
+) -> Response {
+    let (editable, readonly_note, base_hash, threshold) =
+        match editable_disk_base(state, is_admin, &manifest.name) {
+            Ok((set, hash)) => (
+                true,
+                "",
+                hash,
+                set[&manifest.name].inline_response_threshold_bytes,
+            ),
+            Err((note, _)) => (
+                false,
+                note,
+                String::new(),
+                manifest.inline_response_threshold_bytes,
+            ),
+        };
+    let global_threshold = match state.response_settings.effective_threshold().await {
+        Ok(value) => format!("{} bytes", value.get()),
+        Err(error) => {
+            tracing::error!(%error, "global response threshold could not be loaded");
+            "unavailable".to_owned()
+        }
+    };
+    render(&ServerResponsesFragment {
+        name: manifest.name.clone(),
+        config_url,
+        save_url: crate::tenant_ctx::nav_url(tenant.as_ref(), "/servers/config/responses"),
+        csrf_token,
+        editable,
+        readonly_note,
+        base_hash,
+        threshold: threshold
+            .map(|value| value.get().to_string())
+            .unwrap_or_default(),
+        global_threshold,
+    })
+}
+
+pub(crate) async fn server_responses_save(
+    State(state): State<Arc<AdminState>>,
+    user: Option<Extension<Principal>>,
+    csrf: Option<Extension<CsrfToken>>,
+    tenant: Option<Extension<TenantContext>>,
+    Form(form): Form<std::collections::HashMap<String, String>>,
+) -> Response {
+    let principal = user.as_ref().map(|Extension(p)| p);
+    if let Err(error) = crate::dashboard_settings::require_global_settings_admin(
+        principal,
+        tenant.as_ref().map(|Extension(t)| t),
+    ) {
+        return error.into_response();
+    }
+    if !activity_csrf_ok(
+        csrf.as_ref(),
+        form.get("csrf").map(String::as_str).unwrap_or(""),
+    ) {
+        return (StatusCode::FORBIDDEN, "csrf mismatch").into_response();
+    }
+    let Some(store) = state.servers.manifest_store.get() else {
+        return save_banner_err("Saving server response settings requires the manifest store.");
+    };
+    let Some(server) = form.get("server") else {
+        return save_banner_err("Missing server.");
+    };
+    let threshold = match form.get("inline_response_threshold_bytes").map(|s| s.trim()) {
+        None | Some("") => None,
+        Some(value) => match value.parse::<std::num::NonZeroUsize>() {
+            Ok(value) => Some(value),
+            Err(_) => return save_banner_err("Enter a positive whole byte count, or leave blank to inherit the global threshold."),
+        },
+    };
+    match patch_and_publish(&state, store, principal, server, form.get("base_hash").map(String::as_str).unwrap_or(""), "dashboard.server.responses", |manifest| {
+        manifest.inline_response_threshold_bytes = threshold;
+        Ok(())
+    }).await {
+        Ok(version) => save_banner_ok(version, "Applies to every tool on this upstream server. Click Reload manifests to apply immediately; no restart or reconnect is needed."),
+        Err(message) => save_banner_err(message),
     }
 }
 

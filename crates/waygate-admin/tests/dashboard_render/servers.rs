@@ -184,6 +184,7 @@ pub(crate) fn bundle_content_with_stdio() -> String {
     let m = UpstreamManifest {
         classification_mode: Default::default(),
         approval_mode: Default::default(),
+        inline_response_threshold_bytes: None,
         name: "local-stdio".into(),
         transport: Transport::Stdio,
         protocol: Default::default(),
@@ -977,6 +978,51 @@ pub(crate) async fn session_tab_readonly_without_store() {
         !body.contains("/servers/config/session"),
         "read-only tab must not render the save form"
     );
+}
+
+#[tokio::test]
+pub(crate) async fn response_save_updates_server_override_and_blank_restores_inheritance() {
+    let store = InMemoryManifestStore::seeded(&example_messages_bundle_content());
+    let shared: waygate_manifest_store::SharedManifestStore = store.clone();
+    let state = state_with_manifests_and_store(Some(shared)).await;
+    let app = dashboard_router(state.clone(), DashboardAuth::Disabled);
+    let (_, panel) = body_of(
+        app.clone(),
+        "/servers/config?server=example-messages&tab=responses",
+    )
+    .await;
+    assert!(panel.contains("Save &amp; publish"));
+    assert!(panel.contains("every tool on"));
+    for value in ["65536", ""] {
+        let hash = state.read_manifest_set_from_disk().unwrap().unwrap().1;
+        let form = format!("csrf=dev-csrf&server=example-messages&base_hash={hash}&inline_response_threshold_bytes={value}");
+        let (status, body) = post_body(app.clone(), "/servers/config/responses", &form).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Published v"), "{body}");
+        let saved = waygate_upstream::parse_manifest_set(&store.active_content()).unwrap();
+        assert_eq!(
+            saved["example-messages"]
+                .inline_response_threshold_bytes
+                .map(|v| v.get()),
+            value.parse::<usize>().ok()
+        );
+        let (_, stale) = post_body(app.clone(), "/servers/config/responses", &form).await;
+        assert!(stale.contains("config changed"));
+    }
+    let hash = state.read_manifest_set_from_disk().unwrap().unwrap().1;
+    let original = store.active_content();
+    for invalid in ["0", "-1", "1.5", "abc"] {
+        let (_, body) = post_body(app.clone(), "/servers/config/responses", &format!("csrf=dev-csrf&server=example-messages&base_hash={hash}&inline_response_threshold_bytes={invalid}")).await;
+        assert!(body.contains("positive whole byte count"));
+        assert_eq!(store.active_content(), original);
+    }
+    let (status, _) = post_body(
+        app,
+        "/servers/config/responses",
+        "csrf=wrong&server=example-messages&inline_response_threshold_bytes=65536",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

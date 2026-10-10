@@ -34,6 +34,57 @@ There is no fixed gateway-wide byte limit and no base64 fallback. File size,
 retention, and quota policy will be set by the production authority and storage
 provider, not by buffering the body in this protocol adapter.
 
+## Large structured tool responses
+
+For direct MCP tool calls, the gateway can replace a large successful result
+with an owner-scoped MCP file. This requires configured gateway file storage,
+an authenticated caller, and a result containing `structuredContent`.
+The global default is saved in the app under **Settings → Response delivery**.
+It starts at `16384` bytes (16 KiB) and persists in the gateway database.
+Saving a new default applies to new tool calls across replicas without a restart.
+Editing requires the default tenant administrator and a configured database;
+development without a database uses the initial 16 KiB default.
+
+An optional `GATEWAY_INLINE_RESPONSE_THRESHOLD_BYTES` environment override takes
+precedence over the saved app default. A server override takes precedence over
+both. The Settings page shows the effective global threshold and whether the
+environment override is active. The gateway measures the complete serialized
+MCP tool result, including both `content` and `structuredContent`; repeated text
+in those fields counts twice. A result equal to the threshold stays inline.
+
+To override every tool on an upstream server, open **Servers**, expand that
+server's configuration, and select **Responses**. Enter a byte count, select
+**Save & publish**, then **Reload manifests** to apply immediately. Leave the
+field blank to restore inheritance. This is a server setting, independent of
+individual tool classifications.
+
+The same override is `inline_response_threshold_bytes` at the top level of the
+upstream server manifest:
+
+```yaml
+- name: example-search
+  transport: http
+  url: http://example-search:8080/mcp
+  inline_response_threshold_bytes: 65536
+  tools:
+    - name: search
+      risk: low
+      side_effects: false
+    - name: extract
+      risk: low
+      side_effects: false
+```
+
+All thresholds require a positive integer. Omit the manifest field to inherit
+the global default. Server overrides apply on manifest reload without
+reconnecting the upstream; calls already admitted keep their captured server
+override or effective global default.
+Changing the global environment variable requires a gateway restart.
+
+This threshold controls automatic file delivery of otherwise inline structured
+results. Native upstream files and retained connector responses keep their
+existing delivery rules. Code Mode materialization keeps its separate limits.
+
 ## Retained connector responses
 
 A connector may return a compact HTTP-result envelope whose

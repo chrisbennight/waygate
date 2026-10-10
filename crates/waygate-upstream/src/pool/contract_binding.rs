@@ -342,6 +342,7 @@ pub(super) fn snapshot_inputs_for_classification(
         ),
         annotation_mode,
         approval_mode,
+        inline_response_threshold_bytes: manifest.and_then(|m| m.inline_response_threshold_bytes),
         approved_behavior_hash,
         manifest_version_hash,
         manifest_discriminator,
@@ -357,6 +358,7 @@ pub(super) struct SnapshotInputs {
     pub(super) manifest_facts: ToolFacts,
     pub(super) annotation_mode: bool,
     pub(super) approval_mode: crate::ApprovalMode,
+    pub(super) inline_response_threshold_bytes: Option<std::num::NonZeroUsize>,
     pub(super) approved_behavior_hash: Option<String>,
     pub(super) manifest_version_hash: Option<String>,
     /// The manifest's own dispatch declaration, carried so the fallback arm
@@ -420,6 +422,7 @@ impl UpstreamPool {
             manifest_facts,
             annotation_mode,
             approval_mode,
+            inline_response_threshold_bytes,
             approved_behavior_hash,
             manifest_version_hash,
             manifest_discriminator,
@@ -575,6 +578,7 @@ impl UpstreamPool {
                 )
             };
             snapshot
+                .with_inline_response_threshold_bytes(inline_response_threshold_bytes)
                 .with_operation_classifications(manifest_discriminator.clone(), operations)
                 .with_published_definition_and_task_support(definition, published.native_tasks)
         };
@@ -751,6 +755,7 @@ impl UpstreamPool {
                 };
                 ResolvedInvocationTool::Ready(
                     snapshot
+                        .with_inline_response_threshold_bytes(inline_response_threshold_bytes)
                         .with_operation_classifications(def.discriminator, operations)
                         .with_published_definition_and_task_support(
                             definition,

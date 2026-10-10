@@ -16,6 +16,7 @@
 //! `waygate-core` only (reserved-namespace constants, `RiskTier`).
 
 use std::collections::{BTreeMap, HashSet};
+use std::num::NonZeroUsize;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -244,6 +245,12 @@ pub struct UpstreamManifest {
     /// upstream whose entire authorization contract is enforced in Cedar.
     #[serde(default, skip_serializing_if = "ApprovalMode::is_per_call")]
     pub approval_mode: ApprovalMode,
+    /// Override the gateway's inline-response byte threshold for every tool
+    /// on this upstream. Counts the complete serialized MCP tool result;
+    /// larger successful structured results use gateway file storage.
+    /// Omission inherits the gateway-wide default. Must be positive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_response_threshold_bytes: Option<NonZeroUsize>,
     /// Opt-in RFC 8693 token exchange. When set, the gateway swaps the
     /// caller's access token for a downscoped one audienced at this upstream
     /// (Tier A identity chaining). Absence = Tier B (gateway-minted identity
@@ -2097,6 +2104,7 @@ tools:
             resources: vec![],
             classification_mode: ClassificationMode::Manifest,
             approval_mode: ApprovalMode::PerCall,
+            inline_response_threshold_bytes: None,
             exchange: None,
             auth: None,
             mtls: None,
@@ -2139,6 +2147,46 @@ tools:
         annotation_native.tools[0].approved_behavior_hash = Some("a".repeat(64));
         validate_manifest_invariants(&annotation_native)
             .expect("annotation-native mode with a reviewed behavior hash is valid");
+    }
+
+    #[test]
+    fn inline_response_threshold_is_an_optional_positive_server_setting() {
+        let yaml = "- name: example-search\n  transport: http\n  url: http://example-search.test/mcp\n  tools: []\n";
+        let defaults = parse_manifest_set(yaml).unwrap();
+        assert!(defaults["example-search"]
+            .inline_response_threshold_bytes
+            .is_none());
+        assert!(!serialize_manifest_set(&defaults)
+            .unwrap()
+            .contains("inline_response_threshold_bytes"));
+        let configured = yaml.replace(
+            "  tools:",
+            "  inline_response_threshold_bytes: 65536\n  tools:",
+        );
+        let manifests = parse_manifest_set(&configured).unwrap();
+        assert_eq!(
+            manifests["example-search"]
+                .inline_response_threshold_bytes
+                .unwrap()
+                .get(),
+            65536
+        );
+        let serialized = serialize_manifest_set(&manifests).unwrap();
+        let reparsed = parse_manifest_set(&serialized).unwrap();
+        assert_eq!(
+            reparsed["example-search"].inline_response_threshold_bytes,
+            manifests["example-search"].inline_response_threshold_bytes
+        );
+        for invalid in ["0", "-1", "1.5", "not-a-number"] {
+            let candidate = yaml.replace(
+                "  tools:",
+                &format!("  inline_response_threshold_bytes: {invalid}\n  tools:"),
+            );
+            assert!(
+                parse_manifest_set(&candidate).is_err(),
+                "accepted {invalid}"
+            );
+        }
     }
 
     #[test]
