@@ -126,7 +126,10 @@ fn upstream_latency() -> &'static HistogramVec {
     M.get_or_init(|| {
         register_histogram_vec_with_registry!(
             "mcp_upstream_latency_seconds",
-            "End-to-end upstream call latency (includes identity cell serialization + rmcp dispatch).",
+            "End-to-end upstream call latency (includes slot checkout, per-call session \
+             establishment where the upstream dials per call, and rmcp dispatch). The \
+             establishment share is reported separately by \
+             mcp_upstream_session_establish_seconds.",
             &["server"],
             // Upstream MCPs span a wide range — from local HTTP (< 10ms) to
             // remote network calls (100ms–5s).
@@ -135,6 +138,88 @@ fn upstream_latency() -> &'static HistogramVec {
         )
         .expect("register mcp_upstream_latency_seconds")
     })
+}
+
+fn upstream_session_establish() -> &'static HistogramVec {
+    static M: OnceLock<HistogramVec> = OnceLock::new();
+    M.get_or_init(|| {
+        register_histogram_vec_with_registry!(
+            "mcp_upstream_session_establish_seconds",
+            "Time to establish the upstream session one call will run on, for upstreams that \
+             dial per call. Included in mcp_upstream_latency_seconds, reported separately so the \
+             cost of session isolation is visible on its own.",
+            &["server"],
+            // Session establishment is a connect plus an MCP lifecycle
+            // exchange, so it lands below a whole call but above a local
+            // round trip. Buckets are finer at the low end than the
+            // end-to-end histogram's, where this cost would otherwise
+            // disappear into the first bucket.
+            vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
+            registry()
+        )
+        .expect("register mcp_upstream_session_establish_seconds")
+    })
+}
+
+/// Record one per-call session establishment.
+///
+/// Only an upstream that dials per call observes this. A pooled-session
+/// upstream establishes nothing per call, so it has no series here at all —
+/// which is the comparison an operator weighing the two modes wants, and why
+/// this is not reported as a zero.
+pub fn record_upstream_session_establish(server: &str, seconds: f64) {
+    upstream_session_establish()
+        .with_label_values(&[server])
+        .observe(seconds);
+}
+
+fn upstream_session_isolation() -> &'static GaugeVec {
+    static M: OnceLock<GaugeVec> = OnceLock::new();
+    M.get_or_init(|| {
+        register_gauge_vec_with_registry!(
+            "mcp_upstream_session_isolation",
+            "Resolved session-isolation mode per upstream, 1 on the active mode. Join on `server` \
+             to read the establishment and latency histograms by mode.",
+            &["server", "isolation"],
+            registry()
+        )
+        .expect("register mcp_upstream_session_isolation")
+    })
+}
+
+/// The closed isolation label set for [`set_upstream_session_isolation`].
+pub const UPSTREAM_SESSION_ISOLATIONS: &[&str] = &["per_call", "reuse"];
+
+/// Publish which session-isolation mode an upstream resolved to.
+///
+/// Every label in the closed set is written on every call, so a manifest
+/// change that moves an upstream between modes zeroes the departed series
+/// instead of leaving two modes reading as simultaneously active.
+///
+/// Exposed as its own series rather than as a label on the latency histograms:
+/// those are already per-server, and folding a constant-per-server dimension
+/// into them would multiply their bucket series for a value that does not vary
+/// per observation.
+pub fn set_upstream_session_isolation(server: &str, isolation: &str) {
+    debug_assert!(
+        UPSTREAM_SESSION_ISOLATIONS.contains(&isolation),
+        "isolation label must come from the closed set",
+    );
+    for candidate in UPSTREAM_SESSION_ISOLATIONS {
+        upstream_session_isolation()
+            .with_label_values(&[server, candidate])
+            .set(if *candidate == isolation { 1.0 } else { 0.0 });
+    }
+}
+
+/// Zero every isolation label for a removed upstream, so it stops reading as
+/// though a mode were still active for it.
+pub fn clear_upstream_session_isolation(server: &str) {
+    for candidate in UPSTREAM_SESSION_ISOLATIONS {
+        upstream_session_isolation()
+            .with_label_values(&[server, candidate])
+            .set(0.0);
+    }
 }
 
 fn upstream_call_failures() -> &'static CounterVec {
@@ -2017,6 +2102,10 @@ mod tests {
         record_authz_decision_cache_eviction();
         record_authz_decision_cache_eviction();
         record_upstream_call("example-messages", UpstreamOutcome::Ok, 0.042);
+        record_upstream_session_establish("example-messages", 0.018);
+        record_upstream_session_establish("example-messages", 0.031);
+        set_upstream_session_isolation("example-messages", "per_call");
+        set_upstream_session_isolation("example-observability", "reuse");
         record_upstream_call("example-observability", UpstreamOutcome::Error, 1.5);
         record_upstream_call_failure("example-messages", "initialize");
         record_upstream_call_failure("example-messages", "dispatched_unknown_outcome");
@@ -2308,6 +2397,44 @@ mod tests {
         assert!(text.contains("mcp_tools_list_returned_tools_bucket"));
         assert!(text.contains("mcp_tools_list_serialized_bytes_bucket"));
         assert!(!text.contains("client_name="));
+    }
+
+    /// An upstream that moves between isolation modes must not read as being
+    /// in both. The writer sets every label in the closed set on every call so
+    /// the departed mode drops to zero rather than keeping its last value.
+    #[test]
+    fn changing_session_isolation_zeroes_the_departed_mode() {
+        let server = "isolation-switch-example";
+        set_upstream_session_isolation(server, "per_call");
+        let text = crate::gather_text();
+        assert!(
+            text.lines()
+                .any(|line| line.contains("mcp_upstream_session_isolation")
+                    && line.contains(&format!("server=\"{server}\""))
+                    && line.contains("isolation=\"per_call\"")
+                    && line.ends_with(" 1")),
+            "the active mode reads 1:\n{text}"
+        );
+
+        set_upstream_session_isolation(server, "reuse");
+        let text = crate::gather_text();
+        let series = |isolation: &str| -> Option<String> {
+            text.lines()
+                .find(|line| {
+                    line.contains("mcp_upstream_session_isolation")
+                        && line.contains(&format!("server=\"{server}\""))
+                        && line.contains(&format!("isolation=\"{isolation}\""))
+                })
+                .map(str::to_owned)
+        };
+        assert!(
+            series("reuse").is_some_and(|line| line.ends_with(" 1")),
+            "the new mode reads 1:\n{text}"
+        );
+        assert!(
+            series("per_call").is_some_and(|line| line.ends_with(" 0")),
+            "the departed mode must be zeroed, not left at its last value:\n{text}"
+        );
     }
 
     #[test]

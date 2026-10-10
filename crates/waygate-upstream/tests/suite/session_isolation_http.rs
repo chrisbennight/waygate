@@ -1795,3 +1795,112 @@ async fn annotation_multi_lane_disagreement_fails_closed() {
         err.message,
     );
 }
+
+/// Reported establishment cost must follow the mode that actually incurs it.
+/// A per-call upstream pays a connect and lifecycle exchange on every call and
+/// must say so; a pooled-session upstream pays it at boot only and must have no
+/// per-call series at all, which is the comparison the two modes are chosen on.
+///
+/// Both upstreams live in one pool under distinct names so the assertions read
+/// absolute per-server counts from the process-wide registry without depending
+/// on what other tests in this binary recorded.
+#[tokio::test]
+async fn session_establishment_is_reported_only_where_each_call_establishes_one() {
+    fn establish_count(server: &str) -> u64 {
+        let needle = format!("mcp_upstream_session_establish_seconds_count{{server=\"{server}\"}}");
+        waygate_telemetry::gather_text()
+            .lines()
+            .find_map(|line| line.strip_prefix(&needle))
+            .and_then(|rest| rest.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    let (per_call_addr, per_call_inits) = spawn_mock_upstream().await;
+    let (reuse_addr, reuse_inits) = spawn_mock_upstream().await;
+
+    let mut manifests = BTreeMap::new();
+    let mut per_call = legacy(manifest(per_call_addr, Some(SessionIsolation::PerCall)));
+    per_call.name = "establish-per-call".into();
+    manifests.insert("establish-per-call".into(), per_call);
+    let mut reuse = legacy(manifest(reuse_addr, Some(SessionIsolation::Reuse)));
+    reuse.name = "establish-reuse".into();
+    manifests.insert("establish-reuse".into(), reuse);
+    let pool = UpstreamPool::connect(manifests).await;
+
+    let per_call_boot = per_call_inits.load(Ordering::SeqCst);
+    let reuse_boot = reuse_inits.load(Ordering::SeqCst);
+
+    for _ in 0..3 {
+        pool.call_tool("establish-per-call", "noop", None, None, None)
+            .await
+            .expect("per-call dispatch");
+        pool.call_tool("establish-reuse", "noop", None, None, None)
+            .await
+            .expect("pooled dispatch");
+    }
+
+    // Anchor the metric to the observable protocol behaviour: the per-call
+    // upstream really did mint a session per call, the pooled one really did
+    // not. Without this the counts below could agree with a metric wired to
+    // the wrong path.
+    assert_eq!(
+        per_call_inits.load(Ordering::SeqCst),
+        per_call_boot + 3,
+        "per_call must mint a session per call",
+    );
+    assert_eq!(
+        reuse_inits.load(Ordering::SeqCst),
+        reuse_boot,
+        "reuse must keep running on its pooled session",
+    );
+
+    assert_eq!(
+        establish_count("establish-per-call"),
+        3,
+        "each per-call dispatch must report the session it established",
+    );
+    assert_eq!(
+        establish_count("establish-reuse"),
+        0,
+        "a pooled-session upstream establishes nothing per call, so it must \
+         have no series rather than a zero-valued one",
+    );
+}
+
+/// The resolved mode is published so an operator can read the latency and
+/// establishment histograms by mode, and a manifest change between modes must
+/// not leave an upstream reading as both.
+#[tokio::test]
+async fn the_resolved_session_isolation_mode_is_published() {
+    // Matched by label presence rather than by a rendered label order: the
+    // exposition format sorts label names, which is not the order they are
+    // declared in.
+    fn isolation_series(server: &str, isolation: &str) -> Option<f64> {
+        waygate_telemetry::gather_text()
+            .lines()
+            .filter(|line| line.starts_with("mcp_upstream_session_isolation{"))
+            .filter(|line| line.contains(&format!("server=\"{server}\"")))
+            .find(|line| line.contains(&format!("isolation=\"{isolation}\"")))
+            .and_then(|line| line.rsplit_once(' '))
+            .and_then(|(_, value)| value.trim().parse().ok())
+    }
+
+    let (addr, _) = spawn_mock_upstream().await;
+    let mut manifests = BTreeMap::new();
+    let mut published = legacy(manifest(addr, Some(SessionIsolation::PerCall)));
+    published.name = "isolation-published".into();
+    manifests.insert("isolation-published".into(), published);
+    let pool = UpstreamPool::connect(manifests).await;
+    assert!(pool.is_connected("isolation-published").await);
+
+    assert_eq!(
+        isolation_series("isolation-published", "per_call"),
+        Some(1.0),
+        "the resolved mode must be published",
+    );
+    assert_eq!(
+        isolation_series("isolation-published", "reuse"),
+        Some(0.0),
+        "the inactive mode must be published as zero, not left absent",
+    );
+}

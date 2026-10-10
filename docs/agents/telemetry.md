@@ -155,7 +155,23 @@ Metric semantics and operational uses:
   handling time (semconv `mcp.server.operation.duration`); `outcome` is
   `ok`/`error`, where a tool-level `isError` counts as `error`.
 - `mcp_upstream_latency_seconds{server}` — the client-leg duration (semconv
-  `mcp.client.operation.duration`).
+  `mcp.client.operation.duration`). Covers slot checkout, per-call session
+  establishment where the upstream dials per call, and dispatch.
+- `mcp_upstream_session_establish_seconds{server}` — the establishment share of
+  the line above: the connect and MCP lifecycle exchange a call runs on, for
+  upstreams that dial per call. Observed per successful dial attempt. A
+  pooled-session upstream establishes nothing per call, so it has **no series
+  here at all** rather than a zero — absence is the answer, which is what makes
+  the two isolation modes comparable. Subtract it from the latency histogram to
+  separate what the upstream cost from what isolation cost.
+- `mcp_upstream_session_isolation{server,isolation}` — `1` on the resolved mode
+  (`per_call` / `reuse`), `0` on the other; both labels are rewritten together
+  so a manifest change cannot leave an upstream reading as being in both, and a
+  removed upstream is zeroed on every label. Join it on `server` with the two
+  histograms above, and with
+  `mcp_upstream_protocol_generation{server,generation}`, to read latency by
+  isolation mode and by negotiated protocol without multiplying histogram
+  series for dimensions that do not vary per observation.
 - `mcp_schema_validator_cache_{hits,misses,evictions}_total` and
   `mcp_schema_validator_compile_failures_total` — bounded-cache effectiveness
   and approved schemas refused during Stage 6 validation preparation.

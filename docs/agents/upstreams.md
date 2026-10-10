@@ -334,7 +334,23 @@ This document covers:
   process is a single long-lived session). Set `isolation: reuse` on an
   HTTP/SSE upstream you trust to drain per-session state between calls, to
   save the per-call `initialize` round-trip. stdio always reuses,
-  regardless of the field. The block also carries `scope`
+  regardless of the field.
+
+  **Measure that round-trip before trading it for a wider trust boundary.**
+  What `per_call` costs depends on the upstream and the path to it, so read it
+  from the deployment rather than assuming:
+  `mcp_upstream_session_establish_seconds{server}` is the establishment share
+  and `mcp_upstream_latency_seconds{server}` is the whole call, so their ratio
+  is the share of each call spent establishing a session rather than doing
+  work. `mcp_upstream_session_isolation{server,isolation}` names each
+  upstream's resolved mode, and
+  `mcp_upstream_protocol_generation{server,generation}` its negotiated
+  protocol — join both on `server`. Generation matters here: MCP `2026-07-28`
+  removed protocol-level sessions and the `initialize` handshake, so the
+  establishment leg is a different and typically much cheaper operation on a
+  stateless upstream than on a legacy-lifecycle one, and a measurement taken
+  against one says little about the other. If the establishment share is
+  small, the safe default is also the cheap one and there is nothing to trade. The block also carries `scope`
   (`per_principal` | `shared`, default `per_principal`): because the slot
   pool is shared across callers and the gateway may forward per-caller
   identity to a network upstream (Tier-B `X-MCP-Identity` for any
