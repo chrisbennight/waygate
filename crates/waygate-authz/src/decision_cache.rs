@@ -101,6 +101,13 @@ impl DecisionKey {
 /// avoids maintaining access order under the lock.
 pub(crate) struct DecisionCache {
     inner: Mutex<Inner>,
+    /// Verdicts this cache has actually served. Entry count alone cannot show
+    /// that a repeated question was answered from here rather than decided
+    /// again, because re-deciding and re-inserting an existing key leaves the
+    /// count unchanged. Test-only, so release builds carry neither the counter
+    /// nor the increment.
+    #[cfg(test)]
+    served: std::sync::atomic::AtomicUsize,
 }
 
 struct Inner {
@@ -115,13 +122,21 @@ impl DecisionCache {
                 entries: HashMap::new(),
                 order: VecDeque::new(),
             }),
+            #[cfg(test)]
+            served: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     /// Return the cached verdict for `key`, if present.
     pub(crate) fn get(&self, key: &DecisionKey) -> Option<AuthzResult> {
         let guard = self.lock();
-        guard.entries.get(key).cloned()
+        let found = guard.entries.get(key).cloned();
+        #[cfg(test)]
+        if found.is_some() {
+            self.served
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        found
     }
 
     /// Record `result` for `key`, evicting the oldest entry when full.
@@ -161,6 +176,11 @@ impl DecisionCache {
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.lock().entries.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn served(&self) -> usize {
+        self.served.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -973,6 +993,7 @@ mod tests {
             let cold = CedarEngine::from_source(DISCRIMINATING_POLICY).expect("policy parses");
             let expected = outcome(cold.evaluate_facts(&facts));
             let before = cached.cached_decision_count();
+            let served_before = cached.cached_decisions_served();
             let first = outcome(cached.evaluate_facts(&facts));
             let after_first = cached.cached_decision_count();
             let second = outcome(cached.evaluate_facts(&facts));
@@ -997,7 +1018,15 @@ mod tests {
                 );
                 assert_eq!(
                     after_second, after_first,
-                    "{name}: asking again must be answered from the retained decision",
+                    "{name}: asking again must not retain a second decision",
+                );
+                // The count above is unchanged whether the repeat ask was
+                // served or silently re-decided and re-inserted, so the
+                // served count is what pins the lookup as load-bearing.
+                assert_eq!(
+                    cached.cached_decisions_served(),
+                    served_before + 1,
+                    "{name}: asking again must be answered from the cache, not decided again",
                 );
             } else {
                 assert_eq!(
@@ -1031,6 +1060,11 @@ mod tests {
             engine.cached_decision_count(),
             0,
             "a failure is a property of the attempt, not a decision to retain",
+        );
+        assert_eq!(
+            engine.cached_decisions_served(),
+            0,
+            "a failure must never be answered from the cache",
         );
         assert!(
             engine.evaluate_facts(&facts).is_err(),
@@ -1098,7 +1132,12 @@ mod tests {
         assert_eq!(
             engine.cached_decision_count(),
             1,
-            "the second answer must come from that entry, not a fresh decision",
+            "the second answer must not retain a second decision",
+        );
+        assert_eq!(
+            engine.cached_decisions_served(),
+            1,
+            "the step-up verdict must have been read back from the cache",
         );
     }
 
@@ -1133,7 +1172,12 @@ mod tests {
         assert_eq!(
             engine.cached_decision_count(),
             1,
-            "the second answer must come from that entry, not a fresh decision",
+            "the second answer must not retain a second decision",
+        );
+        assert_eq!(
+            engine.cached_decisions_served(),
+            1,
+            "the approval verdict must have been read back from the cache",
         );
     }
 

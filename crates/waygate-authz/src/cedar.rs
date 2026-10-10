@@ -304,6 +304,15 @@ impl CedarEngine {
         self.decisions.len()
     }
 
+    /// How many verdicts this engine has answered from its cache. Distinct
+    /// from the retained count: re-deciding an already-retained question
+    /// leaves that count unchanged, so only this shows the lookup is
+    /// load-bearing.
+    #[cfg(test)]
+    pub(crate) fn cached_decisions_served(&self) -> usize {
+        self.decisions.served()
+    }
+
     /// The uncached decision: one Cedar pass plus the step-up and approval
     /// inferences that a deny may require.
     fn decide_facts(&self, facts: &Facts, strict: bool) -> Result<AuthzResult, CedarError> {
