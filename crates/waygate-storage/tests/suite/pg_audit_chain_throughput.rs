@@ -6,9 +6,15 @@
 //! actually costs, so a decision about restructuring the chain can rest on a
 //! number rather than on the shape of the code:
 //!
-//! - the sequential rate one tenant's chain sustains, which is also the
-//!   ceiling for the chained best-effort queue, whose worker writes one
-//!   tenant's events in order;
+//! - the sequential rate one tenant's chain sustains on each write path:
+//!   required (fail-closed) writes, which the invocation pipeline makes inline
+//!   for side-effecting calls and which also look up the tenant's export
+//!   routing before commit; and chained best-effort writes in their local
+//!   mode, which skip that lookup and are what the chained best-effort queue's
+//!   worker calls, in order, for one tenant's events — so that rate is the
+//!   queue's per-tenant ceiling. A best-effort event that carries an
+//!   invocation hierarchy uses the export mode and pays the routing lookup
+//!   too, so it runs at roughly the required rate;
 //! - whether per-write cost grows with chain length, which would mean the
 //!   chain-head lookup is not index-backed;
 //! - what concurrent writers on one tenant achieve, versus the same
@@ -72,6 +78,20 @@ async fn sequential(sink: &PgAuditSink, tenant: &TenantId, offset: usize) -> Vec
         sink.record_required(event(tenant, offset + index))
             .await
             .expect("record_required");
+        samples.push(started.elapsed());
+    }
+    samples
+}
+
+/// Sequential chained best-effort writes on one tenant, timing each. This is
+/// the call the chained best-effort queue's worker makes for each event of one
+/// tenant, in order; with a single writer there is no lock contention, so
+/// every event lands, which the caller verifies.
+async fn sequential_best_effort(sink: &PgAuditSink, tenant: &TenantId) -> Vec<Duration> {
+    let mut samples = Vec::with_capacity(WRITES);
+    for index in 0..WRITES {
+        let started = Instant::now();
+        sink.record_chained_best_effort(event(tenant, index)).await;
         samples.push(started.elapsed());
     }
     samples
@@ -149,6 +169,14 @@ async fn chained_write_throughput_by_tenant_concurrency() {
     let deep_total: Duration = deep.iter().sum();
     assert_chain_intact(&sink, &serial, 2 * WRITES).await;
 
+    // One tenant, one writer, chained best-effort in its local mode: the
+    // queue worker's per-tenant ceiling. Every write must land, so a lost
+    // write here would show as a short chain rather than as a faster rate.
+    let best_effort = tenant(&run, "best-effort");
+    let mut best_effort_samples = sequential_best_effort(&sink, &best_effort).await;
+    let best_effort_total: Duration = best_effort_samples.iter().sum();
+    assert_chain_intact(&sink, &best_effort, WRITES).await;
+
     // One tenant, many writers: concurrency the advisory lock serializes.
     let contended = tenant(&run, "contended");
     let contended_elapsed = concurrent(&sink, |_| contended.clone()).await;
@@ -169,24 +197,30 @@ async fn chained_write_throughput_by_tenant_concurrency() {
 
     println!("writes per phase: {WRITES}, concurrent writers: {WRITERS}");
     println!(
-        "one tenant, sequential, chain 0..{WRITES}:        {:>8.0} writes/s  p50 {:?}  p99 {:?}",
+        "required, one tenant, sequential, chain 0..{WRITES}:      {:>8.0} writes/s  p50 {:?}  p99 {:?}",
         rate(WRITES, shallow_total),
         percentile(&mut shallow, 50),
         percentile(&mut shallow, 99),
     );
     println!(
-        "one tenant, sequential, chain {WRITES}..{}:     {:>8.0} writes/s  p50 {:?}  p99 {:?}",
+        "required, one tenant, sequential, chain {WRITES}..{}:   {:>8.0} writes/s  p50 {:?}  p99 {:?}",
         2 * WRITES,
         rate(WRITES, deep_total),
         percentile(&mut deep, 50),
         percentile(&mut deep, 99),
     );
     println!(
-        "one tenant, {WRITERS} concurrent writers:            {:>8.0} writes/s",
+        "best-effort (local), one tenant, sequential:        {:>8.0} writes/s  p50 {:?}  p99 {:?}",
+        rate(WRITES, best_effort_total),
+        percentile(&mut best_effort_samples, 50),
+        percentile(&mut best_effort_samples, 99),
+    );
+    println!(
+        "required, one tenant, {WRITERS} concurrent writers:          {:>8.0} writes/s",
         rate(WRITES / WRITERS * WRITERS, contended_elapsed),
     );
     println!(
-        "{WRITERS} tenants, one writer each:                 {:>8.0} writes/s",
+        "required, {WRITERS} tenants, one writer each:               {:>8.0} writes/s",
         rate(WRITES / WRITERS * WRITERS, spread_elapsed),
     );
 }
