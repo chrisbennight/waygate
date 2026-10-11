@@ -171,6 +171,15 @@ Metric semantics and operational uses:
   `gateway_upstream_protocol_generation` reports for the same server, and that
   gauge must not be used to attribute establishment cost. Unserved or absent
   version strings collapse to `other`.
+  The finite buckets cover the handshake-bounded part of a dial, including the
+  one legacy-lifecycle retry an `auto` upstream may make, so a healthy
+  establishment always reads accurately. Stages the handshake deadline does not
+  bound — name resolution, which runs before it — are limited only by the
+  configurable call budget, and an establishment slowed by them lands in the
+  overflow bucket. A quantile there reads as the top boundary rather than the
+  true value: treat a quantile pinned at the top boundary as "pathologically
+  slow", and read the overflow count (`_count` minus the top `_bucket`) for how
+  many calls were affected.
   Two population caveats, because the obvious ratio against
   `mcp_upstream_latency_seconds` is not sound:
   - Task RPCs (`tasks/get`, `tasks/update`, `tasks/cancel`) establish a session
