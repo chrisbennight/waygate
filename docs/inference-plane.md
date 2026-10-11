@@ -481,9 +481,11 @@ loosening that rule.
   before or around the provider call (I2).
 - **Responses.** A unary response is the provider's Messages body, unchanged. A streamed
   response relays each provider event as a named SSE event (`message_start`,
-  `content_block_delta`, …, `message_stop`). Gateway errors use the Anthropic error envelope
-  (`{"type":"error","error":{"type","message"}}`) with the same HTTP status the canonical
-  surfaces would return.
+  `content_block_delta`, …, `message_stop`). Errors produced by the route and the invocation
+  pipeline use the Anthropic error envelope (`{"type":"error","error":{"type","message"}}`)
+  with the same HTTP status the canonical surfaces would return. Authentication failures are
+  answered earlier by the gateway's shared bearer layer, with its standard `401` challenge and
+  body, exactly as on the canonical surfaces.
 - **Accounting.** Usage is extracted from the native response with the same Anthropic
   extractors as the canonical path, so cache reads and cache creation are recorded and priced
   as described in §4.2. Usage rows carry `inbound_surface = anthropic_messages`.

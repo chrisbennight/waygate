@@ -6,7 +6,9 @@
 //! intact. The route is provider-pinned: a model served by any other protocol
 //! is rejected rather than translated. Governance is identical to the
 //! canonical routes because the call enters the same `InvocationService`
-//! (invariant I1). Responses and errors use the Anthropic wire shapes.
+//! (invariant I1). Responses and the errors this route produces use the
+//! Anthropic wire shapes; authentication failures come from the shared bearer
+//! layer before the route runs, as on the canonical routes.
 
 use super::*;
 
