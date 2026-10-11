@@ -15,7 +15,7 @@ fn parse_native_messages(
     body: serde_json::Map<String, serde_json::Value>,
 ) -> Result<NativeMessagesRequest, InvocationError> {
     let stream = match body.get("stream") {
-        None | Some(serde_json::Value::Null) => false,
+        None => false,
         Some(serde_json::Value::Bool(stream)) => *stream,
         Some(_) => {
             return Err(InvocationError::InvalidArguments(
@@ -182,6 +182,7 @@ mod tests {
         assert!(!parse_native_messages("m", body(ok.clone())).unwrap().stream);
         for (field, bad) in [
             ("stream", json!("yes")),
+            ("stream", Value::Null),
             ("messages", json!("hi")),
             ("max_tokens", json!(0)),
             ("max_tokens", json!(-1)),
