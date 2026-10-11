@@ -29,4 +29,5 @@ mod quarantine_dispatch;
 mod quota_action_selection;
 mod streamable_http_e2e;
 mod tasks_pg;
+mod tool_list_order;
 mod waygate_server;
