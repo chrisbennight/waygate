@@ -223,6 +223,26 @@ enum ToolProjection<'a> {
     BuiltinsOnly { canonical_order: bool },
 }
 
+impl ToolProjection<'_> {
+    /// The presentation a captured tool-list view must match to continue a
+    /// traversal of this projection.
+    fn presentation(
+        self,
+        schema_adapted: bool,
+    ) -> crate::tool_list_pagination::ToolListPresentation {
+        let (projection, canonical_order) = match self {
+            Self::Full { canonical_order } => ("full", canonical_order),
+            Self::SessionDisclosed(_) => ("session_disclosed", false),
+            Self::BuiltinsOnly { canonical_order } => ("builtins_only", canonical_order),
+        };
+        crate::tool_list_pagination::ToolListPresentation {
+            projection,
+            canonical_order,
+            schema_adapted,
+        }
+    }
+}
+
 /// Resolution of the one qualified name shared by the compatibility adapter
 /// and a possible ordinary upstream `searchTools` tool.
 enum SearchToolsNameResolution {
@@ -3263,6 +3283,23 @@ impl GatewayServer {
         self.list_visible_tools_with(principal, projection).await
     }
 
+    /// The stable authorized tool view as `client` is shown it, including any
+    /// presentation-only schema adaptation selected for that client.
+    async fn presented_list_tools(
+        &self,
+        client: &ClientContext,
+        principal: Option<&Principal>,
+        projection: ToolProjection<'_>,
+    ) -> Result<Vec<Tool>, McpError> {
+        let mut visible = self
+            .stable_list_visible_tools_with(principal, projection)
+            .await?;
+        if self.root_composition_active(client) {
+            crate::client_schema::adapt_tools(&mut visible);
+        }
+        Ok(visible)
+    }
+
     /// Build one exact authorization/catalog generation for protocol
     /// tools/list. Durable catalog commits, local policy/catalog publications,
     /// and authoritative per-tool read failures each invalidate the attempt.
@@ -5031,27 +5068,44 @@ impl ServerHandler for GatewayServer {
                 waygate_telemetry::metrics::ToolListProjection::Stateless2026,
             ),
         };
-        let mut visible = self
-            .stable_list_visible_tools_with(principal.as_ref(), projection)
-            .await?;
-        if self.root_composition_active(&client) {
-            crate::client_schema::adapt_tools(&mut visible);
-        }
         let cursor = request
             .as_ref()
             .and_then(|request| request.cursor.as_deref());
         let mut result = match client.generation {
-            ProtocolGeneration::Stateless2026 => crate::tool_list_pagination::paginate(
-                visible,
-                cursor,
-                principal.as_ref(),
-                &self.tool_list_cursor_sealer,
-            )
-            .map(|page| {
-                let mut listed = ListToolsResult::with_all_items(page.tools);
-                listed.next_cursor = page.next_cursor;
-                listed
-            }),
+            ProtocolGeneration::Stateless2026 => {
+                let sealer = &self.tool_list_cursor_sealer;
+                let presentation = projection.presentation(self.root_composition_active(&client));
+                // A continuation is served from the view its traversal
+                // captured for this presentation. Only a first page, or a
+                // continuation without such a view, builds and authorizes the
+                // live catalog.
+                let page = match crate::tool_list_pagination::resume_captured(
+                    cursor,
+                    principal.as_ref(),
+                    presentation,
+                    sealer,
+                ) {
+                    Ok(Some(page)) => Ok(page),
+                    Ok(None) => {
+                        let visible = self
+                            .presented_list_tools(&client, principal.as_ref(), projection)
+                            .await?;
+                        crate::tool_list_pagination::paginate(
+                            visible,
+                            cursor,
+                            principal.as_ref(),
+                            presentation,
+                            sealer,
+                        )
+                    }
+                    Err(error) => Err(error),
+                };
+                page.map(|page| {
+                    let mut listed = ListToolsResult::with_all_items(page.tools);
+                    listed.next_cursor = page.next_cursor;
+                    listed
+                })
+            }
             ProtocolGeneration::Legacy => {
                 // The compatibility projection stays unpaginated: legacy
                 // hosts that predate reliable cursor traversal must continue
@@ -5065,6 +5119,9 @@ impl ServerHandler for GatewayServer {
                         None,
                     ))
                 } else {
+                    let visible = self
+                        .presented_list_tools(&client, principal.as_ref(), projection)
+                        .await?;
                     Ok(ListToolsResult::with_all_items(visible))
                 }
             }
