@@ -108,6 +108,51 @@ The default is three samples per catalog size. For a selected case, set
 `WAYGATE_DISCOVERY_BENCH_SAMPLES` to a value from `1` through `3` to change the
 sample count. Report sample counts and failed responses alongside comparisons.
 
+The opt-in audit-chain diagnostic measures what the per-tenant hash chain's
+serialization costs: the sequential rate one tenant's chain sustains on each
+write path, whether per-write cost grows with chain length, and concurrent
+writers on one tenant versus the same concurrency spread across tenants. The
+two paths differ by one query. Required (fail-closed) writes, made inline for
+side-effecting calls, look up the tenant's export routing before commit.
+Chained best-effort writes without an invocation hierarchy skip it, and are what
+the chained best-effort queue's worker calls for one tenant's events in order —
+so their sequential rate is that queue's per-tenant ceiling. A best-effort event
+carrying an invocation hierarchy pays the lookup and runs at roughly the
+required rate:
+
+```sh
+AUDIT_DATABASE_URL=postgres://... cargo test -p waygate-storage --test suite \
+  pg_audit_chain_throughput -- --ignored --nocapture
+```
+
+Use a disposable database on the same Postgres build as CI, with its default
+durability settings — commit cost dominates a chained write, so disabling
+`fsync` or `synchronous_commit` measures something a deployment does not run.
+The diagnostic verifies every chain it writes, so it also shows concurrency does
+not fork a chain. Its rows are left in place under run-unique tenant ids.
+
+In a running gateway, read chain capacity from these signals, and not from the
+others nearby:
+
+- **The queue cannot keep up:** a growing
+  `mcp_evidence_submission_total{posture="chained_best_effort",outcome="dropped_full"}`,
+  meaning the bounded queue was full when an event arrived. A
+  `mcp_evidence_submission_pending{posture="chained_best_effort"}` that stays
+  near the queue's capacity says the same thing earlier. A merely non-zero
+  pending value does not: it counts the event currently being written.
+- **Writers are contending for a tenant's chain:** a growing
+  `mcp_evidence_chained_best_effort_failures_total{stage="chain_lock_contended"}`.
+  A chained best-effort write that cannot take the tenant lock is dropped
+  rather than waiting; it appears as `outcome="dropped"` in
+  `mcp_evidence_chained_best_effort_total`, while the queue counts the attempt as
+  `processed`, so the queue metrics alone never show this loss.
+- **Required writes are waiting:** tenant-lock wait shows up inside invocation
+  latency, since those writes are inline and block rather than drop.
+
+`dropped_closed`, `dropped_shutdown`, and `dropped_worker_panic` report queue
+lifecycle and recorder faults, not capacity, and should not be read as the chain
+being the limit.
+
 Compare the same build profile, toolchain, host, and database conditions before
 and after a change. These local measurements do not establish production
 capacity. Required tests separately check batch query counts, tenant visibility,

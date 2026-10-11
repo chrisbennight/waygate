@@ -214,6 +214,15 @@ pub struct Config {
     /// worker channel closes, which can leak workers on RST_STREAM. Set via
     /// `GATEWAY_SESSION_KEEPALIVE_SECONDS`.
     pub session_keepalive: Option<Duration>,
+    /// Freshness hint stamped on stateless `tools/list` results, letting a
+    /// client reuse the authorized catalog instead of refetching it on every
+    /// request. A hint, not a promise: the catalog may change inside the
+    /// window, a `tools/list_changed` notification invalidates it at once for
+    /// clients that listen, and every call is still authorized and admitted at
+    /// invocation, so a stale declaration bounds discovery only and never
+    /// grants access. Default 60s; `0` restores the do-not-cache hint
+    /// (`None`). Set via `GATEWAY_TOOLS_LIST_CACHE_TTL_SECONDS`.
+    pub tools_list_cache_ttl: Option<Duration>,
     /// Interval between SSE keepalive comment frames (`:` heartbeats) on
     /// every open streamable-HTTP SSE stream — the standalone GET stream and
     /// long-running POST response streams. These bytes are what stop an
@@ -779,6 +788,13 @@ impl Config {
             "use 0 to disable",
         )?;
 
+        let tools_list_cache_ttl = waygate_core::env::duration_secs_zero_disables(
+            "GATEWAY_TOOLS_LIST_CACHE_TTL_SECONDS",
+            60,
+            1,
+            "use 0 to keep tools/list results immediately stale",
+        )?;
+
         let sse_keepalive = waygate_core::env::duration_secs_zero_disables(
             "GATEWAY_SSE_KEEPALIVE_SECONDS",
             120,
@@ -989,6 +1005,7 @@ impl Config {
             reencrypt_interval,
             peer_jwks_refresh_interval,
             session_keepalive,
+            tools_list_cache_ttl,
             sse_keepalive,
             mcp_ping_interval,
             upstream_call_timeout,
@@ -1694,6 +1711,7 @@ mod tests {
             reencrypt_interval: None,
             peer_jwks_refresh_interval: Duration::from_secs(600),
             session_keepalive: None,
+            tools_list_cache_ttl: None,
             sse_keepalive: None,
             mcp_ping_interval: None,
             upstream_call_timeout: None,

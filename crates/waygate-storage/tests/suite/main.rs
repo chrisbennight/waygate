@@ -19,6 +19,7 @@
 //! local lock (see `discovery-pg` there for the pattern).
 
 mod agent_conversations_pg;
+mod pg_audit_chain_throughput;
 mod pg_llm_budgets;
 mod pg_llm_cache;
 mod pg_llm_catalog;

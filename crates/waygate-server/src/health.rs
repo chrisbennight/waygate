@@ -508,6 +508,7 @@ mod tests {
             reencrypt_interval: None,
             peer_jwks_refresh_interval: std::time::Duration::from_secs(600),
             session_keepalive: Some(std::time::Duration::from_secs(3600)),
+            tools_list_cache_ttl: None,
             sse_keepalive: Some(std::time::Duration::from_secs(120)),
             mcp_ping_interval: Some(std::time::Duration::from_secs(120)),
             upstream_call_timeout: Some(std::time::Duration::from_secs(300)),
