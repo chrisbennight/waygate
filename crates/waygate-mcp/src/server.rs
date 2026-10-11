@@ -557,6 +557,9 @@ pub struct GatewayServer {
     /// to clients that can neither accept the full upstream catalog nor refresh
     /// a progressively disclosed direct-tool list.
     codemode_only_tools_clients: Vec<String>,
+    /// Freshness hint stamped on stateless `tools/list` results. `None` keeps
+    /// the do-not-cache hint (`ttlMs: 0`).
+    tools_list_cache_ttl: Option<std::time::Duration>,
     /// Exact client names selecting presentation-only root-composition adaptation.
     root_composition_clients: Vec<String>,
     /// Set during legacy `initialize` when the session selected the compact
@@ -856,6 +859,7 @@ impl GatewayServer {
             eager_tools_clients: Vec::new(),
             client_eager_tools_list: Arc::new(AtomicBool::new(false)),
             codemode_only_tools_clients: Vec::new(),
+            tools_list_cache_ttl: None,
             root_composition_clients: Vec::new(),
             client_codemode_only_tools_list: Arc::new(AtomicBool::new(false)),
             invocation,
@@ -1046,6 +1050,23 @@ impl GatewayServer {
         self
     }
 
+    /// Let stateless clients treat a `tools/list` result as fresh for `ttl`.
+    ///
+    /// A TTL is a freshness hint, not a promise that the catalog will not
+    /// change: the MCP caching contract lets a server change the data before
+    /// it expires. Within the window a stateless client may hold a
+    /// declaration that has since been withdrawn or re-authorized, and the
+    /// consequence is bounded to discovery — every call is still resolved,
+    /// authorized, and admitted at invocation, so a cached declaration never
+    /// grants access. A `tools/list_changed` notification invalidates a fresh
+    /// result immediately for clients that listen for it. `None` keeps the
+    /// do-not-cache hint.
+    #[must_use]
+    pub fn with_tools_list_cache_ttl(mut self, ttl: Option<std::time::Duration>) -> Self {
+        self.tools_list_cache_ttl = ttl;
+        self
+    }
+
     /// Opt selected clients into presentation-only root-composition adaptation.
     /// Client names never affect authorization or invocation validation.
     #[must_use]
@@ -1140,18 +1161,26 @@ impl GatewayServer {
     /// serde skips `None`). `cacheScope` is always `private` — the catalog
     /// and resource visibility are authorization-filtered per principal, so
     /// a shared-cache `public` scope would leak visibility across
-    /// principals. `ttlMs: 0` (do not cache) remains conservative until a
-    /// later caching change binds a nonzero lifetime to catalog invalidation
-    /// and authorization freshness; the stable projection alone does not
-    /// make those independent inputs cache-safe.
+    /// principals.
+    ///
+    /// `ttl` is the freshness hint; `None` stamps `ttlMs: 0`. Only a result
+    /// whose invalidation the gateway owns should pass one: `tools/list` is a
+    /// projection of the governed catalog, whose changes publish a new epoch
+    /// and a `tools/list_changed` notification. Resource listings pass
+    /// through live upstream data the gateway has no invalidation signal for,
+    /// so they must not be given a freshness the upstream never declared.
     fn stamp_cache_hints(
         &self,
         client: &ClientContext,
+        ttl: Option<std::time::Duration>,
         ttl_ms: &mut Option<u64>,
         cache_scope: &mut Option<rmcp::model::CacheScope>,
     ) {
         if client.generation == ProtocolGeneration::Stateless2026 {
-            *ttl_ms = Some(0);
+            *ttl_ms = Some(
+                ttl.map(|ttl| u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
+                    .unwrap_or(0),
+            );
             *cache_scope = Some(rmcp::model::CacheScope::Private);
         }
     }
@@ -4811,6 +4840,7 @@ impl ServerHandler for GatewayServer {
         };
         self.stamp_cache_hints(
             &self.client_context(&context),
+            None,
             &mut listed.ttl_ms,
             &mut listed.cache_scope,
         );
@@ -5040,7 +5070,12 @@ impl ServerHandler for GatewayServer {
             }
         };
         if let Ok(listed) = result.as_mut() {
-            self.stamp_cache_hints(&client, &mut listed.ttl_ms, &mut listed.cache_scope);
+            self.stamp_cache_hints(
+                &client,
+                self.tools_list_cache_ttl,
+                &mut listed.ttl_ms,
+                &mut listed.cache_scope,
+            );
             waygate_telemetry::metrics::record_tool_list_response(
                 observed_projection,
                 listed.tools.len(),
@@ -5080,7 +5115,7 @@ impl ServerHandler for GatewayServer {
             .list_visible_resources(request, principal.as_ref())
             .await
             .map(|mut listed| {
-                self.stamp_cache_hints(&client, &mut listed.ttl_ms, &mut listed.cache_scope);
+                self.stamp_cache_hints(&client, None, &mut listed.ttl_ms, &mut listed.cache_scope);
                 listed
             });
         waygate_telemetry::metrics::record_server_operation(
@@ -5126,7 +5161,7 @@ impl ServerHandler for GatewayServer {
             .list_visible_resource_templates(principal.as_ref())
             .await
             .map(|mut listed| {
-                self.stamp_cache_hints(&client, &mut listed.ttl_ms, &mut listed.cache_scope);
+                self.stamp_cache_hints(&client, None, &mut listed.ttl_ms, &mut listed.cache_scope);
                 listed
             });
         waygate_telemetry::metrics::record_server_operation(
