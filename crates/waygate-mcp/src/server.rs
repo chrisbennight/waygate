@@ -1977,8 +1977,11 @@ impl GatewayServer {
     /// `RequestContext`. When a principal is supplied we filter servers to
     /// only those the caller can discover.
     pub async fn list_meta_tools(&self, principal: Option<&Principal>) -> Vec<Tool> {
-        self.visible_upstream_servers(principal)
-            .await
+        // The projection owns tool order: a catalog may report its servers in
+        // any order, and that order must not reach the listed array.
+        let mut servers = self.visible_upstream_servers(principal).await;
+        servers.sort_unstable();
+        servers
             .into_iter()
             .map(|server| Self::make_search_tool(&server))
             .collect()

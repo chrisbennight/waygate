@@ -68,6 +68,30 @@ receives a stable, current projection on each request. Authorization changes
 and quarantine can therefore remove a previously selected tool, and the host
 must accept a later direct call refusal rather than cache access as a grant.
 
+The order of that projection is promised, not incidental, so a host can key a
+prompt cache or a client-side list cache on the exact tool array. The MCP 2026
+projection, legacy eager sessions, and Code Mode-only clients receive one
+order sorted by qualified tool name across built-in and upstream tools. The
+pages of one MCP 2026 traversal concatenate to one such order and never mix
+pages from different views; see the
+[pagination contract](sep-1888.md#standard-mcp-path). Legacy progressive
+sessions receive the per-server `searchTools` entries in server-name order,
+then built-in tools in their fixed declaration order, then disclosed tools
+grouped by server name and, within a server, in the session's disclosure
+order.
+In every projection the order does not depend on the order in which upstreams,
+connection lanes, or reloads publish their tools, so republishing the same
+catalog leaves the array unchanged. An authorization filter only removes
+tools: two principals with different visibility each see a stable array, and
+the tools they share keep the same relative order.
+
+MCP 2026 `tools/list` results also carry a freshness hint (`ttlMs`, set by
+`GATEWAY_TOOLS_LIST_CACHE_TTL_SECONDS`) with `cacheScope: private`, because the
+catalog is filtered per caller. The hint lets a host reuse the list for that
+long instead of refetching it on every request; a `tools/list_changed`
+notification invalidates it early. A cached declaration remains discovery
+state, never a grant: the gateway authorizes and admits every call again.
+
 Search and code execution do not become authorization boundaries. Following
 Block's [agent guardrail guidance](https://block.github.io/goose/blog/2026/01/05/agentic-guardrails-and-controls/),
 the gateway treats the agent as a nondeterministic client: it enforces identity,
