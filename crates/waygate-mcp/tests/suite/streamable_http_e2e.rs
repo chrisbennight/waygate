@@ -1744,9 +1744,11 @@ async fn stateless_tools_list_is_stable_before_and_after_search() {
 }
 
 /// The 2026 wire pages one canonical authorized view. Continuations are
-/// opaque, an empty cursor starts the same traversal, and a changed catalog
-/// refuses an old cursor instead of combining generations. The legacy lane
-/// remains a complete unpaginated compatibility projection.
+/// opaque, an empty cursor starts the same traversal, and a catalog change
+/// during a traversal neither fails it nor combines generations: the
+/// continuation pages the view the traversal began with, and a new traversal
+/// sees the change. The legacy lane remains a complete unpaginated
+/// compatibility projection.
 #[tokio::test]
 async fn stateless_tools_list_pages_one_catalog_view_while_legacy_stays_complete() {
     let tool_names = Arc::new(tokio::sync::RwLock::new(
@@ -1759,9 +1761,16 @@ async fn stateless_tools_list_pages_one_catalog_view_while_legacy_stays_complete
         tool_names: Some(Arc::clone(&tool_names)),
         ..DemoCatalog::default()
     });
+    // One sealer per test keeps captured views isolated from concurrently
+    // running tests that share the process-local default.
+    let sealer = Arc::new(waygate_mcp::ToolListCursorSealer::process_local());
     let server = spawn_gateway_custom(
         StreamableHttpServerConfig::default().with_allowed_hosts(vec![ALLOWED_HOST.to_string()]),
-        move || GatewayServer::new(catalog.clone()).with_eager_tools_list(true),
+        move || {
+            GatewayServer::new(catalog.clone())
+                .with_eager_tools_list(true)
+                .with_tool_list_cursor_sealer(Arc::clone(&sealer))
+        },
     )
     .await;
     let url = format!("http://{}/mcp", server.addr);
@@ -1831,7 +1840,7 @@ async fn stateless_tools_list_pages_one_catalog_view_while_legacy_stays_complete
     );
 
     tool_names.write().await[74] = "tool-changed".to_owned();
-    let stale = stateless_response_json(
+    let continued = stateless_response_json(
         stateless_post(
             &client,
             &url,
@@ -1844,8 +1853,22 @@ async fn stateless_tools_list_pages_one_catalog_view_while_legacy_stays_complete
     )
     .await;
     assert_eq!(
-        stale["error"]["code"], -32602,
-        "a changed catalog invalidates its old continuation",
+        continued["result"]["tools"], second["result"]["tools"],
+        "a continuation pages the view its traversal began with",
+    );
+    let fresh = stateless_response_json(
+        stateless_post(&client, &url, 7, "tools/list", json!({}), "probe").await,
+    )
+    .await;
+    let fresh_names: Vec<_> = fresh["result"]["tools"]
+        .as_array()
+        .expect("fresh first page")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect();
+    assert!(
+        !fresh_names.contains(&"demo.tool-000"),
+        "a new traversal reflects the changed catalog",
     );
 
     let malformed = stateless_response_json(

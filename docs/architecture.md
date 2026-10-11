@@ -140,8 +140,10 @@ The hot path for one tool call:
    remain quiet. Standard `tools/list` and gateway discovery retry any read
    that overlaps a publication, remote durable generation change, or
    authoritative per-tool store failure; sustained instability returns a
-   retryable error rather than an incomplete projection. Cursors bind the
-   authorized view and reject cross-generation traversal.
+   retryable error rather than an incomplete projection. A 2026 `tools/list`
+   continuation is served from the authorized view its first page built, held
+   briefly per process; without that view, cursors bind the live authorized
+   view and reject cross-generation traversal.
    Discovery reads governed tool and review state in bounded batches and
    indexes the request's published definitions by name. The same contract
    resolver supplies invocation and discovery snapshots. Authorization still
