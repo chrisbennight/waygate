@@ -140,14 +140,19 @@ The hot path for one tool call:
    remain quiet. Standard `tools/list` and gateway discovery retry any read
    that overlaps a publication, remote durable generation change, or
    authoritative per-tool store failure; sustained instability returns a
-   retryable error rather than an incomplete projection. Cursors bind the
-   authorized view and reject cross-generation traversal.
+   retryable error rather than an incomplete projection. A 2026 `tools/list`
+   continuation is served from the authorized view its first page built, held
+   briefly per process; without that view, cursors bind the live authorized
+   view and reject cross-generation traversal.
    Discovery reads governed tool and review state in bounded batches and
    indexes the request's published definitions by name. The same contract
    resolver supplies invocation and discovery snapshots. Authorization still
    runs for each principal and tool; no authorized catalog is cached across
-   callers. A page still builds the eligible catalog before pagination, so
+   callers. A first page, a discovery page, or a `tools/list` continuation
+   without a held view still builds the eligible catalog before pagination, so
    batching reduces database round trips without claiming constant-time pages.
+   A held `tools/list` view is bound to one principal and presentation and
+   serves only that traversal's continuations.
    Legacy sessions retain the gateway-owned
    `searchTools` compatibility projection; discovered tools are invoked as
    `<server>.<tool>`. Upstream `resources/list` pages and `resources/read`
