@@ -64,6 +64,32 @@ projection filtering reach the budget gate instead of being masked by a stale
 capture. The representative catalog is deterministic CI evidence, not a
 substitute for measuring a deployment's authorization-scoped live catalog.
 
+### Built-in surface
+
+The gateway's own built-in namespaces (`gateway-*`, `codemode`, and the skills
+surface) are the one catalog the project fully controls, so they have a budget
+of their own. `scripts/fixtures/tool-context/builtin-tools-list.json` is the
+complete built-in `tools/list` a fully authorized caller receives with no
+upstream servers, built through the real `GatewayServer` projection from every
+namespace's canonical catalog. The `gateway-server` test
+`builtin_tool_capture_is_current` fails when any built-in declaration changes
+without the capture being regenerated, and
+`builtin_tool_capture_covers_every_namespace` fails when a namespace is left
+out. CI then measures the capture against
+`scripts/fixtures/tool-context/builtin-budget.json`. After an intentional
+change, regenerate the capture and check it against the budget:
+
+```sh
+WAYGATE_UPDATE_TOOL_CONTEXT_CAPTURE=1 \
+  cargo test -p waygate-server --bin gateway-server builtin_tool_context
+node scripts/report-tool-context.mjs \
+  --budget scripts/fixtures/tool-context/builtin-budget.json \
+  scripts/fixtures/tool-context/builtin-tools-list.json
+```
+
+The same ratchet rule applies: growth needs an explicit budget diff with a
+reason, and a reduction lowers the budget in the same change.
+
 The output-schema budget includes the gateway's retained-response delivery
 alternative. Strict clients need the file descriptor and delivery-error schema
 alongside the upstream data schema to validate the result they receive. The limits in the budget file include that schema.

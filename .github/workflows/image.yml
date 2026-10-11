@@ -160,6 +160,11 @@ jobs:
           cargo build --locked -p waygate-mcp --example tool_context_projection
           "${CARGO_TARGET_DIR:-target}/debug/examples/tool_context_projection" |
             node scripts/report-tool-context.mjs --budget scripts/fixtures/tool-context/standard-budget.json -
+          # The gateway's own built-in surface. Its checked-in capture is kept
+          # current by the gateway-server test builtin_tool_capture_is_current.
+          node scripts/report-tool-context.mjs \
+            --budget scripts/fixtures/tool-context/builtin-budget.json \
+            scripts/fixtures/tool-context/builtin-tools-list.json
 
       - if: steps.scope.outputs.rust_scope == 'workspace'
         name: Start test database
