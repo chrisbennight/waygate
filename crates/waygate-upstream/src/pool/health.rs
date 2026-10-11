@@ -568,6 +568,13 @@ pub(super) async fn set_protocol_generation_gauge(name: &str, entry: &Arc<Upstre
         }
     }
     waygate_telemetry::metrics::set_upstream_protocol_generations(name, &counts);
+    // Published alongside the generation counts because the two are read
+    // together: generation says which protocol an upstream negotiated,
+    // isolation says whether each call pays to establish its own session.
+    waygate_telemetry::metrics::set_upstream_session_isolation(
+        name,
+        super::lanes::resolve_isolation(&entry.manifest_snapshot()).metric_label(),
+    );
 }
 
 impl UpstreamPool {
@@ -593,6 +600,7 @@ impl UpstreamPool {
             .map(|generation| (*generation, 0i64))
             .collect();
         waygate_telemetry::metrics::set_upstream_protocol_generations(server, &zeroes);
+        waygate_telemetry::metrics::clear_upstream_session_isolation(server);
         waygate_telemetry::metrics::set_upstream_runtime_state(server, None);
     }
 
@@ -634,6 +642,17 @@ impl UpstreamPool {
             return;
         }
         waygate_telemetry::metrics::set_upstream_protocol_generations(server, &counts);
+        // Published together with the generation counts, under the same
+        // liveness check and publish lock, because the two are read together:
+        // generation says which protocol an upstream negotiated, isolation says
+        // whether each call pays to establish its own session. Both are
+        // manifest-derived or connection-derived facts about the same entry, so
+        // a retired publisher must not be able to leave one current and the
+        // other stale.
+        waygate_telemetry::metrics::set_upstream_session_isolation(
+            server,
+            super::lanes::resolve_isolation(&entry.manifest_snapshot()).metric_label(),
+        );
     }
 }
 

@@ -155,7 +155,65 @@ Metric semantics and operational uses:
   handling time (semconv `mcp.server.operation.duration`); `outcome` is
   `ok`/`error`, where a tool-level `isError` counts as `error`.
 - `mcp_upstream_latency_seconds{server}` — the client-leg duration (semconv
-  `mcp.client.operation.duration`).
+  `mcp.client.operation.duration`). Covers slot checkout, per-call session
+  establishment where the upstream dials per call, and dispatch.
+- `mcp_upstream_session_establish_seconds{server,generation}` — the connect and
+  MCP lifecycle exchange a call runs on, for upstreams that dial per call.
+  Observed per successful dial attempt. **Read it in absolute terms** — a
+  quantile is directly what per-call isolation costs that upstream, which is
+  the question the isolation choice turns on. `generation` is the protocol
+  *that session* negotiated, taken from its own peer info, which is what makes
+  stateless and legacy establishment separable: `2026-07-28` removed
+  protocol-level sessions and the `initialize` handshake, so the two are not
+  the same operation. It is a label rather than a join precisely because it
+  varies per observation — a fresh dial negotiates independently of the pooled
+  lanes, so under `protocol: auto` it can differ from what
+  `gateway_upstream_protocol_generation` reports for the same server, and that
+  gauge must not be used to attribute establishment cost. Unserved or absent
+  version strings collapse to `other`.
+  The finite buckets cover the handshake-bounded part of a dial, including the
+  one legacy-lifecycle retry an `auto` upstream may make, so a healthy
+  establishment always reads accurately. Stages the handshake deadline does not
+  bound — name resolution, which runs before it — are limited only by the
+  configurable call budget, and an establishment slowed by them lands in the
+  overflow bucket. A quantile there reads as the top boundary rather than the
+  true value: treat a quantile pinned at the top boundary as "pathologically
+  slow", and read the overflow count (`_count` minus the top `_bucket`) for how
+  many calls were affected.
+  Two population caveats, because the obvious ratio against
+  `mcp_upstream_latency_seconds` is not sound:
+  - Task RPCs (`tasks/get`, `tasks/update`, `tasks/cancel`) establish a session
+    on a per-call upstream and are counted here, but the latency histogram
+    covers tool calls only. On an upstream that uses tasks the two series
+    describe different populations, so a ratio can exceed 1 and a difference of
+    their sums can go negative.
+  - Once a server has dialled per call, its series stays registered and keeps
+    being exported for the lifetime of the process — after a switch to
+    `reuse`, and after the upstream is removed. Removal zeroes the gauges but
+    cannot retract a histogram, so the series does not go stale and does not
+    disappear until the process restarts; it simply stops gaining
+    observations. **Attribute by current mode over a window
+    (`rate`/`increase`) rather than over lifetime totals**, which is also what
+    makes a departed or switched upstream read as idle instead of as its last
+    cumulative total.
+
+  A pooled-session upstream that has never dialled per call has no series here
+  at all, rather than an exported zero.
+- `mcp_upstream_session_isolation{server,isolation}` — `1` on the resolved mode
+  (`per_call` / `reuse`), `0` on the other; both labels are rewritten together
+  so a manifest change cannot leave an upstream reading as being in both, and a
+  removed upstream is zeroed on every label. Join it on `server` to read the
+  two histograms above **by isolation mode**; it is a separate series rather
+  than a label on them because it does not vary per observation.
+
+  It does **not** make call latency readable by protocol generation, and
+  neither does `gateway_upstream_protocol_generation`: that gauge counts the
+  stored pool lanes, whereas on a per-call upstream the sessions that execute
+  calls negotiate independently, so a boot lane on one generation and calls
+  running on another is a reachable state. `mcp_upstream_latency_seconds`
+  carries only `server`, so it cannot be split that way at all. Establishment
+  is the one leg attributable to a generation, and it carries its own label for
+  exactly that reason.
 - `mcp_schema_validator_cache_{hits,misses,evictions}_total` and
   `mcp_schema_validator_compile_failures_total` — bounded-cache effectiveness
   and approved schemas refused during Stage 6 validation preparation.

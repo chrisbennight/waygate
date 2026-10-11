@@ -334,7 +334,29 @@ This document covers:
   process is a single long-lived session). Set `isolation: reuse` on an
   HTTP/SSE upstream you trust to drain per-session state between calls, to
   save the per-call `initialize` round-trip. stdio always reuses,
-  regardless of the field. The block also carries `scope`
+  regardless of the field.
+
+  **Measure that round-trip before trading it for a wider trust boundary.**
+  What `per_call` costs depends on the upstream and the path to it, so read it
+  from the deployment rather than assuming. A quantile of
+  `mcp_upstream_session_establish_seconds{server}` is what each call pays to
+  establish its own session; compare that against the upstream's own work, from
+  `mcp_upstream_latency_seconds{server}`, in absolute terms rather than as a
+  ratio — the two cover different operation populations, which
+  [the telemetry reference](telemetry.md) sets out. If establishment is a small
+  part of a call, the safe default is also the cheap one and there is nothing
+  to trade.
+
+  `mcp_upstream_session_isolation{server,isolation}` names each upstream's
+  resolved mode; join it on `server`. Generation matters too, and the
+  establishment histogram carries its own `generation` label for it: MCP
+  `2026-07-28` removed protocol-level sessions and the `initialize` handshake,
+  so establishment is a different and typically much cheaper operation on a
+  stateless upstream than on a legacy-lifecycle one, and a measurement taken
+  against one says little about the other. Read that label rather than joining
+  `gateway_upstream_protocol_generation`, which describes the pooled lanes: a
+  per-call session negotiates independently, so under `protocol: auto` the two
+  can disagree for the same upstream. The block also carries `scope`
   (`per_principal` | `shared`, default `per_principal`): because the slot
   pool is shared across callers and the gateway may forward per-caller
   identity to a network upstream (Tier-B `X-MCP-Identity` for any

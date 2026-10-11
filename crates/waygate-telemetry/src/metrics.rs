@@ -126,7 +126,10 @@ fn upstream_latency() -> &'static HistogramVec {
     M.get_or_init(|| {
         register_histogram_vec_with_registry!(
             "mcp_upstream_latency_seconds",
-            "End-to-end upstream call latency (includes identity cell serialization + rmcp dispatch).",
+            "End-to-end upstream call latency (includes slot checkout, per-call session \
+             establishment where the upstream dials per call, and rmcp dispatch). The \
+             establishment share is reported separately by \
+             mcp_upstream_session_establish_seconds.",
             &["server"],
             // Upstream MCPs span a wide range — from local HTTP (< 10ms) to
             // remote network calls (100ms–5s).
@@ -135,6 +138,127 @@ fn upstream_latency() -> &'static HistogramVec {
         )
         .expect("register mcp_upstream_latency_seconds")
     })
+}
+
+/// Bucket boundaries for [`record_upstream_session_establish`], exported so
+/// the upstream crate can assert its handshake-bounded dial still fits inside
+/// them — see the note at the registration site.
+pub const UPSTREAM_SESSION_ESTABLISH_BUCKETS: &[f64] = &[
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0,
+];
+
+fn upstream_session_establish() -> &'static HistogramVec {
+    static M: OnceLock<HistogramVec> = OnceLock::new();
+    M.get_or_init(|| {
+        register_histogram_vec_with_registry!(
+            "mcp_upstream_session_establish_seconds",
+            "Time to establish the upstream session one call will run on, for upstreams that \
+             dial per call, labelled by the protocol that session itself negotiated. Included in \
+             mcp_upstream_latency_seconds, reported separately so the cost of session isolation \
+             is visible on its own.",
+            &["server", "generation"],
+            // Session establishment is a connect plus an MCP lifecycle
+            // exchange, so it lands below a whole call but above a local
+            // round trip. Buckets are finer at the low end than the
+            // end-to-end histogram's, where this cost would otherwise
+            // disappear into the first bucket.
+            //
+            // The top boundary covers the handshake-bounded part of a dial:
+            // two handshake deadlines, because an `auto`-lifecycle dial whose
+            // first leg is rejected at initialize retries under the legacy
+            // lifecycle with a fresh budget. A healthy establishment therefore
+            // always lands in a finite bucket.
+            //
+            // It is deliberately not a bound on every successful dial. Stages
+            // the handshake deadline does not cover — name resolution runs
+            // before it starts — are limited only by the configurable outer
+            // call budget, so no fixed boundary could be one. Such an
+            // establishment lands in the overflow bucket, where a quantile
+            // reads as the top boundary: a saturated quantile means
+            // establishment is pathologically slow, and the overflow count is
+            // how many calls were affected.
+            //
+            // The value is duplicated rather than imported because this is a
+            // leaf crate that must not depend on the upstream crate; the
+            // assertion over there keeps the handshake part in step.
+            UPSTREAM_SESSION_ESTABLISH_BUCKETS.to_vec(),
+            registry()
+        )
+        .expect("register mcp_upstream_session_establish_seconds")
+    })
+}
+
+/// Record one per-call session establishment.
+///
+/// Only an upstream that dials per call observes this. A pooled-session
+/// upstream establishes nothing per call, so it has no series here at all —
+/// which is the comparison an operator weighing the two modes wants, and why
+/// this is not reported as a zero.
+///
+/// `generation` is the protocol *this* session negotiated, taken from its own
+/// peer info, and is a label rather than a join because it genuinely varies per
+/// observation: a fresh dial negotiates independently of the pooled lanes, so
+/// under `protocol: auto` it can differ from what
+/// `gateway_upstream_protocol_generation` reports for the same server. Values
+/// outside [`UPSTREAM_PROTOCOL_GENERATIONS`], including a session whose peer
+/// info carried none, collapse to `other`, keeping the vocabulary
+/// gateway-owned rather than upstream-supplied.
+pub fn record_upstream_session_establish(server: &str, generation: Option<&str>, seconds: f64) {
+    let label = generation
+        .filter(|candidate| UPSTREAM_PROTOCOL_GENERATIONS.contains(candidate))
+        .unwrap_or("other");
+    upstream_session_establish()
+        .with_label_values(&[server, label])
+        .observe(seconds);
+}
+
+fn upstream_session_isolation() -> &'static GaugeVec {
+    static M: OnceLock<GaugeVec> = OnceLock::new();
+    M.get_or_init(|| {
+        register_gauge_vec_with_registry!(
+            "mcp_upstream_session_isolation",
+            "Resolved session-isolation mode per upstream, 1 on the active mode. Join on `server` \
+             to read the establishment and latency histograms by mode.",
+            &["server", "isolation"],
+            registry()
+        )
+        .expect("register mcp_upstream_session_isolation")
+    })
+}
+
+/// The closed isolation label set for [`set_upstream_session_isolation`].
+pub const UPSTREAM_SESSION_ISOLATIONS: &[&str] = &["per_call", "reuse"];
+
+/// Publish which session-isolation mode an upstream resolved to.
+///
+/// Every label in the closed set is written on every call, so a manifest
+/// change that moves an upstream between modes zeroes the departed series
+/// instead of leaving two modes reading as simultaneously active.
+///
+/// Exposed as its own series rather than as a label on the latency histograms:
+/// those are already per-server, and folding a constant-per-server dimension
+/// into them would multiply their bucket series for a value that does not vary
+/// per observation.
+pub fn set_upstream_session_isolation(server: &str, isolation: &str) {
+    debug_assert!(
+        UPSTREAM_SESSION_ISOLATIONS.contains(&isolation),
+        "isolation label must come from the closed set",
+    );
+    for candidate in UPSTREAM_SESSION_ISOLATIONS {
+        upstream_session_isolation()
+            .with_label_values(&[server, candidate])
+            .set(if *candidate == isolation { 1.0 } else { 0.0 });
+    }
+}
+
+/// Zero every isolation label for a removed upstream, so it stops reading as
+/// though a mode were still active for it.
+pub fn clear_upstream_session_isolation(server: &str) {
+    for candidate in UPSTREAM_SESSION_ISOLATIONS {
+        upstream_session_isolation()
+            .with_label_values(&[server, candidate])
+            .set(0.0);
+    }
 }
 
 fn upstream_call_failures() -> &'static CounterVec {
@@ -2017,6 +2141,14 @@ mod tests {
         record_authz_decision_cache_eviction();
         record_authz_decision_cache_eviction();
         record_upstream_call("example-messages", UpstreamOutcome::Ok, 0.042);
+        record_upstream_session_establish("example-messages", Some("2026-07-28"), 0.018);
+        record_upstream_session_establish("example-messages", Some("2025-11-25"), 0.031);
+        // An unserved version string and an absent one both collapse into the
+        // closed vocabulary rather than minting a label from upstream input.
+        record_upstream_session_establish("example-messages", Some("1999-01-01"), 0.044);
+        record_upstream_session_establish("example-messages", None, 0.052);
+        set_upstream_session_isolation("example-messages", "per_call");
+        set_upstream_session_isolation("example-observability", "reuse");
         record_upstream_call("example-observability", UpstreamOutcome::Error, 1.5);
         record_upstream_call_failure("example-messages", "initialize");
         record_upstream_call_failure("example-messages", "dispatched_unknown_outcome");
@@ -2308,6 +2440,44 @@ mod tests {
         assert!(text.contains("mcp_tools_list_returned_tools_bucket"));
         assert!(text.contains("mcp_tools_list_serialized_bytes_bucket"));
         assert!(!text.contains("client_name="));
+    }
+
+    /// An upstream that moves between isolation modes must not read as being
+    /// in both. The writer sets every label in the closed set on every call so
+    /// the departed mode drops to zero rather than keeping its last value.
+    #[test]
+    fn changing_session_isolation_zeroes_the_departed_mode() {
+        let server = "isolation-switch-example";
+        set_upstream_session_isolation(server, "per_call");
+        let text = crate::gather_text();
+        assert!(
+            text.lines()
+                .any(|line| line.contains("mcp_upstream_session_isolation")
+                    && line.contains(&format!("server=\"{server}\""))
+                    && line.contains("isolation=\"per_call\"")
+                    && line.ends_with(" 1")),
+            "the active mode reads 1:\n{text}"
+        );
+
+        set_upstream_session_isolation(server, "reuse");
+        let text = crate::gather_text();
+        let series = |isolation: &str| -> Option<String> {
+            text.lines()
+                .find(|line| {
+                    line.contains("mcp_upstream_session_isolation")
+                        && line.contains(&format!("server=\"{server}\""))
+                        && line.contains(&format!("isolation=\"{isolation}\""))
+                })
+                .map(str::to_owned)
+        };
+        assert!(
+            series("reuse").is_some_and(|line| line.ends_with(" 1")),
+            "the new mode reads 1:\n{text}"
+        );
+        assert!(
+            series("per_call").is_some_and(|line| line.ends_with(" 0")),
+            "the departed mode must be zeroed, not left at its last value:\n{text}"
+        );
     }
 
     #[test]

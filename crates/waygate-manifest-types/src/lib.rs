@@ -418,6 +418,18 @@ pub enum SessionIsolation {
     Reuse,
 }
 
+impl SessionIsolation {
+    /// Stable label for the isolation telemetry series. Fixed here rather than
+    /// derived from the serde spelling so a manifest rename cannot silently
+    /// retire an operator's dashboard query.
+    pub fn metric_label(self) -> &'static str {
+        match self {
+            Self::PerCall => "per_call",
+            Self::Reuse => "reuse",
+        }
+    }
+}
+
 /// Whether a *reused* upstream session may be shared across different
 /// callers of an HTTP/SSE upstream.
 ///

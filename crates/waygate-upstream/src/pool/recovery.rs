@@ -376,6 +376,13 @@ async fn dial_per_call(setup: PerCallDial<'_>) -> Result<PerCallDialSuccess, Per
             setup.negotiated_protocol,
             setup.has_continuation,
         );
+        // Times the connect and MCP lifecycle exchange this call runs on, so
+        // the price of per-call session isolation is readable on its own rather
+        // than only inside the end-to-end call latency. Measured per attempt:
+        // a retried dial reports each attempt it actually spent, and a dial
+        // that fails or times out reports nothing, keeping the histogram a
+        // distribution of establishment cost rather than of failure handling.
+        let establish_started = std::time::Instant::now();
         let dial_result = match remaining(setup.deadline) {
             Some(remaining) => match tokio::time::timeout(remaining, dial).await {
                 Ok(result) => result,
@@ -385,6 +392,23 @@ async fn dial_per_call(setup: PerCallDial<'_>) -> Result<PerCallDialSuccess, Per
             },
             None => dial.await,
         };
+        if let Ok(connected) = dial_result.as_ref() {
+            // Label with the protocol THIS session negotiated, read from its
+            // own peer info. A fresh dial negotiates independently of the
+            // pooled lanes, so under `protocol: auto` it can land on a
+            // different generation than the boot connection — attributing its
+            // cost to the pooled lanes' generation would compare the wrong
+            // populations.
+            waygate_telemetry::metrics::record_upstream_session_establish(
+                setup.server,
+                connected
+                    .service
+                    .peer_info()
+                    .map(|info| info.protocol_version.to_string())
+                    .as_deref(),
+                establish_started.elapsed().as_secs_f64(),
+            );
+        }
         match dial_result {
             Ok(connected) => {
                 return Ok(PerCallDialSuccess {
