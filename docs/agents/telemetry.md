@@ -178,12 +178,15 @@ Metric semantics and operational uses:
     covers tool calls only. On an upstream that uses tasks the two series
     describe different populations, so a ratio can exceed 1 and a difference of
     their sums can go negative.
-  - Once a server has dialled per call its series persists for the process,
-    including after a switch to `reuse` or after the upstream is removed —
-    those establishments did happen, and the series simply stops gaining
+  - Once a server has dialled per call, its series stays registered and keeps
+    being exported for the lifetime of the process — after a switch to
+    `reuse`, and after the upstream is removed. Removal zeroes the gauges but
+    cannot retract a histogram, so the series does not go stale and does not
+    disappear until the process restarts; it simply stops gaining
     observations. **Attribute by current mode over a window
-    (`rate`/`increase`) rather than over lifetime totals**, and let a departed
-    server age out through ordinary scrape staleness as any other series does.
+    (`rate`/`increase`) rather than over lifetime totals**, which is also what
+    makes a departed or switched upstream read as idle instead of as its last
+    cumulative total.
 
   A pooled-session upstream that has never dialled per call has no series here
   at all, rather than an exported zero.
