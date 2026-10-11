@@ -148,8 +148,11 @@ The hot path for one tool call:
    indexes the request's published definitions by name. The same contract
    resolver supplies invocation and discovery snapshots. Authorization still
    runs for each principal and tool; no authorized catalog is cached across
-   callers. A page still builds the eligible catalog before pagination, so
+   callers. A first page, a discovery page, or a `tools/list` continuation
+   without a held view still builds the eligible catalog before pagination, so
    batching reduces database round trips without claiming constant-time pages.
+   A held `tools/list` view is bound to one principal and presentation and
+   serves only that traversal's continuations.
    Legacy sessions retain the gateway-owned
    `searchTools` compatibility projection; discovered tools are invoked as
    `<server>.<tool>`. Upstream `resources/list` pages and `resources/read`
