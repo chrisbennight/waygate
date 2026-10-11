@@ -1515,6 +1515,60 @@ async fn removing_an_upstream_clears_its_refusal_gauge() {
     );
 }
 
+/// A removed upstream must stop reading as though an isolation mode were still
+/// active for it, the same way its refusal gauge is zeroed above.
+#[tokio::test]
+async fn removing_an_upstream_zeroes_its_session_isolation_gauge() {
+    fn isolation_series(server: &str, isolation: &str) -> Option<f64> {
+        waygate_telemetry::gather_text()
+            .lines()
+            .filter(|line| line.starts_with("mcp_upstream_session_isolation{"))
+            .filter(|line| line.contains(&format!("server=\"{server}\"")))
+            .find(|line| line.contains(&format!("isolation=\"{isolation}\"")))
+            .and_then(|line| line.rsplit_once(' '))
+            .and_then(|(_, value)| value.trim().parse().ok())
+    }
+
+    let (addr, _control) = spawn_dynamic_catalog().await;
+    let mut manifest = dynamic_manifest_at(addr);
+    manifest.name = "isolation-drop-mock".to_owned();
+    let pool = UpstreamPool::connect(BTreeMap::from([(
+        "isolation-drop-mock".to_owned(),
+        manifest,
+    )]))
+    .await;
+
+    // This suite's manifest helper pins `reuse`, so that is the mode boot must
+    // mark active here — which also covers the branch the per-call boot test
+    // in the session-isolation suite does not.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while isolation_series("isolation-drop-mock", "reuse") != Some(1.0) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("boot publish must mark the resolved mode active");
+    assert_eq!(
+        isolation_series("isolation-drop-mock", "per_call"),
+        Some(0.0),
+        "the inactive mode must publish as zero",
+    );
+
+    // Reload to an empty manifest set: the upstream is hot-removed.
+    pool.reload_manifests(&BTreeMap::new()).await;
+
+    assert_eq!(
+        isolation_series("isolation-drop-mock", "reuse"),
+        Some(0.0),
+        "a removed upstream must not keep reporting an active isolation mode",
+    );
+    assert_eq!(
+        isolation_series("isolation-drop-mock", "per_call"),
+        Some(0.0),
+        "every label in the closed set must be zeroed on removal",
+    );
+}
+
 /// The steady state: a conforming upstream is passed through untouched and
 /// reports nothing to the operator.
 #[tokio::test]

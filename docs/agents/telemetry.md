@@ -193,11 +193,18 @@ Metric semantics and operational uses:
 - `mcp_upstream_session_isolation{server,isolation}` — `1` on the resolved mode
   (`per_call` / `reuse`), `0` on the other; both labels are rewritten together
   so a manifest change cannot leave an upstream reading as being in both, and a
-  removed upstream is zeroed on every label. Join it on `server` with the two
-  histograms above, and with
-  `gateway_upstream_protocol_generation{server,generation}`, to read latency by
-  isolation mode and by negotiated protocol without multiplying histogram
-  series for dimensions that do not vary per observation.
+  removed upstream is zeroed on every label. Join it on `server` to read the
+  two histograms above **by isolation mode**; it is a separate series rather
+  than a label on them because it does not vary per observation.
+
+  It does **not** make call latency readable by protocol generation, and
+  neither does `gateway_upstream_protocol_generation`: that gauge counts the
+  stored pool lanes, whereas on a per-call upstream the sessions that execute
+  calls negotiate independently, so a boot lane on one generation and calls
+  running on another is a reachable state. `mcp_upstream_latency_seconds`
+  carries only `server`, so it cannot be split that way at all. Establishment
+  is the one leg attributable to a generation, and it carries its own label for
+  exactly that reason.
 - `mcp_schema_validator_cache_{hits,misses,evictions}_total` and
   `mcp_schema_validator_compile_failures_total` — bounded-cache effectiveness
   and approved schemas refused during Stage 6 validation preparation.
