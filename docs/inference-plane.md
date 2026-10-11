@@ -30,6 +30,12 @@
   embed protocols (Gemini `:embedContent`, Cohere `/v1/embed`) are not supported.
   Embeddings *discovery* is wired for **OpenRouter** (its dedicated `/embeddings/models`
   listing); auto-discovery for the other providers is not supported (§7.1).
+- **Native Anthropic Messages surface:** `POST /v1/messages` accepts an Anthropic Messages
+  request body and forwards it to an Anthropic Messages route without canonical translation,
+  unary and streaming. Prompt-cache breakpoints (`cache_control`), extended thinking, native
+  content blocks, and provider server-side tools therefore reach the provider intact. The
+  surface is provider-pinned: it serves only models whose route speaks Anthropic Messages, and
+  every governance stage applies (§4.8).
 - Four providers: **OpenAI** (ChatGPT/Codex subscription → Responses API), **Google Gemini**
   (Code Assist subscription → `generateContent`), **Anthropic** (first-party `x-api-key` →
   Messages API), **OpenRouter** (API key → OpenAI-compatible Chat Completions).
@@ -451,6 +457,42 @@ machinery (§7), the unified pipeline gates (§5), `InferenceRecord`/usage, and 
 
 ---
 
+### 4.8 Native Anthropic Messages profile
+
+The canonical surfaces reject request fields the canonical model does not represent (I6), so
+provider features such as prompt caching are unreachable through them. `POST /v1/messages` is a
+second, provider-pinned surface that keeps the body in the provider's own shape instead of
+loosening that rule.
+
+- **Routing.** The `model` field names a catalog alias, exactly as on the canonical surfaces. The
+  alias must resolve to a chat model whose primary route uses the Anthropic Messages protocol;
+  any other model is rejected with a client error before any gate runs. Fallback targets on
+  other protocols are skipped, because a native body has no rendering for them. Anthropic
+  Messages fallbacks keep the usual pool failover, cooldown, and time-to-first-byte behavior
+  (§7).
+- **Body.** The gateway checks only what its own decisions depend on: the body is a JSON object,
+  `stream` is absent or a boolean, `messages` is an array, and `max_tokens` is a positive
+  integer. It replaces `model` with the route's upstream model and forwards every other field
+  unchanged. The provider validates the rest. The gateway sends its pinned `anthropic-version`
+  header and does not forward client `anthropic-beta` headers.
+- **Governance.** The call enters the same invocation service as the canonical surfaces (I1):
+  the model authorizes as a Cedar `Model` resource, and profile restrictions, request quota, the
+  lagging budget, approval, response capacity, and the pre-call and outcome audit rows all apply
+  before or around the provider call (I2).
+- **Responses.** A unary response is the provider's Messages body, unchanged. A streamed
+  response relays each provider event as a named SSE event (`message_start`,
+  `content_block_delta`, …, `message_stop`). Gateway errors use the Anthropic error envelope
+  (`{"type":"error","error":{"type","message"}}`) with the same HTTP status the canonical
+  surfaces would return.
+- **Accounting.** Usage is extracted from the native response with the same Anthropic
+  extractors as the canonical path, so cache reads and cache creation are recorded and priced
+  as described in §4.2. Usage rows carry `inbound_surface = anthropic_messages`.
+- **Cache.** Native requests are never served from or stored in the gateway exact-match cache
+  (§9), whose key is the canonical request.
+- **Authentication.** Clients authenticate to the gateway with `Authorization: Bearer`, not an
+  `x-api-key` header. Anthropic SDKs support this through their auth-token option; point the
+  SDK's base URL at the gateway root so it calls `/v1/messages`.
+
 ## 5. Invocation flow (normative, LLM specifics)
 
 The shared service owns a thirteen-stage MCP contract. The LLM arm reuses every
@@ -752,6 +794,8 @@ rolling/daily/weekly/monthly. Cost weighting comes from the `llm_models` costing
   reused after upgrading. They expire and are swept normally; no database
   migration or manual purge is required. Cache lookups still follow current
   authorization and budget checks.
+- **Scope:** the canonical chat, Responses, and embeddings surfaces. The native
+  `/v1/messages` surface (§4.8) has no canonical request and is never cached.
 - **Default off — two-key arming.** Caching requires BOTH `GATEWAY_LLM_CACHE_ENABLED=true`
   (system-level; default off, since this is the one place the gateway stores response *content*)
   AND a per-model `cache_ttl_ms` (the per-alias opt-in + the entry's TTL). Either unset ⇒ the
@@ -954,6 +998,8 @@ written (§14).
   auto-discovery is available for OpenRouter; other models require configuration.
 - The discovery dashboard does not expose every model-source or presence field.
 - Cross-protocol fallback routes cannot preserve Responses conversation IDs.
+- The native `/v1/messages` surface does not forward client `anthropic-beta` headers, so
+  provider features that require a beta header are not available through it.
 - An upstream `store:false` request does not disable the gateway's separately
   configured exact-match cache. Keep that cache disabled when local persistence
   is unwanted.
