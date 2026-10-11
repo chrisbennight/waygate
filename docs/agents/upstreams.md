@@ -348,12 +348,15 @@ This document covers:
   to trade.
 
   `mcp_upstream_session_isolation{server,isolation}` names each upstream's
-  resolved mode and `gateway_upstream_protocol_generation{server,generation}`
-  its negotiated protocol; join both on `server`. Generation matters here: MCP
+  resolved mode; join it on `server`. Generation matters too, and the
+  establishment histogram carries its own `generation` label for it: MCP
   `2026-07-28` removed protocol-level sessions and the `initialize` handshake,
   so establishment is a different and typically much cheaper operation on a
   stateless upstream than on a legacy-lifecycle one, and a measurement taken
-  against one says little about the other. The block also carries `scope`
+  against one says little about the other. Read that label rather than joining
+  `gateway_upstream_protocol_generation`, which describes the pooled lanes: a
+  per-call session negotiates independently, so under `protocol: auto` the two
+  can disagree for the same upstream. The block also carries `scope`
   (`per_principal` | `shared`, default `per_principal`): because the slot
   pool is shared across callers and the gateway may forward per-caller
   identity to a network upstream (Tier-B `X-MCP-Identity` for any

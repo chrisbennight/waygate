@@ -157,11 +157,20 @@ Metric semantics and operational uses:
 - `mcp_upstream_latency_seconds{server}` — the client-leg duration (semconv
   `mcp.client.operation.duration`). Covers slot checkout, per-call session
   establishment where the upstream dials per call, and dispatch.
-- `mcp_upstream_session_establish_seconds{server}` — the connect and MCP
-  lifecycle exchange a call runs on, for upstreams that dial per call. Observed
-  per successful dial attempt. **Read it in absolute terms** — a quantile is
-  directly what per-call isolation costs that upstream, which is the question
-  the isolation choice turns on.
+- `mcp_upstream_session_establish_seconds{server,generation}` — the connect and
+  MCP lifecycle exchange a call runs on, for upstreams that dial per call.
+  Observed per successful dial attempt. **Read it in absolute terms** — a
+  quantile is directly what per-call isolation costs that upstream, which is
+  the question the isolation choice turns on. `generation` is the protocol
+  *that session* negotiated, taken from its own peer info, which is what makes
+  stateless and legacy establishment separable: `2026-07-28` removed
+  protocol-level sessions and the `initialize` handshake, so the two are not
+  the same operation. It is a label rather than a join precisely because it
+  varies per observation — a fresh dial negotiates independently of the pooled
+  lanes, so under `protocol: auto` it can differ from what
+  `gateway_upstream_protocol_generation` reports for the same server, and that
+  gauge must not be used to attribute establishment cost. Unserved or absent
+  version strings collapse to `other`.
   Two population caveats, because the obvious ratio against
   `mcp_upstream_latency_seconds` is not sound:
   - Task RPCs (`tasks/get`, `tasks/update`, `tasks/cancel`) establish a session
@@ -169,10 +178,12 @@ Metric semantics and operational uses:
     covers tool calls only. On an upstream that uses tasks the two series
     describe different populations, so a ratio can exceed 1 and a difference of
     their sums can go negative.
-  - An upstream that dialled per call and was later switched to `reuse` keeps
-    the series it already accumulated; those establishments did happen.
-    Attribute by current mode over a window (`rate`/`increase`) rather than
-    over lifetime totals. Only removing the upstream drops the series.
+  - Once a server has dialled per call its series persists for the process,
+    including after a switch to `reuse` or after the upstream is removed —
+    those establishments did happen, and the series simply stops gaining
+    observations. **Attribute by current mode over a window
+    (`rate`/`increase`) rather than over lifetime totals**, and let a departed
+    server age out through ordinary scrape staleness as any other series does.
 
   A pooled-session upstream that has never dialled per call has no series here
   at all, rather than an exported zero.

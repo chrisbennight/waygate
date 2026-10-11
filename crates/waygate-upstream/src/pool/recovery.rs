@@ -392,9 +392,20 @@ async fn dial_per_call(setup: PerCallDial<'_>) -> Result<PerCallDialSuccess, Per
             },
             None => dial.await,
         };
-        if dial_result.is_ok() {
+        if let Ok(connected) = dial_result.as_ref() {
+            // Label with the protocol THIS session negotiated, read from its
+            // own peer info. A fresh dial negotiates independently of the
+            // pooled lanes, so under `protocol: auto` it can land on a
+            // different generation than the boot connection — attributing its
+            // cost to the pooled lanes' generation would compare the wrong
+            // populations.
             waygate_telemetry::metrics::record_upstream_session_establish(
                 setup.server,
+                connected
+                    .service
+                    .peer_info()
+                    .map(|info| info.protocol_version.to_string())
+                    .as_deref(),
                 establish_started.elapsed().as_secs_f64(),
             );
         }

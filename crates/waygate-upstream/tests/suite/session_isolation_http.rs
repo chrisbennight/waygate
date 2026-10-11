@@ -1811,12 +1811,24 @@ async fn session_establishment_is_reported_only_where_each_call_establishes_one(
     // would let an exported zero-valued histogram satisfy an assertion that
     // claims no series exists.
     fn establish_count(server: &str) -> Option<u64> {
-        waygate_telemetry::gather_text()
+        establish_count_for(server, None)
+    }
+
+    /// Summed across generations when `generation` is `None`, so the absence
+    /// contract does not depend on which protocol a session negotiated.
+    fn establish_count_for(server: &str, generation: Option<&str>) -> Option<u64> {
+        let matched: Vec<u64> = waygate_telemetry::gather_text()
             .lines()
             .filter(|line| line.starts_with("mcp_upstream_session_establish_seconds_count{"))
-            .find(|line| line.contains(&format!("server=\"{server}\"")))
-            .and_then(|line| line.rsplit_once(' '))
-            .and_then(|(_, value)| value.trim().parse().ok())
+            .filter(|line| line.contains(&format!("server=\"{server}\"")))
+            .filter(|line| {
+                generation
+                    .is_none_or(|generation| line.contains(&format!("generation=\"{generation}\"")))
+            })
+            .filter_map(|line| line.rsplit_once(' '))
+            .filter_map(|(_, value)| value.trim().parse::<u64>().ok())
+            .collect();
+        (!matched.is_empty()).then(|| matched.iter().sum())
     }
 
     let (per_call_addr, per_call_inits) = spawn_mock_upstream().await;
@@ -1862,6 +1874,15 @@ async fn session_establishment_is_reported_only_where_each_call_establishes_one(
         establish_count("establish-per-call"),
         Some(3),
         "each per-call dispatch must report the session it established",
+    );
+    // These upstreams pin the legacy lifecycle, so the recorded generation
+    // must be the one the dialled session itself negotiated rather than a
+    // default or the pooled lanes' value.
+    assert_eq!(
+        establish_count_for("establish-per-call", Some("2025-11-25")),
+        Some(3),
+        "establishment must be attributed to the protocol its own session \
+         negotiated",
     );
     assert_eq!(
         establish_count("establish-reuse"),

@@ -146,9 +146,10 @@ fn upstream_session_establish() -> &'static HistogramVec {
         register_histogram_vec_with_registry!(
             "mcp_upstream_session_establish_seconds",
             "Time to establish the upstream session one call will run on, for upstreams that \
-             dial per call. Included in mcp_upstream_latency_seconds, reported separately so the \
-             cost of session isolation is visible on its own.",
-            &["server"],
+             dial per call, labelled by the protocol that session itself negotiated. Included in \
+             mcp_upstream_latency_seconds, reported separately so the cost of session isolation \
+             is visible on its own.",
+            &["server", "generation"],
             // Session establishment is a connect plus an MCP lifecycle
             // exchange, so it lands below a whole call but above a local
             // round trip. Buckets are finer at the low end than the
@@ -167,9 +168,21 @@ fn upstream_session_establish() -> &'static HistogramVec {
 /// upstream establishes nothing per call, so it has no series here at all —
 /// which is the comparison an operator weighing the two modes wants, and why
 /// this is not reported as a zero.
-pub fn record_upstream_session_establish(server: &str, seconds: f64) {
+///
+/// `generation` is the protocol *this* session negotiated, taken from its own
+/// peer info, and is a label rather than a join because it genuinely varies per
+/// observation: a fresh dial negotiates independently of the pooled lanes, so
+/// under `protocol: auto` it can differ from what
+/// `gateway_upstream_protocol_generation` reports for the same server. Values
+/// outside [`UPSTREAM_PROTOCOL_GENERATIONS`], including a session whose peer
+/// info carried none, collapse to `other`, keeping the vocabulary
+/// gateway-owned rather than upstream-supplied.
+pub fn record_upstream_session_establish(server: &str, generation: Option<&str>, seconds: f64) {
+    let label = generation
+        .filter(|candidate| UPSTREAM_PROTOCOL_GENERATIONS.contains(candidate))
+        .unwrap_or("other");
     upstream_session_establish()
-        .with_label_values(&[server])
+        .with_label_values(&[server, label])
         .observe(seconds);
 }
 
@@ -210,17 +223,6 @@ pub fn set_upstream_session_isolation(server: &str, isolation: &str) {
             .with_label_values(&[server, candidate])
             .set(if *candidate == isolation { 1.0 } else { 0.0 });
     }
-}
-
-/// Drop a removed upstream's establishment series.
-///
-/// Only for removal, where the upstream no longer exists to report on. A
-/// manifest change that moves a surviving upstream between isolation modes
-/// deliberately keeps its series: those establishments did happen, and erasing
-/// them would destroy history an operator may still be querying. Attribute by
-/// current mode over a window rather than over lifetime totals.
-pub fn clear_upstream_session_establish(server: &str) {
-    let _ = upstream_session_establish().remove_label_values(&[server]);
 }
 
 /// Zero every isolation label for a removed upstream, so it stops reading as
@@ -2113,8 +2115,12 @@ mod tests {
         record_authz_decision_cache_eviction();
         record_authz_decision_cache_eviction();
         record_upstream_call("example-messages", UpstreamOutcome::Ok, 0.042);
-        record_upstream_session_establish("example-messages", 0.018);
-        record_upstream_session_establish("example-messages", 0.031);
+        record_upstream_session_establish("example-messages", Some("2026-07-28"), 0.018);
+        record_upstream_session_establish("example-messages", Some("2025-11-25"), 0.031);
+        // An unserved version string and an absent one both collapse into the
+        // closed vocabulary rather than minting a label from upstream input.
+        record_upstream_session_establish("example-messages", Some("1999-01-01"), 0.044);
+        record_upstream_session_establish("example-messages", None, 0.052);
         set_upstream_session_isolation("example-messages", "per_call");
         set_upstream_session_isolation("example-observability", "reuse");
         record_upstream_call("example-observability", UpstreamOutcome::Error, 1.5);
