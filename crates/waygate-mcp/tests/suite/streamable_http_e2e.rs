@@ -2325,6 +2325,88 @@ async fn cache_hints_are_stamped_for_stateless_and_absent_for_legacy() {
     server.shutdown().await;
 }
 
+/// A configured `tools/list` freshness reaches `tools/list` and nothing else.
+///
+/// The gateway owns invalidation for its tool catalog, so it may let a
+/// stateless client reuse that result. Resource listings and reads are live
+/// upstream data it has no invalidation signal for, so they must keep the
+/// immediately-stale hint rather than inherit a freshness the upstream never
+/// declared. The scope stays private throughout, and the legacy session wire
+/// gains no cache fields.
+#[tokio::test]
+async fn configured_tools_list_freshness_is_scoped_to_tools_list() {
+    let session_ct = CancellationToken::new();
+    let catalog: SharedCatalog = Arc::new(DemoCatalog::default());
+    let server = spawn_gateway_custom(
+        StreamableHttpServerConfig::default()
+            .with_cancellation_token(session_ct.child_token())
+            .with_allowed_hosts(vec![ALLOWED_HOST.to_string()]),
+        move || {
+            GatewayServer::new(catalog.clone())
+                .with_tools_list_cache_ttl(Some(std::time::Duration::from_secs(45)))
+        },
+    )
+    .await;
+    let url = format!("http://{}/mcp", server.addr);
+    let client = reqwest::Client::new();
+
+    let tools = stateless_post(&client, &url, 1, "tools/list", json!({}), "probe")
+        .await
+        .text()
+        .await
+        .expect("body");
+    assert!(
+        tools.contains("\"ttlMs\":45000") && tools.contains("\"cacheScope\":\"private\""),
+        "tools/list carries the configured freshness, still private; got: {tools}"
+    );
+
+    let resources = stateless_post(&client, &url, 2, "resources/list", json!({}), "probe")
+        .await
+        .text()
+        .await
+        .expect("body");
+    assert!(
+        resources.contains("\"ttlMs\":0") && resources.contains("\"cacheScope\":\"private\""),
+        "resources/list must not inherit the tools/list freshness; got: {resources}"
+    );
+    let read = stateless_post(
+        &client,
+        &url,
+        3,
+        "resources/read",
+        json!({"uri": "demo://guide"}),
+        "probe",
+    )
+    .await
+    .text()
+    .await
+    .expect("body");
+    assert!(
+        read.contains("\"ttlMs\":0") && read.contains("\"cacheScope\":\"private\""),
+        "a hint-less resources/read must not inherit the tools/list freshness; got: {read}"
+    );
+
+    let session_id = raw_initialize_session(&client, &url).await;
+    let legacy = client
+        .post(&url)
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json")
+        .header("mcp-session-id", &session_id)
+        .json(&json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}))
+        .send()
+        .await
+        .expect("POST legacy tools/list")
+        .text()
+        .await
+        .expect("body");
+    assert!(
+        !legacy.contains("ttlMs") && !legacy.contains("cacheScope"),
+        "the legacy wire must not grow cache fields when a freshness is configured; got: {legacy}"
+    );
+
+    server.shutdown().await;
+}
+
 /// The security contract of the read pass-through: an upstream freshness
 /// hint survives, but an upstream-declared `public` scope NEVER does — the
 /// body was resolved under the current principal's authorization, so a
