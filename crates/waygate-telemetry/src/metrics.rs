@@ -141,10 +141,10 @@ fn upstream_latency() -> &'static HistogramVec {
 }
 
 /// Bucket boundaries for [`record_upstream_session_establish`], exported so
-/// the upstream crate can assert its handshake deadline still falls inside
-/// them — see the note at the registration site.
+/// the upstream crate can assert the longest successful dial still falls
+/// inside them — see the note at the registration site.
 pub const UPSTREAM_SESSION_ESTABLISH_BUCKETS: &[f64] = &[
-    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0,
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0,
 ];
 
 fn upstream_session_establish() -> &'static HistogramVec {
@@ -163,14 +163,16 @@ fn upstream_session_establish() -> &'static HistogramVec {
             // end-to-end histogram's, where this cost would otherwise
             // disappear into the first bucket.
             //
-            // The top boundary matches the upstream dialer's handshake
-            // deadline, which is the longest a *successful* establishment can
-            // take, so every recorded observation falls in a finite bucket and
-            // a quantile cannot saturate at the largest boundary instead of
-            // reporting the real tail. The value is duplicated rather than
-            // imported because this is a leaf crate that must not depend on
-            // the upstream crate; raising that deadline means raising this
-            // boundary with it.
+            // The top boundary covers the longest a *successful* establishment
+            // can take, so every recorded observation falls in a finite bucket
+            // and a quantile cannot saturate at the largest boundary instead of
+            // reporting the real tail. That bound is two handshake deadlines,
+            // not one: an `auto`-lifecycle dial whose first leg is rejected at
+            // initialize retries under the legacy lifecycle with a fresh
+            // budget, and the measurement spans the whole dial. The value is
+            // duplicated rather than imported because this is a leaf crate that
+            // must not depend on the upstream crate; the assertion over there
+            // is what keeps the two in step.
             UPSTREAM_SESSION_ESTABLISH_BUCKETS.to_vec(),
             registry()
         )
