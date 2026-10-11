@@ -41,4 +41,24 @@ mod tests {
     fn streaming_policy_builds() {
         streaming_client().expect("streaming client policy must build");
     }
+
+    /// A successful establishment is bounded by [`HANDSHAKE_TIMEOUT`], so that
+    /// bound must fall inside the establishment histogram's finite buckets.
+    /// Otherwise slow-but-successful dials land only in the overflow bucket and
+    /// a quantile saturates at the largest boundary instead of reporting the
+    /// real tail. The telemetry crate is a leaf and cannot see this constant,
+    /// so the coupling is checked from here, where both are visible.
+    #[test]
+    fn the_handshake_deadline_fits_inside_the_establishment_buckets() {
+        let largest = waygate_telemetry::metrics::UPSTREAM_SESSION_ESTABLISH_BUCKETS
+            .last()
+            .copied()
+            .expect("establishment buckets are not empty");
+        assert!(
+            largest >= HANDSHAKE_TIMEOUT.as_secs_f64(),
+            "the largest finite establishment bucket ({largest}s) must cover the handshake \
+             deadline ({}s); raising the deadline requires raising the bucket",
+            HANDSHAKE_TIMEOUT.as_secs_f64(),
+        );
+    }
 }

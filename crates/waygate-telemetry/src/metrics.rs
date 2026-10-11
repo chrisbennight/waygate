@@ -140,6 +140,13 @@ fn upstream_latency() -> &'static HistogramVec {
     })
 }
 
+/// Bucket boundaries for [`record_upstream_session_establish`], exported so
+/// the upstream crate can assert its handshake deadline still falls inside
+/// them — see the note at the registration site.
+pub const UPSTREAM_SESSION_ESTABLISH_BUCKETS: &[f64] = &[
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0,
+];
+
 fn upstream_session_establish() -> &'static HistogramVec {
     static M: OnceLock<HistogramVec> = OnceLock::new();
     M.get_or_init(|| {
@@ -155,7 +162,16 @@ fn upstream_session_establish() -> &'static HistogramVec {
             // round trip. Buckets are finer at the low end than the
             // end-to-end histogram's, where this cost would otherwise
             // disappear into the first bucket.
-            vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
+            //
+            // The top boundary matches the upstream dialer's handshake
+            // deadline, which is the longest a *successful* establishment can
+            // take, so every recorded observation falls in a finite bucket and
+            // a quantile cannot saturate at the largest boundary instead of
+            // reporting the real tail. The value is duplicated rather than
+            // imported because this is a leaf crate that must not depend on
+            // the upstream crate; raising that deadline means raising this
+            // boundary with it.
+            UPSTREAM_SESSION_ESTABLISH_BUCKETS.to_vec(),
             registry()
         )
         .expect("register mcp_upstream_session_establish_seconds")
