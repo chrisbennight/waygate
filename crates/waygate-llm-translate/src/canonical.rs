@@ -20,6 +20,9 @@ pub enum Surface {
     Embeddings,
     ImagesGenerations,
     ImagesEdits,
+    /// The provider-native Anthropic Messages surface: the client body is
+    /// forwarded to an Anthropic Messages route without canonical translation.
+    AnthropicMessages,
 }
 
 impl Surface {
@@ -30,6 +33,7 @@ impl Surface {
             Self::Embeddings => "embeddings",
             Self::ImagesGenerations => "images_generations",
             Self::ImagesEdits => "images_edits",
+            Self::AnthropicMessages => "anthropic_messages",
         }
     }
 }

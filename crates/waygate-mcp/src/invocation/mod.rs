@@ -542,6 +542,11 @@ struct InvocationContext<'a> {
     /// surfaces and every MCP tool call.
     embeddings_surface: bool,
     images_surface: Option<waygate_invocation::ImagesSurface>,
+    /// LLM fast-path only: the call arrived on the provider-native Anthropic
+    /// Messages surface (`POST /v1/messages`). The fast-path branches to
+    /// `invoke_native_messages`, which forwards the body untranslated and so
+    /// only accepts a model served by an Anthropic Messages route.
+    native_messages_surface: bool,
     /// The in-app agent acting on the human principal's
     /// behalf (`agent:<name>`), carried from `InvocationRequest::acting_agent`.
     /// Stamped onto every audit row this call emits (`AuditEvent.acting_agent`)
@@ -748,6 +753,7 @@ impl InvocationService for DefaultInvocationService {
             responses_surface: req.responses_surface,
             embeddings_surface: req.embeddings_surface,
             images_surface: req.images_surface,
+            native_messages_surface: req.native_messages_surface,
             acting_agent: req.acting_agent(),
             invocation_hierarchy: req.hierarchy,
             approval_binding,
