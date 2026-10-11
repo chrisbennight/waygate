@@ -269,6 +269,14 @@ pub struct InvocationRequest {
     /// Images API operation; absent for chat, embeddings, and MCP calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images_surface: Option<ImagesSurface>,
+    /// LLM fast-path only: `true` when the call arrived on the provider-native
+    /// Anthropic Messages surface (`POST /v1/messages`). The request body is
+    /// validated and forwarded without canonical translation, so it is only
+    /// accepted for a model served by an Anthropic Messages route. Mutually
+    /// exclusive with the other surface selectors; `false` (the default) for
+    /// the OpenAI-shaped surfaces and every MCP tool call.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_messages_surface: bool,
     /// MRTR retry (SEP-2322): the caller's answers to a previous
     /// `input_required` pause. Passed through to the upstream dispatch
     /// verbatim — the gateway neither inspects nor synthesizes entries.
@@ -311,6 +319,7 @@ impl InvocationRequest {
             responses_surface: false,
             embeddings_surface: false,
             images_surface: None,
+            native_messages_surface: false,
             input_responses: None,
             request_state: None,
             caller_capabilities: None,
@@ -394,6 +403,12 @@ impl InvocationRequest {
     /// Mark this as an OpenAI Responses-surface call (the `/v1/responses` route).
     pub fn with_responses_surface(mut self, responses: bool) -> Self {
         self.responses_surface = responses;
+        self
+    }
+
+    /// Mark this as a provider-native Anthropic Messages call (the `/v1/messages` route).
+    pub fn with_native_messages_surface(mut self, native: bool) -> Self {
+        self.native_messages_surface = native;
         self
     }
 

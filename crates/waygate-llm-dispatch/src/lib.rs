@@ -119,6 +119,20 @@ impl std::fmt::Debug for DispatchOutcome {
     }
 }
 
+/// A provider-native Anthropic Messages request: the client's body, forwarded
+/// without canonical translation. The only field the gateway rewrites is
+/// `model`, which becomes the resolved route's upstream model, so routing and
+/// authorization stay keyed on the catalog alias.
+#[derive(Debug, Clone)]
+pub struct NativeMessagesRequest {
+    /// The catalog alias the client addressed (for metadata and telemetry).
+    pub model_requested: String,
+    /// The client's Messages request body.
+    pub body: serde_json::Map<String, Value>,
+    /// Whether the body asks for an SSE response (`"stream": true`).
+    pub stream: bool,
+}
+
 /// Failure modes of a dispatch, before any post-dispatch pipeline stage.
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
@@ -319,6 +333,40 @@ impl LlmDispatcher {
         fallbacks: &[ResolvedRoute],
         ttfb: Option<Duration>,
     ) -> Result<DispatchOutcome, DispatchError> {
+        self.failover(primary, fallbacks, ttfb, |route| self.dispatch(req, route))
+            .await
+    }
+
+    /// Dispatch a provider-native Anthropic Messages request with the same
+    /// credential-pool failover, cooldown, and time-to-first-byte handling as
+    /// [`dispatch_with_failover`](Self::dispatch_with_failover). Every candidate
+    /// must be an Anthropic Messages route: a native body cannot be rendered for
+    /// another protocol, so the caller filters the pool before calling.
+    pub async fn dispatch_native_messages_with_failover(
+        &self,
+        req: &NativeMessagesRequest,
+        primary: &ResolvedRoute,
+        fallbacks: &[ResolvedRoute],
+        ttfb: Option<Duration>,
+    ) -> Result<DispatchOutcome, DispatchError> {
+        self.failover(primary, fallbacks, ttfb, |route| {
+            self.dispatch_native_messages(req, route)
+        })
+        .await
+    }
+
+    /// The shared failover loop behind the chat and native-Messages dispatchers.
+    async fn failover<'r, F, Fut>(
+        &self,
+        primary: &'r ResolvedRoute,
+        fallbacks: &'r [ResolvedRoute],
+        ttfb: Option<Duration>,
+        attempt: F,
+    ) -> Result<DispatchOutcome, DispatchError>
+    where
+        F: Fn(&'r ResolvedRoute) -> Fut,
+        Fut: std::future::Future<Output = Result<DispatchOutcome, DispatchError>>,
+    {
         // Try non-cooled candidates first, then cooled ones as a last resort:
         // cooldown *deprioritizes* a credential, it never excludes it, so a
         // serviceable request is never hard-blocked even if every live candidate
@@ -334,7 +382,7 @@ impl LlmDispatcher {
             // Settle the streamed first frame within the TTFB deadline (if any);
             // a stall there is retryable and fails over like any other error.
             let started = std::time::Instant::now();
-            let result = match self.dispatch(req, route).await {
+            let result = match attempt(route).await {
                 Ok(outcome) => settle_stream_outcome(outcome, ttfb, started).await,
                 Err(e) => Err(e),
             };
@@ -553,6 +601,78 @@ impl LlmDispatcher {
                 };
                 DispatchOutcome::Unary { record, body }
             }
+            ProviderResponse::Stream(frames) => DispatchOutcome::Stream {
+                record_base,
+                frames,
+            },
+        })
+    }
+
+    /// Dispatch a provider-native Anthropic Messages request to `route`. The
+    /// client body is sent as-is except for `model`, which becomes the route's
+    /// upstream model. A unary response body is returned verbatim; a streamed
+    /// response returns the provider's Messages SSE frames. Usage and finish
+    /// metadata are folded from the native response by the same Anthropic
+    /// extractors the canonical path uses.
+    pub async fn dispatch_native_messages(
+        &self,
+        req: &NativeMessagesRequest,
+        route: &ResolvedRoute,
+    ) -> Result<DispatchOutcome, DispatchError> {
+        // Backstop for the caller's route filter: a native Messages body has no
+        // rendering for another protocol. Not retryable, so failover stops here.
+        if route.protocol != UpstreamProtocol::AnthropicMessages {
+            return Err(DispatchError::UnsupportedProtocol(route.protocol));
+        }
+        let mut body = req.body.clone();
+        body.insert(
+            "model".to_owned(),
+            Value::String(route.upstream_model.clone()),
+        );
+
+        // I4: the bearer is injected and managed by the credential store.
+        let bearer = self
+            .credentials
+            .bearer(route.provider, &route.credential_label)
+            .await?;
+
+        let record_base = InferenceRecord::new(
+            route.provider,
+            route.credential_label.as_str(),
+            req.model_requested.as_str(),
+            Surface::AnthropicMessages,
+            UpstreamProtocol::AnthropicMessages,
+        );
+        let started = std::time::Instant::now();
+
+        let response = self
+            .providers
+            .send(ProviderRequest {
+                base_url: route.base_url.clone(),
+                path: route.path.clone(),
+                bearer,
+                auth: ProviderAuth::Anthropic,
+                body: Value::Object(body),
+                stream: req.stream,
+                account_id: None,
+                codex_ua_version: None,
+            })
+            .await
+            .inspect_err(|_| {
+                waygate_telemetry::metrics::record_llm_request_failure(
+                    route.provider.as_str(),
+                    &record_base.model_requested,
+                    None,
+                    started.elapsed().as_secs_f64(),
+                    waygate_telemetry::metrics::LlmFailurePhase::Dispatch,
+                )
+            })?;
+
+        Ok(match response {
+            ProviderResponse::Unary(body) => DispatchOutcome::Unary {
+                record: extract_anthropic_messages(record_base, &body),
+                body,
+            },
             ProviderResponse::Stream(frames) => DispatchOutcome::Stream {
                 record_base,
                 frames,

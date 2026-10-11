@@ -50,6 +50,7 @@ backends.
 | --- | --- | --- |
 | `/v1/chat/completions` | Unary and streaming chat, tool calls, structured output translation | Features depend on the selected provider protocol. |
 | `/v1/responses` | Responses-shaped ingress and streaming event output | Native Responses preserves protocol-specific features more faithfully; translated providers have a narrower feature set. |
+| `/v1/messages` | Anthropic Messages request and response shapes forwarded without translation, unary and streaming | Serves only models routed to Anthropic Messages. Use it for provider features such as prompt caching; it is not a cross-provider path. Clients authenticate with `Authorization: Bearer`. See [the native profile](../inference-plane.md#48-native-anthropic-messages-profile). |
 | `/v1/embeddings` | Unary OpenAI-compatible embedding requests | Configure an embeddings model; native non-OpenAI embedding protocols are separate work. |
 | `/v1/images/generations` and `/v1/images/edits` | Configured Codex image models through model gates | Follow the [image contract](../images-api.md) for options, uploads, and backend requirements. |
 

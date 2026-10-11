@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
-use crate::canonical::UpstreamProtocol;
+use crate::canonical::{Surface, UpstreamProtocol};
 use crate::outbound::STRUCTURED_OUTPUT_TOOL_NAME;
 use crate::record::{FinishReason, InferenceRecord};
 use crate::response::{
@@ -243,12 +243,18 @@ pub struct AnthropicStreamTranslator {
     /// Whether the structured-output emulation tool streamed — its `tool_use`
     /// stop maps to a normal `stop` finish (the client sees content, not a call).
     emulated_present: bool,
+    /// Whether the request may carry the structured-output emulation. A
+    /// native Messages request is forwarded untranslated, so a tool with the
+    /// sentinel name there is an ordinary client tool.
+    emulation: bool,
 }
 
 impl AnthropicStreamTranslator {
     pub fn new(mut base: InferenceRecord) -> Self {
         base.upstream_protocol = UpstreamProtocol::AnthropicMessages;
+        let emulation = base.inbound_surface != Surface::AnthropicMessages;
         Self {
+            emulation,
             record: base,
             id: None,
             model: None,
@@ -326,7 +332,7 @@ impl AnthropicStreamTranslator {
                 }
                 let cb = cb.unwrap();
                 let name = str_field(cb, "name").unwrap_or_default();
-                if name == STRUCTURED_OUTPUT_TOOL_NAME {
+                if self.emulation && name == STRUCTURED_OUTPUT_TOOL_NAME {
                     self.emulated_present = true;
                     self.tool_blocks.insert(
                         index,
@@ -1832,6 +1838,18 @@ mod tests {
         let s = t.push(r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#);
         assert_eq!(s.chunks[0]["choices"][0]["finish_reason"], "stop");
         assert_eq!(t.snapshot().finish_reason, Some(FinishReason::Stop));
+    }
+
+    #[test]
+    fn native_messages_stream_records_a_sentinel_named_tool_as_a_tool_call() {
+        let mut base = anthropic_base();
+        base.inbound_surface = Surface::AnthropicMessages;
+        let mut t = StreamTranslator::for_record(base);
+        t.push(&format!(
+            r#"{{"type":"content_block_start","index":0,"content_block":{{"type":"tool_use","id":"tu_1","name":"{STRUCTURED_OUTPUT_TOOL_NAME}"}}}}"#
+        ));
+        t.push(r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#);
+        assert_eq!(t.snapshot().finish_reason, Some(FinishReason::ToolUse));
     }
 
     #[test]
