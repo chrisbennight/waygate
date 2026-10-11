@@ -207,7 +207,8 @@ actually intends to propose.
 
 The same rule applies to results whose shape varies by action. The output
 schemas of `get_action_context` and `preview_change` declare `context` and
-`effect` as open objects, discriminated at runtime by `kind`, with a
+`effect` as open objects, discriminated at runtime by `kind` and `domain`
+respectively, with a
 description naming where the exact schema lives. `describe_action` returns
 those exact schemas under `result_schemas` when called with
 `include_result_schemas: true`. They are derived from the same types the tools

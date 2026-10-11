@@ -3297,7 +3297,7 @@
                   }
                 },
                 "preview_effect": {
-                  "description": "JSON Schema of a non-null `preview_change` `effect`, a union\ndiscriminated by its `kind` field.",
+                  "description": "JSON Schema of a non-null `preview_change` `effect`, a union\ndiscriminated by its `domain` field.",
                   "not": {
                     "not": {}
                   }
@@ -3742,7 +3742,7 @@
               }
             },
             "effect": {
-              "description": "Current policy/manifest effect computed by the same helpers as the human\nreview queue, discriminated by `kind`. `null` for other action families\nor when schema validation failed before current state could be read.\nIts exact schema is `describe_action` with `include_result_schemas`,\nat `result_schemas.preview_effect`.",
+              "description": "Current policy/manifest effect computed by the same helpers as the human\nreview queue, discriminated by `domain`. `null` for other action families\nor when schema validation failed before current state could be read.\nIts exact schema is `describe_action` with `include_result_schemas`,\nat `result_schemas.preview_effect`.",
               "additionalProperties": true,
               "anyOf": [
                 {

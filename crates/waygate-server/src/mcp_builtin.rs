@@ -818,7 +818,7 @@ struct ResultSchemas {
     /// by its `kind` field.
     action_context: Value,
     /// JSON Schema of a non-null `preview_change` `effect`, a union
-    /// discriminated by its `kind` field.
+    /// discriminated by its `domain` field.
     preview_effect: Value,
 }
 
@@ -864,7 +864,7 @@ struct PreviewResponse {
     /// Valid worked params for state-dependent policy/manifest actions.
     params_example: Option<Value>,
     /// Current policy/manifest effect computed by the same helpers as the human
-    /// review queue, discriminated by `kind`. `null` for other action families
+    /// review queue, discriminated by `domain`. `null` for other action families
     /// or when schema validation failed before current state could be read.
     /// Its exact schema is `describe_action` with `include_result_schemas`,
     /// at `result_schemas.preview_effect`.
@@ -1785,6 +1785,23 @@ mod tests {
         assert!(effect["description"]
             .as_str()
             .is_some_and(|d| d.contains("result_schemas.preview_effect")));
+        // The described discriminators are the serialized union tags.
+        for (field, schema, tag) in [
+            (context, &schemas["action_context"], "kind"),
+            (effect, &schemas["preview_effect"], "domain"),
+        ] {
+            assert!(field["description"]
+                .as_str()
+                .is_some_and(|d| d.contains(&format!("discriminated by `{tag}`"))));
+            assert!(
+                schema["oneOf"]
+                    .as_array()
+                    .is_some_and(|variants| variants.iter().all(|variant| variant["required"]
+                        .as_array()
+                        .is_some_and(|required| required.contains(&json!(tag))))),
+                "every variant requires its `{tag}` tag: {schema}"
+            );
+        }
     }
 
     #[tokio::test]
