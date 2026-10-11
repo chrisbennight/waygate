@@ -2124,6 +2124,18 @@ mod tests {
             validator.iter_errors(&body).next().is_none(),
             "manifest context validates against the advertised output schema",
         );
+        let exact = serde_json::to_value(schemars::schema_for!(
+            waygate_admin::change_context::ActionContext
+        ))
+        .expect("context schema serializes");
+        assert!(
+            jsonschema::validator_for(&exact)
+                .expect("context schema compiles")
+                .iter_errors(&body["context"])
+                .next()
+                .is_none(),
+            "manifest context validates against the schema describe_action serves",
+        );
         assert_eq!(body["action_type"], "manifest.upsert_servers");
         assert_eq!(body["context"]["kind"], "live_manifests");
         assert_eq!(body["context"]["source"], "live_disk");

@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use waygate_admin::change_context::read_action_context;
+use waygate_admin::change_context::{read_action_context, ActionContextResponse};
 use waygate_admin::AdminState;
 use waygate_oidc::Principal;
 
@@ -32,20 +32,6 @@ struct GetActionContextRequest {
     selector: Option<JsonObject>,
 }
 
-/// The advertised output shape of `waygate_admin::change_context::ActionContextResponse`. The context is
-/// declared open so its per-action variants are fetched on demand rather than
-/// loaded into every client's `tools/list`.
-#[derive(JsonSchema)]
-#[allow(dead_code)] // Schema-only: responses serialize the admin response type.
-struct ActionContextOutput {
-    /// Registered action this context prepares.
-    action_type: String,
-    /// Action-specific current state, discriminated by `kind`. Its exact
-    /// schema is `describe_action` with `include_result_schemas`, at
-    /// `result_schemas.action_context`.
-    context: serde_json::Map<String, Value>,
-}
-
 pub(crate) fn tool_def() -> Tool {
     Tool::new(
         format!("{NAMESPACE}.get_action_context"),
@@ -56,7 +42,7 @@ pub(crate) fn tool_def() -> Tool {
         input_schema::<GetActionContextRequest>(),
     )
     .with_title("Read proposal preparation context")
-    .with_output_schema::<ActionContextOutput>()
+    .with_output_schema::<ActionContextResponse>()
     .annotate(ToolAnnotations::new().read_only(true))
 }
 

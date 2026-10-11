@@ -146,7 +146,12 @@ pub fn context_action_types() -> Vec<&'static str> {
 pub struct ActionContextResponse {
     /// Registered action this context prepares.
     pub action_type: String,
-    /// Action-specific current state.
+    /// Action-specific current state, discriminated by `kind`. Its exact
+    /// schema is `describe_action` with `include_result_schemas`, at
+    /// `result_schemas.action_context`.
+    // Advertised as an open object so the per-action variants are fetched on
+    // demand rather than loaded into every client's `tools/list`.
+    #[schemars(with = "serde_json::Map<String, Value>")]
     pub context: ActionContext,
 }
 
