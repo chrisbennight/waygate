@@ -73,9 +73,12 @@ complete built-in `tools/list` a fully authorized caller receives with no
 upstream servers, built through the real `GatewayServer` projection from every
 namespace's canonical catalog. The `gateway-server` test
 `builtin_tool_capture_is_current` fails when any built-in declaration changes
-without the capture being regenerated, and
-`builtin_tool_capture_covers_every_namespace` fails when a namespace is left
-out. CI then measures the capture against
+without the capture being regenerated.
+`builtin_tool_capture_includes_every_reserved_namespace` fails unless the
+capture covers exactly the namespaces in
+`waygate_core::RESERVED_BUILTIN_NAMESPACES`, where every built-in namespace
+must be reserved, and `builtin_tool_capture_covers_every_namespace` fails when
+a namespace's tools are missing. CI then measures the capture against
 `scripts/fixtures/tool-context/builtin-budget.json`. After an intentional
 change, regenerate the capture and check it against the budget:
 

@@ -113,6 +113,29 @@ fn capture_path() -> PathBuf {
         .join(CAPTURE)
 }
 
+/// The capture's namespaces are exactly the gateway's reserved built-in
+/// namespaces. A new built-in namespace must be reserved so upstream manifests
+/// cannot shadow it, which makes that list the authority this capture is
+/// checked against; an identity-only reservation would need an explicit
+/// exclusion here.
+#[test]
+fn builtin_tool_capture_includes_every_reserved_namespace() {
+    let mut captured: Vec<String> = builtin_catalogs()
+        .into_iter()
+        .map(|catalog| catalog.namespace)
+        .collect();
+    captured.sort();
+    let mut reserved: Vec<String> = waygate_core::RESERVED_BUILTIN_NAMESPACES
+        .iter()
+        .map(|namespace| (*namespace).to_owned())
+        .collect();
+    reserved.sort();
+    assert_eq!(
+        captured, reserved,
+        "add every reserved built-in namespace's surface_catalog() to builtin_catalogs()"
+    );
+}
+
 #[tokio::test]
 async fn builtin_tool_capture_covers_every_namespace() {
     let capture = builtin_tools_list().await;
