@@ -2325,6 +2325,242 @@ async fn cache_hints_are_stamped_for_stateless_and_absent_for_legacy() {
     server.shutdown().await;
 }
 
+/// A configured `tools/list` freshness reaches `tools/list` and nothing else.
+///
+/// The gateway owns invalidation for its tool catalog, so it may let a
+/// stateless client reuse that result. Resource listings and reads are live
+/// upstream data it has no invalidation signal for, so they must keep the
+/// immediately-stale hint rather than inherit a freshness the upstream never
+/// declared. The scope stays private throughout, and the legacy session wire
+/// gains no cache fields.
+#[tokio::test]
+async fn configured_tools_list_freshness_is_scoped_to_tools_list() {
+    let session_ct = CancellationToken::new();
+    let catalog: SharedCatalog = Arc::new(DemoCatalog::default());
+    let server = spawn_gateway_custom(
+        StreamableHttpServerConfig::default()
+            .with_cancellation_token(session_ct.child_token())
+            .with_allowed_hosts(vec![ALLOWED_HOST.to_string()]),
+        move || {
+            GatewayServer::new(catalog.clone())
+                .with_tools_list_cache_ttl(Some(std::time::Duration::from_secs(45)))
+        },
+    )
+    .await;
+    let url = format!("http://{}/mcp", server.addr);
+    let client = reqwest::Client::new();
+
+    let tools = stateless_post(&client, &url, 1, "tools/list", json!({}), "probe")
+        .await
+        .text()
+        .await
+        .expect("body");
+    assert!(
+        tools.contains("\"ttlMs\":45000") && tools.contains("\"cacheScope\":\"private\""),
+        "tools/list carries the configured freshness, still private; got: {tools}"
+    );
+
+    let resources = stateless_post(&client, &url, 2, "resources/list", json!({}), "probe")
+        .await
+        .text()
+        .await
+        .expect("body");
+    assert!(
+        resources.contains("\"ttlMs\":0") && resources.contains("\"cacheScope\":\"private\""),
+        "resources/list must not inherit the tools/list freshness; got: {resources}"
+    );
+    let read = stateless_post(
+        &client,
+        &url,
+        3,
+        "resources/read",
+        json!({"uri": "demo://guide"}),
+        "probe",
+    )
+    .await
+    .text()
+    .await
+    .expect("body");
+    assert!(
+        read.contains("\"ttlMs\":0") && read.contains("\"cacheScope\":\"private\""),
+        "a hint-less resources/read must not inherit the tools/list freshness; got: {read}"
+    );
+
+    let session_id = raw_initialize_session(&client, &url).await;
+    let legacy = client
+        .post(&url)
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json")
+        .header("mcp-session-id", &session_id)
+        .json(&json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}))
+        .send()
+        .await
+        .expect("POST legacy tools/list")
+        .text()
+        .await
+        .expect("body");
+    assert!(
+        !legacy.contains("ttlMs") && !legacy.contains("cacheScope"),
+        "the legacy wire must not grow cache fields when a freshness is configured; got: {legacy}"
+    );
+
+    server.shutdown().await;
+}
+
+/// A freshness hint is only ever stamped on a list built from one stable
+/// catalog and policy generation. While a publication or policy swap is in
+/// progress, `tools/list` returns the retryable `catalog_changing` error
+/// instead of a cacheable result, and the first list after the change commits
+/// carries the configured freshness again.
+#[tokio::test]
+async fn tools_list_freshness_is_never_stamped_on_a_publishing_catalog() {
+    let session_ct = CancellationToken::new();
+    let catalog: SharedCatalog = Arc::new(DemoCatalog::default());
+    let epoch = ToolCatalogEpoch::new();
+    let server_epoch = epoch.clone();
+    let server = spawn_gateway_custom(
+        StreamableHttpServerConfig::default()
+            .with_cancellation_token(session_ct.child_token())
+            .with_allowed_hosts(vec![ALLOWED_HOST.to_string()]),
+        move || {
+            GatewayServer::new(catalog.clone())
+                .with_tool_catalog_epoch(&server_epoch)
+                .with_tools_list_cache_ttl(Some(std::time::Duration::from_secs(45)))
+        },
+    )
+    .await;
+    let url = format!("http://{}/mcp", server.addr);
+    let client = reqwest::Client::new();
+
+    let change = epoch.begin_change();
+    let during = stateless_post(&client, &url, 1, "tools/list", json!({}), "probe")
+        .await
+        .text()
+        .await
+        .expect("body");
+    assert!(
+        during.contains("catalog_changing") && !during.contains("ttlMs"),
+        "a publishing catalog must not yield a cacheable tools/list; got: {during}"
+    );
+    change.commit();
+
+    let after = stateless_post(&client, &url, 2, "tools/list", json!({}), "probe")
+        .await
+        .text()
+        .await
+        .expect("body");
+    assert!(
+        after.contains("\"ttlMs\":45000") && after.contains("demo.echo"),
+        "the first list after the change commits is fresh and cacheable; got: {after}"
+    );
+
+    server.shutdown().await;
+}
+
+/// Allows tool calls until the shared flag is cleared.
+struct RevocableGate(Arc<std::sync::atomic::AtomicBool>);
+
+#[async_trait]
+impl AuthzGate for RevocableGate {
+    async fn may_discover_server(&self, _principal: &Principal, _server: &str) -> bool {
+        true
+    }
+
+    async fn authorize_tool_call(&self, _facts: &waygate_core::Facts) -> AuthzVerdict {
+        if self.0.load(Ordering::SeqCst) {
+            AuthzVerdict::Allow {
+                policy_ids: vec!["permit-tool-call".to_owned()],
+            }
+        } else {
+            AuthzVerdict::Deny {
+                reason: "access revoked".to_owned(),
+                policy_ids: vec!["forbid-tool-call".to_owned()],
+                reasons: vec![],
+            }
+        }
+    }
+}
+
+/// A cached declaration is not a grant: a client that listed a tool while it
+/// was authorized, then calls it after authorization is revoked inside the
+/// advertised freshness window, is refused before the upstream is contacted.
+#[tokio::test]
+async fn a_cached_tool_declaration_does_not_survive_revocation_at_call_time() {
+    let session_ct = CancellationToken::new();
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let catalog: SharedCatalog = Arc::new(DemoCatalog {
+        dispatches: Some(dispatches.clone()),
+        ..DemoCatalog::default()
+    });
+    let allowed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let gate = Arc::new(RevocableGate(allowed.clone()));
+    let server = spawn_gateway_custom_with_principal(
+        StreamableHttpServerConfig::default()
+            .with_cancellation_token(session_ct.child_token())
+            .with_allowed_hosts(vec![ALLOWED_HOST.to_string()]),
+        move || {
+            GatewayServer::with_authz(catalog.clone(), gate.clone())
+                .with_tools_list_cache_ttl(Some(std::time::Duration::from_secs(45)))
+        },
+        Some(wire_principal()),
+    )
+    .await;
+    let url = format!("http://{}/mcp", server.addr);
+    let client = reqwest::Client::new();
+
+    let listed = stateless_post(&client, &url, 1, "tools/list", json!({}), "probe")
+        .await
+        .text()
+        .await
+        .expect("body");
+    assert!(
+        listed.contains("demo.echo") && listed.contains("\"ttlMs\":45000"),
+        "the authorized declaration is listed with a freshness hint; got: {listed}"
+    );
+    stateless_post(
+        &client,
+        &url,
+        2,
+        "tools/call",
+        json!({"name": "demo.echo", "arguments": {}}),
+        "probe",
+    )
+    .await
+    .text()
+    .await
+    .expect("body");
+    assert_eq!(
+        dispatches.load(Ordering::SeqCst),
+        1,
+        "the authorized call dispatches"
+    );
+
+    allowed.store(false, Ordering::SeqCst);
+    let refused = stateless_post(
+        &client,
+        &url,
+        3,
+        "tools/call",
+        json!({"name": "demo.echo", "arguments": {}}),
+        "probe",
+    )
+    .await
+    .text()
+    .await
+    .expect("body");
+    assert_eq!(
+        dispatches.load(Ordering::SeqCst),
+        1,
+        "a revoked tool must not dispatch despite the cached declaration; got: {refused}"
+    );
+    assert!(
+        !refused.contains("called demo.echo"),
+        "the revoked call must not return an upstream result; got: {refused}"
+    );
+
+    server.shutdown().await;
+}
+
 /// The security contract of the read pass-through: an upstream freshness
 /// hint survives, but an upstream-declared `public` scope NEVER does — the
 /// body was resolved under the current principal's authorization, so a
