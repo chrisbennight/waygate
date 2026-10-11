@@ -79,6 +79,24 @@ pub struct BuiltinCatalog {
     pub tools: Vec<CatalogTool>,
 }
 
+/// MCP reads an embedded schema without `$schema` as JSON Schema 2020-12, so
+/// declaring that dialect explicitly on the gateway's own tools only repeats
+/// bytes in every client's `tools/list`. Any other declared dialect is kept.
+const DEFAULT_SCHEMA_DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
+
+fn omit_default_dialect(tool: &mut Tool) {
+    let strip = |schema: &mut Arc<JsonObject>| {
+        if schema.get("$schema").and_then(serde_json::Value::as_str) == Some(DEFAULT_SCHEMA_DIALECT)
+        {
+            Arc::make_mut(schema).remove("$schema");
+        }
+    };
+    strip(&mut tool.input_schema);
+    if let Some(output) = tool.output_schema.as_mut() {
+        strip(output);
+    }
+}
+
 impl BuiltinCatalog {
     pub fn new(
         namespace: impl Into<String>,
@@ -110,6 +128,7 @@ impl BuiltinCatalog {
                 "built-in tool `{}` has a non-self-contained output schema",
                 tool.identity.qualified_name(),
             );
+            omit_default_dialect(&mut tool.definition);
         }
         Self {
             namespace,

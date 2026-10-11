@@ -205,6 +205,20 @@ configuration such as benign URL queries and stdio arguments remains available.
 `tools/list` stays small; both schemas and state are fetched only when an agent
 actually intends to propose.
 
+The same rule applies to results whose shape varies by action. The output
+schemas of `get_action_context` and `preview_change` declare `context` and
+`effect` as open objects, discriminated at runtime by `kind` and `domain`
+respectively, with a
+description naming where the exact schema lives. `describe_action` returns
+those exact schemas under `result_schemas` when called with
+`include_result_schemas: true`. They are derived from the same types the tools
+serialize, so they cannot drift. Inlining every variant would put tens of
+kilobytes of per-action types into every client's `tools/list`.
+
+Built-in schemas omit an explicit `$schema` declaration of JSON Schema
+2020-12, which MCP already assumes when `$schema` is absent; any other
+declared dialect is kept.
+
 After preparing params, `gateway-admin.preview_change` is the read-only
 proposal check. It validates the same current target and freshness witness as
 proposal capture, including the action-specific serialized params cap. Policy
