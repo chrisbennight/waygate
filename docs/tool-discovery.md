@@ -186,9 +186,10 @@ blocks from store outages; the latter returns a typed retryable
 `catalog_unavailable` error rather than a policy denial. This is the ordinary
 [sequence-counter consistency pattern](https://docs.kernel.org/locking/seqlock.html):
 readers reject an in-progress or changed generation rather than exposing a
-mixed snapshot. Standard `tools/list` and gateway discovery cursors also fail
-closed when their authorized view no longer matches, preventing a traversal
-from splicing pages across catalog or policy generations.
+mixed snapshot. A standard `tools/list` continuation is served from the view
+its traversal's first page built while that view is held. Otherwise, like
+gateway discovery cursors, it fails closed when its authorized view no longer
+matches. Neither splices pages across catalog or policy generations.
 
 ## Discovery cost
 
@@ -368,8 +369,11 @@ Use this recovery sequence:
    odd publication generation as transient; sustained odd generations or
    `generation_churn` fallbacks indicate a publication that is not converging.
 4. Cursor rejection is expected after catalog, policy, governance, or
-   definition changes because the client must restart at page one. Investigate
-   a sustained rejection rate only after ruling out expected publication
+   definition changes because the client must restart at page one. Each
+   rejection is logged with the check that failed; `changed_view` is the
+   expected reason. A standard `tools/list` traversal sees it only when it
+   outlives its held view or continues on another replica. Investigate a
+   sustained rejection rate only after ruling out expected publication
    activity.
 5. For reconciliation errors, inspect the manifest validation or catalog-store
    error and correct the source configuration. Do not repair Tantivy directly;
