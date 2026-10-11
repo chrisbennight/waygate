@@ -238,6 +238,10 @@ A tool is not done until:
   that one list; a new tool in an existing namespace is covered for free. This
   is the cross-cutting backstop the per-namespace tests below
   refine;
+- **the built-in context budget covers it.** The checked-in built-in
+  `tools/list` capture is regenerated and stays within
+  `scripts/fixtures/tool-context/builtin-budget.json`; see
+  [the built-in surface budget](../tool-context-budget.md#built-in-surface);
 - it is covered by the `surface_descriptor_matches_served_tools` pattern (one per
   namespace, in `mcp_builtin.rs` / `mcp_observe.rs` / `mcp_control.rs`) so the
   served schema and the surface descriptor cannot drift;
