@@ -2510,6 +2510,9 @@ async fn gateway_main() -> anyhow::Result<()> {
 #[path = "main_tests/builtin_selfdoc_enforcement.rs"]
 mod builtin_selfdoc_enforcement;
 #[cfg(test)]
+#[path = "main_tests/builtin_tool_context.rs"]
+mod builtin_tool_context;
+#[cfg(test)]
 #[path = "main_tests/llm_cache_toggle_tests.rs"]
 mod llm_cache_toggle_tests;
 #[cfg(test)]

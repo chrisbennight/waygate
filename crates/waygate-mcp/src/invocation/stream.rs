@@ -342,11 +342,22 @@ pub(super) struct StreamFinalize {
     pub(super) model_alias: String,
     /// Tee-on-miss store, `Some` only when the model opts into caching.
     pub(super) cache_store: Option<StreamCacheTee>,
-    /// `true` for a `/v1/responses` caller: forward the provider frames as named
-    /// Responses SSE events (passthrough, OpenAI-Responses upstream) rather than
-    /// the OpenAI chat-completion-chunk transport. The translator still folds the
-    /// audit/usage record; only the client framing differs.
-    pub(super) responses_surface: bool,
+    /// How provider frames are presented to the client. The translator folds
+    /// the audit/usage record the same way for every framing.
+    pub(super) framing: ClientFraming,
+}
+
+/// The client transport a streamed inference call is rendered into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClientFraming {
+    /// `/v1/chat/completions`: OpenAI chat-completion chunks ending in `[DONE]`.
+    ChatChunks,
+    /// `/v1/responses`: named Responses events. An OpenAI-Responses upstream's
+    /// frames are relayed as-is; other upstreams are lifted from chat chunks.
+    Responses,
+    /// `/v1/messages`: the provider's own events, relayed as named SSE events
+    /// keyed by each frame's `type`.
+    NativeRelay,
 }
 
 /// Build an OpenAI-chat-shaped `usage` object from a stream's terminal
@@ -449,8 +460,9 @@ pub(super) fn finalizing_inference_stream(
         // chat chunks. Two egresses: an OpenAI-Responses upstream's frames are
         // already Responses events and are passed through 1:1 (R3a,
         // `responses_lifter` is `None`); other upstreams have their normalized chat
-        // chunks lifted into Responses events by the lifter (R3b).
-        responses_surface: bool,
+        // chunks lifted into Responses events by the lifter (R3b). A native
+        // `/v1/messages` caller takes the same 1:1 relay.
+        framing: ClientFraming,
         responses_lifter: Option<waygate_llm_translate::ChatStreamToResponses>,
     }
     // Client-disconnect safety net: if the consumer (axum SSE egress) drops the
@@ -510,7 +522,7 @@ pub(super) fn finalizing_inference_stream(
     // The lifter is engaged only for a Responses caller routed to a NON-Responses
     // upstream: an OpenAI-Responses upstream's frames are passed through 1:1, so it
     // keeps `None`. Read the protocol before `record_base` moves into the translator.
-    let responses_lifter = if fin.responses_surface
+    let responses_lifter = if fin.framing == ClientFraming::Responses
         && fin.record_base.upstream_protocol
             != waygate_llm_translate::UpstreamProtocol::OpenAiResponses
     {
@@ -532,7 +544,7 @@ pub(super) fn finalizing_inference_stream(
         principal_sub: fin.principal_sub,
         model_alias: fin.model_alias,
         cache_store: fin.cache_store,
-        responses_surface: fin.responses_surface,
+        framing: fin.framing,
         responses_lifter,
     };
     futures::stream::unfold(init, |mut st| async move {
@@ -593,12 +605,14 @@ pub(super) fn finalizing_inference_stream(
                                 terminal,
                             });
                         }
-                    } else if st.responses_surface {
+                    } else if st.framing != ClientFraming::ChatChunks {
                         // R3a passthrough: an OpenAI-Responses upstream frame already
-                        // IS a Responses event (its `type` is the SSE event name).
+                        // IS a Responses event (its `type` is the SSE event name), and
+                        // so is an Anthropic Messages frame on the native relay.
                         // Forward it verbatim as a named event — including the
-                        // terminal `response.completed`/`response.incomplete` frame
-                        // (this transport has no `[DONE]` sentinel). Non-JSON frames
+                        // terminal frame (`response.completed`/`response.incomplete`
+                        // or `message_stop`; neither transport has a `[DONE]`
+                        // sentinel). Non-JSON frames
                         // (keepalives) yield nothing. The chat `step.chunks` are
                         // unused here; the audit fold already happened above.
                         if let Ok(event) = serde_json::from_str::<Value>(ev.data.trim()) {

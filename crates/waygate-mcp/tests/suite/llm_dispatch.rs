@@ -2415,6 +2415,7 @@ async fn embeddings_cache_is_per_principal() {
 }
 
 mod images;
+mod native_messages;
 
 #[tokio::test]
 async fn oversized_embeddings_explain_the_limit_without_exposing_the_backend_body() {

@@ -9,7 +9,7 @@
 
 use serde_json::{json, Value};
 
-use crate::canonical::UpstreamProtocol;
+use crate::canonical::{Surface, UpstreamProtocol};
 use crate::outbound::STRUCTURED_OUTPUT_TOOL_NAME;
 use crate::record::{FinishReason, InferenceRecord, TokenUsage};
 
@@ -105,7 +105,11 @@ pub fn extract_anthropic_messages(mut base: InferenceRecord, response: &Value) -
     // sentinel tool), but the client receives a normal completion (the tool call
     // is unwound into content). Record `Stop` so the usage/audit metadata matches
     // the client-visible finish rather than logging it as a tool call.
-    if base.finish_reason == Some(FinishReason::ToolUse) && is_structured_output_emulation(response)
+    // A native Messages request is forwarded untranslated and never carries
+    // the emulation, so a tool with the sentinel name there is a real call.
+    if base.finish_reason == Some(FinishReason::ToolUse)
+        && base.inbound_surface != Surface::AnthropicMessages
+        && is_structured_output_emulation(response)
     {
         base.finish_reason = Some(FinishReason::Stop);
     }
@@ -1222,6 +1226,30 @@ mod tests {
         );
         // Reads as a normal completion, not a tool call.
         assert_eq!(out["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn native_messages_record_keeps_a_sentinel_named_tool_call() {
+        use crate::canonical::Surface;
+        use waygate_llm_credentials::LlmProvider;
+        // A native Messages request is forwarded untranslated, so a client
+        // tool that happens to use the sentinel name is a real tool call.
+        let base = InferenceRecord::new(
+            LlmProvider::Anthropic,
+            "MAIN",
+            "claude-alias",
+            Surface::AnthropicMessages,
+            UpstreamProtocol::AnthropicMessages,
+        );
+        let resp = json!({
+            "stop_reason": "tool_use",
+            "content": [{"type": "tool_use", "id": "tu_1",
+                "name": STRUCTURED_OUTPUT_TOOL_NAME, "input": {}}]
+        });
+        assert_eq!(
+            extract_anthropic_messages(base, &resp).finish_reason,
+            Some(FinishReason::ToolUse)
+        );
     }
 
     #[test]

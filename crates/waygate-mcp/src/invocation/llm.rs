@@ -4,11 +4,12 @@
 
 use super::stream::{
     decision_inputs, finalizing_inference_stream, hold_response_capacity, synthetic_replay_stream,
-    StreamCacheAgg, StreamCacheTee, StreamFinalize,
+    ClientFraming, StreamCacheAgg, StreamCacheTee, StreamFinalize,
 };
 use super::*;
 
 mod images;
+mod native;
 
 impl DefaultInvocationService {
     async fn admit_llm_response(
@@ -37,7 +38,8 @@ impl DefaultInvocationService {
         // Branch on the model's operation, and reject a surface/operation
         // mismatch with a clean client error BEFORE any gate or cost: an
         // embeddings model must arrive on `/v1/embeddings`, and a chat
-        // model on `/v1/chat/completions` or `/v1/responses`. Without this
+        // model on `/v1/chat/completions`, `/v1/responses`, or the native
+        // `/v1/messages`. Without this
         // the embeddings parser would choke on a chat body (or vice-versa)
         // or the wrong body would be POSTed to the wrong upstream path.
         if model.operation == LlmOperation::Images || ctx.images_surface.is_some() {
@@ -45,6 +47,7 @@ impl DefaultInvocationService {
                 || ctx.images_surface.is_none()
                 || ctx.embeddings_surface
                 || ctx.responses_surface
+                || ctx.native_messages_surface
             {
                 return Err(InvocationError::InvalidArguments(
                     "image models require POST /v1/images/generations or /v1/images/edits".into(),
@@ -69,6 +72,8 @@ impl DefaultInvocationService {
         }
         if is_embeddings_model {
             self.invoke_embeddings(ctx, model, dispatcher).await
+        } else if ctx.native_messages_surface {
+            self.invoke_native_messages(ctx, model, dispatcher).await
         } else {
             self.invoke_llm(ctx, model, dispatcher).await
         }
@@ -431,7 +436,11 @@ impl DefaultInvocationService {
                     }),
                     _ => None,
                 };
-                let responses_surface = ctx.responses_surface;
+                let framing = if ctx.responses_surface {
+                    ClientFraming::Responses
+                } else {
+                    ClientFraming::ChatChunks
+                };
                 let stream = finalizing_inference_stream(
                     self.audit.clone(),
                     base_audit,
@@ -444,7 +453,7 @@ impl DefaultInvocationService {
                         principal_sub,
                         model_alias: ctx.tool.to_owned(),
                         cache_store,
-                        responses_surface,
+                        framing,
                     },
                 );
                 Ok(InvocationResponse::Stream(hold_response_capacity(

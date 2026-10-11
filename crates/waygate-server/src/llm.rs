@@ -53,6 +53,7 @@ const MODELS_ENV: &str = "GATEWAY_LLM_MODELS";
 mod embedding_config;
 mod embedding_errors;
 mod images;
+mod messages;
 
 /// Max inbound request body (bytes) for an LLM call.
 const MAX_BODY: usize = 8 * 1024 * 1024;
@@ -882,6 +883,7 @@ pub fn router(
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/responses", post(responses))
         .route("/v1/embeddings", post(embeddings))
+        .route("/v1/messages", post(messages::messages))
         .route("/v1/images/generations", post(images::generations))
         .route("/v1/images/edits", post(images::edits))
         .route("/v1/models", get(list_models))
