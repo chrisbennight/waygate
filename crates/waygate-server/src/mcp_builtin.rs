@@ -367,7 +367,20 @@ impl BuiltinTools for ChangeProposalTools {
                         }
                     },
                 };
-                Ok(structured(&DescribeActionResponse { actions }))
+                let result_schemas = match args.get("include_result_schemas") {
+                    None | Some(Value::Bool(false)) => None,
+                    Some(Value::Bool(true)) => Some(ResultSchemas::current()),
+                    Some(_) => {
+                        return Err(McpError::invalid_params(
+                            "`include_result_schemas` must be a boolean",
+                            None,
+                        ))
+                    }
+                };
+                Ok(structured(&DescribeActionResponse {
+                    actions,
+                    result_schemas,
+                }))
             }
             "get_action_context" => action_context::call(&self.admin_state, principal, &args).await,
             "preview_change" => {
@@ -791,6 +804,37 @@ struct ActionContextEntry {
 #[derive(Serialize, schemars::JsonSchema)]
 struct DescribeActionResponse {
     actions: Vec<ActionEntry>,
+    /// Present only when `include_result_schemas` was true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_schemas: Option<ResultSchemas>,
+}
+
+/// Exact schemas for result objects whose shape varies by action. Their
+/// tools declare these fields as open objects so the per-action detail is
+/// loaded on demand instead of into every client's `tools/list`.
+#[derive(Serialize, schemars::JsonSchema)]
+struct ResultSchemas {
+    /// JSON Schema of `get_action_context` `context`, a union discriminated
+    /// by its `kind` field.
+    action_context: Value,
+    /// JSON Schema of a non-null `preview_change` `effect`, a union
+    /// discriminated by its `kind` field.
+    preview_effect: Value,
+}
+
+impl ResultSchemas {
+    fn current() -> Self {
+        Self {
+            action_context: serde_json::to_value(schemars::schema_for!(
+                waygate_admin::change_context::ActionContext
+            ))
+            .expect("schemars schema serializes to JSON"),
+            preview_effect: serde_json::to_value(schemars::schema_for!(
+                waygate_admin::change_effect_preview::ChangeEffectPreview
+            ))
+            .expect("schemars schema serializes to JSON"),
+        }
+    }
 }
 
 /// Response shape for `preview_change`: proposal-equivalent validation, the
@@ -820,8 +864,11 @@ struct PreviewResponse {
     /// Valid worked params for state-dependent policy/manifest actions.
     params_example: Option<Value>,
     /// Current policy/manifest effect computed by the same helpers as the human
-    /// review queue. `null` for other action families or when schema validation
-    /// failed before current state could be read.
+    /// review queue, discriminated by `kind`. `null` for other action families
+    /// or when schema validation failed before current state could be read.
+    /// Its exact schema is `describe_action` with `include_result_schemas`,
+    /// at `result_schemas.preview_effect`.
+    #[schemars(with = "Option<serde_json::Map<String, Value>>")]
     effect: Option<waygate_admin::change_effect_preview::ChangeEffectPreview>,
 }
 
@@ -889,6 +936,13 @@ fn describe_schema() -> Arc<JsonObject> {
                 "description": "Registry key of the action whose params schema you want, e.g. \
                     `rate_limit.update` or `api_key.mint`. Omit to get the full catalog — every \
                     proposable action paired with its params schema.",
+            },
+            "include_result_schemas": {
+                "type": "boolean",
+                "description": "Also return `result_schemas`: the exact JSON Schemas of the \
+                    `get_action_context` `context` object and the `preview_change` `effect` \
+                    object, which those tools' output schemas leave open to keep `tools/list` \
+                    small. Default false.",
             },
         },
     }))
@@ -1639,6 +1693,98 @@ mod tests {
         .as_object()
         .cloned()
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn describe_action_serves_open_result_schemas_on_request() {
+        let t = tools();
+        let maker = principal(&["mcp:propose"]);
+        let describe = |args: Value| {
+            let t = &t;
+            let maker = &maker;
+            async move {
+                t.call(
+                    "describe_action",
+                    Some(args.as_object().cloned().unwrap()),
+                    Some(maker),
+                )
+                .await
+            }
+        };
+
+        let plain = describe(json!({"action_type": "api_key.mint"}))
+            .await
+            .expect("describe_action")
+            .structured_content
+            .unwrap();
+        assert!(
+            plain.get("result_schemas").is_none(),
+            "result schemas are opt-in"
+        );
+
+        let with = describe(json!({"action_type": "api_key.mint", "include_result_schemas": true}))
+            .await
+            .expect("describe_action with result schemas")
+            .structured_content
+            .unwrap();
+        let schemas = &with["result_schemas"];
+        assert_eq!(
+            schemas["action_context"],
+            serde_json::to_value(schemars::schema_for!(
+                waygate_admin::change_context::ActionContext
+            ))
+            .unwrap(),
+            "the context schema is derived from the type get_action_context serializes"
+        );
+        assert_eq!(
+            schemas["preview_effect"],
+            serde_json::to_value(schemars::schema_for!(
+                waygate_admin::change_effect_preview::ChangeEffectPreview
+            ))
+            .unwrap(),
+            "the effect schema is derived from the type preview_change serializes"
+        );
+        for name in ["action_context", "preview_effect"] {
+            assert!(
+                jsonschema::validator_for(&schemas[name]).is_ok(),
+                "{name} schema compiles"
+            );
+        }
+        let response_schema =
+            serde_json::to_value(schemars::schema_for!(DescribeActionResponse)).unwrap();
+        assert!(
+            jsonschema::validator_for(&response_schema)
+                .unwrap()
+                .iter_errors(&with)
+                .next()
+                .is_none(),
+            "the response validates against the advertised output schema"
+        );
+
+        let err = describe(json!({"include_result_schemas": "yes"}))
+            .await
+            .expect_err("a non-boolean flag is rejected");
+        assert!(err.message.contains("must be a boolean"), "{}", err.message);
+
+        // The tools whose fields these schemas describe point callers at them.
+        let defs = tool_defs();
+        let output = |name: &str| {
+            serde_json::to_value(
+                defs.iter()
+                    .find(|tool| tool.name == format!("{NAMESPACE}.{name}"))
+                    .and_then(|tool| tool.output_schema.clone())
+                    .expect("output schema"),
+            )
+            .unwrap()
+        };
+        let context = &output("get_action_context")["properties"]["context"];
+        let effect = &output("preview_change")["properties"]["effect"];
+        assert!(context["description"]
+            .as_str()
+            .is_some_and(|d| d.contains("result_schemas.action_context")));
+        assert!(effect["description"]
+            .as_str()
+            .is_some_and(|d| d.contains("result_schemas.preview_effect")));
     }
 
     #[tokio::test]
