@@ -108,6 +108,28 @@ The default is three samples per catalog size. For a selected case, set
 `WAYGATE_DISCOVERY_BENCH_SAMPLES` to a value from `1` through `3` to change the
 sample count. Report sample counts and failed responses alongside comparisons.
 
+The opt-in audit-chain diagnostic measures what the per-tenant hash chain's
+serialization costs: the sequential rate one tenant's chain sustains (which is
+also the ceiling for the chained best-effort evidence queue, whose worker writes
+one tenant's events in order), whether per-write cost grows with chain length,
+and concurrent writers on one tenant versus the same concurrency spread across
+tenants:
+
+```sh
+AUDIT_DATABASE_URL=postgres://... cargo test -p waygate-storage --test suite \
+  pg_audit_chain_throughput -- --ignored --nocapture
+```
+
+Use a disposable database on the same Postgres build as CI, with its default
+durability settings — commit cost dominates a chained write, so disabling
+`fsync` or `synchronous_commit` measures something a deployment does not run.
+The diagnostic verifies every chain it writes, so it also shows concurrency does
+not fork a chain. Its rows are left in place under run-unique tenant ids. In a
+running gateway, the signal that the chain has become the limit is sustained
+non-zero `mcp_evidence_submission_pending{posture="chained_best_effort"}` or
+growing `dropped_*` outcomes in `mcp_evidence_submission_total` for that
+posture.
+
 Compare the same build profile, toolchain, host, and database conditions before
 and after a change. These local measurements do not establish production
 capacity. Required tests separately check batch query counts, tenant visibility,
