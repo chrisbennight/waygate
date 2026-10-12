@@ -2580,6 +2580,42 @@ impl CodeModeTools {
         Ok(())
     }
 
+    /// Confirm the worker still holds its claim immediately before an effect
+    /// is dispatched, extending it by a full lease. Renewal is atomic with the
+    /// cancellation flag, so a cancellation accepted after the start append is
+    /// observed here. A claim lost to reconciliation or a takeover refuses the
+    /// effect instead of letting it run where its outcome cannot be journaled.
+    async fn confirm_claim_before_effect(
+        &self,
+        claim: Option<&ExecutionClaim>,
+    ) -> Result<(), McpError> {
+        let Some(claim) = claim else {
+            return Ok(());
+        };
+        let store = self
+            .execution_store
+            .as_ref()
+            .ok_or_else(execution_unavailable)?;
+        let renewed = store
+            .renew(claim, self.claim_lease())
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    %error,
+                    execution_id = %claim.execution_id,
+                    "could not confirm the Code Mode claim before effect dispatch"
+                );
+                execution_unavailable()
+            })?;
+        if !renewed {
+            if self.finish_requested_cancellation(store, claim).await? {
+                return Err(execution_cancelled());
+            }
+            return Err(execution_unavailable());
+        }
+        Ok(())
+    }
+
     /// Await an in-flight effect while keeping the durable worker claim
     /// alive. The effect is exempt from the execution deadline, and a
     /// spec-permitted upstream call can far outlive the claim lease; without
@@ -2596,10 +2632,8 @@ impl CodeModeTools {
         let Some(claim) = claim else {
             return dispatch.await;
         };
-        // The claim runs a full lease from the moment the effect starts. An
-        // effect that starts late in the original lease would otherwise
-        // outlive it before its first periodic renewal.
-        self.renew_claim_for_effect(claim).await;
+        // The caller's pre-dispatch gate already extended the claim by a full
+        // lease, so periodic renewal starts one period later.
         tokio::pin!(dispatch);
         let period = self.claim_lease() / 3;
         let mut renewal = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
@@ -3105,6 +3139,7 @@ impl CodeModeTools {
                             if admitted.contract.side_effects()
                                 && attempt.profile == CodeExecutionProfile::Direct =>
                         {
+                            self.confirm_claim_before_effect(attempt.claim).await?;
                             let dispatch = self.invoke_connector(
                                 attempt.principal, &admitted, arguments, hierarchy,
                                 CodeExecutionProfile::Direct, None,
@@ -3144,36 +3179,10 @@ impl CodeModeTools {
                                     ),
                                 ))
                             } else {
-                                // Pre-dispatch cancellation fence: renewal is
-                                // atomic with the cancellation flag, so a
-                                // cancellation accepted after the start append
-                                // is observed here, before dispatch. The bound
-                                // grant claim repeats the same refusal
-                                // atomically with authority consumption.
-                                if let Some(claim) = attempt.claim {
-                                    let store = self
-                                        .execution_store
-                                        .as_ref()
-                                        .ok_or_else(execution_unavailable)?;
-                                    let renewed = store
-                                        .renew(claim, self.claim_lease())
-                                        .await
-                                        .map_err(|error| {
-                                            tracing::error!(
-                                                %error,
-                                                execution_id = %claim.execution_id,
-                                                "could not confirm the Code Mode claim before \
-                                                 effect dispatch"
-                                            );
-                                            execution_unavailable()
-                                        })?;
-                                    if !renewed {
-                                        if self.finish_requested_cancellation(store, claim).await? {
-                                            return Err(execution_cancelled());
-                                        }
-                                        return Err(execution_unavailable());
-                                    }
-                                }
+                                // The bound grant claim repeats the gate's
+                                // cancellation refusal atomically with
+                                // authority consumption.
+                                self.confirm_claim_before_effect(attempt.claim).await?;
                                 let approval = mutation_approval_request(
                                     &attempt, &admitted, &arguments, hierarchy,
                                 );
@@ -11563,8 +11572,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn mutation_broker_refuses_dispatch_when_cancellation_lands_after_the_start_append() {
+    /// The cancellation request commits in the gap between the fenced
+    /// call-start append and the dispatch: the pre-dispatch claim gate must
+    /// observe it and no upstream call may follow.
+    async fn effect_refuses_dispatch_when_cancellation_lands_after_the_start_append(
+        profile: CodeExecutionProfile,
+    ) {
         let fake = FakeCatalog::with_tools(&[("email", "send", true)]);
         let call_id = runner_call_id("email", "send");
         let admitted_calls = HashMap::from([(
@@ -11583,9 +11596,6 @@ mod tests {
                 .with_execution_store(store.clone());
         let source = "return connectors.email.send({value: 'x'});";
         let claim = claimed_mutation_fixture(&store, source).await;
-        // The cancellation request commits in the gap between the fenced
-        // call-start append and the dispatch: the pre-dispatch renewal fence
-        // must observe it and no upstream call may follow.
         store
             .cancel_on_first_append
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -11614,7 +11624,7 @@ mod tests {
                     execution_id: claim.execution_id,
                     claim: Some(&claim),
                     persist_content: true,
-                    profile: CodeExecutionProfile::LegacyApprovalBound,
+                    profile,
                     source_digest: source_digest(source),
                     deadline: None,
                 },
@@ -11634,6 +11644,22 @@ mod tests {
         );
         let cancelled = store.current.lock().await.clone().expect("execution");
         assert_eq!(cancelled.status, ExecutionStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn mutation_broker_refuses_dispatch_when_cancellation_lands_after_the_start_append() {
+        effect_refuses_dispatch_when_cancellation_lands_after_the_start_append(
+            CodeExecutionProfile::LegacyApprovalBound,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn direct_effect_refuses_dispatch_when_the_claim_is_lost_after_the_start_append() {
+        effect_refuses_dispatch_when_cancellation_lands_after_the_start_append(
+            CodeExecutionProfile::Direct,
+        )
+        .await;
     }
 
     /// Invocation that commits a cancellation request while the dispatch is
