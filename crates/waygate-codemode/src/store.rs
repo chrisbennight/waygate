@@ -2138,7 +2138,21 @@ fn status_strings(statuses: &[ExecutionStatus]) -> Vec<&'static str> {
     statuses.iter().map(|status| status.as_str()).collect()
 }
 
+/// Whole seconds for a lease, rounded up so a stored lease is never shorter
+/// than the one requested.
 fn lease_seconds(lease: Duration) -> i64 {
-    let seconds = lease.as_secs().max(1);
-    i64::try_from(seconds).unwrap_or(i64::MAX)
+    let seconds = lease.as_secs() + u64::from(lease.subsec_nanos() > 0);
+    i64::try_from(seconds.max(1)).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stored_lease_is_never_shorter_than_requested() {
+        assert_eq!(lease_seconds(Duration::from_millis(13_800)), 14);
+        assert_eq!(lease_seconds(Duration::from_secs(15)), 15);
+        assert_eq!(lease_seconds(Duration::ZERO), 1);
+    }
 }

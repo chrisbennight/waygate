@@ -2485,14 +2485,23 @@ async fn gateway_main() -> anyhow::Result<()> {
         // Refuse new Code Mode runs and end live claims with the work window,
         // then let in-flight MCP requests and detached runs finish before the
         // MCP transport closes its streams. The window leaves the evidence
-        // queues their own flush budget inside the drain timeout.
+        // queues their own flush budget inside the drain timeout. Ending the
+        // claims counts against the same window, so slow claim updates cannot
+        // eat into that budget.
         let work_window =
             drain_timeout.saturating_sub(waygate_mcp::audit::EVIDENCE_QUEUE_DRAIN_TIMEOUT);
-        codemode_capacity
-            .begin_drain(codemode_store.as_ref(), work_window)
-            .await;
+        let work_deadline = tokio::time::Instant::now() + work_window;
+        if tokio::time::timeout_at(
+            work_deadline,
+            codemode_capacity.begin_drain(codemode_store.as_ref(), work_window),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!("ending live Code Mode claims did not finish within the drain window");
+        }
         inflight_work.close();
-        if tokio::time::timeout(work_window, inflight_work.wait())
+        if tokio::time::timeout_at(work_deadline, inflight_work.wait())
             .await
             .is_err()
         {

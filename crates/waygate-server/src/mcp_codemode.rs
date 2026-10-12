@@ -237,16 +237,35 @@ impl CodeModeExecutionCapacity {
         self.work.spawn(run);
     }
 
-    fn hold_claim(self: &Arc<Self>, claim: &ExecutionClaim) -> LiveClaim {
+    /// Register a claim held by a run in this process. A drain sets its
+    /// deadline before it snapshots the registry under the same lock, so a
+    /// claim registered after that snapshot sees the deadline here and is
+    /// ended with the window instead.
+    async fn hold_claim(
+        self: &Arc<Self>,
+        store: Option<&SharedExecutionStore>,
+        claim: &ExecutionClaim,
+    ) -> LiveClaim {
         let key = (claim.execution_id, claim.owner);
         self.live_claims
             .lock()
             .expect("live claim registry poisoned")
             .insert(key, claim.clone());
-        LiveClaim {
+        let live = LiveClaim {
             capacity: self.clone(),
             key,
+        };
+        if let (Some(deadline), Some(store)) = (self.drain_deadline.get(), store) {
+            let window = deadline.saturating_duration_since(Instant::now());
+            if let Err(error) = store.renew_effect_lease(claim, window).await {
+                tracing::warn!(
+                    %error,
+                    execution_id = %claim.execution_id,
+                    "could not end a Code Mode claim with the drain window"
+                );
+            }
         }
+        live
     }
 
     fn tenant(&self, tenant: &str) -> Arc<Semaphore> {
@@ -2041,7 +2060,10 @@ impl CodeModeTools {
             _capacity_permit,
             ..
         } = claimed;
-        let _live_claim = self.execution_capacity.hold_claim(&claim);
+        let _live_claim = self
+            .execution_capacity
+            .hold_claim(self.execution_store.as_ref(), &claim)
+            .await;
         let work = async {
             #[cfg(test)]
             if let Some(barrier) = self.attempt_barrier.as_ref() {
@@ -14009,10 +14031,10 @@ mod tests {
             owner: Uuid::now_v7(),
             epoch: 1,
         };
-        let live = capacity.hold_claim(&claim);
+        let shared: SharedExecutionStore = store.clone();
+        let live = capacity.hold_claim(Some(&shared), &claim).await;
         let window = Duration::from_secs(20);
 
-        let shared: SharedExecutionStore = store.clone();
         capacity.begin_drain(Some(&shared), window).await;
 
         assert_eq!(
@@ -14020,6 +14042,21 @@ mod tests {
             vec![window],
             "a live claim's lease ends with the drain window"
         );
+        // A run that registers its claim after the drain's snapshot ends its
+        // lease with the remaining window itself.
+        let late = capacity
+            .hold_claim(
+                Some(&shared),
+                &ExecutionClaim {
+                    execution_id: Uuid::now_v7(),
+                    ..claim.clone()
+                },
+            )
+            .await;
+        let renewals = store.renewals.lock().await.clone();
+        assert_eq!(renewals.len(), 2);
+        assert!(renewals[1] <= window);
+        drop(late);
         assert!(
             capacity.lease_within_drain(Duration::from_secs(300)) <= window,
             "an effect renewal cannot outlast the drain window"
