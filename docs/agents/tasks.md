@@ -30,13 +30,14 @@ lists the caller's executions, allowing recovery of a lost handle.
 Each kind of work has a different owner, so each survives differently. A
 restart here is a graceful shutdown within `GATEWAY_DRAIN_TIMEOUT_SECONDS`. A
 crash skips the drain: in-flight responses are lost, and Code Mode runs are
-reconciled once their claim lease lapses.
+reconciled once their claim lease lapses, with `worker_lease_expired` or
+`effect_outcome_unknown`.
 
 | Work | Gateway restart | Client disconnect | Next request on another replica |
 |---|---|---|---|
-| Detached Code Mode run (`codemode.start`, or a task-augmented `execute` or `resume`) | Finishes if it can within the drain window. Otherwise it is reconciled as `expired`, with `effect_outcome_unknown` when a side effect may have applied. It is never replayed. | No effect. The run does not depend on the request that started it. | Status, results, and cancellation work from any replica. |
+| Detached Code Mode run (`codemode.start`, or a task-augmented `execute` or `resume`) | Finishes if it can within the drain window. Otherwise it is recorded at shutdown as `expired` with `worker_interrupted`, or `effect_outcome_unknown` when a side effect may have applied. It is never replayed. | No effect. The run does not depend on the request that started it. | Status, results, and cancellation work from any replica. |
 | Paused Code Mode run (`waiting_for_resume`) | Survives. It holds no worker and expires only at retention. | No effect. | Resumes on any replica. |
-| Blocking `codemode.execute` | Finishes if it can within the drain window. Otherwise its response is lost, and with a database the run is reconciled as `expired`. | The program runs to completion. A 2025-11-25 client can resume the response stream with `Last-Event-ID` on the same replica while its session lives. | A repeated call runs the program again. |
+| Blocking `codemode.execute` | Finishes if it can within the drain window. Otherwise its response is lost, and with a database the run is recorded at shutdown as interrupted, like a detached run. | The program runs to completion. A 2025-11-25 client can resume the response stream with `Last-Event-ID` on the same replica while its session lives. | A repeated call runs the program again. |
 | Upstream-owned task | The route survives and the work stays with the upstream. A local-process upstream's tasks end with the gateway unless its task store outlives the process. | Does not cancel the upstream work. A task ID the client never received cannot be recovered. | Works on any replica with the same upstream configuration. |
 | Ordinary tool call | Finishes if it can within the drain window. Otherwise it is cancelled upstream and its outcome is unknown. | A 2026-07-28 disconnect cancels it upstream. A 2025-11-25 call keeps running, and its response stream can be resumed on the same replica while the session lives. | A 2026-07-28 request is served by any replica. A 2025-11-25 session lives on one replica and must re-initialize elsewhere. |
 
