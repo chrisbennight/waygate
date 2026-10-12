@@ -1473,6 +1473,29 @@ impl ExecutionStore for PgExecutionStore {
                        THEN NULL
                        WHEN retention_until <= now() THEN 'retention_expired'
                        WHEN status = 'submitted' THEN 'worker_never_claimed'
+                       -- A side-effecting call whose start was journaled
+                       -- without an outcome may already have applied, so the
+                       -- owner must check the target before repeating it.
+                       WHEN EXISTS (
+                           SELECT 1
+                             FROM codemode_execution_events started
+                            WHERE started.tenant_id = codemode_executions.tenant_id
+                              AND started.execution_id = codemode_executions.id
+                              AND started.kind = 'connector_call_started'
+                              AND started.detail->>'side_effects' = 'true'
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                    FROM codemode_execution_events outcome
+                                   WHERE outcome.tenant_id = started.tenant_id
+                                     AND outcome.execution_id = started.execution_id
+                                     AND outcome.call_id IS NOT DISTINCT FROM started.call_id
+                                     AND outcome.attempt IS NOT DISTINCT FROM started.attempt
+                                     AND outcome.kind IN (
+                                         'connector_call_succeeded',
+                                         'connector_call_failed'
+                                     )
+                              )
+                       ) THEN 'effect_outcome_unknown'
                        ELSE 'worker_lease_expired'
                    END,
                    resume_context = CASE

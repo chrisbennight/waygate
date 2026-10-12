@@ -2550,6 +2550,111 @@ async fn abandoned_submissions_and_worker_claims_terminalize_on_owner_poll() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoned_worker_reports_unknown_outcome_only_for_unjournaled_effects() {
+    let Some(pool) = connect().await else {
+        eprintln!("skipping Code Mode unknown-outcome Pg contract: AUDIT_DATABASE_URL not set");
+        return;
+    };
+    let tenant = seed_tenant(&pool, &Uuid::new_v4().to_string()).await;
+    let store = PgExecutionStore::new(pool.clone());
+    let call = |kind, call_id, side_effects| NewExecutionEvent {
+        kind,
+        step_number: Some(1),
+        call_id: Some(call_id),
+        attempt: Some(1),
+        detail: json!({"server": "s", "tool": "t", "side_effects": side_effects}),
+    };
+
+    // Each case journals some connector calls under a live claim, then loses
+    // its worker and is reconciled by the owner.
+    let cases = [
+        (
+            "effect in flight",
+            vec![(ExecutionEventKind::ConnectorCallStarted, true)],
+            "effect_outcome_unknown",
+        ),
+        (
+            "effect outcome journaled",
+            vec![
+                (ExecutionEventKind::ConnectorCallStarted, true),
+                (ExecutionEventKind::ConnectorCallSucceeded, true),
+            ],
+            "worker_lease_expired",
+        ),
+        (
+            "read in flight",
+            vec![(ExecutionEventKind::ConnectorCallStarted, false)],
+            "worker_lease_expired",
+        ),
+    ];
+    for (case, calls, expected_reason) in cases {
+        let id = Uuid::now_v7();
+        store
+            .submit(new_execution(&tenant, id))
+            .await
+            .expect("submit execution");
+        let (_, claim) = store
+            .claim(
+                &tenant,
+                id,
+                Uuid::now_v7(),
+                Duration::from_secs(30),
+                execution_source().to_owned(),
+                json!({"snapshot": 1}),
+            )
+            .await
+            .expect("claim execution")
+            .expect("claim succeeds");
+        let call_id = Uuid::now_v7();
+        for (kind, side_effects) in calls {
+            assert!(
+                store
+                    .append_event(&claim, call(kind, call_id, side_effects))
+                    .await
+                    .expect("journal connector call"),
+                "{case}: live claim journals the call"
+            );
+        }
+        sqlx::query(
+            r#"
+            UPDATE codemode_executions
+               SET claim_expires_at = now() - interval '1 second'
+             WHERE tenant_id = $1 AND id = $2
+            "#,
+        )
+        .bind(&tenant)
+        .bind(id)
+        .execute(&pool)
+        .await
+        .expect("expire worker claim");
+
+        let reconciled = store
+            .reconcile_abandoned(
+                &tenant,
+                "alice",
+                "https://issuer.test",
+                id,
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("reconcile abandoned worker")
+            .expect("owner sees execution");
+        assert_eq!(reconciled.status, ExecutionStatus::Expired, "{case}");
+        assert_eq!(
+            reconciled.terminal_reason_code.as_deref(),
+            Some(expected_reason),
+            "{case}"
+        );
+        let history = store.events(&tenant, id).await.expect("history");
+        let last = history.last().expect("terminal event");
+        assert_eq!(last.kind.as_str(), "expired", "{case}");
+        assert_eq!(last.detail["reason_code"], expected_reason, "{case}");
+    }
+
+    cleanup(&pool, &tenant).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claim_is_single_owner_and_epoch_fences_stale_workers() {
     let Some(pool) = connect().await else {
         eprintln!("skipping Code Mode claim Pg contract: AUDIT_DATABASE_URL not set");

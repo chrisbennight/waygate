@@ -666,12 +666,12 @@ binding discovery; a retry that converges on an existing handle needs no new
 permit.
 
 The source itself is attached atomically with the worker claim for ordinary
-synchronous execution. When explicit content storage makes an execution
-resumable, submission durably stores the bounded source and task
-acknowledgment follows bounded admission and the initial worker claim. A
-process loss after acknowledgment therefore leaves both source and immutable
-tool snapshot available for fenced recovery; an unacknowledged row that never
-reached admission expires instead of advertising an unusable resume boundary.
+synchronous execution. When explicit content storage is allowed, submission
+durably stores the bounded source and task acknowledgment follows bounded
+admission and the initial worker claim, so an explicit pause checkpoint can
+later resume against the same source and immutable tool snapshot; an
+unacknowledged row that never reached admission expires instead of advertising
+an unusable resume boundary.
 Repeated tenant or global capacity refusals cannot otherwise amplify program
 content into the control database. A conditional worker claim fences every
 nested-call journal append and terminal transition. Capacity refusal, runner
@@ -686,11 +686,18 @@ persist non-content outcome metadata.
 Synchronous calls return the bounded result directly. When the operator
 explicitly allows result storage, task-augmented calls additionally persist that
 bounded result for repeated retrieval via `tasks/get` during the retention
-window. Owner polling returns an abandoned resumable attempt to
-`waiting_for_resume`, releases its stale claim, and preserves the bound
-checkpoint and input; a stale worker remains fenced. Non-resumable abandoned
-submissions and attempts terminalize, so process loss cannot leave a task
-projected as working forever. Without that storage decision or durable storage,
+window. An attempt that loses its worker is never replayed, because a program
+with direct authority must not repeat effects. Once its claim lease has passed,
+owner polling terminalizes the abandoned work as `expired` and releases the
+stale claim; a stale worker remains fenced. The reason is
+`worker_never_claimed` for a submission no worker claimed and
+`worker_lease_expired` for an interrupted attempt, unless the journal shows a
+side-effecting call that started without a recorded outcome. That reason is
+`effect_outcome_unknown`: the effect may already have applied, so check the
+target system before deliberately repeating the work with `repeat_after`.
+Process loss therefore cannot leave a task projected as working forever. Rows
+from older releases that recorded a resumable profile return to
+`waiting_for_resume` instead. Without that storage decision or durable storage,
 the bounded blocking execution path remains available without advertising task
 augmentation or claiming restart durability. MCP Tasks projects the internal
 journal rather than becoming a competing execution store.

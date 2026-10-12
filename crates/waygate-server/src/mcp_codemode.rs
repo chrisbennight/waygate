@@ -3044,10 +3044,14 @@ impl CodeModeTools {
                         }
                         Ok(admitted)
                     });
+                    // `side_effects` lets abandonment reconciliation tell an
+                    // effect whose outcome was never journaled from a read
+                    // that was merely in flight.
                     let event_detail = match admitted.as_ref() {
                         Ok(admitted) => serde_json::json!({
                             "server": admitted.server,
                             "tool": admitted.tool,
+                            "side_effects": admitted.contract.side_effects(),
                         }),
                         Err(_) => serde_json::json!({"binding_refused": true}),
                     };
