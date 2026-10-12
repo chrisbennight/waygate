@@ -2485,14 +2485,15 @@ async fn gateway_main() -> anyhow::Result<()> {
 
     let cleanup = async {
         // Refuse new Code Mode runs, then let in-flight requests and detached
-        // runs finish before the MCP transport closes its streams. The window
-        // leaves the evidence queues their own flush budget inside the drain
+        // runs finish before the MCP transport closes its streams. Waiting for
+        // work and for the HTTP server's own drain both end at one deadline
+        // that leaves the evidence queues their flush budget inside the drain
         // timeout.
         codemode_capacity.begin_drain();
-        let work_window =
-            drain_timeout.saturating_sub(waygate_mcp::audit::EVIDENCE_QUEUE_DRAIN_TIMEOUT);
+        let work_deadline = tokio::time::Instant::now()
+            + drain_timeout.saturating_sub(waygate_mcp::audit::EVIDENCE_QUEUE_DRAIN_TIMEOUT);
         inflight_work.close();
-        if tokio::time::timeout(work_window, inflight_work.wait())
+        if tokio::time::timeout_at(work_deadline, inflight_work.wait())
             .await
             .is_err()
         {
@@ -2510,12 +2511,16 @@ async fn gateway_main() -> anyhow::Result<()> {
             async move { capacity.interrupt_remaining(store.as_ref()).await }
         });
         mcp_transport_ct.cancel();
-        // Wait for axum to finish draining in-flight HTTP
-        // connections.
-        match server_task.await {
-            Ok(Ok(())) => tracing::info!("axum drained cleanly"),
-            Ok(Err(e)) => tracing::warn!(error = %e, "axum returned error during drain"),
-            Err(e) => tracing::warn!(error = %e, "axum task join failed"),
+        // Wait for axum to finish draining in-flight HTTP connections. A
+        // response still streaming at the deadline, such as an inference
+        // stream, closes when the process exits.
+        match tokio::time::timeout_at(work_deadline, server_task).await {
+            Ok(Ok(Ok(()))) => tracing::info!("axum drained cleanly"),
+            Ok(Ok(Err(e))) => tracing::warn!(error = %e, "axum returned error during drain"),
+            Ok(Err(e)) => tracing::warn!(error = %e, "axum task join failed"),
+            Err(_) => {
+                tracing::warn!("HTTP connections were still open at the end of the drain window")
+            }
         }
         // Stop accepting best-effort evidence only after HTTP handlers have
         // drained, then give the fixed-capacity queues up to five seconds
