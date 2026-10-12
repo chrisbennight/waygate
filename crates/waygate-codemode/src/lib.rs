@@ -311,6 +311,15 @@ pub struct RetryEquivalence {
     pub execution_profile: Value,
 }
 
+/// Owner identity of an execution nominated for abandonment reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbandonedExecution {
+    pub tenant_id: String,
+    pub principal_sub: String,
+    pub principal_issuer: String,
+    pub id: Uuid,
+}
+
 /// The owner identity that scopes an in-flight listing. Every field narrows:
 /// tenant and subject select the caller's rows, the issuer refuses a
 /// same-`sub` principal minted by a different issuer (a pre-upgrade
@@ -686,6 +695,20 @@ pub trait ExecutionStore: Send + Sync + 'static {
         id: Uuid,
         submission_grace: Duration,
     ) -> Result<Option<Execution>, StoreError>;
+
+    /// A bounded batch of executions across all owners that look abandoned,
+    /// so background reconciliation can terminalize dead work without
+    /// waiting for its owner to read it. This only nominates candidates:
+    /// `reconcile_abandoned` re-checks abandonment inside its conditional
+    /// update, so concurrent sweeps on several replicas and a racing owner
+    /// read converge on one outcome.
+    async fn list_abandoned(
+        &self,
+        submission_grace: Duration,
+    ) -> Result<Vec<AbandonedExecution>, StoreError> {
+        let _ = submission_grace;
+        Ok(Vec::new())
+    }
 
     async fn events(&self, tenant_id: &str, id: Uuid) -> Result<Vec<ExecutionEvent>, StoreError>;
 

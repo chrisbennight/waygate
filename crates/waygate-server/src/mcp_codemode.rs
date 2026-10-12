@@ -101,6 +101,20 @@ fn execution_setup_allowance() -> Duration {
 /// Headroom for the runner's own teardown and final frame after its budget
 /// expires, so the parent does not race the runner's precise timeout report.
 const EXECUTION_TIMEOUT_HEADROOM: Duration = Duration::from_secs(1);
+/// Program-phase bound for a given budget; see
+/// `CodeModeTools::program_phase_timeout`.
+fn program_phase_timeout_for(execution_limit: Duration) -> Duration {
+    execution_limit + EXECUTION_TIMEOUT_HEADROOM
+}
+
+/// Claim lease for a given budget; see `CodeModeTools::claim_lease`.
+fn claim_lease_for(execution_limit: Duration) -> Duration {
+    EXECUTION_CLAIM_LEASE_FLOOR
+        .max(execution_setup_allowance() + program_phase_timeout_for(execution_limit))
+}
+
+/// How often each replica reconciles abandoned executions in the background.
+const ABANDONED_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 /// Floor for the durable worker claim lease.
 ///
 /// The lease fences one runner against another claiming the same execution,
@@ -489,7 +503,7 @@ impl CodeModeTools {
     /// setup would silently grant it the whole setup allowance on top of its
     /// budget.
     fn program_phase_timeout(&self) -> Duration {
-        self.execution_limit + EXECUTION_TIMEOUT_HEADROOM
+        program_phase_timeout_for(self.execution_limit)
     }
 
     /// Program-phase deadline enforced by the broker for every profile.
@@ -521,7 +535,7 @@ impl CodeModeTools {
     /// work it fences would let a long program finish and then be unable to
     /// record its own result.
     fn claim_lease(&self) -> Duration {
-        EXECUTION_CLAIM_LEASE_FLOOR.max(self.call_timeout())
+        claim_lease_for(self.execution_limit)
     }
 
     fn acquire_detached_execution_slot(&self) -> Result<OwnedSemaphorePermit, McpError> {
@@ -3517,6 +3531,56 @@ fn configured_execution_store(pool: sqlx::PgPool) -> waygate_codemode::PgExecuti
             tenant_count: limits().retained_tenant_count as i64,
         })
         .expect("boot validated retained source limits")
+}
+
+/// Terminalize executions whose worker died, at startup and then on a fixed
+/// interval, so status, listings, and the operator view stop reporting dead
+/// work as running even when nobody reads it by id. Abandoned submissions use
+/// the same grace as owner reads, derived from the configured budget.
+pub fn spawn_abandoned_reconciler(
+    store: Option<SharedExecutionStore>,
+    execution_limit: Duration,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let submission_grace = claim_lease_for(execution_limit);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(ABANDONED_RECONCILE_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = tick.tick() => {
+                    if let Err(error) = reconcile_abandoned_batch(&store, submission_grace).await {
+                        tracing::warn!(
+                            %error,
+                            "Code Mode abandoned-execution reconciliation failed; will retry next interval"
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
+async fn reconcile_abandoned_batch(
+    store: &SharedExecutionStore,
+    submission_grace: Duration,
+) -> Result<(), waygate_core::store::StoreError> {
+    for candidate in store.list_abandoned(submission_grace).await? {
+        store
+            .reconcile_abandoned(
+                &candidate.tenant_id,
+                &candidate.principal_sub,
+                &candidate.principal_issuer,
+                candidate.id,
+                submission_grace,
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 pub fn shared_execution_store(db_pool: Option<sqlx::PgPool>) -> Option<SharedExecutionStore> {

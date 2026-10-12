@@ -1021,6 +1021,12 @@ async fn gateway_main() -> anyhow::Result<()> {
         cfg.upstream_task_retention_seconds,
         ct.clone(),
     );
+    let codemode_execution_limit = mcp_codemode::execution_limit_from_env()?;
+    mcp_codemode::spawn_abandoned_reconciler(
+        mcp_codemode::shared_execution_store(db_pool.clone()),
+        codemode_execution_limit,
+        ct.clone(),
+    );
     let mcp_factory = Arc::new(mcp_factory::McpServerFactory {
         catalog: catalog.clone(),
         catalog_store: catalog_store.clone(),
@@ -1030,7 +1036,7 @@ async fn gateway_main() -> anyhow::Result<()> {
         tool_catalog_epoch: tool_catalog_epoch.clone(),
         audit_mode: cfg.audit_mode,
         result_storage: cfg.codemode_result_storage,
-        execution_limit: mcp_codemode::execution_limit_from_env()?,
+        execution_limit: codemode_execution_limit,
         execution_capacity: mcp_codemode::CodeModeExecutionCapacity::shared(cfg.codemode_capacity),
         quota: quota_service.clone(),
         hitl_hub: hitl_hub.clone(),
