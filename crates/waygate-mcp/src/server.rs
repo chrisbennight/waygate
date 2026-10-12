@@ -3359,8 +3359,12 @@ impl GatewayServer {
         principal: Option<&Principal>,
         projection: ToolProjection<'_>,
     ) -> Vec<Tool> {
+        // A full projection already lists every tool the caller may call, so
+        // the per-server search adapters would only repeat the gateway's own
+        // discovery tools. They stay with session disclosure, and remain
+        // callable by name.
         let (include_meta_tools, full_projection, canonical_order) = match projection {
-            ToolProjection::Full { canonical_order } => (true, true, canonical_order),
+            ToolProjection::Full { canonical_order } => (false, true, canonical_order),
             ToolProjection::SessionDisclosed(_) => (true, false, false),
             ToolProjection::BuiltinsOnly { canonical_order } => (false, false, canonical_order),
         };
@@ -3537,13 +3541,6 @@ impl GatewayServer {
                     // the same resolution.
                     continue;
                 };
-                if canonical_order
-                    && record.identity.name == "searchTools"
-                    && tool_has_publishable_input_schema(&record.definition)
-                {
-                    let adapter_name = format!("{server}{SEARCH_TOOLS_SUFFIX}");
-                    out.retain(|tool| tool.name != adapter_name);
-                }
                 out.push(record.definition);
             }
         }
@@ -4022,11 +4019,6 @@ fn serialized_list_tools_result_size(result: &ListToolsResult) -> Option<usize> 
     let mut writer = SerializedSizeWriter::default();
     serde_json::to_writer(&mut writer, result).ok()?;
     Some(writer.0)
-}
-
-fn tool_has_publishable_input_schema(tool: &Tool) -> bool {
-    input_schema_has_object_root(&tool.input_schema)
-        && portable_schema_object(&tool.input_schema).is_some()
 }
 
 fn retain_publishable_tools(tools: &mut Vec<Tool>) {
