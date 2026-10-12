@@ -1,10 +1,13 @@
-//! MCP requests a rolling restart lets finish before the transport closes.
+//! Requests a rolling restart lets finish before the MCP transport closes.
 //!
-//! Shutdown waits on one work tracker for in-flight MCP requests and detached
-//! Code Mode runs, and closes the MCP transport only afterward. Standing
-//! notification streams are not work: a `GET` stream and a 2026-07-28
+//! Shutdown waits on one work tracker for in-flight requests and detached
+//! Code Mode runs, and closes the MCP transport only afterward. The tracker
+//! wraps the authenticated surface outside authentication, so a request still
+//! being authenticated when shutdown begins is counted. Standing notification
+//! streams are not work: a `GET` stream and a 2026-07-28
 //! `subscriptions/listen` stream never end on their own, so counting them
-//! would hold every restart open for the whole drain window.
+//! would hold every restart open for the whole drain window. The HTTP server's
+//! own graceful shutdown still waits for any other read.
 
 use axum::body::Body;
 use axum::extract::Request;

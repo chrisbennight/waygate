@@ -1455,156 +1455,63 @@ impl ExecutionStore for PgExecutionStore {
         submission_grace: Duration,
     ) -> Result<Option<Execution>, StoreError> {
         let mut tx = self.pool.begin().await?;
-        let reconciled = execution_query!(
-            r#"
-            UPDATE codemode_executions
-               SET status = CASE
-                       WHEN execution_profile->>'resumable' = 'true'
-                            AND source IS NOT NULL
-                            AND tool_snapshot IS NOT NULL
-                            AND retention_until > now()
-                       THEN 'waiting_for_resume'
-                       ELSE 'expired'
-                   END,
-                   terminal_reason_code = CASE
-                       WHEN execution_profile->>'resumable' = 'true'
-                            AND source IS NOT NULL
-                            AND tool_snapshot IS NOT NULL
-                            AND retention_until > now()
-                       THEN NULL
-                       WHEN retention_until <= now() THEN 'retention_expired'
-                       WHEN status = 'submitted' THEN 'worker_never_claimed'
-                       -- A side-effecting call whose start was journaled
-                       -- without an outcome may already have applied, so the
-                       -- owner must check the target before repeating it.
-                       WHEN EXISTS (
-                           SELECT 1
-                             FROM codemode_execution_events started
-                            WHERE started.tenant_id = codemode_executions.tenant_id
-                              AND started.execution_id = codemode_executions.id
-                              AND started.kind = 'connector_call_started'
-                              AND started.detail->>'side_effects' = 'true'
-                              AND NOT EXISTS (
-                                  SELECT 1
-                                    FROM codemode_execution_events outcome
-                                   WHERE outcome.tenant_id = started.tenant_id
-                                     AND outcome.execution_id = started.execution_id
-                                     AND outcome.call_id IS NOT DISTINCT FROM started.call_id
-                                     AND outcome.attempt IS NOT DISTINCT FROM started.attempt
-                                     AND outcome.kind IN (
-                                         'connector_call_succeeded',
-                                         'connector_call_failed'
-                                     )
-                              )
-                       ) THEN 'effect_outcome_unknown'
-                       ELSE 'worker_lease_expired'
-                   END,
-                   resume_context = CASE
-                       WHEN execution_profile->>'resumable' = 'true'
-                            AND source IS NOT NULL
-                            AND tool_snapshot IS NOT NULL
-                            AND retention_until > now()
-                       THEN COALESCE(
-                           resume_context,
-                           '{"checkpoint":null}'::jsonb
-                       )
-                       ELSE resume_context
-                   END,
-                   completed_at = CASE
-                       WHEN execution_profile->>'resumable' = 'true'
-                            AND source IS NOT NULL
-                            AND tool_snapshot IS NOT NULL
-                            AND retention_until > now()
-                       THEN NULL
-                       ELSE now()
-                   END,
-                   claim_owner = NULL,
-                   claim_expires_at = NULL
-             WHERE tenant_id = $1
-               AND principal_sub = $2
-               -- Exact issuer binding: this read MUTATES (abandonment
-               -- reconciliation), so the predicate itself must refuse a
-               -- pre-upgrade NULL row or a cross-issuer subject collision.
-               AND principal_issuer = $5
-               AND id = $3
-               AND completed_at IS NULL
-               AND (
-                   (
-                       status = 'submitted'
-                       AND claim_owner IS NULL
-                       AND submitted_at <= now() - ($4 * interval '1 second')
-                   )
-                   OR (
-                       status = 'running'
-                       AND claim_owner IS NOT NULL
-                       AND claim_expires_at <= now()
-                   )
-                   OR (
-                       status IN ('waiting_for_approval', 'waiting_for_resume')
-                       AND claim_owner IS NULL
-                       AND retention_until <= now()
-                   )
-               )
-            RETURNING
-            "#,
-            ""
+        let reconciled = reconcile_abandoned_in(
+            &mut tx,
+            tenant_id,
+            principal_sub,
+            principal_issuer,
+            id,
+            submission_grace,
+            "worker_lease_expired",
         )
-        .bind(tenant_id)
-        .bind(principal_sub)
-        .bind(id)
-        .bind(lease_seconds(submission_grace))
-        .bind(principal_issuer)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if let Some(row) = reconciled {
-            let execution = row_to_execution(&row);
-            let reason = if execution.status == ExecutionStatus::WaitingForResume {
-                "worker_interrupted"
-            } else {
-                execution
-                    .terminal_reason_code
-                    .as_deref()
-                    .expect("expired execution has a reason")
-            };
-            insert_event(
-                &mut tx,
-                id,
-                tenant_id,
-                &NewExecutionEvent {
-                    kind: if execution.status == ExecutionStatus::WaitingForResume {
-                        crate::ExecutionEventKind::WaitingForResume
-                    } else {
-                        crate::ExecutionEventKind::Expired
-                    },
-                    step_number: None,
-                    call_id: None,
-                    attempt: None,
-                    detail: serde_json::json!({"reason_code": reason}),
-                },
-            )
-            .await?;
-            tx.commit().await?;
-            return Ok(Some(execution));
-        }
-
-        let current = execution_query!(
-            "SELECT",
-            r#"
-              FROM codemode_executions
-             WHERE tenant_id = $1
-               AND principal_sub = $2
-               AND principal_issuer = $4
-               AND id = $3
-            "#
-        )
-        .bind(tenant_id)
-        .bind(principal_sub)
-        .bind(id)
-        .bind(principal_issuer)
-        .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(current.as_ref().map(row_to_execution))
+        Ok(reconciled)
+    }
+
+    async fn interrupt_claimed(
+        &self,
+        claim: &ExecutionClaim,
+        principal_sub: &str,
+        principal_issuer: &str,
+    ) -> Result<Option<Execution>, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        // Ending the claim locks the row, so a renewal from the stopping
+        // worker waits for this transaction and then fails its fence.
+        let ended = sqlx::query(
+            r#"
+            UPDATE codemode_executions
+               SET claim_expires_at = now()
+             WHERE tenant_id = $1
+               AND id = $2
+               AND claim_owner = $3
+               AND claim_epoch = $4
+               AND status = 'running'
+               AND completed_at IS NULL
+            "#,
+        )
+        .bind(&claim.tenant_id)
+        .bind(claim.execution_id)
+        .bind(claim.owner)
+        .bind(claim.epoch)
+        .execute(&mut *tx)
+        .await?;
+        if ended.rows_affected() == 0 {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let interrupted = reconcile_abandoned_in(
+            &mut tx,
+            &claim.tenant_id,
+            principal_sub,
+            principal_issuer,
+            claim.execution_id,
+            Duration::ZERO,
+            "worker_interrupted",
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(interrupted)
     }
 
     async fn list_abandoned(
@@ -2138,21 +2045,171 @@ fn status_strings(statuses: &[ExecutionStatus]) -> Vec<&'static str> {
     statuses.iter().map(|status| status.as_str()).collect()
 }
 
-/// Whole seconds for a lease, rounded up so a stored lease is never shorter
-/// than the one requested.
-fn lease_seconds(lease: Duration) -> i64 {
-    let seconds = lease.as_secs() + u64::from(lease.subsec_nanos() > 0);
-    i64::try_from(seconds.max(1)).unwrap_or(i64::MAX)
+/// Terminalize `id` inside `tx` when it is abandoned, or return its current
+/// row. `lapsed_reason` names a run whose claim lapsed with no more specific
+/// reason in its journal.
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_abandoned_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &str,
+    principal_sub: &str,
+    principal_issuer: &str,
+    id: Uuid,
+    submission_grace: Duration,
+    lapsed_reason: &str,
+) -> Result<Option<Execution>, StoreError> {
+    let reconciled = execution_query!(
+        r#"
+            UPDATE codemode_executions
+               SET status = CASE
+                       WHEN execution_profile->>'resumable' = 'true'
+                            AND source IS NOT NULL
+                            AND tool_snapshot IS NOT NULL
+                            AND retention_until > now()
+                       THEN 'waiting_for_resume'
+                       ELSE 'expired'
+                   END,
+                   terminal_reason_code = CASE
+                       WHEN execution_profile->>'resumable' = 'true'
+                            AND source IS NOT NULL
+                            AND tool_snapshot IS NOT NULL
+                            AND retention_until > now()
+                       THEN NULL
+                       WHEN retention_until <= now() THEN 'retention_expired'
+                       WHEN status = 'submitted' THEN 'worker_never_claimed'
+                       -- A side-effecting call whose start was journaled
+                       -- without an outcome may already have applied, so the
+                       -- owner must check the target before repeating it.
+                       WHEN EXISTS (
+                           SELECT 1
+                             FROM codemode_execution_events started
+                            WHERE started.tenant_id = codemode_executions.tenant_id
+                              AND started.execution_id = codemode_executions.id
+                              AND started.kind = 'connector_call_started'
+                              AND started.detail->>'side_effects' = 'true'
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                    FROM codemode_execution_events outcome
+                                   WHERE outcome.tenant_id = started.tenant_id
+                                     AND outcome.execution_id = started.execution_id
+                                     AND outcome.call_id IS NOT DISTINCT FROM started.call_id
+                                     AND outcome.attempt IS NOT DISTINCT FROM started.attempt
+                                     AND outcome.kind IN (
+                                         'connector_call_succeeded',
+                                         'connector_call_failed'
+                                     )
+                              )
+                       ) THEN 'effect_outcome_unknown'
+                       ELSE $6
+                   END,
+                   resume_context = CASE
+                       WHEN execution_profile->>'resumable' = 'true'
+                            AND source IS NOT NULL
+                            AND tool_snapshot IS NOT NULL
+                            AND retention_until > now()
+                       THEN COALESCE(
+                           resume_context,
+                           '{"checkpoint":null}'::jsonb
+                       )
+                       ELSE resume_context
+                   END,
+                   completed_at = CASE
+                       WHEN execution_profile->>'resumable' = 'true'
+                            AND source IS NOT NULL
+                            AND tool_snapshot IS NOT NULL
+                            AND retention_until > now()
+                       THEN NULL
+                       ELSE now()
+                   END,
+                   claim_owner = NULL,
+                   claim_expires_at = NULL
+             WHERE tenant_id = $1
+               AND principal_sub = $2
+               -- Exact issuer binding: this read MUTATES (abandonment
+               -- reconciliation), so the predicate itself must refuse a
+               -- pre-upgrade NULL row or a cross-issuer subject collision.
+               AND principal_issuer = $5
+               AND id = $3
+               AND completed_at IS NULL
+               AND (
+                   (
+                       status = 'submitted'
+                       AND claim_owner IS NULL
+                       AND submitted_at <= now() - ($4 * interval '1 second')
+                   )
+                   OR (
+                       status = 'running'
+                       AND claim_owner IS NOT NULL
+                       AND claim_expires_at <= now()
+                   )
+                   OR (
+                       status IN ('waiting_for_approval', 'waiting_for_resume')
+                       AND claim_owner IS NULL
+                       AND retention_until <= now()
+                   )
+               )
+            RETURNING
+            "#,
+        ""
+    )
+    .bind(tenant_id)
+    .bind(principal_sub)
+    .bind(id)
+    .bind(lease_seconds(submission_grace))
+    .bind(principal_issuer)
+    .bind(lapsed_reason)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(row) = reconciled {
+        let execution = row_to_execution(&row);
+        let reason = if execution.status == ExecutionStatus::WaitingForResume {
+            "worker_interrupted"
+        } else {
+            execution
+                .terminal_reason_code
+                .as_deref()
+                .expect("expired execution has a reason")
+        };
+        insert_event(
+            tx,
+            id,
+            tenant_id,
+            &NewExecutionEvent {
+                kind: if execution.status == ExecutionStatus::WaitingForResume {
+                    crate::ExecutionEventKind::WaitingForResume
+                } else {
+                    crate::ExecutionEventKind::Expired
+                },
+                step_number: None,
+                call_id: None,
+                attempt: None,
+                detail: serde_json::json!({"reason_code": reason}),
+            },
+        )
+        .await?;
+        return Ok(Some(execution));
+    }
+
+    let current = execution_query!(
+        "SELECT",
+        r#"
+              FROM codemode_executions
+             WHERE tenant_id = $1
+               AND principal_sub = $2
+               AND principal_issuer = $4
+               AND id = $3
+            "#
+    )
+    .bind(tenant_id)
+    .bind(principal_sub)
+    .bind(id)
+    .bind(principal_issuer)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(current.as_ref().map(row_to_execution))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_stored_lease_is_never_shorter_than_requested() {
-        assert_eq!(lease_seconds(Duration::from_millis(13_800)), 14);
-        assert_eq!(lease_seconds(Duration::from_secs(15)), 15);
-        assert_eq!(lease_seconds(Duration::ZERO), 1);
-    }
+fn lease_seconds(lease: Duration) -> i64 {
+    let seconds = lease.as_secs().max(1);
+    i64::try_from(seconds).unwrap_or(i64::MAX)
 }

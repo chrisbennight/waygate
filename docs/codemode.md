@@ -697,16 +697,16 @@ reconciliation handles a bounded batch, so a dead worker is normally noticed
 within that lease plus one reconciliation interval, and a larger backlog clears
 over the following intervals. The reason is
 `worker_never_claimed` for a submission no worker claimed and
-`worker_lease_expired` for an interrupted attempt, unless the journal shows a
+`worker_lease_expired` for an attempt whose worker disappeared, unless the journal shows a
 side-effecting call that started without a recorded outcome. That reason is
 `effect_outcome_unknown`: the effect may already have applied, so check the
 target system before deliberately repeating the work with `repeat_after`.
 Process loss therefore cannot leave a task projected as working forever. On
-shutdown the gateway refuses new executions with `gateway_draining`, lets
+shutdown the gateway refuses new executions with `gateway_draining` and lets
 in-flight runs finish within `GATEWAY_DRAIN_TIMEOUT_SECONDS`, less the audit
-queues' flush time, and ends their claims with that window, so a run that
-cannot finish in time is reconciled shortly after the window closes rather than
-after its full lease. Rows
+queues' flush time. When that window ends it records each run still going as
+`expired` with the reason `worker_interrupted`, or `effect_outcome_unknown` when
+a side effect may have applied, rather than leaving it to its lease. Rows
 from older releases that recorded a resumable profile return to
 `waiting_for_resume` instead. Without that storage decision or durable storage,
 the bounded blocking execution path remains available without advertising task
