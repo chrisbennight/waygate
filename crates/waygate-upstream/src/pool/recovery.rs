@@ -32,6 +32,7 @@ struct PerCallDial<'a> {
     trace_id: &'a str,
     safe_retry: bool,
     attempts: usize,
+    cancellation: &'a tokio_util::sync::CancellationToken,
 }
 
 struct PerCallDialSuccess {
@@ -111,13 +112,19 @@ fn handoff_budget(
     }
 }
 
+/// A caller that has gone gets no second attempt, whatever phase failed.
 fn can_retry(
     safe_retry: bool,
     attempts: usize,
     phase: ToolCallFailurePhase,
     deadline: Option<tokio::time::Instant>,
+    cancellation: &tokio_util::sync::CancellationToken,
 ) -> bool {
-    safe_retry && attempts == 1 && phase.dispatch_proven_absent() && deadline_is_live(deadline)
+    safe_retry
+        && attempts == 1
+        && phase.dispatch_proven_absent()
+        && deadline_is_live(deadline)
+        && !cancellation.is_cancelled()
 }
 
 /// Close a per-call session. Its open requests end first: the SDK cannot
@@ -174,6 +181,7 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
             trace_id: setup.trace_id,
             safe_retry,
             attempts,
+            cancellation: setup.cancellation,
         })
         .await;
         let connected = match dial {
@@ -260,7 +268,13 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
                 }
                 Err(error) => {
                     let phase = ToolCallFailurePhase::PreDispatch;
-                    let retry = can_retry(safe_retry, attempts, phase, setup.deadline);
+                    let retry = can_retry(
+                        safe_retry,
+                        attempts,
+                        phase,
+                        setup.deadline,
+                        setup.cancellation,
+                    );
                     tracing::warn!(
                         server = setup.server,
                         tool_name = setup.tool_name,
@@ -336,9 +350,13 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
             Err(error) => Err(error),
         };
         if let Err(error) = response.as_mut() {
-            // A caller that has gone gets no second attempt.
-            let retry = can_retry(safe_retry, attempts, error.phase, setup.deadline)
-                && !setup.cancellation.is_cancelled();
+            let retry = can_retry(
+                safe_retry,
+                attempts,
+                error.phase,
+                setup.deadline,
+                setup.cancellation,
+            );
             if retry {
                 tracing::warn!(
                     server = setup.server,
@@ -433,7 +451,13 @@ async fn dial_per_call(setup: PerCallDial<'_>) -> Result<PerCallDialSuccess, Per
             Err(error) => {
                 let phase = ToolCallFailurePhase::from_dial_error(&error);
                 dispatch::record_failure(setup.server, phase);
-                let retry = can_retry(setup.safe_retry, attempts, phase, setup.deadline);
+                let retry = can_retry(
+                    setup.safe_retry,
+                    attempts,
+                    phase,
+                    setup.deadline,
+                    setup.cancellation,
+                );
                 tracing::warn!(
                     server = setup.server,
                     tool_name = setup.tool_name,
@@ -501,6 +525,7 @@ mod tests {
             trace_id: "trace-dial-failure",
             safe_retry: true,
             attempts: 1,
+            cancellation: &tokio_util::sync::CancellationToken::new(),
         })
         .await
         {
@@ -516,8 +541,34 @@ mod tests {
 
     #[test]
     fn request_handoff_failure_uses_the_same_single_attempt_budget() {
-        assert!(can_retry(true, 1, ToolCallFailurePhase::PreDispatch, None));
-        assert!(!can_retry(true, 2, ToolCallFailurePhase::PreDispatch, None));
+        let live = tokio_util::sync::CancellationToken::new();
+        assert!(can_retry(
+            true,
+            1,
+            ToolCallFailurePhase::PreDispatch,
+            None,
+            &live
+        ));
+        assert!(!can_retry(
+            true,
+            2,
+            ToolCallFailurePhase::PreDispatch,
+            None,
+            &live
+        ));
+    }
+
+    #[test]
+    fn a_cancelled_call_is_never_retried() {
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        cancelled.cancel();
+        for phase in [
+            ToolCallFailurePhase::Dial,
+            ToolCallFailurePhase::Initialize,
+            ToolCallFailurePhase::PreDispatch,
+        ] {
+            assert!(!can_retry(true, 1, phase, None, &cancelled));
+        }
     }
 
     #[test]
