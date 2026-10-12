@@ -728,6 +728,7 @@ impl InvocationService for DefaultInvocationService {
             caller_capabilities: req.caller_capabilities.take(),
             approval_gated: false,
             task_binding: None,
+            cancellation: std::mem::take(&mut req.cancellation),
         };
         let mut ctx = InvocationContext {
             task_origin: None,
@@ -1770,6 +1771,7 @@ impl DefaultInvocationService {
             caller_capabilities: ctx.mrtr.caller_capabilities.clone(),
             approval_gated,
             task_binding: ctx.mrtr.task_binding.clone(),
+            cancellation: ctx.mrtr.cancellation.clone(),
         };
         let result = retained_response::dispatch(self, ctx, args, &admitted, mrtr).await;
         ctx.latency_ms = Some(started.elapsed().as_millis().min(i64::MAX as u128) as i64);

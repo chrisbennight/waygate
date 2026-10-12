@@ -23,6 +23,7 @@ use rmcp::transport::streamable_http_client::{
     SseError, StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
 };
 use sse_stream::{Sse, SseStream};
+use tokio_util::sync::CancellationToken;
 
 use waygate_core::http_client::{read_body_capped, ReadBodyError};
 use waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY;
@@ -67,6 +68,7 @@ pub(crate) fn response_materialization_limit(error: &ServiceError) -> Option<usi
 pub(crate) struct BoundedResponseClient {
     inner: reqwest::Client,
     connection_failed: Arc<AtomicBool>,
+    open_requests: CancellationToken,
 }
 
 impl BoundedResponseClient {
@@ -74,6 +76,30 @@ impl BoundedResponseClient {
         Self {
             inner,
             connection_failed: Arc::new(AtomicBool::new(false)),
+            open_requests: CancellationToken::new(),
+        }
+    }
+
+    /// Cancelling the returned token ends every message POST still waiting on
+    /// this connection, and any later one. The SDK's HTTP worker awaits a POST
+    /// until its response headers arrive, and a 2026-07-28 upstream sends none
+    /// until it has a result, so without this a closed session would leave the
+    /// upstream working. Ending the POST closes its stream, which a
+    /// 2026-07-28 upstream treats as cancellation.
+    pub(crate) fn open_requests(&self) -> CancellationToken {
+        self.open_requests.clone()
+    }
+
+    async fn until_closed(
+        &self,
+        request: impl std::future::Future<
+            Output = Result<StreamableHttpPostResponse, StreamableHttpError<reqwest::Error>>,
+        >,
+    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<reqwest::Error>> {
+        tokio::select! {
+            biased;
+            () = self.open_requests.cancelled() => Err(StreamableHttpError::TransportChannelClosed),
+            result = request => result,
         }
     }
 
@@ -259,8 +285,13 @@ impl StreamableHttpClient for BoundedResponseClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         let result = self
-            .inner
-            .post_message(uri, message, session_id, auth_header, custom_headers)
+            .until_closed(self.inner.post_message(
+                uri,
+                message,
+                session_id,
+                auth_header,
+                custom_headers,
+            ))
             .await;
         self.observe_connection_failure(&result);
         result
@@ -276,19 +307,25 @@ impl StreamableHttpClient for BoundedResponseClient {
         max_sse_event_size: usize,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         let result = if let Some(limit) = Self::response_limit(&message) {
-            self.post_bounded(uri, message, session_id, auth_header, custom_headers, limit)
-                .await
+            self.until_closed(self.post_bounded(
+                uri,
+                message,
+                session_id,
+                auth_header,
+                custom_headers,
+                limit,
+            ))
+            .await
         } else {
-            self.inner
-                .post_message_with_max_sse_event_size(
-                    uri,
-                    message,
-                    session_id,
-                    auth_header,
-                    custom_headers,
-                    max_sse_event_size,
-                )
-                .await
+            self.until_closed(self.inner.post_message_with_max_sse_event_size(
+                uri,
+                message,
+                session_id,
+                auth_header,
+                custom_headers,
+                max_sse_event_size,
+            ))
+            .await
         };
         self.observe_connection_failure(&result);
         result

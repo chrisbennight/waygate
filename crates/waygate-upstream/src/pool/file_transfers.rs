@@ -297,6 +297,7 @@ impl UpstreamPool {
                     service,
                     network_destination,
                     cleartext_control_plane,
+                    ..
                 } = connected;
                 if let Err(error) = self
                     .ensure_file_upload_contract_current(

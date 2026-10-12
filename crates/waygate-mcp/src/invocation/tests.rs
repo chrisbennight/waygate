@@ -2218,6 +2218,21 @@ mod mrtr_dispatch_tests {
             .is_some_and(|caps| caps.elicitation.is_some()));
     }
 
+    #[tokio::test]
+    async fn the_callers_cancellation_reaches_the_dispatch() {
+        let (service, catalog) = service(ScriptedCatalog::returning(
+            CallToolResult::success(vec![rmcp::model::ContentBlock::text("done")]).into(),
+        ));
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let request =
+            InvocationRequest::new("mock", "confirm").with_cancellation(cancellation.clone());
+        service.invoke(None, request).await.expect("completes");
+        cancellation.cancel();
+        assert!(catalog.seen_mrtr.lock().unwrap()[0]
+            .cancellation
+            .is_cancelled());
+    }
+
     /// Inspector that finds its needle in the serialized pause and reports
     /// the given decision, proving the pause rides the same chain as a
     /// normal result.

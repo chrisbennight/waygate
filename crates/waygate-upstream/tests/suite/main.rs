@@ -42,6 +42,7 @@ fn test_identity_issuer() -> Arc<IdentityIssuer> {
 }
 
 mod async_rw_parse_error;
+mod call_cancellation_http;
 mod discovery_batch;
 mod discovery_scale;
 mod identity_over_http;

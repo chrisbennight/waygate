@@ -32,6 +32,7 @@ struct PerCallDial<'a> {
     trace_id: &'a str,
     safe_retry: bool,
     attempts: usize,
+    cancellation: &'a tokio_util::sync::CancellationToken,
 }
 
 struct PerCallDialSuccess {
@@ -69,6 +70,7 @@ pub(super) struct PerCallExecution<'a> {
     pub(super) task: Option<&'a waygate_mcp::tasks::TaskRpc>,
     pub(super) allow_tasks: bool,
     pub(super) processor: Option<&'a dyn CallToolResultProcessor>,
+    pub(super) cancellation: &'a tokio_util::sync::CancellationToken,
 }
 
 pub(super) enum PerCallExecutionOutcome {
@@ -110,19 +112,30 @@ fn handoff_budget(
     }
 }
 
+/// A caller that has gone gets no second attempt, whatever phase failed.
 fn can_retry(
     safe_retry: bool,
     attempts: usize,
     phase: ToolCallFailurePhase,
     deadline: Option<tokio::time::Instant>,
+    cancellation: &tokio_util::sync::CancellationToken,
 ) -> bool {
-    safe_retry && attempts == 1 && phase.dispatch_proven_absent() && deadline_is_live(deadline)
+    safe_retry
+        && attempts == 1
+        && phase.dispatch_proven_absent()
+        && deadline_is_live(deadline)
+        && !cancellation.is_cancelled()
 }
 
+/// Close a per-call session. Its open requests end first: the SDK cannot
+/// stop its own HTTP worker while that worker waits on a response, and a
+/// closed session must not leave its upstream working.
 async fn close_service(
     service: RunningService<RoleClient, ClientInfo>,
+    open_requests: &tokio_util::sync::CancellationToken,
     deadline: Option<tokio::time::Instant>,
 ) {
+    open_requests.cancel();
     match remaining(deadline) {
         Some(remaining) if remaining.is_zero() => drop(service),
         Some(remaining) => {
@@ -168,6 +181,7 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
             trace_id: setup.trace_id,
             safe_retry,
             attempts,
+            cancellation: setup.cancellation,
         })
         .await;
         let connected = match dial {
@@ -183,7 +197,12 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
             }
         };
 
-        let service = connected.service;
+        let crate::transport::ConnectedService {
+            service,
+            cleartext_control_plane,
+            open_requests,
+            ..
+        } = connected;
         if matches!(
             setup.current_manifest.classification_mode,
             crate::ClassificationMode::McpAnnotations
@@ -235,7 +254,7 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
                         tool_name = setup.tool_name,
                         "per-call session advertises a contract that does not match the approved behavior hash; refusing dispatch",
                     );
-                    close_service(service, setup.deadline).await;
+                    close_service(service, &open_requests, setup.deadline).await;
                     return PerCallExecutionOutcome::Failed {
                         error: McpError::internal_error(
                             format!(
@@ -249,7 +268,13 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
                 }
                 Err(error) => {
                     let phase = ToolCallFailurePhase::PreDispatch;
-                    let retry = can_retry(safe_retry, attempts, phase, setup.deadline);
+                    let retry = can_retry(
+                        safe_retry,
+                        attempts,
+                        phase,
+                        setup.deadline,
+                        setup.cancellation,
+                    );
                     tracing::warn!(
                         server = setup.server,
                         tool_name = setup.tool_name,
@@ -263,12 +288,12 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
                     dispatch::record_failure(setup.server, phase);
                     let error_class = error.error_class();
                     if retry {
-                        close_service(service, setup.deadline).await;
+                        close_service(service, &open_requests, setup.deadline).await;
                         dispatch::record_retry_attempt(setup.server);
                         attempts += 1;
                         continue;
                     }
-                    close_service(service, setup.deadline).await;
+                    close_service(service, &open_requests, setup.deadline).await;
                     if attempts > 1 {
                         dispatch::record_retry_exhausted(setup.server);
                     }
@@ -296,7 +321,7 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
             )
             .await
         {
-            close_service(service, setup.deadline).await;
+            close_service(service, &open_requests, setup.deadline).await;
             return PerCallExecutionOutcome::Failed {
                 error: admission::contract_changed_error(setup.server, setup.tool_name),
                 error_class: UpstreamErrorClass::Protocol,
@@ -316,15 +341,22 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
                     setup
                         .processor
                         .is_some_and(|processor| processor.supports_file_output()),
-                    connected.cleartext_control_plane,
+                    cleartext_control_plane,
                     budget,
+                    setup.cancellation,
                 )
                 .await
             }
             Err(error) => Err(error),
         };
         if let Err(error) = response.as_mut() {
-            let retry = can_retry(safe_retry, attempts, error.phase, setup.deadline);
+            let retry = can_retry(
+                safe_retry,
+                attempts,
+                error.phase,
+                setup.deadline,
+                setup.cancellation,
+            );
             if retry {
                 tracing::warn!(
                     server = setup.server,
@@ -338,7 +370,7 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
                 dispatch::record_failure(setup.server, error.phase);
                 dispatch::record_retry_attempt(setup.server);
                 attempts += 1;
-                close_service(service, setup.deadline).await;
+                close_service(service, &open_requests, setup.deadline).await;
                 continue;
             }
             error.retryable = safe_retry
@@ -352,7 +384,7 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
             bounded_reads_supported: matches!(setup.snapshot.transport, crate::Transport::Http),
         };
         let result = dispatch::process_dispatch_response(response, setup.processor, &reader).await;
-        close_service(service, setup.deadline).await;
+        close_service(service, &open_requests, setup.deadline).await;
         return PerCallExecutionOutcome::Finished { result, attempts };
     }
 }
@@ -419,7 +451,13 @@ async fn dial_per_call(setup: PerCallDial<'_>) -> Result<PerCallDialSuccess, Per
             Err(error) => {
                 let phase = ToolCallFailurePhase::from_dial_error(&error);
                 dispatch::record_failure(setup.server, phase);
-                let retry = can_retry(setup.safe_retry, attempts, phase, setup.deadline);
+                let retry = can_retry(
+                    setup.safe_retry,
+                    attempts,
+                    phase,
+                    setup.deadline,
+                    setup.cancellation,
+                );
                 tracing::warn!(
                     server = setup.server,
                     tool_name = setup.tool_name,
@@ -487,6 +525,7 @@ mod tests {
             trace_id: "trace-dial-failure",
             safe_retry: true,
             attempts: 1,
+            cancellation: &tokio_util::sync::CancellationToken::new(),
         })
         .await
         {
@@ -502,8 +541,34 @@ mod tests {
 
     #[test]
     fn request_handoff_failure_uses_the_same_single_attempt_budget() {
-        assert!(can_retry(true, 1, ToolCallFailurePhase::PreDispatch, None));
-        assert!(!can_retry(true, 2, ToolCallFailurePhase::PreDispatch, None));
+        let live = tokio_util::sync::CancellationToken::new();
+        assert!(can_retry(
+            true,
+            1,
+            ToolCallFailurePhase::PreDispatch,
+            None,
+            &live
+        ));
+        assert!(!can_retry(
+            true,
+            2,
+            ToolCallFailurePhase::PreDispatch,
+            None,
+            &live
+        ));
+    }
+
+    #[test]
+    fn a_cancelled_call_is_never_retried() {
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        cancelled.cancel();
+        for phase in [
+            ToolCallFailurePhase::Dial,
+            ToolCallFailurePhase::Initialize,
+            ToolCallFailurePhase::PreDispatch,
+        ] {
+            assert!(!can_retry(true, 1, phase, None, &cancelled));
+        }
     }
 
     #[test]
