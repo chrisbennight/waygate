@@ -42,6 +42,7 @@ url.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 
 rmcp = { workspace = true, features = [
     "server",
@@ -60,7 +61,6 @@ waygate-test-support.workspace = true
 axum = { workspace = true }
 waygate-llm-providers.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
-tokio-util.workspace = true
 tower.workspace = true
 reqwest = { workspace = true }
 sha2.workspace = true

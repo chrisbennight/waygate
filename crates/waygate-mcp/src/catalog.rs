@@ -639,6 +639,10 @@ pub struct ToolCallMrtr {
     pub approval_gated: bool,
     /// Connection identity admitted before a task-capable call may dispatch.
     pub task_binding: Option<String>,
+    /// The downstream request's cancellation. When it fires, the dispatch
+    /// cancels its upstream request instead of waiting for a result nobody
+    /// will receive.
+    pub cancellation: tokio_util::sync::CancellationToken,
 }
 
 /// Authority that admitted a tool into one invocation.

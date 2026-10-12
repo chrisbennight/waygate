@@ -300,6 +300,13 @@ pub struct InvocationRequest {
     /// answers no server-initiated input request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caller_capabilities: Option<rmcp::model::ClientCapabilities>,
+    /// Cancelled when the downstream caller abandons this request: a
+    /// 2026-07-28 client closing its response stream, an explicit
+    /// `notifications/cancelled`, or the transport shutting down. Upstream
+    /// dispatch then cancels its own request. Never cancelled for callers that
+    /// do not supply one.
+    #[serde(skip)]
+    pub cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl InvocationRequest {
@@ -323,6 +330,7 @@ impl InvocationRequest {
             input_responses: None,
             request_state: None,
             caller_capabilities: None,
+            cancellation: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -352,6 +360,12 @@ impl InvocationRequest {
         capabilities: Option<rmcp::model::ClientCapabilities>,
     ) -> Self {
         self.caller_capabilities = capabilities;
+        self
+    }
+
+    /// Tie upstream dispatch to the downstream request's cancellation.
+    pub fn with_cancellation(mut self, cancellation: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation = cancellation;
         self
     }
 

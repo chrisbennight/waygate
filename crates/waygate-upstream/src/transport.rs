@@ -195,6 +195,10 @@ pub(crate) struct ConnectedService {
     pub(crate) service: RunningService<RoleClient, ClientInfo>,
     pub(crate) network_destination: Option<PinnedNetworkDestination>,
     pub(crate) cleartext_control_plane: bool,
+    /// Cancel to end every request this connection still has open with the
+    /// upstream before the service closes. Only streamable HTTP holds a
+    /// request open that the service's own shutdown cannot reach.
+    pub(crate) open_requests: tokio_util::sync::CancellationToken,
 }
 
 /// Build + serve the rmcp client transport for `manifest`, returning the
@@ -477,6 +481,7 @@ async fn dial_once(
             };
             let http = BoundedResponseClient::new(http);
             let connection_probe = http.clone();
+            let open_requests = http.open_requests();
             let service = match (issuer, cell) {
                 (Some(issuer), Some(cell)) => {
                     let mut wrapped =
@@ -514,6 +519,7 @@ async fn dial_once(
                 network_destination: Some(destination),
                 cleartext_control_plane: url::Url::parse(&url)
                     .is_ok_and(|url| url.scheme() == "http"),
+                open_requests,
             })
         }
         Transport::Sse => {
@@ -578,6 +584,7 @@ async fn dial_once(
                 service,
                 network_destination: Some(destination),
                 cleartext_control_plane,
+                open_requests: Default::default(),
             })
         }
         Transport::Stdio => {
@@ -616,6 +623,7 @@ async fn dial_once(
                 service,
                 network_destination: None,
                 cleartext_control_plane: false,
+                open_requests: Default::default(),
             })
         }
     }

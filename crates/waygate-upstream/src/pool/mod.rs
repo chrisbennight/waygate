@@ -2009,6 +2009,7 @@ impl UpstreamPool {
                     task: task.as_ref(),
                     allow_tasks: mrtr.task_binding.is_some(),
                     processor,
+                    cancellation: &mrtr.cancellation,
                 })
                 .await;
                 match execution {
@@ -2232,9 +2233,9 @@ impl UpstreamPool {
                 // Bound the upstream call with a hard timeout. Without it a
                 // wedged stream (long-idle HTTP/2 that silently half-closed)
                 // holds the checked-out slot and blocks every other call
-                // routed to it. On timeout we drop the in-flight future
-                // (releasing the slot) and fault the slot so repeated hangs
-                // trip the breaker and the re-probe rebuilds it.
+                // routed to it. On timeout the request is cancelled upstream,
+                // the slot is released, and the slot is faulted so repeated
+                // hangs trip the breaker and the re-probe rebuilds it.
                 // Contract in `dispatch::legacy_continuation_refusal`.
                 // Breaker-neutral: a local generation mismatch, not an
                 // upstream-health signal.
@@ -2259,6 +2260,7 @@ impl UpstreamPool {
                     processor.is_some_and(|processor| processor.supports_file_output()),
                     conn.cleartext_control_plane,
                     recovery::remaining(call_deadline),
+                    &mrtr.cancellation,
                 )
                 .await;
                 let reader = resources::SessionResourceReader {
