@@ -1,19 +1,19 @@
 {
   "formatVersion": 1,
   "reportFormatVersion": 2,
-  "expectedToolCount": 5,
+  "expectedToolCount": 3,
   "maximums": {
-    "toolsJsonBytes": 16772,
-    "fieldValueBytes.names": 103,
-    "fieldValueBytes.titles": 97,
-    "fieldValueBytes.descriptions": 280,
-    "fieldValueBytes.inputSchemas": 8237,
-    "fieldValueBytes.outputSchemas": 7241,
-    "fieldValueBytes.annotations": 445,
+    "toolsJsonBytes": 2756,
+    "fieldValueBytes.names": 63,
+    "fieldValueBytes.titles": 47,
+    "fieldValueBytes.descriptions": 138,
+    "fieldValueBytes.inputSchemas": 581,
+    "fieldValueBytes.outputSchemas": 1451,
+    "fieldValueBytes.annotations": 267,
     "fieldValueBytes.meta": 0,
-    "repeatedStringBytes": 4261,
+    "repeatedStringBytes": 0,
     "repeatedDescriptionLeadingBlockBytes": 0,
-    "repeatedOutputSchemaBytes": 2895,
-    "largestDeclarationBytes": 7007
+    "repeatedOutputSchemaBytes": 0,
+    "largestDeclarationBytes": 1888
   }
 }

@@ -415,7 +415,10 @@ async fn eager_client_allowlist_applies_only_to_matching_session() {
         .into_iter()
         .map(|tool| tool.name.to_string())
         .collect();
-    assert!(static_names.contains(&"demo.searchTools".to_owned()));
+    assert!(
+        !static_names.contains(&"demo.searchTools".to_owned()),
+        "a full list carries no per-server search adapter: {static_names:?}"
+    );
     assert!(
         static_names.contains(&"demo.echo".to_owned()),
         "matching client must receive the authorized catalog eagerly: {static_names:?}"
@@ -476,17 +479,16 @@ async fn codex_eager_catalog_supports_search_then_direct_mutation() {
         .await
         .expect("Codex tools/list");
     let names: Vec<_> = listed.tools.iter().map(|tool| tool.name.as_ref()).collect();
-    for expected in [
-        "demo.searchTools",
-        "demo.api.get",
-        "demo.api.mutate",
-        "demo.api.destroy",
-    ] {
+    for expected in ["demo.api.get", "demo.api.mutate", "demo.api.destroy"] {
         assert!(
             names.contains(&expected),
             "Codex must receive a callable declaration for {expected}: {names:?}"
         );
     }
+    assert!(
+        !names.contains(&"demo.searchTools"),
+        "a full list carries no per-server search adapter: {names:?}"
+    );
 
     let discovered = client
         .call_tool(
@@ -1637,8 +1639,8 @@ async fn stateless_wire_keeps_server_instructions_out_of_tool_descriptions() {
 }
 
 /// A 2026-07-28 request is served statelessly: no session id is minted, the
-/// result carries the SEP-2322 `resultType` discriminator, and the SEP-1888
-/// meta-tool catalog is visible.
+/// result carries the SEP-2322 `resultType` discriminator, and the stable
+/// catalog is visible.
 #[tokio::test]
 async fn stateless_request_is_served_without_a_session() {
     let server = spawn_gateway_with_allowed_hosts(vec![ALLOWED_HOST.into()]).await;
@@ -1656,8 +1658,8 @@ async fn stateless_request_is_served_without_a_session() {
         "2026-07-28 results carry resultType; got: {body}"
     );
     assert!(
-        body.contains("demo.searchTools"),
-        "the meta-tool catalog serves statelessly; got: {body}"
+        body.contains("demo.echo"),
+        "the stable catalog serves statelessly; got: {body}"
     );
 
     server.shutdown().await;
@@ -1705,7 +1707,7 @@ async fn stateless_tools_list_is_stable_before_and_after_search() {
         .collect();
     assert_eq!(
         before_names,
-        vec!["demo.alpha", "demo.echo", "demo.searchTools", "demo.zeta"],
+        vec!["demo.alpha", "demo.echo", "demo.zeta"],
         "the full projection uses canonical qualified-name order",
     );
 
@@ -1827,9 +1829,9 @@ async fn stateless_tools_list_pages_one_catalog_view_while_legacy_stays_complete
         )
         .map(|tool| tool["name"].as_str().expect("tool name"))
         .collect();
-    let mut expected = vec!["demo.searchTools".to_owned()];
-    expected.extend((0..75).map(|index| format!("demo.tool-{index:03}")));
-    expected.sort_unstable();
+    let expected: Vec<_> = (0..75)
+        .map(|index| format!("demo.tool-{index:03}"))
+        .collect();
     assert_eq!(
         all_names, expected,
         "page traversal is complete and canonical"
@@ -1909,7 +1911,7 @@ async fn stateless_tools_list_pages_one_catalog_view_while_legacy_stays_complete
             .as_array()
             .expect("legacy tools")
             .len(),
-        76,
+        75,
         "legacy eager listing stays complete",
     );
     assert!(
@@ -1983,7 +1985,7 @@ async fn stateless_upstream_search_tools_name_takes_direct_tool_precedence() {
 /// different call result. This malformed-schema case pins the same predicate
 /// used for profile, Cedar, and runtime-admission withholding.
 #[tokio::test]
-async fn stateless_withheld_search_tools_collision_keeps_adapter_visible_and_callable() {
+async fn stateless_withheld_search_tools_collision_keeps_adapter_callable() {
     let tool_names = Arc::new(tokio::sync::RwLock::new(vec![
         "echo".to_string(),
         "searchTools".to_string(),
@@ -2005,16 +2007,13 @@ async fn stateless_withheld_search_tools_collision_keeps_adapter_visible_and_cal
         stateless_post(&client, &url, 1, "tools/list", json!({}), "probe").await,
     )
     .await;
-    let collision: Vec<_> = listed["result"]["tools"]
-        .as_array()
-        .expect("tools array")
-        .iter()
-        .filter(|tool| tool["name"] == "demo.searchTools")
-        .collect();
-    assert_eq!(collision.len(), 1, "the qualified name is declared once");
-    assert_ne!(
-        collision[0]["description"], "demo tool",
-        "the withheld direct declaration cannot displace the adapter",
+    assert!(
+        !listed["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .any(|tool| tool["name"] == "demo.searchTools"),
+        "a full list declares neither the withheld tool nor the adapter: {listed}",
     );
 
     let called = stateless_response_json(
@@ -2147,7 +2146,7 @@ async fn stateless_codemode_only_client_gets_compact_catalog_and_guidance() {
             .any(|tool| tool["name"] == "demo.echo"),
         "non-matching stateless client must keep the stable full catalog: {unmatched}"
     );
-    assert!(unmatched_tools
+    assert!(!unmatched_tools
         .iter()
         .any(|tool| tool["name"] == "demo.searchTools"));
 

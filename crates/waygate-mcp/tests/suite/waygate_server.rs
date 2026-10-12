@@ -3337,9 +3337,8 @@ async fn pending_notify_does_not_rearm_on_repeat_search() {
 async fn eager_tools_list_returns_full_catalog_without_search() {
     // Operator escape hatch for clients that ignore tools/list_changed
     // (claude-code#13646): the full upstream catalog shows up in
-    // `tools/list` immediately, with no `searchTools` call required.
-    // Meta-tools remain alongside so SEP #1888-aware clients can still
-    // use progressive discovery.
+    // `tools/list` immediately, with no `searchTools` call required. A full
+    // list repeats no per-server search adapter.
     let catalog: SharedCatalog = FakeCatalog::new(vec![
         (
             "example-messages".into(),
@@ -3365,10 +3364,8 @@ async fn eager_tools_list_returns_full_catalog_without_search() {
         names,
         vec![
             "example-messages.list_contacts",
-            "example-messages.searchTools",
             "example-messages.send_message",
             "example-observability.query",
-            "example-observability.searchTools",
         ],
         "eager compatibility projections must be canonical for stable client caches",
     );
@@ -3441,7 +3438,6 @@ async fn eager_projection_rechecks_authorization_on_every_list() {
         .into_iter()
         .map(|tool| tool.name.to_string())
         .collect();
-    assert!(after.contains(&"example-messages.searchTools".to_owned()));
     assert!(
         !after.contains(&"example-messages.send_message".to_owned()),
         "eager compatibility changes projection size, never authorization: {after:?}",

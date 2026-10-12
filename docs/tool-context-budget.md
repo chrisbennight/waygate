@@ -130,7 +130,9 @@ validation-equivalent portability projection documented in
 `docs/agents/mcp-tool-docs.md`.
 Synthetic legacy `searchTools` descriptions likewise carry only the upstream
 name and purpose; their shared discovery and invocation guidance stays in the
-server instructions instead of repeating once per visible upstream.
+server instructions instead of repeating once per visible upstream. Those
+adapters appear only in a legacy session's progressive list, whose
+instructions carry that guidance; a full list omits them.
 
 Some hosts may choose to render server instructions beside every tool in their
 own model prompt. That rendering is outside the MCP wire contract. To verify
