@@ -18,15 +18,21 @@ use futures::StreamExt;
 use tokio_util::task::TaskTracker;
 
 const HEADER_MCP_METHOD: &str = "Mcp-Method";
+const HEADER_MCP_PROTOCOL_VERSION: &str = "MCP-Protocol-Version";
 
 /// Hold a drain token until the request's response body has been sent or
 /// dropped, so a streamed result keeps the transport open until it is written.
 pub async fn track_request(work: TaskTracker, request: Request, next: Next) -> Response {
-    let standing = request.method() != Method::POST
-        || request
-            .headers()
-            .get(HEADER_MCP_METHOD)
-            .is_some_and(|method| method == "subscriptions/listen");
+    // Only a 2026-07-28 request has its routing header checked against its
+    // body, so only there does the header prove a listen stream.
+    let headers = request.headers();
+    let listen = headers
+        .get(HEADER_MCP_METHOD)
+        .is_some_and(|method| method == "subscriptions/listen")
+        && headers
+            .get(HEADER_MCP_PROTOCOL_VERSION)
+            .is_some_and(|version| version == waygate_mcp::MCP_SPEC_VERSION);
+    let standing = request.method() != Method::POST || listen;
     if standing {
         return next.run(request).await;
     }
@@ -83,6 +89,7 @@ mod tests {
             Request::get("/mcp").body(Body::empty()).expect("request"),
             Request::post("/mcp")
                 .header(HEADER_MCP_METHOD, "subscriptions/listen")
+                .header(HEADER_MCP_PROTOCOL_VERSION, waygate_mcp::MCP_SPEC_VERSION)
                 .body(Body::empty())
                 .expect("request"),
         ] {
@@ -92,5 +99,24 @@ mod tests {
                 .expect("response");
             assert!(work.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn a_legacy_request_naming_listen_is_still_work() {
+        let work = TaskTracker::new();
+        let _response = router(work.clone())
+            .oneshot(
+                Request::post("/mcp")
+                    .header(HEADER_MCP_METHOD, "subscriptions/listen")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            work.len(),
+            1,
+            "a legacy header is not checked against the body, so it proves nothing"
+        );
     }
 }
