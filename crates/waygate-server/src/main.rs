@@ -20,6 +20,7 @@ mod mcp_builtin;
 mod mcp_codemode;
 mod mcp_control;
 mod mcp_discovery;
+mod mcp_drain;
 mod mcp_factory;
 mod mcp_files;
 mod mcp_http_promote;
@@ -1022,10 +1023,18 @@ async fn gateway_main() -> anyhow::Result<()> {
         ct.clone(),
     );
     let codemode_execution_limit = mcp_codemode::execution_limit_from_env()?;
+    let codemode_store = mcp_codemode::shared_execution_store(db_pool.clone());
     mcp_codemode::spawn_abandoned_reconciler(
-        mcp_codemode::shared_execution_store(db_pool.clone()),
+        codemode_store.clone(),
         codemode_execution_limit,
         ct.clone(),
+    );
+    // In-flight MCP requests and detached Code Mode runs that shutdown lets
+    // finish before closing the MCP transport.
+    let inflight_work = tokio_util::task::TaskTracker::new();
+    let codemode_capacity = mcp_codemode::CodeModeExecutionCapacity::shared(
+        cfg.codemode_capacity,
+        inflight_work.clone(),
     );
     let mcp_factory = Arc::new(mcp_factory::McpServerFactory {
         catalog: catalog.clone(),
@@ -1037,7 +1046,7 @@ async fn gateway_main() -> anyhow::Result<()> {
         audit_mode: cfg.audit_mode,
         result_storage: cfg.codemode_result_storage,
         execution_limit: codemode_execution_limit,
-        execution_capacity: mcp_codemode::CodeModeExecutionCapacity::shared(cfg.codemode_capacity),
+        execution_capacity: codemode_capacity.clone(),
         quota: quota_service.clone(),
         hitl_hub: hitl_hub.clone(),
         inspectors: inspectors.clone(),
@@ -1073,10 +1082,17 @@ async fn gateway_main() -> anyhow::Result<()> {
         idjag_advertise_ema,
         mcp_ping_interval,
     });
+    let mcp_transport_ct = CancellationToken::new();
     let mcp_service = StreamableHttpService::new(
         move || mcp_factory.build(),
         session_manager,
-        streamable_http_server_config(cfg.sse_keepalive, ct.child_token(), mcp_allowed_hosts),
+        // Its own token, not a child of the shutdown token: shutdown closes the
+        // MCP transport only after in-flight work has finished.
+        streamable_http_server_config(
+            cfg.sse_keepalive,
+            mcp_transport_ct.child_token(),
+            mcp_allowed_hosts,
+        ),
     );
 
     // Pass the peer JWKS cache so the bearer
@@ -1816,6 +1832,13 @@ async fn gateway_main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(move |req, next| {
             let state = preparse_gate_state.clone();
             async move { mcp_preparse_gate::preparse_gate(state, req, next).await }
+        }))
+        .layer(axum::middleware::from_fn({
+            let work = inflight_work.clone();
+            move |req, next| {
+                let work = work.clone();
+                async move { mcp_drain::track_request(work, req, next).await }
+            }
         }));
     let mut protected: Router<()> = Router::new()
         .nest("/mcp", mcp_service_with_promote)
@@ -2459,6 +2482,26 @@ async fn gateway_main() -> anyhow::Result<()> {
     );
 
     let cleanup = async {
+        // Refuse new Code Mode runs and end live claims with the work window,
+        // then let in-flight MCP requests and detached runs finish before the
+        // MCP transport closes its streams. The window leaves the evidence
+        // queues their own flush budget inside the drain timeout.
+        let work_window =
+            drain_timeout.saturating_sub(waygate_mcp::audit::EVIDENCE_QUEUE_DRAIN_TIMEOUT);
+        codemode_capacity
+            .begin_drain(codemode_store.as_ref(), work_window)
+            .await;
+        inflight_work.close();
+        if tokio::time::timeout(work_window, inflight_work.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                in_flight = inflight_work.len(),
+                "in-flight MCP work did not finish within the drain window; closing the MCP transport"
+            );
+        }
+        mcp_transport_ct.cancel();
         // Wait for axum to finish draining in-flight HTTP
         // connections.
         match server_task.await {

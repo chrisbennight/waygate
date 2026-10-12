@@ -701,7 +701,12 @@ over the following intervals. The reason is
 side-effecting call that started without a recorded outcome. That reason is
 `effect_outcome_unknown`: the effect may already have applied, so check the
 target system before deliberately repeating the work with `repeat_after`.
-Process loss therefore cannot leave a task projected as working forever. Rows
+Process loss therefore cannot leave a task projected as working forever. On
+shutdown the gateway refuses new executions with `gateway_draining`, lets
+in-flight runs finish within `GATEWAY_DRAIN_TIMEOUT_SECONDS`, less the audit
+queues' flush time, and ends their claims with that window, so a run that
+cannot finish in time is reconciled shortly after the window closes rather than
+after its full lease. Rows
 from older releases that recorded a resumable profile return to
 `waiting_for_resume` instead. Without that storage decision or durable storage,
 the bounded blocking execution path remains available without advertising task

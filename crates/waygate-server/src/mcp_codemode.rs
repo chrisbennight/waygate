@@ -158,6 +158,14 @@ pub struct CodeModeExecutionCapacity {
     detached: Arc<Semaphore>,
     tenants: Mutex<HashMap<String, Weak<Semaphore>>>,
     detached_starts: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    /// Work a rolling restart lets finish before the MCP transport closes:
+    /// detached runs here, and in-flight MCP requests through the same tracker.
+    work: tokio_util::task::TaskTracker,
+    /// Claims held by runs in this process, keyed by execution and owner, so a
+    /// drain can end their leases with its window.
+    live_claims: Mutex<HashMap<(uuid::Uuid, uuid::Uuid), ExecutionClaim>>,
+    /// When the drain window closes; set once shutdown begins.
+    drain_deadline: std::sync::OnceLock<Instant>,
 }
 
 impl CodeModeExecutionCapacity {
@@ -168,11 +176,77 @@ impl CodeModeExecutionCapacity {
             detached: Arc::new(Semaphore::new(limits.detached)),
             tenants: Mutex::new(HashMap::new()),
             detached_starts: Mutex::new(HashMap::new()),
+            work: tokio_util::task::TaskTracker::new(),
+            live_claims: Mutex::new(HashMap::new()),
+            drain_deadline: std::sync::OnceLock::new(),
         }
     }
 
-    pub(crate) fn shared(limits: CodeModeCapacityLimits) -> Arc<Self> {
-        Arc::new(Self::new(limits))
+    pub(crate) fn shared(
+        limits: CodeModeCapacityLimits,
+        work: tokio_util::task::TaskTracker,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            work,
+            ..Self::new(limits)
+        })
+    }
+
+    /// Refuse new runs and end every live claim's lease with the drain
+    /// window, so a run that cannot finish in time becomes reconcilable when
+    /// the window closes rather than when its full lease would have lapsed.
+    pub(crate) async fn begin_drain(&self, store: Option<&SharedExecutionStore>, window: Duration) {
+        if self.drain_deadline.set(Instant::now() + window).is_err() {
+            return;
+        }
+        let Some(store) = store else {
+            return;
+        };
+        let claims: Vec<ExecutionClaim> = self
+            .live_claims
+            .lock()
+            .expect("live claim registry poisoned")
+            .values()
+            .cloned()
+            .collect();
+        for claim in claims {
+            // Sets the lease relative to now under the owner and epoch fence,
+            // without a cancellation predicate, so it also ends a lease early.
+            if let Err(error) = store.renew_effect_lease(&claim, window).await {
+                tracing::warn!(
+                    %error,
+                    execution_id = %claim.execution_id,
+                    "could not end a Code Mode claim with the drain window"
+                );
+            }
+        }
+    }
+
+    /// A lease that does not outlast the drain window once shutdown began.
+    fn lease_within_drain(&self, lease: Duration) -> Duration {
+        match self.drain_deadline.get() {
+            Some(deadline) => lease.min(deadline.saturating_duration_since(Instant::now())),
+            None => lease,
+        }
+    }
+
+    fn spawn_detached<F>(&self, run: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.work.spawn(run);
+    }
+
+    fn hold_claim(self: &Arc<Self>, claim: &ExecutionClaim) -> LiveClaim {
+        let key = (claim.execution_id, claim.owner);
+        self.live_claims
+            .lock()
+            .expect("live claim registry poisoned")
+            .insert(key, claim.clone());
+        LiveClaim {
+            capacity: self.clone(),
+            key,
+        }
     }
 
     fn tenant(&self, tenant: &str) -> Arc<Semaphore> {
@@ -193,6 +267,9 @@ impl CodeModeExecutionCapacity {
         &self,
         principal: &Principal,
     ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), McpError> {
+        if self.drain_deadline.get().is_some() {
+            return Err(gateway_draining());
+        }
         let tenant = self
             .tenant(principal.tenant.as_str())
             .try_acquire_owned()
@@ -226,6 +303,23 @@ impl CodeModeExecutionCapacity {
         start
     }
 }
+
+/// Registration of a claim held by a run in this process; released on drop.
+struct LiveClaim {
+    capacity: Arc<CodeModeExecutionCapacity>,
+    key: (uuid::Uuid, uuid::Uuid),
+}
+
+impl Drop for LiveClaim {
+    fn drop(&mut self) {
+        self.capacity
+            .live_claims
+            .lock()
+            .expect("live claim registry poisoned")
+            .remove(&self.key);
+    }
+}
+
 #[cfg(test)]
 #[derive(Default)]
 struct AttemptBarrier {
@@ -1397,7 +1491,7 @@ impl CodeModeTools {
         let execution_id = execution.id;
         let tools = self.clone();
         let principal = principal.clone();
-        tokio::spawn(async move {
+        self.execution_capacity.spawn_detached(async move {
             if let Err(error) = tools.run_claimed_program(&principal, claimed).await {
                 // There is no caller left to return this to, and the terminal
                 // state is journaled regardless. This is for an operator
@@ -1437,7 +1531,7 @@ impl CodeModeTools {
 
         let tools = self.clone();
         let principal = principal.clone();
-        tokio::spawn(async move {
+        self.execution_capacity.spawn_detached(async move {
             if let Err(error) = tools.run_claimed_program(&principal, claimed).await {
                 tracing::debug!(
                     %execution_id,
@@ -1947,6 +2041,7 @@ impl CodeModeTools {
             _capacity_permit,
             ..
         } = claimed;
+        let _live_claim = self.execution_capacity.hold_claim(&claim);
         let work = async {
             #[cfg(test)]
             if let Some(barrier) = self.attempt_barrier.as_ref() {
@@ -2597,7 +2692,11 @@ impl CodeModeTools {
             .as_ref()
             .ok_or_else(execution_unavailable)?;
         let renewed = store
-            .renew(claim, self.claim_lease())
+            .renew(
+                claim,
+                self.execution_capacity
+                    .lease_within_drain(self.claim_lease()),
+            )
             .await
             .map_err(|error| {
                 tracing::error!(
@@ -2658,7 +2757,14 @@ impl CodeModeTools {
         let Some(store) = self.execution_store.as_ref() else {
             return;
         };
-        match store.renew_effect_lease(claim, self.claim_lease()).await {
+        match store
+            .renew_effect_lease(
+                claim,
+                self.execution_capacity
+                    .lease_within_drain(self.claim_lease()),
+            )
+            .await
+        {
             Ok(true) => {}
             Ok(false) => tracing::warn!(
                 execution_id = %claim.execution_id,
@@ -4175,7 +4281,7 @@ impl BuiltinTools for CodeModeTools {
         let execution_id = claimed.execution.id;
         let tools = self.clone();
         let principal = principal.clone();
-        tokio::spawn(async move {
+        self.execution_capacity.spawn_detached(async move {
             if let Err(error) = tools.run_claimed_program(&principal, claimed).await {
                 tracing::debug!(
                     %execution_id,
@@ -5582,6 +5688,13 @@ fn execution_capacity() -> McpError {
     McpError::invalid_request(
         "Code Mode execution capacity is currently exhausted",
         Some(serde_json::json!({"error": "execution_capacity"})),
+    )
+}
+
+fn gateway_draining() -> McpError {
+    McpError::invalid_request(
+        "The gateway is shutting down and admits no new Code Mode executions; retry shortly",
+        Some(serde_json::json!({"error": "gateway_draining"})),
     )
 }
 
@@ -13880,6 +13993,51 @@ mod tests {
                 .unwrap()["error"],
             "execution_capacity"
         );
+    }
+
+    #[tokio::test]
+    async fn drain_refuses_new_runs_and_ends_live_claims_with_its_window() {
+        let capacity = Arc::new(CodeModeExecutionCapacity::new(CodeModeCapacityLimits {
+            global: 2,
+            per_tenant: 2,
+            detached: 1,
+        }));
+        let store = Arc::new(RecordingExecutionStore::default());
+        let claim = ExecutionClaim {
+            execution_id: Uuid::now_v7(),
+            tenant_id: "drain".to_owned(),
+            owner: Uuid::now_v7(),
+            epoch: 1,
+        };
+        let live = capacity.hold_claim(&claim);
+        let window = Duration::from_secs(20);
+
+        let shared: SharedExecutionStore = store.clone();
+        capacity.begin_drain(Some(&shared), window).await;
+
+        assert_eq!(
+            *store.renewals.lock().await,
+            vec![window],
+            "a live claim's lease ends with the drain window"
+        );
+        assert!(
+            capacity.lease_within_drain(Duration::from_secs(300)) <= window,
+            "an effect renewal cannot outlast the drain window"
+        );
+        assert_eq!(
+            capacity
+                .acquire_execution(&reader())
+                .unwrap_err()
+                .data
+                .unwrap()["error"],
+            "gateway_draining"
+        );
+        drop(live);
+        assert!(capacity
+            .live_claims
+            .lock()
+            .expect("live claim registry")
+            .is_empty());
     }
 
     #[tokio::test]
