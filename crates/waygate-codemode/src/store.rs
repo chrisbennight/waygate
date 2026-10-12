@@ -9,11 +9,12 @@ use waygate_core::store::StoreError;
 use time::OffsetDateTime;
 
 use crate::{
-    DetachedExecutionSlot, Execution, ExecutionArtifact, ExecutionArtifactContent, ExecutionClaim,
-    ExecutionEvent, ExecutionStatus, ExecutionStore, ExecutionTransition, InFlightExecution,
-    NewExecution, NewExecutionEvent, OperatorInFlightExecution, OwnedInFlight, ResumeExecution,
-    RetainedSource, RetryEquivalence, SourceArtifactOwner, SourceArtifactStore, StartExecution,
-    StartExecutionResult, MAX_RETAINED_SOURCES_PER_OWNER, MAX_RETAINED_SOURCES_PER_TENANT,
+    AbandonedExecution, DetachedExecutionSlot, Execution, ExecutionArtifact,
+    ExecutionArtifactContent, ExecutionClaim, ExecutionEvent, ExecutionStatus, ExecutionStore,
+    ExecutionTransition, InFlightExecution, NewExecution, NewExecutionEvent,
+    OperatorInFlightExecution, OwnedInFlight, ResumeExecution, RetainedSource, RetryEquivalence,
+    SourceArtifactOwner, SourceArtifactStore, StartExecution, StartExecutionResult,
+    MAX_RETAINED_SOURCES_PER_OWNER, MAX_RETAINED_SOURCES_PER_TENANT,
     MAX_RETAINED_SOURCE_BYTES_PER_OWNER, MAX_RETAINED_SOURCE_BYTES_PER_TENANT,
     MAX_SOURCE_LOCATORS_PER_OWNER, MAX_SOURCE_LOCATORS_PER_TENANT,
 };
@@ -1604,6 +1605,71 @@ impl ExecutionStore for PgExecutionStore {
         .await?;
         tx.commit().await?;
         Ok(current.as_ref().map(row_to_execution))
+    }
+
+    async fn list_abandoned(
+        &self,
+        submission_grace: Duration,
+    ) -> Result<Vec<AbandonedExecution>, StoreError> {
+        // Mirrors the abandonment arms of `reconcile_abandoned`, which
+        // re-checks them; rows written before issuer binding stay out, as
+        // that update refuses them. Each arm is bounded on its own and walks
+        // an existing partial index rather than sorting every unfinished row:
+        // dead claims by claim expiry, paused rows by retention, and
+        // never-claimed submissions within the in-flight index.
+        let rows = sqlx::query_as::<_, (String, String, String, Uuid)>(
+            r#"
+            (
+                SELECT tenant_id, principal_sub, principal_issuer, id
+                  FROM codemode_executions
+                 WHERE claim_owner IS NOT NULL
+                   AND claim_expires_at <= now()
+                   AND status = 'running'
+                   AND completed_at IS NULL
+                   AND principal_issuer IS NOT NULL
+                 ORDER BY claim_expires_at, id
+                 LIMIT $2
+            )
+            UNION ALL
+            (
+                SELECT tenant_id, principal_sub, principal_issuer, id
+                  FROM codemode_executions
+                 WHERE completed_at IS NULL
+                   AND retention_until <= now()
+                   AND status IN ('waiting_for_approval', 'waiting_for_resume')
+                   AND claim_owner IS NULL
+                   AND principal_issuer IS NOT NULL
+                 ORDER BY retention_until, id
+                 LIMIT $2
+            )
+            UNION ALL
+            (
+                SELECT tenant_id, principal_sub, principal_issuer, id
+                  FROM codemode_executions
+                 WHERE status = 'submitted'
+                   AND claim_owner IS NULL
+                   AND completed_at IS NULL
+                   AND principal_issuer IS NOT NULL
+                   AND submitted_at <= now() - ($1 * interval '1 second')
+                 LIMIT $2
+            )
+            "#,
+        )
+        .bind(lease_seconds(submission_grace))
+        .bind(RETENTION_SWEEP_BATCH_SIZE)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(tenant_id, principal_sub, principal_issuer, id)| AbandonedExecution {
+                    tenant_id,
+                    principal_sub,
+                    principal_issuer,
+                    id,
+                },
+            )
+            .collect())
     }
 
     async fn events(&self, tenant_id: &str, id: Uuid) -> Result<Vec<ExecutionEvent>, StoreError> {

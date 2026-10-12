@@ -688,8 +688,14 @@ explicitly allows result storage, task-augmented calls additionally persist that
 bounded result for repeated retrieval via `tasks/get` during the retention
 window. An attempt that loses its worker is never replayed, because a program
 with direct authority must not repeat effects. Once its claim lease has passed,
-owner polling terminalizes the abandoned work as `expired` and releases the
-stale claim; a stale worker remains fenced. The reason is
+the abandoned work is terminalized as `expired` and its stale claim released,
+either by an owner read or by background reconciliation, which every replica
+runs at startup and then every minute; a stale worker remains fenced. An
+ordinary run does not renew its claim, so the lease spans the setup allowance
+and the execution budget (`GATEWAY_CODEMODE_EXECUTION_LIMIT_SECONDS`). Each
+reconciliation handles a bounded batch, so a dead worker is normally noticed
+within that lease plus one reconciliation interval, and a larger backlog clears
+over the following intervals. The reason is
 `worker_never_claimed` for a submission no worker claimed and
 `worker_lease_expired` for an interrupted attempt, unless the journal shows a
 side-effecting call that started without a recorded outcome. That reason is

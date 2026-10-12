@@ -2655,6 +2655,98 @@ async fn abandoned_worker_reports_unknown_outcome_only_for_unjournaled_effects()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoned_executions_are_nominated_across_owners_without_live_claims() {
+    let Some(pool) = connect().await else {
+        eprintln!(
+            "skipping Code Mode abandoned-nomination Pg contract: AUDIT_DATABASE_URL not set"
+        );
+        return;
+    };
+    let tenant = seed_tenant(&pool, &Uuid::new_v4().to_string()).await;
+    let store = PgExecutionStore::new(pool.clone());
+    let grace = Duration::from_secs(1);
+
+    let unclaimed = Uuid::now_v7();
+    store
+        .submit(new_execution(&tenant, unclaimed))
+        .await
+        .expect("submit unclaimed execution");
+    sqlx::query(
+        "UPDATE codemode_executions SET submitted_at = now() - interval '2 seconds' WHERE id = $1",
+    )
+    .bind(unclaimed)
+    .execute(&pool)
+    .await
+    .expect("age unclaimed execution");
+
+    let mut claimed = Vec::new();
+    for principal_sub in ["bob", "alice"] {
+        let id = Uuid::now_v7();
+        let mut execution = new_execution(&tenant, id);
+        execution.principal_sub = principal_sub.to_owned();
+        store.submit(execution).await.expect("submit execution");
+        store
+            .claim(
+                &tenant,
+                id,
+                Uuid::now_v7(),
+                Duration::from_secs(30),
+                execution_source().to_owned(),
+                json!({"snapshot": 1}),
+            )
+            .await
+            .expect("claim execution")
+            .expect("claim succeeds");
+        claimed.push(id);
+    }
+    let (dead, live) = (claimed[0], claimed[1]);
+    sqlx::query(
+        "UPDATE codemode_executions SET claim_expires_at = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(dead)
+    .execute(&pool)
+    .await
+    .expect("expire bob's worker claim");
+
+    // Nomination is read-only across tenants; this test only acts on its own.
+    let nominated: Vec<_> = store
+        .list_abandoned(grace)
+        .await
+        .expect("nominate abandoned executions")
+        .into_iter()
+        .filter(|candidate| candidate.tenant_id == tenant)
+        .collect();
+    let mut nominated_ids: Vec<_> = nominated.iter().map(|candidate| candidate.id).collect();
+    nominated_ids.sort();
+    let mut expected = vec![unclaimed, dead];
+    expected.sort();
+    assert_eq!(nominated_ids, expected, "a live claim is never nominated");
+
+    for candidate in nominated {
+        let reconciled = store
+            .reconcile_abandoned(
+                &candidate.tenant_id,
+                &candidate.principal_sub,
+                &candidate.principal_issuer,
+                candidate.id,
+                grace,
+            )
+            .await
+            .expect("reconcile nominated execution")
+            .expect("owner identity resolves the execution");
+        assert_eq!(reconciled.status, ExecutionStatus::Expired);
+    }
+    let still_live = store
+        .get(&tenant, live)
+        .await
+        .expect("read live execution")
+        .expect("live execution exists");
+    assert_eq!(still_live.status, ExecutionStatus::Running);
+
+    cleanup(&pool, &tenant).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claim_is_single_owner_and_epoch_fences_stale_workers() {
     let Some(pool) = connect().await else {
         eprintln!("skipping Code Mode claim Pg contract: AUDIT_DATABASE_URL not set");

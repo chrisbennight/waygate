@@ -101,6 +101,20 @@ fn execution_setup_allowance() -> Duration {
 /// Headroom for the runner's own teardown and final frame after its budget
 /// expires, so the parent does not race the runner's precise timeout report.
 const EXECUTION_TIMEOUT_HEADROOM: Duration = Duration::from_secs(1);
+/// Program-phase bound for a given budget; see
+/// `CodeModeTools::program_phase_timeout`.
+fn program_phase_timeout_for(execution_limit: Duration) -> Duration {
+    execution_limit + EXECUTION_TIMEOUT_HEADROOM
+}
+
+/// Claim lease for a given budget; see `CodeModeTools::claim_lease`.
+fn claim_lease_for(execution_limit: Duration) -> Duration {
+    EXECUTION_CLAIM_LEASE_FLOOR
+        .max(execution_setup_allowance() + program_phase_timeout_for(execution_limit))
+}
+
+/// How often each replica reconciles abandoned executions in the background.
+const ABANDONED_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 /// Floor for the durable worker claim lease.
 ///
 /// The lease fences one runner against another claiming the same execution,
@@ -489,7 +503,7 @@ impl CodeModeTools {
     /// setup would silently grant it the whole setup allowance on top of its
     /// budget.
     fn program_phase_timeout(&self) -> Duration {
-        self.execution_limit + EXECUTION_TIMEOUT_HEADROOM
+        program_phase_timeout_for(self.execution_limit)
     }
 
     /// Program-phase deadline enforced by the broker for every profile.
@@ -521,7 +535,7 @@ impl CodeModeTools {
     /// work it fences would let a long program finish and then be unable to
     /// record its own result.
     fn claim_lease(&self) -> Duration {
-        EXECUTION_CLAIM_LEASE_FLOOR.max(self.call_timeout())
+        claim_lease_for(self.execution_limit)
     }
 
     fn acquire_detached_execution_slot(&self) -> Result<OwnedSemaphorePermit, McpError> {
@@ -2566,6 +2580,42 @@ impl CodeModeTools {
         Ok(())
     }
 
+    /// Confirm the worker still holds its claim immediately before an effect
+    /// is dispatched, extending it by a full lease. Renewal is atomic with the
+    /// cancellation flag, so a cancellation accepted after the start append is
+    /// observed here. A claim lost to reconciliation or a takeover refuses the
+    /// effect instead of letting it run where its outcome cannot be journaled.
+    async fn confirm_claim_before_effect(
+        &self,
+        claim: Option<&ExecutionClaim>,
+    ) -> Result<(), McpError> {
+        let Some(claim) = claim else {
+            return Ok(());
+        };
+        let store = self
+            .execution_store
+            .as_ref()
+            .ok_or_else(execution_unavailable)?;
+        let renewed = store
+            .renew(claim, self.claim_lease())
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    %error,
+                    execution_id = %claim.execution_id,
+                    "could not confirm the Code Mode claim before effect dispatch"
+                );
+                execution_unavailable()
+            })?;
+        if !renewed {
+            if self.finish_requested_cancellation(store, claim).await? {
+                return Err(execution_cancelled());
+            }
+            return Err(execution_unavailable());
+        }
+        Ok(())
+    }
+
     /// Await an in-flight effect while keeping the durable worker claim
     /// alive. The effect is exempt from the execution deadline, and a
     /// spec-permitted upstream call can far outlive the claim lease; without
@@ -2582,33 +2632,43 @@ impl CodeModeTools {
         let Some(claim) = claim else {
             return dispatch.await;
         };
+        // The caller's pre-dispatch gate already extended the claim by a full
+        // lease, so periodic renewal starts one period later.
         tokio::pin!(dispatch);
+        let period = self.claim_lease() / 3;
+        let mut renewal = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
+                // A finished dispatch is observed before any further renewal,
+                // however slow renewals become.
+                biased;
                 result = &mut dispatch => break result,
-                _ = tokio::time::sleep(self.claim_lease() / 3) => {
-                    let Some(store) = self.execution_store.as_ref() else {
-                        continue;
-                    };
-                    // Cancellation-tolerant on purpose: a cancellation
-                    // requested mid-flight must not let the lease lapse and
-                    // reconciliation terminalize the row before the effect's
-                    // outcome is journaled. Cancellation finalizes at the
-                    // next journal boundary instead.
-                    match store.renew_effect_lease(claim, self.claim_lease()).await {
-                        Ok(true) => {}
-                        Ok(false) => tracing::warn!(
-                            execution_id = %claim.execution_id,
-                            "Code Mode effect dispatch continuing without a renewable claim"
-                        ),
-                        Err(error) => tracing::warn!(
-                            %error,
-                            execution_id = %claim.execution_id,
-                            "Code Mode claim renewal failed during effect dispatch"
-                        ),
-                    }
-                }
+                _ = renewal.tick() => self.renew_claim_for_effect(claim).await,
             }
+        }
+    }
+
+    /// Extend the claim by a full lease while an effect is in flight.
+    /// Cancellation-tolerant on purpose: a cancellation requested mid-flight
+    /// must not let the lease lapse and reconciliation terminalize the row
+    /// before the effect's outcome is journaled. Cancellation finalizes at the
+    /// next journal boundary instead.
+    async fn renew_claim_for_effect(&self, claim: &ExecutionClaim) {
+        let Some(store) = self.execution_store.as_ref() else {
+            return;
+        };
+        match store.renew_effect_lease(claim, self.claim_lease()).await {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                execution_id = %claim.execution_id,
+                "Code Mode effect dispatch continuing without a renewable claim"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                execution_id = %claim.execution_id,
+                "Code Mode claim renewal failed during effect dispatch"
+            ),
         }
     }
 
@@ -3079,6 +3139,7 @@ impl CodeModeTools {
                             if admitted.contract.side_effects()
                                 && attempt.profile == CodeExecutionProfile::Direct =>
                         {
+                            self.confirm_claim_before_effect(attempt.claim).await?;
                             let dispatch = self.invoke_connector(
                                 attempt.principal, &admitted, arguments, hierarchy,
                                 CodeExecutionProfile::Direct, None,
@@ -3118,36 +3179,10 @@ impl CodeModeTools {
                                     ),
                                 ))
                             } else {
-                                // Pre-dispatch cancellation fence: renewal is
-                                // atomic with the cancellation flag, so a
-                                // cancellation accepted after the start append
-                                // is observed here, before dispatch. The bound
-                                // grant claim repeats the same refusal
-                                // atomically with authority consumption.
-                                if let Some(claim) = attempt.claim {
-                                    let store = self
-                                        .execution_store
-                                        .as_ref()
-                                        .ok_or_else(execution_unavailable)?;
-                                    let renewed = store
-                                        .renew(claim, self.claim_lease())
-                                        .await
-                                        .map_err(|error| {
-                                            tracing::error!(
-                                                %error,
-                                                execution_id = %claim.execution_id,
-                                                "could not confirm the Code Mode claim before \
-                                                 effect dispatch"
-                                            );
-                                            execution_unavailable()
-                                        })?;
-                                    if !renewed {
-                                        if self.finish_requested_cancellation(store, claim).await? {
-                                            return Err(execution_cancelled());
-                                        }
-                                        return Err(execution_unavailable());
-                                    }
-                                }
+                                // The bound grant claim repeats the gate's
+                                // cancellation refusal atomically with
+                                // authority consumption.
+                                self.confirm_claim_before_effect(attempt.claim).await?;
                                 let approval = mutation_approval_request(
                                     &attempt, &admitted, &arguments, hierarchy,
                                 );
@@ -3517,6 +3552,56 @@ fn configured_execution_store(pool: sqlx::PgPool) -> waygate_codemode::PgExecuti
             tenant_count: limits().retained_tenant_count as i64,
         })
         .expect("boot validated retained source limits")
+}
+
+/// Terminalize executions whose worker died, at startup and then on a fixed
+/// interval, so status, listings, and the operator view stop reporting dead
+/// work as running even when nobody reads it by id. Abandoned submissions use
+/// the same grace as owner reads, derived from the configured budget.
+pub fn spawn_abandoned_reconciler(
+    store: Option<SharedExecutionStore>,
+    execution_limit: Duration,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let submission_grace = claim_lease_for(execution_limit);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(ABANDONED_RECONCILE_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = tick.tick() => {
+                    if let Err(error) = reconcile_abandoned_batch(&store, submission_grace).await {
+                        tracing::warn!(
+                            %error,
+                            "Code Mode abandoned-execution reconciliation failed; will retry next interval"
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
+async fn reconcile_abandoned_batch(
+    store: &SharedExecutionStore,
+    submission_grace: Duration,
+) -> Result<(), waygate_core::store::StoreError> {
+    for candidate in store.list_abandoned(submission_grace).await? {
+        store
+            .reconcile_abandoned(
+                &candidate.tenant_id,
+                &candidate.principal_sub,
+                &candidate.principal_issuer,
+                candidate.id,
+                submission_grace,
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 pub fn shared_execution_store(db_pool: Option<sqlx::PgPool>) -> Option<SharedExecutionStore> {
@@ -10841,8 +10926,9 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn slow_effect_dispatch_keeps_renewing_the_worker_claim() {
+    /// Run one side-effecting call whose dispatch takes `delay` under a
+    /// durable claim, returning the tools and the store that saw its renewals.
+    async fn dispatch_one_effect(delay: Duration) -> (CodeModeTools, Arc<RecordingExecutionStore>) {
         let fake = FakeCatalog::with_tools(&[("email", "send", true)]);
         let call_id = runner_call_id("email", "send");
         let admitted_calls = HashMap::from([(
@@ -10854,11 +10940,8 @@ mod tests {
                 contract: upstream_contract(fake.contract_identity("email", "send")),
             },
         )]);
-        // Dispatch outlives the configured lease: the ticker must renew it so
-        // the outcome append keeps its fence and reconciliation cannot steal
-        // the still-dispatching row.
         let invocation = Arc::new(SlowInvocation {
-            delay: Duration::from_secs(limits().execution_seconds) * 3,
+            delay,
             requests: tokio::sync::Mutex::new(Vec::new()),
         });
         let store = Arc::new(RecordingExecutionStore::default());
@@ -10912,6 +10995,16 @@ mod tests {
             outcome,
             RunnerProgramOutcome::Completed { calls: 1, .. }
         ));
+        (tools, store)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_effect_dispatch_keeps_renewing_the_worker_claim() {
+        // Dispatch outlives the configured lease: the ticker must renew it so
+        // the outcome append keeps its fence and reconciliation cannot steal
+        // the still-dispatching row.
+        let (tools, store) =
+            dispatch_one_effect(Duration::from_secs(limits().execution_seconds) * 3).await;
         let renewals = store.renewals.lock().await;
         assert!(
             renewals.len() >= 2,
@@ -10924,6 +11017,14 @@ mod tests {
         // the contract: a renewal must extend the fence by the same span a
         // fresh claim would.
         assert!(renewals.iter().all(|lease| *lease == tools.claim_lease()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_effect_extends_the_worker_claim_before_it_dispatches() {
+        // An effect can start late in the original lease. Renewing only after
+        // a renewal period would let that lease lapse under a live effect.
+        let (tools, store) = dispatch_one_effect(Duration::ZERO).await;
+        assert_eq!(*store.renewals.lock().await, vec![tools.claim_lease()]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -11471,8 +11572,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn mutation_broker_refuses_dispatch_when_cancellation_lands_after_the_start_append() {
+    /// The cancellation request commits in the gap between the fenced
+    /// call-start append and the dispatch: the pre-dispatch claim gate must
+    /// observe it and no upstream call may follow.
+    async fn effect_refuses_dispatch_when_cancellation_lands_after_the_start_append(
+        profile: CodeExecutionProfile,
+    ) {
         let fake = FakeCatalog::with_tools(&[("email", "send", true)]);
         let call_id = runner_call_id("email", "send");
         let admitted_calls = HashMap::from([(
@@ -11491,9 +11596,6 @@ mod tests {
                 .with_execution_store(store.clone());
         let source = "return connectors.email.send({value: 'x'});";
         let claim = claimed_mutation_fixture(&store, source).await;
-        // The cancellation request commits in the gap between the fenced
-        // call-start append and the dispatch: the pre-dispatch renewal fence
-        // must observe it and no upstream call may follow.
         store
             .cancel_on_first_append
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -11522,7 +11624,7 @@ mod tests {
                     execution_id: claim.execution_id,
                     claim: Some(&claim),
                     persist_content: true,
-                    profile: CodeExecutionProfile::LegacyApprovalBound,
+                    profile,
                     source_digest: source_digest(source),
                     deadline: None,
                 },
@@ -11542,6 +11644,22 @@ mod tests {
         );
         let cancelled = store.current.lock().await.clone().expect("execution");
         assert_eq!(cancelled.status, ExecutionStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn mutation_broker_refuses_dispatch_when_cancellation_lands_after_the_start_append() {
+        effect_refuses_dispatch_when_cancellation_lands_after_the_start_append(
+            CodeExecutionProfile::LegacyApprovalBound,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn direct_effect_refuses_dispatch_when_the_claim_is_lost_after_the_start_append() {
+        effect_refuses_dispatch_when_cancellation_lands_after_the_start_append(
+            CodeExecutionProfile::Direct,
+        )
+        .await;
     }
 
     /// Invocation that commits a cancellation request while the dispatch is
