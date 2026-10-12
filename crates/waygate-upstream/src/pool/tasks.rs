@@ -5,6 +5,7 @@ use rmcp::model::{
     CancelTaskParams, CancelTaskRequest, ClientCapabilities, ClientRequest, GetTaskParams,
     GetTaskRequest, ServerResult, UpdateTaskParams, UpdateTaskRequest,
 };
+use tokio_util::sync::CancellationToken;
 use waygate_invocation::{TaskAction, TaskResponse};
 use waygate_mcp::catalog::{CallToolResultProcessor, InvocationError};
 use waygate_mcp::tasks::TaskRpc;
@@ -44,6 +45,7 @@ pub(super) fn request(rpc: &TaskRpc) -> ClientRequest {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_once(
     service: &RunningService<RoleClient, ClientInfo>,
     params: rmcp::model::CallToolRequestParams,
@@ -52,6 +54,7 @@ pub(super) async fn dispatch_once(
     file_output: bool,
     cleartext_control_plane: bool,
     timeout: Option<Duration>,
+    cancellation: &CancellationToken,
 ) -> Result<DispatchResponse, dispatch::ToolCallAttemptError> {
     let mirrored = task
         .map(|task| &task.capabilities)
@@ -74,7 +77,7 @@ pub(super) async fn dispatch_once(
         })
     };
     let Some(task) = task else {
-        return dispatch::call_tool_once_with_meta(service, params, meta, timeout)
+        return dispatch::call_tool_once_with_meta(service, params, meta, timeout, cancellation)
             .await
             .map(|result| DispatchResponse::Tool(Box::new(result)));
     };
@@ -89,7 +92,8 @@ pub(super) async fn dispatch_once(
         });
     }
     let request = request(task);
-    let result = dispatch::send_once_classified(service, request, meta, timeout).await?;
+    let result =
+        dispatch::send_once_classified(service, request, meta, timeout, cancellation).await?;
     let response = match (&task.action, result) {
         (TaskAction::Get, ServerResult::GetTaskResult(result))
             if result.task.task.task_id == task.task_id

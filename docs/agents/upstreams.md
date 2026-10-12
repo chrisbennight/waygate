@@ -562,6 +562,32 @@ receive request in the connection pool. Do not add a generic read timeout to the
 receive client; quiet streams are valid unless an upstream protocol declares a
 heartbeat contract.
 
+## Upstream call cancellation
+
+The gateway stops waiting for an upstream `tools/call` when its call deadline
+(`GATEWAY_UPSTREAM_CALL_TIMEOUT_SECONDS`) expires or when the downstream request
+is abandoned. A request is abandoned when a 2026-07-28 client closes its
+response stream, when a client sends `notifications/cancelled`, or when the MCP
+transport shuts down. A 2025-11-25 client that only disconnects does not cancel
+its call, because that version says a disconnection is not a cancellation.
+
+The gateway then cancels the upstream request in the upstream's own protocol
+generation, as the
+[2026-07-28 cancellation rules](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation)
+describe. A legacy or stdio upstream receives `notifications/cancelled`. A
+2026-07-28 upstream sees the request's stream close. A per-call session also
+ends any request it still has open when it closes, which is what reaches a
+2026-07-28 upstream that has not yet started its response. A `reuse` session
+shared with other calls cannot close one request that way. Such an upstream
+keeps working until it answers, and the next call on that session waits behind
+it, within that call's own deadline.
+
+A cancelled call is never repeated. After dispatch its outcome is unknown: the
+error and the execution-error audit row carry `upstream_call_cancelled` with the
+`dispatched_unknown_outcome` phase, and a deadline carries `upstream_call_failed`
+with the same phase. A caller's cancellation does not count against the
+upstream's circuit breaker.
+
 ## In the meantime
 
 - **Manifest schema:**

@@ -24,6 +24,7 @@ use rmcp::service::{Peer, RequestContext};
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 
 use waygate_oidc::Principal;
 
@@ -1336,6 +1337,7 @@ impl GatewayServer {
                 ProtocolGeneration::Legacy,
                 Some(&self.disclosed),
                 &MrtrCaller::CANNOT,
+                CancellationToken::new(),
             )
             .await?
         {
@@ -1353,7 +1355,9 @@ impl GatewayServer {
     /// a compatibility/search surface without mutating subsequent lists.
     /// `caller` is the downstream client's MRTR posture: whether an
     /// `input_required` pause may be returned to it at all, and which
-    /// capabilities the upstream leg may rely on it answering.
+    /// capabilities the upstream leg may rely on it answering. `cancellation`
+    /// fires when the downstream request is abandoned, and cancels the
+    /// upstream request it dispatched.
     async fn dispatch_tool_call_with(
         &self,
         mut request: CallToolRequestParams,
@@ -1361,6 +1365,7 @@ impl GatewayServer {
         generation: ProtocolGeneration,
         disclosed: Option<&DisclosedTools>,
         caller: &MrtrCaller,
+        cancellation: CancellationToken,
     ) -> Result<CallToolResponse, McpError> {
         let name = request.name.as_ref();
 
@@ -1477,7 +1482,8 @@ impl GatewayServer {
         let invocation_request = InvocationRequest::new(server, tool_name)
             .with_arguments(request.arguments)
             .with_mrtr_retry(input_responses, request_state)
-            .with_caller_capabilities(caller.capabilities.clone());
+            .with_caller_capabilities(caller.capabilities.clone())
+            .with_cancellation(cancellation);
         match self.invocation.invoke(principal, invocation_request).await {
             // The MCP tool-call path is unary and MCP-shaped. The streaming and
             // raw-JSON (LLM) response shapes come only from the inference plane,
@@ -5442,6 +5448,7 @@ impl ServerHandler for GatewayServer {
                     client.generation,
                     disclosed,
                     &MrtrCaller::from_client(&client),
+                    ctx.ct.clone(),
                 )
                 .await
             }
@@ -5988,6 +5995,7 @@ mod mrtr_projection_tests {
                 ProtocolGeneration::Legacy,
                 Some(server.disclosed()),
                 caller,
+                CancellationToken::new(),
             )
             .await
     }
@@ -6134,6 +6142,27 @@ mod mrtr_projection_tests {
             .caller_capabilities
             .as_ref()
             .is_some_and(|caps| caps.elicitation.is_some()));
+    }
+
+    #[tokio::test]
+    async fn the_requests_cancellation_reaches_the_invocation() {
+        let invocation = ScriptedInvocation::new(ScriptedOutcome::Complete);
+        let gw = server(Arc::clone(&invocation));
+        let cancellation = CancellationToken::new();
+        gw.dispatch_tool_call_with(
+            call("mock.send"),
+            None,
+            ProtocolGeneration::Stateless2026,
+            None,
+            &bare_2026_caller(),
+            cancellation.clone(),
+        )
+        .await
+        .expect("completes");
+        cancellation.cancel();
+        assert!(invocation.requests.lock().await[0]
+            .cancellation
+            .is_cancelled());
     }
 
     #[tokio::test]

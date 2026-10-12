@@ -12,9 +12,10 @@ use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities,
     ClientRequest, ProtocolVersion, ServerResult,
 };
-use rmcp::service::{PeerRequestOptions, RunningService, ServiceError};
+use rmcp::service::{PeerRequestOptions, RequestHandle, RunningService, ServiceError};
 use rmcp::{ErrorData as McpError, RoleClient};
 use serde_json::{Map, Value};
+use tokio_util::sync::CancellationToken;
 
 use waygate_mcp::catalog::{
     CallScopedResourceReader, CallToolResultProcessing, CallToolResultProcessingError,
@@ -59,6 +60,15 @@ pub(super) struct ToolCallAttemptError {
 }
 
 impl ToolCallAttemptError {
+    /// The gateway abandoned the request for its downstream caller. A
+    /// cancellation the upstream itself reports is an ordinary failure.
+    fn caller_cancelled(&self) -> bool {
+        matches!(
+            &self.source,
+            ServiceError::Cancelled { reason: Some(reason) } if reason == CALLER_CANCELLED_REASON
+        )
+    }
+
     pub(super) fn error_class(&self) -> UpstreamErrorClass {
         match self.source {
             ServiceError::Timeout { .. } | ServiceError::Cancelled { .. } => {
@@ -114,7 +124,7 @@ pub(super) async fn call_tool_once_classified(
     params: CallToolRequestParams,
     timeout: Option<std::time::Duration>,
 ) -> Result<CallToolResponse, ToolCallAttemptError> {
-    call_tool_once_with_meta(service, params, None, timeout).await
+    call_tool_once_with_meta(service, params, None, timeout, &CancellationToken::new()).await
 }
 
 pub(super) async fn call_tool_once_with_meta(
@@ -122,12 +132,14 @@ pub(super) async fn call_tool_once_with_meta(
     params: CallToolRequestParams,
     meta: Option<rmcp::model::RequestMetaObject>,
     timeout: Option<std::time::Duration>,
+    cancellation: &CancellationToken,
 ) -> Result<CallToolResponse, ToolCallAttemptError> {
     let result = send_once_classified(
         service,
         ClientRequest::CallToolRequest(CallToolRequest::new(params)),
         meta,
         timeout,
+        cancellation,
     )
     .await?;
     match result {
@@ -150,21 +162,36 @@ pub(super) async fn call_tool_once_with_meta(
     }
 }
 
+/// Why the gateway stopped waiting for an upstream response.
+enum Abandoned {
+    Deadline,
+    Cancelled,
+}
+
+/// Send one request and wait for its response until the call deadline or the
+/// downstream caller's cancellation. Either one cancels the upstream request
+/// through the SDK, as [`deliver_cancellation`] describes. The gateway owns the
+/// deadline so that one timer both ends the wait and tells the upstream.
 pub(super) async fn send_once_classified(
     service: &RunningService<RoleClient, rmcp::model::ClientInfo>,
     request: ClientRequest,
     meta: Option<rmcp::model::RequestMetaObject>,
     timeout: Option<std::time::Duration>,
+    cancellation: &CancellationToken,
 ) -> Result<ServerResult, ToolCallAttemptError> {
-    let deadline = timeout.and_then(|duration| tokio::time::Instant::now().checked_add(duration));
-    let mut options = timeout.map_or_else(PeerRequestOptions::no_options, |duration| {
-        PeerRequestOptions::with_timeout(duration).with_max_total_timeout(duration)
-    });
-    if let Some(meta) = meta {
-        options = options.with_meta(meta);
+    if cancellation.is_cancelled() {
+        return Err(ToolCallAttemptError {
+            phase: ToolCallFailurePhase::PreDispatch,
+            source: caller_cancelled(),
+            retryable: false,
+        });
     }
+    let deadline = timeout.and_then(|duration| tokio::time::Instant::now().checked_add(duration));
+    let options = meta.map_or_else(PeerRequestOptions::no_options, |meta| {
+        PeerRequestOptions::no_options().with_meta(meta)
+    });
     let send = service.peer().send_cancellable_request(request, options);
-    let handle = match timeout {
+    let mut handle = match timeout {
         Some(duration) => {
             tokio::time::timeout(duration, send)
                 .await
@@ -181,30 +208,98 @@ pub(super) async fn send_once_classified(
         source,
         retryable: false,
     })?;
-    let response = handle.await_response();
-    let result = match deadline {
-        Some(deadline) => {
-            let remaining = deadline
-                .checked_duration_since(tokio::time::Instant::now())
-                .unwrap_or_default();
-            tokio::time::timeout(remaining, response)
-                .await
-                .map_err(|_| ToolCallAttemptError {
-                    phase: ToolCallFailurePhase::DispatchedUnknownOutcome,
-                    source: ServiceError::Timeout {
+    let abandon = async {
+        match deadline {
+            Some(deadline) => tokio::select! {
+                () = tokio::time::sleep_until(deadline) => Abandoned::Deadline,
+                () = cancellation.cancelled() => Abandoned::Cancelled,
+            },
+            None => {
+                cancellation.cancelled().await;
+                Abandoned::Cancelled
+            }
+        }
+    };
+    let waited = tokio::select! {
+        biased;
+        response = &mut handle.rx => Ok(response),
+        abandoned = abandon => Err(abandoned),
+    };
+    let response = match waited {
+        Ok(response) => response.map_err(|_| ServiceError::TransportClosed),
+        Err(abandoned) => {
+            let (source, reason) = match abandoned {
+                Abandoned::Deadline => (
+                    ServiceError::Timeout {
                         timeout: timeout.unwrap_or_default(),
                     },
-                    retryable: false,
-                })?
+                    RequestHandle::<RoleClient>::REQUEST_TIMEOUT_REASON,
+                ),
+                Abandoned::Cancelled => (caller_cancelled(), CALLER_CANCELLED_REASON),
+            };
+            deliver_cancellation(service, handle, reason).await;
+            return Err(ToolCallAttemptError {
+                phase: ToolCallFailurePhase::DispatchedUnknownOutcome,
+                source,
+                retryable: false,
+            });
         }
-        None => response.await,
+    };
+    response
+        .and_then(|result| result)
+        .map_err(|source| ToolCallAttemptError {
+            phase: ToolCallFailurePhase::from_service_error(&source),
+            source,
+            retryable: false,
+        })
+}
+
+/// Hand an abandoned request's cancellation to the SDK.
+///
+/// On a 2026-07-28 session the SDK ends the request without writing to an
+/// HTTP upstream: it closes the request's stream, and a closed per-call
+/// session ends a request that has not started its response. Delivery is
+/// therefore not awaited, because an upstream that has not answered keeps the
+/// SDK's HTTP worker waiting on that request. A legacy session must write
+/// `notifications/cancelled`, which has to leave inside this call's identity
+/// scope and before its session closes, so it is awaited within the budget the
+/// gateway gives any interactive write. The outcome is unknown either way.
+async fn deliver_cancellation(
+    service: &RunningService<RoleClient, rmcp::model::ClientInfo>,
+    handle: RequestHandle<RoleClient>,
+    reason: &'static str,
+) {
+    let stateless = service.peer_info().is_some_and(|info| {
+        info.protocol_version.as_str() >= ProtocolVersion::V_2026_07_28.as_str()
+    });
+    let cancel = handle.cancel(Some(reason.to_owned()));
+    if stateless {
+        tokio::spawn(async move {
+            if let Err(error) = cancel.await {
+                tracing::debug!(%error, "upstream request cancellation was not delivered");
+            }
+        });
+        return;
     }
-    .map_err(|source| ToolCallAttemptError {
-        phase: ToolCallFailurePhase::from_service_error(&source),
-        source,
-        retryable: false,
-    })?;
-    Ok(result)
+    match tokio::time::timeout(crate::http_policy::WRITE_TIMEOUT, cancel).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "upstream request cancellation was not delivered");
+        }
+        Err(_) => tracing::warn!(
+            "upstream request cancellation was not delivered within the write budget"
+        ),
+    }
+}
+
+const CALLER_CANCELLED_REASON: &str = "the downstream caller cancelled the request";
+
+/// The gateway is the requester on the upstream leg, so only the gateway
+/// cancels its requests, and it does so only for its own caller.
+fn caller_cancelled() -> ServiceError {
+    ServiceError::Cancelled {
+        reason: Some(CALLER_CANCELLED_REASON.to_owned()),
+    }
 }
 
 pub(super) fn admitted_safe_retry(
@@ -243,6 +338,22 @@ pub(super) fn bounded_upstream_error(
             "phase": phase.as_str(),
             "retryable": retryable,
             "attempts": attempts,
+            "trace_id": trace_id,
+        })),
+    )
+}
+
+/// A call the downstream caller abandoned. After dispatch its upstream
+/// outcome is unknown, which the phase states.
+fn cancelled_upstream_error(server: &str, phase: ToolCallFailurePhase, trace_id: &str) -> McpError {
+    McpError::internal_error(
+        format!(
+            "upstream `{server}` call was cancelled by the caller during {}",
+            phase.as_str()
+        ),
+        Some(serde_json::json!({
+            "error": "upstream_call_cancelled",
+            "phase": phase.as_str(),
             "trace_id": trace_id,
         })),
     )
@@ -396,6 +507,13 @@ pub(super) async fn finish_call_response(
                 pool.settle_probe_recovery(server, entry, recovered).await;
             }
             Ok(ProcessedCallToolResponse::ProcessingError(error))
+        }
+        Err(error) if error.caller_cancelled() => {
+            // The caller left; that says nothing about the upstream's health.
+            permit.neutral();
+            drop(conn_guard);
+            tracing::info!(%server, %trace_id, phase = error.phase.as_str(), "upstream call cancelled for its caller");
+            Err(cancelled_upstream_error(server, error.phase, trace_id))
         }
         Err(error) => {
             let phase = error.phase;
