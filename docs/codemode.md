@@ -714,7 +714,10 @@ from older releases that recorded a resumable profile return to
 `waiting_for_resume` instead. Without that storage decision or durable storage,
 the bounded blocking execution path remains available without advertising task
 augmentation or claiming restart durability. MCP Tasks projects the internal
-journal rather than becoming a competing execution store.
+journal rather than becoming a competing execution store. For what survives a
+restart, a client disconnect, or a replica change, set against the gateway's
+other kinds of work, see
+[the survival summary](agents/tasks.md#what-survives-restarts-disconnects-and-replica-changes).
 
 When durable content storage is enabled, the generated SDK exposes
 `execution.artifactsAvailable` and

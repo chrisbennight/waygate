@@ -230,6 +230,10 @@ curl -sN --max-time 130 https://gateway.example.com/mcp \
 
 ## Client-side timeouts during a long tool call
 
+For what each kind of work keeps across a restart, a disconnect, or a replica
+change, see
+[the survival summary](agents/tasks.md#what-survives-restarts-disconnects-and-replica-changes).
+
 The section above concerns intermediaries reaping a quiet stream. This one
 concerns the timers that bound a single `tools/call` which legitimately runs for
 minutes. They overlap rather than partition: a long call holds a POST response
