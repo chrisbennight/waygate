@@ -2597,10 +2597,16 @@ impl CodeModeTools {
             return dispatch.await;
         };
         tokio::pin!(dispatch);
+        // The first tick is immediate and polled before the dispatch, so the
+        // claim runs a full lease from the moment the effect starts. An effect
+        // that starts late in the original lease would otherwise outlive it
+        // before its first renewal.
+        let mut renewal = tokio::time::interval(self.claim_lease() / 3);
+        renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                result = &mut dispatch => break result,
-                _ = tokio::time::sleep(self.claim_lease() / 3) => {
+                biased;
+                _ = renewal.tick() => {
                     let Some(store) = self.execution_store.as_ref() else {
                         continue;
                     };
@@ -2622,6 +2628,7 @@ impl CodeModeTools {
                         ),
                     }
                 }
+                result = &mut dispatch => break result,
             }
         }
     }
@@ -10905,8 +10912,9 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn slow_effect_dispatch_keeps_renewing_the_worker_claim() {
+    /// Run one side-effecting call whose dispatch takes `delay` under a
+    /// durable claim, returning the tools and the store that saw its renewals.
+    async fn dispatch_one_effect(delay: Duration) -> (CodeModeTools, Arc<RecordingExecutionStore>) {
         let fake = FakeCatalog::with_tools(&[("email", "send", true)]);
         let call_id = runner_call_id("email", "send");
         let admitted_calls = HashMap::from([(
@@ -10918,11 +10926,8 @@ mod tests {
                 contract: upstream_contract(fake.contract_identity("email", "send")),
             },
         )]);
-        // Dispatch outlives the configured lease: the ticker must renew it so
-        // the outcome append keeps its fence and reconciliation cannot steal
-        // the still-dispatching row.
         let invocation = Arc::new(SlowInvocation {
-            delay: Duration::from_secs(limits().execution_seconds) * 3,
+            delay,
             requests: tokio::sync::Mutex::new(Vec::new()),
         });
         let store = Arc::new(RecordingExecutionStore::default());
@@ -10976,6 +10981,16 @@ mod tests {
             outcome,
             RunnerProgramOutcome::Completed { calls: 1, .. }
         ));
+        (tools, store)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_effect_dispatch_keeps_renewing_the_worker_claim() {
+        // Dispatch outlives the configured lease: the ticker must renew it so
+        // the outcome append keeps its fence and reconciliation cannot steal
+        // the still-dispatching row.
+        let (tools, store) =
+            dispatch_one_effect(Duration::from_secs(limits().execution_seconds) * 3).await;
         let renewals = store.renewals.lock().await;
         assert!(
             renewals.len() >= 2,
@@ -10988,6 +11003,14 @@ mod tests {
         // the contract: a renewal must extend the fence by the same span a
         // fresh claim would.
         assert!(renewals.iter().all(|lease| *lease == tools.claim_lease()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_effect_extends_the_worker_claim_before_it_dispatches() {
+        // An effect can start late in the original lease. Renewing only after
+        // a renewal period would let that lease lapse under a live effect.
+        let (tools, store) = dispatch_one_effect(Duration::ZERO).await;
+        assert_eq!(*store.renewals.lock().await, vec![tools.claim_lease()]);
     }
 
     #[tokio::test(start_paused = true)]
