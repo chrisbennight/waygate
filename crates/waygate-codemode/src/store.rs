@@ -1870,8 +1870,8 @@ async fn purge_expired_state(tx: &mut Transaction<'_, Postgres>) -> Result<(), S
     .bind(RETENTION_SWEEP_BATCH_SIZE)
     .execute(&mut **tx)
     .await?;
-    // Crash-abandoned principal slots have no release path of their own:
-    // graceful shutdown deletes the row and a returning principal replaces
+    // Crash-abandoned principal slots have no release path of their own: a
+    // holder releases its row explicitly and a returning principal replaces
     // it, but a principal that never comes back would leave its row forever.
     // A full day past expiry is far beyond any renewal gap, so an
     // alive-but-partitioned holder is never swept out from under a

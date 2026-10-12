@@ -179,8 +179,8 @@ Typical idle timeouts to plan around:
 The gateway ships two layers of defense, both on by default:
 
 - **`GATEWAY_SSE_KEEPALIVE_SECONDS`** (default 120) — SSE comment frames
-  (`:`) on every open stream. Pure server→client bytes; defeats idle-read
-  timers on the response path.
+  (`:`) on every open stream of a 2025-11-25 session. Pure server→client
+  bytes; defeats idle-read timers on the response path.
 - **`GATEWAY_MCP_PING_INTERVAL_SECONDS`** (default 120) — server-initiated
   MCP `ping` requests. The client's answer arrives as a new POST, so bytes
   flow in both directions and the `mcp_client_pings_total` counter reports
@@ -189,6 +189,13 @@ The gateway ships two layers of defense, both on by default:
 **Pick intervals below the tightest hop.** The defaults survive squid's
 300s; a 60s-idle hop (stock nginx, ALB) needs `GATEWAY_SSE_KEEPALIVE_SECONDS`
 ≤ 55. There is no benefit to going below ~15s on either knob.
+
+Neither layer reaches a 2026-07-28 request. That protocol has no session, no
+standalone stream, and no server-initiated ping, and the gateway opens each
+response only when its first message is ready. A long 2026-07-28 call is
+therefore byte-silent until its result, so every hop's idle-read timeout must
+exceed the longest call it carries. Work that may outlast those timeouts belongs
+in a task or a detached Code Mode execution, which return a handle at once.
 
 Per-proxy notes:
 
@@ -226,9 +233,10 @@ curl -sN --max-time 130 https://gateway.example.com/mcp \
 The section above concerns intermediaries reaping a quiet stream. This one
 concerns the timers that bound a single `tools/call` which legitimately runs for
 minutes. They overlap rather than partition: a long call holds a POST response
-stream open, `GATEWAY_SSE_KEEPALIVE_SECONDS` heartbeats that stream as well as
-the standalone GET one, and an intermediary with a tighter idle-read timeout can
-still reap it mid-call. So read the hop table above as part of this picture — if
+stream open, and an intermediary with a tighter idle-read timeout can reap it
+mid-call. On a 2025-11-25 session `GATEWAY_SSE_KEEPALIVE_SECONDS` heartbeats
+that stream as well as the standalone GET one; a 2026-07-28 call sends nothing
+until its result. So read the hop table above as part of this picture — if
 a long call dies at a suspiciously round interval matching a proxy default,
 start there rather than here.
 
@@ -318,8 +326,9 @@ Backgrounding covers main-conversation calls only. It does not apply to:
 - **clients that do not implement it.**
 
 Those paths get no backgrounding reprieve, so a long call survives them only if
-the gateway answers inside whatever timers govern them, or emits progress
-notifications.
+the gateway answers inside whatever timers govern them. The gateway neither
+emits progress notifications nor relays an upstream's, so nothing it sends
+during a call extends an idle window.
 
 For Claude Code those are the request timeout and the idle window described
 above — both still apply here; backgrounding was never what kept the call alive.
@@ -344,9 +353,10 @@ the client announces the hand-off in-session, lists the task under `/tasks`, and
 a backgrounded task does not survive exiting the session.
 
 `GATEWAY_SSE_KEEPALIVE_SECONDS` is worth separating into the part it does and
-the part nobody here has tested. It heartbeats the in-call POST stream, so it is
-genuinely the lever against an *intermediary* reaping that stream mid-call — see
-the hop table above. What it is not known to do is satisfy the *client's*
+the part nobody here has tested. On a 2025-11-25 session it heartbeats the
+in-call POST stream, so it is genuinely the lever against an *intermediary*
+reaping that stream mid-call — see the hop table above. A 2026-07-28 call's
+response carries nothing until its result, so there it has no effect. What it is not known to do is satisfy the *client's*
 per-call idle timer: its frames are SSE comments rather than protocol-level
 progress notifications, uncorrelated to any in-flight request, and whether that
 traffic feeds the client timer has not been tested here. Treat that half as

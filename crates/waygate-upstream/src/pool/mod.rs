@@ -8,9 +8,9 @@
 //!   own.
 //! - `stdio` — spawns the configured `command` and speaks rmcp over its
 //!   stdin/stdout via `TokioChildProcess`. The child inherits the gateway's
-//!   stderr for logging. No auto-restart: a child that exits stays
-//!   disconnected until the operator restarts the gateway; the breaker
-//!   trips after the configured failure budget.
+//!   stderr for logging. A child that exits is respawned by the reconnect
+//!   scheduler with backoff, like any failed upstream; the breaker trips
+//!   after the configured failure budget.
 //!
 //! Identity forwarding (`X-MCP-Identity`) and RFC 8693 token exchange are
 //! HTTP-only (http + sse). Stdio upstreams run inside the gateway's own
@@ -106,9 +106,8 @@ struct ConnectionSlot {
 struct UpstreamEntry {
     /// Manifest is behind a std RwLock so SIGHUP can swap tool classifications
     /// (risk tier, side_effects) without touching the live rmcp connection.
-    /// Connection-shape fields (transport, url, command) are read once at
-    /// dial time — a reload that changes those logs a warning and is ignored;
-    /// a restart is still required to re-dial with a new transport.
+    /// Connection-shape fields (transport, url, command) are read at dial
+    /// time; a reload that changes them re-dials or rebuilds the entry live.
     manifest: StdRwLock<UpstreamManifest>,
     /// Connection pool for this upstream. Always ≥ 1 slot. Network
     /// transports (HTTP/SSE) get `pool_size` slots so calls parallelize;
