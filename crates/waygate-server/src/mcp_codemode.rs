@@ -2596,40 +2596,45 @@ impl CodeModeTools {
         let Some(claim) = claim else {
             return dispatch.await;
         };
+        // The claim runs a full lease from the moment the effect starts. An
+        // effect that starts late in the original lease would otherwise
+        // outlive it before its first periodic renewal.
+        self.renew_claim_for_effect(claim).await;
         tokio::pin!(dispatch);
-        // The first tick is immediate and polled before the dispatch, so the
-        // claim runs a full lease from the moment the effect starts. An effect
-        // that starts late in the original lease would otherwise outlive it
-        // before its first renewal.
-        let mut renewal = tokio::time::interval(self.claim_lease() / 3);
+        let period = self.claim_lease() / 3;
+        let mut renewal = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
+                // A finished dispatch is observed before any further renewal,
+                // however slow renewals become.
                 biased;
-                _ = renewal.tick() => {
-                    let Some(store) = self.execution_store.as_ref() else {
-                        continue;
-                    };
-                    // Cancellation-tolerant on purpose: a cancellation
-                    // requested mid-flight must not let the lease lapse and
-                    // reconciliation terminalize the row before the effect's
-                    // outcome is journaled. Cancellation finalizes at the
-                    // next journal boundary instead.
-                    match store.renew_effect_lease(claim, self.claim_lease()).await {
-                        Ok(true) => {}
-                        Ok(false) => tracing::warn!(
-                            execution_id = %claim.execution_id,
-                            "Code Mode effect dispatch continuing without a renewable claim"
-                        ),
-                        Err(error) => tracing::warn!(
-                            %error,
-                            execution_id = %claim.execution_id,
-                            "Code Mode claim renewal failed during effect dispatch"
-                        ),
-                    }
-                }
                 result = &mut dispatch => break result,
+                _ = renewal.tick() => self.renew_claim_for_effect(claim).await,
             }
+        }
+    }
+
+    /// Extend the claim by a full lease while an effect is in flight.
+    /// Cancellation-tolerant on purpose: a cancellation requested mid-flight
+    /// must not let the lease lapse and reconciliation terminalize the row
+    /// before the effect's outcome is journaled. Cancellation finalizes at the
+    /// next journal boundary instead.
+    async fn renew_claim_for_effect(&self, claim: &ExecutionClaim) {
+        let Some(store) = self.execution_store.as_ref() else {
+            return;
+        };
+        match store.renew_effect_lease(claim, self.claim_lease()).await {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                execution_id = %claim.execution_id,
+                "Code Mode effect dispatch continuing without a renewable claim"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                execution_id = %claim.execution_id,
+                "Code Mode claim renewal failed during effect dispatch"
+            ),
         }
     }
 
