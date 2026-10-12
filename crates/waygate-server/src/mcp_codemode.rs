@@ -229,9 +229,9 @@ impl CodeModeExecutionCapacity {
         let Some(store) = store else {
             return;
         };
-        for held in held {
-            interrupt_held_claim(store, &held).await;
-        }
+        // Concurrent, so a row held by another transaction delays only its
+        // own record.
+        futures::future::join_all(held.iter().map(|held| interrupt_held_claim(store, held))).await;
     }
 
     fn spawn_detached<F>(&self, run: F)
