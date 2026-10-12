@@ -5,7 +5,9 @@
 //! both end the upstream request this way.
 //!
 //! The mock upstream's `wait` tool never completes on its own. It returns only
-//! once its request is cancelled, and records that it was.
+//! once its request is cancelled, and records that it was. The mock also
+//! records each `notifications/cancelled` it receives, so a legacy case proves
+//! the notification itself arrived rather than only that its session closed.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -13,10 +15,10 @@ use std::time::Duration;
 
 use axum::Router;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, Implementation, ListToolsResult,
-    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CancelledNotificationParam, Implementation,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
 };
-use rmcp::service::RequestContext;
+use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
@@ -38,6 +40,7 @@ const WAIT: Duration = Duration::from_secs(10);
 struct WaitingUpstream {
     started: Arc<Notify>,
     cancelled: Arc<Notify>,
+    notified: Arc<Notify>,
 }
 
 impl ServerHandler for WaitingUpstream {
@@ -72,6 +75,24 @@ impl ServerHandler for WaitingUpstream {
         ctx.ct.cancelled().await;
         self.cancelled.notify_one();
         Err(McpError::internal_error("cancelled", None))
+    }
+
+    async fn on_cancelled(
+        &self,
+        _notification: CancelledNotificationParam,
+        _context: NotificationContext<RoleServer>,
+    ) {
+        self.notified.notify_one();
+    }
+}
+
+/// A legacy upstream must be told with `notifications/cancelled`; closing its
+/// session or stream is not a cancellation in that protocol.
+async fn legacy_upstream_was_notified(protocol: UpstreamProtocol, upstream: &WaitingUpstream) {
+    if matches!(protocol, UpstreamProtocol::Legacy) {
+        tokio::time::timeout(WAIT, upstream.notified.notified())
+            .await
+            .expect("a legacy upstream receives notifications/cancelled");
     }
 }
 
@@ -169,6 +190,7 @@ async fn caller_cancellation_reaches(protocol: UpstreamProtocol, isolation: Sess
     tokio::time::timeout(WAIT, upstream.cancelled.notified())
         .await
         .expect("the upstream request is cancelled");
+    legacy_upstream_was_notified(protocol, &upstream).await;
     let error = tokio::time::timeout(WAIT, pending)
         .await
         .expect("the gateway stops waiting")
@@ -190,6 +212,13 @@ async fn caller_cancellation_notifies_a_legacy_upstream() {
     caller_cancellation_reaches(UpstreamProtocol::Legacy, SessionIsolation::Reuse).await;
 }
 
+/// A per-call legacy session closes right after the call, which must not cut
+/// off the notification on its way out.
+#[tokio::test]
+async fn caller_cancellation_notifies_a_legacy_per_call_upstream() {
+    caller_cancellation_reaches(UpstreamProtocol::Legacy, SessionIsolation::PerCall).await;
+}
+
 async fn call_deadline_reaches(protocol: UpstreamProtocol, isolation: SessionIsolation) {
     let (addr, upstream) = spawn_upstream().await;
     // Long enough for a per-call dial on a slow runner; the upstream never
@@ -204,6 +233,7 @@ async fn call_deadline_reaches(protocol: UpstreamProtocol, isolation: SessionIso
     tokio::time::timeout(WAIT, upstream.cancelled.notified())
         .await
         .expect("the upstream request is cancelled at the deadline");
+    legacy_upstream_was_notified(protocol, &upstream).await;
     let error = tokio::time::timeout(WAIT, pending)
         .await
         .expect("the gateway stops waiting")

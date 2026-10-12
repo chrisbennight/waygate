@@ -170,10 +170,8 @@ enum Abandoned {
 
 /// Send one request and wait for its response until the call deadline or the
 /// downstream caller's cancellation. Either one cancels the upstream request
-/// through the SDK, which sends `notifications/cancelled` to a legacy or
-/// stdio upstream and closes the request's stream on a 2026-07-28 upstream
-/// that has begun its response. The gateway owns the deadline so that one
-/// timer both ends the wait and tells the upstream.
+/// through the SDK, as [`deliver_cancellation`] describes. The gateway owns the
+/// deadline so that one timer both ends the wait and tells the upstream.
 pub(super) async fn send_once_classified(
     service: &RunningService<RoleClient, rmcp::model::ClientInfo>,
     request: ClientRequest,
@@ -239,16 +237,7 @@ pub(super) async fn send_once_classified(
                 ),
                 Abandoned::Cancelled => (caller_cancelled(), CALLER_CANCELLED_REASON),
             };
-            // Delivery is not awaited: a 2026-07-28 upstream that has not yet
-            // answered keeps the SDK's HTTP worker waiting on this request,
-            // and the caller must not wait with it. Closing a per-call
-            // session ends that request instead. The outcome is unknown
-            // either way.
-            tokio::spawn(async move {
-                if let Err(error) = handle.cancel(Some(reason.to_owned())).await {
-                    tracing::debug!(%error, "upstream request cancellation was not delivered");
-                }
-            });
+            deliver_cancellation(service, handle, reason).await;
             return Err(ToolCallAttemptError {
                 phase: ToolCallFailurePhase::DispatchedUnknownOutcome,
                 source,
@@ -263,6 +252,44 @@ pub(super) async fn send_once_classified(
             source,
             retryable: false,
         })
+}
+
+/// Hand an abandoned request's cancellation to the SDK.
+///
+/// On a 2026-07-28 session the SDK ends the request without writing to an
+/// HTTP upstream: it closes the request's stream, and a closed per-call
+/// session ends a request that has not started its response. Delivery is
+/// therefore not awaited, because an upstream that has not answered keeps the
+/// SDK's HTTP worker waiting on that request. A legacy session must write
+/// `notifications/cancelled`, which has to leave inside this call's identity
+/// scope and before its session closes, so it is awaited within the budget the
+/// gateway gives any interactive write. The outcome is unknown either way.
+async fn deliver_cancellation(
+    service: &RunningService<RoleClient, rmcp::model::ClientInfo>,
+    handle: RequestHandle<RoleClient>,
+    reason: &'static str,
+) {
+    let stateless = service.peer_info().is_some_and(|info| {
+        info.protocol_version.as_str() >= ProtocolVersion::V_2026_07_28.as_str()
+    });
+    let cancel = handle.cancel(Some(reason.to_owned()));
+    if stateless {
+        tokio::spawn(async move {
+            if let Err(error) = cancel.await {
+                tracing::debug!(%error, "upstream request cancellation was not delivered");
+            }
+        });
+        return;
+    }
+    match tokio::time::timeout(crate::http_policy::WRITE_TIMEOUT, cancel).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "upstream request cancellation was not delivered");
+        }
+        Err(_) => tracing::warn!(
+            "upstream request cancellation was not delivered within the write budget"
+        ),
+    }
 }
 
 const CALLER_CANCELLED_REASON: &str = "the downstream caller cancelled the request";
