@@ -1613,32 +1613,46 @@ impl ExecutionStore for PgExecutionStore {
     ) -> Result<Vec<AbandonedExecution>, StoreError> {
         // Mirrors the abandonment arms of `reconcile_abandoned`, which
         // re-checks them; rows written before issuer binding stay out, as
-        // that update refuses them.
+        // that update refuses them. Each arm is bounded on its own and walks
+        // an existing partial index rather than sorting every unfinished row:
+        // dead claims by claim expiry, paused rows by retention, and
+        // never-claimed submissions within the in-flight index.
         let rows = sqlx::query_as::<_, (String, String, String, Uuid)>(
             r#"
-            SELECT tenant_id, principal_sub, principal_issuer, id
-              FROM codemode_executions
-             WHERE completed_at IS NULL
-               AND principal_issuer IS NOT NULL
-               AND (
-                   (
-                       status = 'submitted'
-                       AND claim_owner IS NULL
-                       AND submitted_at <= now() - ($1 * interval '1 second')
-                   )
-                   OR (
-                       status = 'running'
-                       AND claim_owner IS NOT NULL
-                       AND claim_expires_at <= now()
-                   )
-                   OR (
-                       status IN ('waiting_for_approval', 'waiting_for_resume')
-                       AND claim_owner IS NULL
-                       AND retention_until <= now()
-                   )
-               )
-             ORDER BY updated_at
-             LIMIT $2
+            (
+                SELECT tenant_id, principal_sub, principal_issuer, id
+                  FROM codemode_executions
+                 WHERE claim_owner IS NOT NULL
+                   AND claim_expires_at <= now()
+                   AND status = 'running'
+                   AND completed_at IS NULL
+                   AND principal_issuer IS NOT NULL
+                 ORDER BY claim_expires_at, id
+                 LIMIT $2
+            )
+            UNION ALL
+            (
+                SELECT tenant_id, principal_sub, principal_issuer, id
+                  FROM codemode_executions
+                 WHERE completed_at IS NULL
+                   AND retention_until <= now()
+                   AND status IN ('waiting_for_approval', 'waiting_for_resume')
+                   AND claim_owner IS NULL
+                   AND principal_issuer IS NOT NULL
+                 ORDER BY retention_until, id
+                 LIMIT $2
+            )
+            UNION ALL
+            (
+                SELECT tenant_id, principal_sub, principal_issuer, id
+                  FROM codemode_executions
+                 WHERE status = 'submitted'
+                   AND claim_owner IS NULL
+                   AND completed_at IS NULL
+                   AND principal_issuer IS NOT NULL
+                   AND submitted_at <= now() - ($1 * interval '1 second')
+                 LIMIT $2
+            )
             "#,
         )
         .bind(lease_seconds(submission_grace))
