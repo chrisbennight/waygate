@@ -10,6 +10,8 @@ use serde_json::{json, Map, Value};
 use crate::files::{FileValue, RETAINED_DELIVERY_META_KEY};
 
 pub const FIELD: &str = "_gateway_delivery";
+/// Envelope member carrying a filed result's preview text.
+pub const PREVIEW_FIELD: &str = "_gateway_preview";
 
 #[derive(Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +36,12 @@ pub(crate) enum Delivery {
 #[derive(Serialize, JsonSchema)]
 struct Envelope {
     _gateway_delivery: Delivery,
+    /// The upstream's own text for a result delivered as a file, when it
+    /// fits the inline threshold and the result is not labeled sensitive.
+    /// It sits beside the delivery descriptor rather than in it, so the
+    /// `_meta` descriptor stays identical to `_gateway_delivery`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    _gateway_preview: Option<String>,
 }
 
 fn envelope_schema() -> &'static Value {
@@ -109,6 +117,14 @@ pub fn output_schema(upstream: &Map<String, Value>) -> Map<String, Value> {
 /// caller that asked for one tool's contract.
 pub fn detailed_output_schema(upstream: &Map<String, Value>) -> Map<String, Value> {
     with_delivery_alternative(upstream, envelope_schema())
+}
+
+/// Add a filed result's preview to its structured envelope, for clients that
+/// give the model only `structuredContent`. Call after [`attach`].
+pub(crate) fn attach_preview(result: &mut CallToolResult, preview: String) {
+    if let Some(Value::Object(root)) = result.structured_content.as_mut() {
+        root.insert(PREVIEW_FIELD.to_owned(), Value::String(preview));
+    }
 }
 
 pub(crate) fn attach(result: &mut CallToolResult, delivery: Delivery) {

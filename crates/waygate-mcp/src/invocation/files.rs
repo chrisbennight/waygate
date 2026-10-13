@@ -72,41 +72,38 @@ fn fits_without_mirror(output: &CallToolResult, threshold: usize) -> bool {
     super::encoded_len_within(&unmirrored, threshold).unwrap_or(false)
 }
 
-/// The text of a result delivered as a file: the upstream's own text, unless
-/// the caller withholds it, as far as it fits the inline budget, followed by
-/// what the file holds. Mirrors of the structured content are left to the file.
-fn file_preview(
+/// The upstream's own text a result delivered as a file keeps, unless the
+/// caller withholds it, as far as it fits the inline budget. Mirrors of the
+/// structured content are left to the file.
+fn upstream_preview(
     output: &CallToolResult,
     withhold_text: bool,
     threshold: usize,
-    size: usize,
 ) -> Vec<rmcp::model::ContentBlock> {
     let mut preview = Vec::new();
-    if !withhold_text {
-        let mut budget = threshold;
-        for block in &output.content {
-            let Some(text) = block.as_text() else {
-                continue;
-            };
-            if output
-                .structured_content
-                .as_ref()
-                .is_some_and(|structured| mirrors_structured(&text.text, structured))
-            {
-                continue;
-            }
-            // Charge the whole encoded block, so block overhead and escaping
-            // count against the inline budget as well as the text.
-            let Ok(Some(len)) = super::encoded_len_at_most(block, budget) else {
-                break;
-            };
-            budget -= len;
-            preview.push(rmcp::model::ContentBlock::text(text.text.clone()));
-        }
+    if withhold_text {
+        return preview;
     }
-    preview.push(rmcp::model::ContentBlock::text(format!(
-        "The complete result ({size} bytes of JSON) is saved as a gateway file, linked below."
-    )));
+    let mut budget = threshold;
+    for block in &output.content {
+        let Some(text) = block.as_text() else {
+            continue;
+        };
+        if output
+            .structured_content
+            .as_ref()
+            .is_some_and(|structured| mirrors_structured(&text.text, structured))
+        {
+            continue;
+        }
+        // Charge the whole encoded block, so block overhead and escaping
+        // count against the inline budget as well as the text.
+        let Ok(Some(len)) = super::encoded_len_at_most(block, budget) else {
+            break;
+        };
+        budget -= len;
+        preview.push(rmcp::model::ContentBlock::text(text.text.clone()));
+    }
     preview
 }
 
@@ -558,7 +555,23 @@ impl DefaultInvocationService {
                 .as_ref()
                 .is_some_and(|meta| meta.contains_key(super::result_trust::TRUST_ANNOTATIONS_KEY));
         let withhold_text = sensitive || ctx.facts().pii || unreadable_label;
-        compact.content = file_preview(&output, withhold_text, threshold, size);
+        compact.content = upstream_preview(&output, withhold_text, threshold);
+        // Some clients give the model only `structuredContent` when a result
+        // has it, so the same preview also travels in the envelope.
+        let preview: Vec<&str> = compact
+            .content
+            .iter()
+            .filter_map(|block| block.as_text().map(|text| text.text.as_str()))
+            .collect();
+        if !preview.is_empty() {
+            let preview = preview.join("\n\n");
+            crate::retained_delivery::attach_preview(&mut compact, preview);
+        }
+        compact
+            .content
+            .push(rmcp::model::ContentBlock::text(format!(
+            "The complete result ({size} bytes of JSON) is saved as a gateway file, linked below."
+        )));
         compact
             .content
             .push(rmcp::model::ContentBlock::resource_link(

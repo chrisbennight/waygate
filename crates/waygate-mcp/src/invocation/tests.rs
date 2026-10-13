@@ -662,10 +662,14 @@ mod retained_response_pipeline_tests {
             result.content.last(),
             Some(ContentBlock::ResourceLink(_))
         ));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["_gateway_delivery"]["delivery_status"], "file");
+        // Clients that show the model only structured content see it too.
         assert_eq!(
-            result.structured_content.unwrap()["_gateway_delivery"]["delivery_status"],
-            "file"
+            structured["_gateway_preview"],
+            "Found 4096 matches; the first is `match`."
         );
+        assert!(crate::retained_delivery::validator().is_valid(&structured));
     }
 
     #[tokio::test]
@@ -707,6 +711,7 @@ mod retained_response_pipeline_tests {
         let texts = texts(&result);
         assert_eq!(texts.len(), 1);
         assert!(texts[0].starts_with("The complete result ("));
+        assert!(result.structured_content.unwrap()["_gateway_preview"].is_null());
     }
 
     #[tokio::test]
@@ -720,6 +725,7 @@ mod retained_response_pipeline_tests {
         let texts = texts(&result);
         assert_eq!(texts.len(), 1);
         assert!(texts[0].starts_with("The complete result ("));
+        assert!(result.structured_content.unwrap()["_gateway_preview"].is_null());
     }
 
     #[tokio::test]
