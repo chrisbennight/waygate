@@ -140,15 +140,15 @@ impl UpstreamPool {
                     ),
                 )
                 .await?;
-            if let Some(review) = store
-                .get(waygate_core::TenantId::DEFAULT, name, tool.name.as_ref())
+            if let Some((_, blocked)) = store
+                .review_state(waygate_core::TenantId::DEFAULT, name, tool.name.as_ref())
                 .await?
             {
                 let mut quarantined = entry
                     .quarantined
                     .write()
                     .expect("upstream quarantine lock poisoned");
-                if review.quarantined {
+                if blocked {
                     quarantined.insert(tool.name.to_string());
                 } else {
                     quarantined.remove(tool.name.as_ref());

@@ -916,3 +916,99 @@ async fn observation_waiting_for_reconciliation_does_not_lock_the_tool_identity(
     );
     assert!(observed.unwrap());
 }
+
+#[tokio::test]
+async fn an_unchanged_contract_is_admitted_without_waiting_while_a_change_still_quarantines() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("review-fast-path-{}", Uuid::new_v4());
+    ManifestImporter::new(pool.clone())
+        .import_atomic(&tenant, &[annotation_approval_fixture(&tenant, "a")], false)
+        .await
+        .unwrap();
+    let store = PgCatalogStore::new(pool.clone());
+    let approved = json!({"description":"Approved"});
+    let replacement = json!({"description":"Replacement"});
+    store
+        .observe_against_approval(&tenant, "docs", "search", "a", &approved, false, Some("a"))
+        .await
+        .unwrap();
+    let seeded = store.get(&tenant, "docs", "search").await.unwrap().unwrap();
+    assert!(!seeded.quarantined);
+
+    let application_name = format!("review-change-{}", Uuid::new_v4());
+    let changer_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            pool.connect_options()
+                .as_ref()
+                .clone()
+                .application_name(&application_name),
+        )
+        .await
+        .unwrap();
+    let mut reconcile_tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gateway-catalog-manifest-reconcile'), hashtext($1))")
+        .bind(&tenant).execute(&mut *reconcile_tx).await.unwrap();
+
+    let unchanged = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        store.observe_against_approval(&tenant, "docs", "search", "a", &approved, false, Some("a")),
+    )
+    .await;
+
+    let changed_tenant = tenant.clone();
+    let changed_contract = replacement.clone();
+    let change = tokio::spawn(async move {
+        PgCatalogStore::new(changer_pool)
+            .observe_against_approval(
+                &changed_tenant,
+                "docs",
+                "search",
+                "b",
+                &changed_contract,
+                false,
+                Some("a"),
+            )
+            .await
+    });
+    let queued = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock')")
+                .bind(&application_name).fetch_one(&pool).await.unwrap();
+            if waiting { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await;
+    reconcile_tx.rollback().await.unwrap();
+    let changed = tokio::time::timeout(std::time::Duration::from_secs(5), change)
+        .await
+        .unwrap()
+        .unwrap();
+    let after_change = store.get(&tenant, "docs", "search").await.unwrap().unwrap();
+    // A session still advertising the approved contract observes it again
+    // after the change; that must not release the quarantine.
+    let reobserved = store
+        .observe_against_approval(&tenant, "docs", "search", "a", &approved, false, Some("a"))
+        .await;
+    let after_reobservation = store.review_state(&tenant, "docs", "search").await.unwrap();
+    sqlx::query("DELETE FROM tenants WHERE id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert!(
+        !unchanged
+            .expect("an unchanged contract must not wait for the tenant catalog lock")
+            .unwrap(),
+        "an unchanged contract records nothing"
+    );
+    queued.expect("a changed contract must still wait for the tenant catalog lock");
+    assert!(changed.unwrap());
+    assert!(after_change.quarantined && after_change.observed_hash == "b");
+    assert!(after_change.generation > seeded.generation);
+    assert!(reobserved.unwrap());
+    assert_eq!(after_reobservation, Some(("a".into(), true)));
+}
