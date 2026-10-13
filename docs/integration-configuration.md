@@ -55,6 +55,7 @@ The gateway adds these identifiers of its own to MCP messages. Standard
 | `io.cacahuate.mcp-gateway.code-mode` | Skill frontmatter `metadata` | Read from skill sources | Optional skill-script compatibility metadata. |
 | `io.bennight.gateway/responseMaterializationLimitBytes` | Request `_meta` of the gateway's `resources/read` calls | To upstreams | The largest response the gateway will materialize for that read. The gateway's own HTTP transport enforces it; an upstream may ignore it. |
 | `_gateway_delivery` | A `structuredContent` member | To clients | The delivery envelope of a result delivered as a file. Published output schemas accept it as an alternative to the upstream's own result. |
+| `_gateway_preview` | A `structuredContent` member, beside `_gateway_delivery` | To clients | The upstream's own text for a result delivered as a file, when it fits the inline threshold and the result is not labeled sensitive. It repeats the text preview for clients that show the model only structured content. |
 | `urn:mcp-gateway:upstream-output` | `$id` inside published output schemas | To clients | Keeps the upstream schema's local references scoped inside that delivery alternative. |
 | `_gateway_counts` | A `structuredContent` member | To clients | Reports how a result-count argument was adjusted; see [operation envelopes](agents/tool-envelopes.md). |
 | `x-mcp-result-count` | A JSON Schema keyword on a count argument in published input schemas | To clients | Declares the count projection that `_gateway_counts` reports. |

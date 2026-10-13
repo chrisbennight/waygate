@@ -58,7 +58,9 @@ A result delivered as a file keeps the `_gateway_delivery` envelope in
 the envelope: it carries the upstream's own text, other than a copy of the
 structured result, when that text fits within the threshold and the result is
 not labeled sensitive, followed by one line giving the file's size. A reader
-can decide from that whether it needs the file at all.
+can decide from that whether it needs the file at all. The same preview is in
+`structuredContent._gateway_preview`, because some clients, including Claude
+Code and Codex, give the model only `structuredContent` when a result has it.
 
 To override every tool on an upstream server, open **Servers**, expand that
 server's configuration, and select **Responses**. Enter a byte count, select
