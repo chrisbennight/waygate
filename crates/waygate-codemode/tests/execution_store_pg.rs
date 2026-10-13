@@ -5,9 +5,9 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 use waygate_codemode::{
     source_digest, DetachedExecutionSlot, ExecutionClaim, ExecutionEventKind, ExecutionStatus,
-    ExecutionStore, ExecutionTransition, NewExecution, NewExecutionEvent, OwnedInFlight,
-    PgExecutionStore, ResumeExecution, RetryEquivalence, SourceArtifactOwner, SourceArtifactStore,
-    StartExecution, StartExecutionResult, MAX_RETAINED_SOURCES_PER_OWNER,
+    ExecutionStatusRecord, ExecutionStore, ExecutionTransition, NewExecution, NewExecutionEvent,
+    OwnedInFlight, PgExecutionStore, ResumeExecution, RetryEquivalence, SourceArtifactOwner,
+    SourceArtifactStore, StartExecution, StartExecutionResult, MAX_RETAINED_SOURCES_PER_OWNER,
     MAX_SOURCE_LOCATORS_PER_OWNER,
 };
 use waygate_tenants::{PgTenantStore, TenantStore};
@@ -2756,6 +2756,79 @@ async fn a_stopping_worker_records_its_live_runs_as_interrupted() {
         .expect("read execution")
         .expect("execution exists");
     assert_eq!(current.status, ExecutionStatus::Running);
+
+    cleanup(&pool, &tenant).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_status_read_matches_the_full_row_without_its_content() {
+    let Some(pool) = connect().await else {
+        eprintln!("skipping Code Mode status-read Pg contract: AUDIT_DATABASE_URL not set");
+        return;
+    };
+    let tenant = seed_tenant(&pool, &Uuid::new_v4().to_string()).await;
+    let store = PgExecutionStore::new(pool.clone());
+    let id = Uuid::now_v7();
+    store
+        .submit(new_execution(&tenant, id))
+        .await
+        .expect("submit execution");
+    store
+        .claim(
+            &tenant,
+            id,
+            Uuid::now_v7(),
+            Duration::from_secs(300),
+            execution_source().to_owned(),
+            json!({"snapshot": 1}),
+        )
+        .await
+        .expect("claim execution")
+        .expect("claim succeeds");
+
+    // Each stage leaves the row in a state a status check reports differently.
+    for (stage, update) in [
+        ("running", None),
+        (
+            "paused",
+            Some(
+                r#"UPDATE codemode_executions
+                      SET status = 'waiting_for_resume', claim_owner = NULL,
+                          claim_expires_at = NULL,
+                          resume_context = '{"checkpoint": {"prompt": "Next?"}, "state": [1, 2]}'
+                    WHERE tenant_id = $1 AND id = $2"#,
+            ),
+        ),
+        (
+            "succeeded",
+            Some(
+                r#"UPDATE codemode_executions
+                      SET status = 'succeeded', completed_at = now(),
+                          result_payload = '{"value": 42}'
+                    WHERE tenant_id = $1 AND id = $2"#,
+            ),
+        ),
+    ] {
+        if let Some(update) = update {
+            sqlx::query(update)
+                .bind(&tenant)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .expect("advance execution");
+        }
+        let full = store
+            .get(&tenant, id)
+            .await
+            .expect("full read")
+            .expect("execution exists");
+        let status = store
+            .get_status(&tenant, id)
+            .await
+            .expect("status read")
+            .expect("execution exists");
+        assert_eq!(status, ExecutionStatusRecord::from(&full), "{stage}");
+    }
 
     cleanup(&pool, &tenant).await;
 }
