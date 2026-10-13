@@ -1030,10 +1030,9 @@ async fn gateway_main() -> anyhow::Result<()> {
         codemode_execution_limit,
         ct.clone(),
     );
+    // Woken by the fleet doorbell listener, which already holds the one
+    // listening connection.
     let codemode_cancellation_watch = codemode_cancellation::CancellationWatch::default();
-    if let Some(pool) = db_pool.clone() {
-        codemode_cancellation_watch.spawn_listener(pool, ct.clone());
-    }
     // In-flight MCP requests and detached Code Mode runs that shutdown lets
     // finish before closing the MCP transport.
     let inflight_work = tokio_util::task::TaskTracker::new();
@@ -1075,7 +1074,7 @@ async fn gateway_main() -> anyhow::Result<()> {
         schema_validator_cache: schema_validator_cache.clone(),
         change_request_store: change_request_store.clone(),
         codemode_db_pool: db_pool.clone(),
-        codemode_cancellation_watch,
+        codemode_cancellation_watch: codemode_cancellation_watch.clone(),
         change_notifier: change_notifier.clone(),
         public_url: cfg.public_url.clone(),
         admin_state_cell: admin_state_cell.clone(),
@@ -1977,6 +1976,7 @@ async fn gateway_main() -> anyhow::Result<()> {
             policy_config_health: policy_config_health.clone(),
             replica_id: replica_id.clone(),
             db_pool: db_pool.clone(),
+            codemode_cancellations: codemode_cancellation_watch.clone(),
             // Seed with the hash boot just loaded from disk, so the first poll
             // tick no-ops instead of redundantly re-loading the same set. A
             // boot that RECOVERED off a broken disk seeds the broken disk's hash

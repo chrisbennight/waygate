@@ -70,6 +70,7 @@ fn deps_with(dir: &std::path::Path, engine: Arc<ReloadableCedar>) -> ReloadDeps 
         policy_config_health: Arc::new(waygate_upstream::ConfigHealth::default()),
         replica_id: "test-replica".to_owned(),
         db_pool: None,
+        codemode_cancellations: Default::default(),
         last_policy_hash: Mutex::new(None),
         last_tenant_policy_hash: Mutex::new(None),
     }

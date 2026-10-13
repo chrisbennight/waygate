@@ -8935,7 +8935,7 @@ mod tests {
         ) -> Result<Option<ExecutionStatusRecord>, StoreError> {
             let failing = self
                 .status_read_failures
-                .fetch_update(
+                .try_update(
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
                     |left| left.checked_sub(1),
