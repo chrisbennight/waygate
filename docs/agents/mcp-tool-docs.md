@@ -24,6 +24,37 @@ root composition keywords.
 > request, obtain the current state needed to prepare it safely, and predict the
 > result shape, the tool fails this standard.
 
+### What clients show the model
+
+A tool result can carry the same value twice: as `structuredContent`, and as
+its JSON serialization in a text block, which the MCP specification
+recommends for clients that cannot read structured results. Clients choose
+one of the two for the model:
+
+| Client | Shows the model | Evidence |
+| --- | --- | --- |
+| Claude Code (CLI) | `structuredContent`, serialized; text blocks are dropped when it is present. Resource links and images are kept. | [anthropics/claude-code#55677](https://github.com/anthropics/claude-code/issues/55677), closed by a maintainer as intended, and related reports; also observed through this gateway. |
+| Codex | One copy, taken from `structuredContent`. | [openai/codex#45637](https://github.com/openai/codex/issues/45637) and [#38287](https://github.com/openai/codex/issues/38287). |
+| Claude.ai web, ChatGPT | The text block. | Reported in [anthropics/claude-code#55677](https://github.com/anthropics/claude-code/issues/55677). |
+
+No client found shows the model both copies, so the text mirror costs
+transfer bytes but not model context, and text-only clients depend on it.
+Gateway-built results therefore keep it, with no per-client switch: they use
+the MCP library's structured-result constructor, which always adds the mirror.
+Two tools write a notice instead: `gateway-admin.propose_change`, whose text
+repeats the binding code and approval link, and
+`gateway-admin.get_change_secret`, whose text deliberately leaves out the
+single-use secret, as described under the standard's fourth point below. Both
+keep everything the caller needs in `structuredContent`, which is what Claude
+Code and Codex models see. Recheck this table when a client changes how it
+presents tool results.
+
+The other direction matters more. Text that is not a copy of the structured
+value, such as guidance or a preview, is invisible to Claude Code and Codex
+when the result also has `structuredContent`. Put anything the model must see
+in the structured value as well; a result delivered as a file, for example,
+carries its preview in both places.
+
 ## Scope
 
 All built-in tools in the `gateway-admin`, `gateway-observe`, and
