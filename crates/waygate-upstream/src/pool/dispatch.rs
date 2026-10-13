@@ -885,6 +885,16 @@ pub(super) fn mirrored_dial_capabilities(
 /// [`mirrored_dial_capabilities`]). A rolled-back upstream fails this dial
 /// — counted against the breaker, healed by the ordinary re-probe — rather
 /// than receiving a capability-bearing legacy `initialize`.
+fn lane_negotiated_legacy_under_auto(
+    snapshot: &crate::UpstreamManifest,
+    negotiated_protocol: Option<&str>,
+) -> bool {
+    matches!(snapshot.protocol, crate::UpstreamProtocol::Auto)
+        && matches!(snapshot.transport, crate::Transport::Http)
+        && negotiated_protocol
+            .is_some_and(|version| version < ProtocolVersion::V_2026_07_28.as_str())
+}
+
 pub(super) fn pinned_2026_manifest(snapshot: &crate::UpstreamManifest) -> crate::UpstreamManifest {
     let mut pinned = snapshot.clone();
     pinned.protocol = crate::UpstreamProtocol::V20260728;
@@ -917,6 +927,29 @@ pub(super) async fn per_call_dial(
 ) -> Result<crate::transport::ConnectedService, crate::transport::DialError> {
     let mirrored = mirrored_dial_capabilities(caller, negotiated_protocol);
     if mirrored.is_none() && !has_continuation {
+        // Under `auto`, a lane that negotiated the legacy generation already
+        // proved discovery is refused, so a per-call dial skips the probe.
+        // An upstream that has since upgraded may refuse the legacy handshake;
+        // the dial then tries discovery alone, since `auto` would only repeat
+        // the refused legacy leg after it.
+        if lane_negotiated_legacy_under_auto(snapshot, negotiated_protocol) {
+            let mut pinned = snapshot.clone();
+            pinned.protocol = crate::UpstreamProtocol::Legacy;
+            return match crate::transport::connect_with_destination(&pinned, issuer, cell, exchange)
+                .await
+            {
+                Err(crate::transport::DialError::Init(_)) => {
+                    crate::transport::connect_with_destination(
+                        &pinned_2026_manifest(snapshot),
+                        issuer,
+                        cell,
+                        exchange,
+                    )
+                    .await
+                }
+                dialed => dialed,
+            };
+        }
         return crate::transport::connect_with_destination(snapshot, issuer, cell, exchange).await;
     }
     crate::transport::connect_with_capabilities(
