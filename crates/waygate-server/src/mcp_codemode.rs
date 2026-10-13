@@ -7237,7 +7237,9 @@ fn connector_contract_with_authorization(
             .as_ref()
             .and_then(serde_json::Value::as_object)
             .map(|schema| {
-                serde_json::Value::Object(waygate_mcp::retained_delivery::output_schema(schema))
+                serde_json::Value::Object(waygate_mcp::retained_delivery::detailed_output_schema(
+                    schema,
+                ))
             }),
         governance: Governance::from_admission(facts, authorization),
     })
