@@ -37,9 +37,13 @@ fn mirrors_structured(text: &str, structured: &serde_json::Value) -> bool {
 fn fits_without_mirror(output: &CallToolResult, threshold: usize) -> bool {
     #[derive(serde::Serialize)]
     struct Unmirrored<'a> {
+        #[serde(rename = "resultType", skip_serializing_if = "Option::is_none")]
+        result_type: Option<&'a rmcp::model::ResultType>,
         content: Vec<&'a rmcp::model::ContentBlock>,
         #[serde(rename = "structuredContent")]
         structured_content: &'a serde_json::Value,
+        #[serde(rename = "isError", skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
         #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
         meta: Option<&'a rmcp::model::MetaObject>,
     }
@@ -55,12 +59,14 @@ fn fits_without_mirror(output: &CallToolResult, threshold: usize) -> bool {
         return false;
     }
     let unmirrored = Unmirrored {
+        result_type: output.result_type.as_ref(),
         content: output
             .content
             .iter()
             .filter(|block| !mirrors(block))
             .collect(),
         structured_content: structured,
+        is_error: output.is_error,
         meta: output.meta.as_ref(),
     };
     super::encoded_len_within(&unmirrored, threshold).unwrap_or(false)
@@ -89,10 +95,12 @@ fn file_preview(
             {
                 continue;
             }
-            let Some(remaining) = budget.checked_sub(text.text.len()) else {
+            // Charge the whole encoded block, so block overhead and escaping
+            // count against the inline budget as well as the text.
+            let Ok(Some(len)) = super::encoded_len_at_most(block, budget) else {
                 break;
             };
-            budget = remaining;
+            budget -= len;
             preview.push(rmcp::model::ContentBlock::text(text.text.clone()));
         }
     }

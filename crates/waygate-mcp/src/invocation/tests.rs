@@ -669,6 +669,29 @@ mod retained_response_pipeline_tests {
     }
 
     #[tokio::test]
+    async fn a_filed_result_preview_charges_each_block_against_the_budget() {
+        let mut original = CallToolResult::structured(json!({"rows": vec!["match"; 4096]}));
+        for _ in 0..1000 {
+            original.content.insert(0, ContentBlock::text(""));
+        }
+        original.meta.get_or_insert_with(Default::default).insert(
+            "io.modelcontextprotocol/trust-annotations".into(),
+            json!({"sensitive": false, "untrusted": false}),
+        );
+        let threshold = 256;
+        let (result, files) = deliver_with_threshold(original, threshold).await;
+        assert_eq!(files.published.load(Ordering::SeqCst), 1);
+        // The upstream's blocks precede the file line and the resource link.
+        let previewed = &result.content[..result.content.len() - 2];
+        assert!(!previewed.is_empty());
+        let charged: usize = previewed
+            .iter()
+            .map(|block| serde_json::to_vec(block).unwrap().len())
+            .sum();
+        assert!(charged <= threshold, "{charged} bytes previewed");
+    }
+
+    #[tokio::test]
     async fn a_filed_sensitive_result_shows_no_upstream_text() {
         let mut original = large_inline_result();
         original
