@@ -2167,6 +2167,48 @@ async fn a_waiting_checkout_takes_whichever_slot_frees_first() {
     drop(kept);
 }
 
+/// A busy slot's call holds its connection for reading, and a reconnect may
+/// queue a writer behind it. A waiting checkout must not stall on that lock
+/// while another slot is free.
+#[tokio::test]
+async fn a_waiting_checkout_does_not_stall_on_a_busy_slot_being_reconnected() {
+    let entry = entry_with_slots(2);
+    let first = entry.checkout().await;
+    let second = entry.checkout().await;
+    let (busy, other) = if std::ptr::eq(first.slot, &entry.slots[0]) {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let dispatching = busy.slot.conn.read().await;
+    let reconnect = {
+        let entry = entry.clone();
+        tokio::spawn(async move {
+            drop(entry.slots[0].conn.write().await);
+        })
+    };
+    while entry.slots[0].conn.try_read().is_ok() {
+        tokio::task::yield_now().await;
+    }
+    let waiting = {
+        let entry = entry.clone();
+        tokio::spawn(async move {
+            let co = entry.checkout().await;
+            co.slot as *const ConnectionSlot as usize
+        })
+    };
+    let other_slot = other.slot as *const ConnectionSlot as usize;
+    drop(other);
+    let taken = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+        .await
+        .expect("a queued reconnect on a busy slot must not hold up a free one")
+        .unwrap();
+    assert_eq!(taken, other_slot);
+    drop(dispatching);
+    drop(busy);
+    reconnect.await.unwrap();
+}
+
 /// Regression for the 2026-06-10 prod boot deadlock: a stdio upstream that
 /// spawns but never answers the MCP `initialize` handshake (`sleep` ignores
 /// stdin and writes no stdout) used to hang `dial_slots` forever, parking the

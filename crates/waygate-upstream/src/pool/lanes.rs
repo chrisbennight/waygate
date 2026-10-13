@@ -265,10 +265,14 @@ impl super::UpstreamEntry {
             .await
             .expect("connection slot permits are never closed");
         loop {
-            // Pass 1: free AND connected.
+            // Nothing in the scan waits. A busy slot is skipped before its
+            // connection is read, since its call holds that lock for reading
+            // and a queued reconnect writer would hold this read behind it.
+            // Pass 1: free AND connected; a connection being replaced is
+            // not known to be connected.
             for slot in &self.slots {
-                if slot.conn.read().await.is_some() {
-                    if let Ok(guard) = slot.in_use.try_lock() {
+                if let Ok(guard) = slot.in_use.try_lock() {
+                    if slot.conn.try_read().is_ok_and(|conn| conn.is_some()) {
                         return SlotCheckout {
                             slot,
                             _guard: guard,
