@@ -60,6 +60,7 @@ else
       examples/email-policy/*) rust_scope=workspace; guards=true ;;
       scripts/report-tool-context.mjs|scripts/fixtures/tool-context/standard-budget.json) tooling=true; tool_context=true ;;
       scripts/fixtures/tool-context/builtin-budget.json) tooling=true; tool_context=true ;;
+      scripts/fixtures/tool-context/realistic-*.json) tooling=true; tool_context=true; synthetic_fixtures=true ;;
       # The capture's freshness test is a Rust test, so a capture edit runs it.
       scripts/fixtures/tool-context/builtin-tools-list.json) rust_scope=workspace; tooling=true; tool_context=true ;;
       *.md|scripts/check-doc-anchors.sh|scripts/check-licenses.sh|scripts/check-no-plan-citations.sh) docs=true ;;

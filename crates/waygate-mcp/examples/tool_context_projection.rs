@@ -1,6 +1,13 @@
 //! Emit a deterministic standard MCP `tools/list` capture from the real
 //! gateway projection path for the prompt-surface CI ratchet.
+//!
+//! With no arguments it projects a small built-in representative catalog as
+//! the full list. `--catalog <file>` projects a synthetic catalog file
+//! instead, shaped `{"servers": [{"name": ..., "tools": [...]}]}`, and
+//! `--projection progressive` emits what a new legacy session lists before it
+//! discloses any tool, rather than the full list.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -136,9 +143,65 @@ fn representative_catalog() -> SharedCatalog {
     })
 }
 
+#[derive(serde::Deserialize)]
+struct CatalogFile {
+    servers: Vec<CatalogServer>,
+}
+
+#[derive(serde::Deserialize)]
+struct CatalogServer {
+    name: String,
+    tools: Vec<Tool>,
+}
+
+fn catalog_file(path: &PathBuf) -> Result<SharedCatalog, Box<dyn std::error::Error>> {
+    let file: CatalogFile = serde_json::from_slice(&std::fs::read(path)?)?;
+    Ok(Arc::new(RepresentativeCatalog {
+        servers: file
+            .servers
+            .into_iter()
+            .map(|server| (server.name, server.tools))
+            .collect(),
+    }))
+}
+
+struct Options {
+    catalog: Option<PathBuf>,
+    progressive: bool,
+}
+
+fn options() -> Result<Options, Box<dyn std::error::Error>> {
+    let mut options = Options {
+        catalog: None,
+        progressive: false,
+    };
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--catalog" => {
+                options.catalog = Some(args.next().ok_or("--catalog requires a file path")?.into());
+            }
+            "--projection" => {
+                options.progressive = match args.next().as_deref() {
+                    Some("full") => false,
+                    Some("progressive") => true,
+                    _ => return Err("--projection must be full or progressive".into()),
+                };
+            }
+            other => return Err(format!("unknown argument {other}").into()),
+        }
+    }
+    Ok(options)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let server = GatewayServer::new(representative_catalog()).with_eager_tools_list(true);
+    let options = options()?;
+    let catalog = match &options.catalog {
+        Some(path) => catalog_file(path)?,
+        None => representative_catalog(),
+    };
+    let server = GatewayServer::new(catalog).with_eager_tools_list(!options.progressive);
     let result = ListToolsResult::with_all_items(server.list_visible_tools(None).await);
     let capture = json!({"jsonrpc": "2.0", "id": 7, "result": result});
     serde_json::to_writer_pretty(std::io::stdout().lock(), &capture)?;

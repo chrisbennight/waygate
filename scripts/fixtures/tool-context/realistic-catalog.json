@@ -1,0 +1,3271 @@
+{
+  "servers": [
+    {
+      "name": "demo-chat",
+      "tools": [
+        {
+          "name": "send_message",
+          "title": "Send message",
+          "description": "Send a message to a channel or a direct conversation. Mentions use the recipient's handle. Messages longer than the channel limit are rejected rather than truncated.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "channel": {
+                "type": "string",
+                "description": "Channel identifier or direct conversation identifier."
+              },
+              "text": {
+                "type": "string",
+                "description": "Message body in the service's markup.",
+                "maxLength": 4000
+              },
+              "thread": {
+                "type": "string",
+                "description": "Identifier of the message to reply to, for a threaded reply."
+              },
+              "attachments": {
+                "type": "array",
+                "description": "Files to attach, by previously uploaded file identifier.",
+                "items": {
+                  "type": "string",
+                  "description": "Uploaded file identifier."
+                },
+                "maxItems": 10
+              }
+            },
+            "required": [
+              "channel",
+              "text"
+            ]
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "messageId": {
+                "type": "string"
+              },
+              "sentAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "messageId"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "list_channels",
+          "title": "List channels",
+          "description": "List channels visible to the caller, newest activity first.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "cursor": {
+                "type": "string",
+                "description": "Opaque continuation cursor returned by a previous call."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              },
+              "includeArchived": {
+                "type": "boolean",
+                "description": "Include archived channels.",
+                "default": false
+              }
+            }
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "memberCount": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name"
+                  ]
+                }
+              },
+              "nextCursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "items"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "read_history",
+          "title": "Read history",
+          "description": "Read recent messages from one channel.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "channel": {
+                "type": "string",
+                "description": "Channel identifier."
+              },
+              "before": {
+                "type": "string",
+                "description": "Return messages sent before this message identifier."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              }
+            },
+            "required": [
+              "channel"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "add_reaction",
+          "title": "Add reaction",
+          "description": "Add an emoji reaction to a message.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "channel": {
+                "type": "string",
+                "description": "Channel identifier."
+              },
+              "messageId": {
+                "type": "string",
+                "description": "Message identifier."
+              },
+              "emoji": {
+                "type": "string",
+                "description": "Emoji short name without colons."
+              }
+            },
+            "required": [
+              "channel",
+              "messageId",
+              "emoji"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "search_messages",
+          "title": "Search messages",
+          "description": "Search messages across channels the caller can read. Supports quoted phrases, from:handle and in:channel filters.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Search query."
+              },
+              "cursor": {
+                "type": "string",
+                "description": "Opaque continuation cursor returned by a previous call."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              }
+            },
+            "required": [
+              "query"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "demo-mail",
+      "tools": [
+        {
+          "name": "search",
+          "title": "Search mail",
+          "description": "Search the mailbox with the provider's query syntax. Returns message summaries, not bodies.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Search query, for example 'from:alice newer_than:7d'."
+              },
+              "cursor": {
+                "type": "string",
+                "description": "Opaque continuation cursor returned by a previous call."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              }
+            },
+            "required": [
+              "query"
+            ]
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "from": {
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    },
+                    "date": {
+                      "type": "string"
+                    },
+                    "snippet": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                }
+              },
+              "nextCursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "items"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "read",
+          "title": "Read message",
+          "description": "Read one message, including headers and the plain-text body. HTML-only bodies are converted to text.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Message identifier."
+              },
+              "includeAttachments": {
+                "type": "boolean",
+                "description": "List attachment metadata.",
+                "default": true
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "send",
+          "title": "Send mail",
+          "description": "Send an email from the caller's address.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "to": {
+                "type": "array",
+                "description": "Recipient addresses.",
+                "items": {
+                  "type": "string",
+                  "description": "Email address.",
+                  "format": "email"
+                },
+                "minItems": 1
+              },
+              "cc": {
+                "type": "array",
+                "description": "Carbon-copy addresses.",
+                "items": {
+                  "type": "string",
+                  "description": "Email address.",
+                  "format": "email"
+                }
+              },
+              "subject": {
+                "type": "string",
+                "description": "Subject line."
+              },
+              "body": {
+                "type": "string",
+                "description": "Plain-text body."
+              },
+              "inReplyTo": {
+                "type": "string",
+                "description": "Message identifier this replies to."
+              }
+            },
+            "required": [
+              "to",
+              "subject",
+              "body"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "move",
+          "title": "Move message",
+          "description": "Move a message to another folder.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Message identifier."
+              },
+              "folder": {
+                "type": "string",
+                "description": "Destination folder name."
+              }
+            },
+            "required": [
+              "id",
+              "folder"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "label",
+          "title": "Label message",
+          "description": "Add or remove labels on a message.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Message identifier."
+              },
+              "add": {
+                "type": "array",
+                "description": "Labels to add.",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "remove": {
+                "type": "array",
+                "description": "Labels to remove.",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "demo-metrics",
+      "tools": [
+        {
+          "name": "query",
+          "title": "Instant query",
+          "description": "Evaluate a metrics query expression at one instant.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "expr": {
+                "type": "string",
+                "description": "Query expression."
+              },
+              "time": {
+                "type": "string",
+                "description": "Evaluation time in RFC 3339 format. Defaults to now.",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "expr"
+            ]
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "resultType": {
+                "type": "string",
+                "enum": [
+                  "vector",
+                  "scalar",
+                  "matrix",
+                  "string"
+                ]
+              },
+              "result": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              }
+            },
+            "required": [
+              "resultType",
+              "result"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "query_range",
+          "title": "Range query",
+          "description": "Evaluate a metrics query expression over a time range at a fixed step. Large ranges with small steps are rejected; widen the step instead.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "expr": {
+                "type": "string",
+                "description": "Query expression."
+              },
+              "start": {
+                "type": "string",
+                "description": "Inclusive start time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "description": "Exclusive end time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "step": {
+                "type": "string",
+                "description": "Resolution step, for example '30s' or '5m'.",
+                "pattern": "^[0-9]+[smhd]$"
+              }
+            },
+            "required": [
+              "expr",
+              "start",
+              "end",
+              "step"
+            ]
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "resultType": {
+                "type": "string",
+                "enum": [
+                  "vector",
+                  "scalar",
+                  "matrix",
+                  "string"
+                ]
+              },
+              "result": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              }
+            },
+            "required": [
+              "resultType",
+              "result"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "list_label_names",
+          "title": "List label names",
+          "description": "List label names, optionally limited to series matching a selector.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "match": {
+                "type": "array",
+                "description": "Series selectors.",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "start": {
+                "type": "string",
+                "description": "Inclusive start time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "description": "Exclusive end time in RFC 3339 format.",
+                "format": "date-time"
+              }
+            }
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "list_label_values",
+          "title": "List label values",
+          "description": "List the values of one label.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string",
+                "description": "Label name."
+              },
+              "match": {
+                "type": "array",
+                "description": "Series selectors.",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "start": {
+                "type": "string",
+                "description": "Inclusive start time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "description": "Exclusive end time in RFC 3339 format.",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "label"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "list_metric_names",
+          "title": "List metric names",
+          "description": "List metric names, optionally filtered by a regular expression.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "regex": {
+                "type": "string",
+                "description": "Regular expression the name must match."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              }
+            }
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "get_metadata",
+          "title": "Get metric metadata",
+          "description": "Return the type, help text and unit for one metric.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "metric": {
+                "type": "string",
+                "description": "Metric name."
+              }
+            },
+            "required": [
+              "metric"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "demo-logs",
+      "tools": [
+        {
+          "name": "query_logs",
+          "title": "Query logs",
+          "description": "Run a log query over a time range and return matching lines, newest first. Queries without a stream selector are rejected.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Log query with a stream selector."
+              },
+              "start": {
+                "type": "string",
+                "description": "Inclusive start time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "description": "Exclusive end time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              },
+              "direction": {
+                "type": "string",
+                "description": "Result order.",
+                "enum": [
+                  "backward",
+                  "forward"
+                ],
+                "default": "backward"
+              }
+            },
+            "required": [
+              "query"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "list_streams",
+          "title": "List streams",
+          "description": "List label sets of the log streams in a time range.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "match": {
+                "type": "string",
+                "description": "Stream selector."
+              },
+              "start": {
+                "type": "string",
+                "description": "Inclusive start time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "description": "Exclusive end time in RFC 3339 format.",
+                "format": "date-time"
+              }
+            }
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "find_patterns",
+          "title": "Find patterns",
+          "description": "Group log lines that share a structure and return the most frequent patterns.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Stream selector."
+              },
+              "start": {
+                "type": "string",
+                "description": "Inclusive start time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "description": "Exclusive end time in RFC 3339 format.",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "query"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "get_stats",
+          "title": "Get stream statistics",
+          "description": "Return line, byte and stream counts for a selector.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Stream selector."
+              },
+              "start": {
+                "type": "string",
+                "description": "Inclusive start time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "description": "Exclusive end time in RFC 3339 format.",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "query"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "demo-home-main",
+      "tools": [
+        {
+          "name": "get_state",
+          "title": "Get entity state",
+          "description": "Return the current state and attributes of one entity.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "entityId": {
+                "type": "string",
+                "description": "Entity identifier, for example 'light.kitchen'.",
+                "pattern": "^[a-z_]+\\.[a-z0-9_]+$"
+              }
+            },
+            "required": [
+              "entityId"
+            ]
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "entityId": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "attributes": {
+                "type": "object"
+              },
+              "lastChanged": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "entityId",
+              "state"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "call_service",
+          "title": "Call service",
+          "description": "Call a home automation service, such as turning on a light or setting a thermostat. Check the entity's current state first; some services act on every entity in an area.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "domain": {
+                "type": "string",
+                "description": "Service domain, for example 'light'."
+              },
+              "service": {
+                "type": "string",
+                "description": "Service name, for example 'turn_on'."
+              },
+              "target": {
+                "type": "object",
+                "properties": {
+                  "entityId": {
+                    "type": "array",
+                    "description": "Target entities.",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "areaId": {
+                    "type": "array",
+                    "description": "Target areas.",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "data": {
+                "type": "object",
+                "description": "Service-specific fields.",
+                "additionalProperties": true
+              }
+            },
+            "required": [
+              "domain",
+              "service"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "search_entities",
+          "title": "Search entities",
+          "description": "Search entities by name, area or domain.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Free-text search."
+              },
+              "domain": {
+                "type": "string",
+                "description": "Limit to one domain."
+              },
+              "area": {
+                "type": "string",
+                "description": "Limit to one area."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              }
+            }
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "get_history",
+          "title": "Get history",
+          "description": "Return state changes for entities over a time range.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "entityIds": {
+                "type": "array",
+                "description": "Entities to include.",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1
+              },
+              "start": {
+                "type": "string",
+                "description": "Inclusive start time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "description": "Exclusive end time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "significantOnly": {
+                "type": "boolean",
+                "description": "Return only significant changes.",
+                "default": true
+              }
+            },
+            "required": [
+              "entityIds"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "list_areas",
+          "title": "List areas",
+          "description": "List floors and areas with their entity counts.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "set_automation",
+          "title": "Create or update automation",
+          "description": "Create or replace an automation. The definition is validated before it is saved; an invalid definition is rejected with the validation errors.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Automation identifier. Omit to create a new automation."
+              },
+              "alias": {
+                "type": "string",
+                "description": "Display name."
+              },
+              "triggers": {
+                "type": "array",
+                "description": "Trigger definitions.",
+                "items": {
+                  "type": "object"
+                },
+                "minItems": 1
+              },
+              "conditions": {
+                "type": "array",
+                "description": "Condition definitions.",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "actions": {
+                "type": "array",
+                "description": "Action definitions.",
+                "items": {
+                  "type": "object"
+                },
+                "minItems": 1
+              },
+              "mode": {
+                "type": "string",
+                "description": "Behavior when triggered while running.",
+                "enum": [
+                  "single",
+                  "restart",
+                  "queued",
+                  "parallel"
+                ],
+                "default": "single"
+              }
+            },
+            "required": [
+              "alias",
+              "triggers",
+              "actions"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "get_logs",
+          "title": "Get logs",
+          "description": "Return recent system log entries, optionally filtered by integration and level.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "integration": {
+                "type": "string",
+                "description": "Integration name."
+              },
+              "level": {
+                "type": "string",
+                "description": "Minimum level.",
+                "enum": [
+                  "debug",
+                  "info",
+                  "warning",
+                  "error"
+                ]
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              }
+            }
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "demo-home-annex",
+      "tools": [
+        {
+          "name": "get_state",
+          "title": "Get entity state",
+          "description": "Return the current state and attributes of one entity.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "entityId": {
+                "type": "string",
+                "description": "Entity identifier, for example 'light.kitchen'.",
+                "pattern": "^[a-z_]+\\.[a-z0-9_]+$"
+              }
+            },
+            "required": [
+              "entityId"
+            ]
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "entityId": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "attributes": {
+                "type": "object"
+              },
+              "lastChanged": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "entityId",
+              "state"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "call_service",
+          "title": "Call service",
+          "description": "Call a home automation service, such as turning on a light or setting a thermostat. Check the entity's current state first; some services act on every entity in an area.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "domain": {
+                "type": "string",
+                "description": "Service domain, for example 'light'."
+              },
+              "service": {
+                "type": "string",
+                "description": "Service name, for example 'turn_on'."
+              },
+              "target": {
+                "type": "object",
+                "properties": {
+                  "entityId": {
+                    "type": "array",
+                    "description": "Target entities.",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "areaId": {
+                    "type": "array",
+                    "description": "Target areas.",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "data": {
+                "type": "object",
+                "description": "Service-specific fields.",
+                "additionalProperties": true
+              }
+            },
+            "required": [
+              "domain",
+              "service"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "search_entities",
+          "title": "Search entities",
+          "description": "Search entities by name, area or domain.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Free-text search."
+              },
+              "domain": {
+                "type": "string",
+                "description": "Limit to one domain."
+              },
+              "area": {
+                "type": "string",
+                "description": "Limit to one area."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              }
+            }
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "get_history",
+          "title": "Get history",
+          "description": "Return state changes for entities over a time range.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "entityIds": {
+                "type": "array",
+                "description": "Entities to include.",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1
+              },
+              "start": {
+                "type": "string",
+                "description": "Inclusive start time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "description": "Exclusive end time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "significantOnly": {
+                "type": "boolean",
+                "description": "Return only significant changes.",
+                "default": true
+              }
+            },
+            "required": [
+              "entityIds"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "list_areas",
+          "title": "List areas",
+          "description": "List floors and areas with their entity counts.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "set_automation",
+          "title": "Create or update automation",
+          "description": "Create or replace an automation. The definition is validated before it is saved; an invalid definition is rejected with the validation errors.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Automation identifier. Omit to create a new automation."
+              },
+              "alias": {
+                "type": "string",
+                "description": "Display name."
+              },
+              "triggers": {
+                "type": "array",
+                "description": "Trigger definitions.",
+                "items": {
+                  "type": "object"
+                },
+                "minItems": 1
+              },
+              "conditions": {
+                "type": "array",
+                "description": "Condition definitions.",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "actions": {
+                "type": "array",
+                "description": "Action definitions.",
+                "items": {
+                  "type": "object"
+                },
+                "minItems": 1
+              },
+              "mode": {
+                "type": "string",
+                "description": "Behavior when triggered while running.",
+                "enum": [
+                  "single",
+                  "restart",
+                  "queued",
+                  "parallel"
+                ],
+                "default": "single"
+              }
+            },
+            "required": [
+              "alias",
+              "triggers",
+              "actions"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "get_logs",
+          "title": "Get logs",
+          "description": "Return recent system log entries, optionally filtered by integration and level.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "integration": {
+                "type": "string",
+                "description": "Integration name."
+              },
+              "level": {
+                "type": "string",
+                "description": "Minimum level.",
+                "enum": [
+                  "debug",
+                  "info",
+                  "warning",
+                  "error"
+                ]
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              }
+            }
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "demo-forge",
+      "tools": [
+        {
+          "name": "api_read",
+          "title": "Read API",
+          "description": "Run a read-only API operation found through the catalog. The operation must be classified read-only; writes are refused before submission.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "operation_id": {
+                "type": "string",
+                "description": "Operation identifier from the catalog search.",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "arguments": {
+                "type": "object",
+                "description": "Arguments exactly as the operation's description lists them.",
+                "additionalProperties": true
+              }
+            },
+            "required": [
+              "operation_id",
+              "arguments"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "api_mutate",
+          "title": "Mutate API",
+          "description": "Run an ordinary write operation found through the catalog, such as creating an issue or a pull request. Destructive and administrative operations are refused.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "operation_id": {
+                "type": "string",
+                "description": "Operation identifier from the catalog search.",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "arguments": {
+                "type": "object",
+                "description": "Arguments exactly as the operation's description lists them.",
+                "additionalProperties": true
+              }
+            },
+            "required": [
+              "operation_id",
+              "arguments"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "api_admin",
+          "title": "Administer API",
+          "description": "Run an administrative or destructive operation found through the catalog. Inspect the operation and its arguments first.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "operation_id": {
+                "type": "string",
+                "description": "Operation identifier from the catalog search.",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "arguments": {
+                "type": "object",
+                "description": "Arguments exactly as the operation's description lists them.",
+                "additionalProperties": true
+              }
+            },
+            "required": [
+              "operation_id",
+              "arguments"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "catalog_search",
+          "title": "Search catalog",
+          "description": "Search the API operation catalog by keyword and return matching operation identifiers with one-line summaries.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Keywords."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              }
+            },
+            "required": [
+              "query"
+            ]
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "operation_id": {
+                      "type": "string"
+                    },
+                    "summary": {
+                      "type": "string"
+                    },
+                    "classification": {
+                      "type": "string",
+                      "enum": [
+                        "read",
+                        "mutate",
+                        "admin"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "operation_id"
+                  ]
+                }
+              },
+              "nextCursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "items"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "catalog_describe",
+          "title": "Describe operation",
+          "description": "Return the exact argument schema and classification of one catalog operation.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "operation_id": {
+                "type": "string",
+                "description": "Operation identifier."
+              }
+            },
+            "required": [
+              "operation_id"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "issue_context",
+          "title": "Issue context",
+          "description": "Return an issue's description, labels, comments and linked work in one bounded result.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "owner": {
+                "type": "string",
+                "description": "Repository owner."
+              },
+              "repo": {
+                "type": "string",
+                "description": "Repository name."
+              },
+              "number": {
+                "type": "integer",
+                "description": "Issue number.",
+                "minimum": 1
+              },
+              "sections": {
+                "type": "array",
+                "description": "Sections to include.",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "comments",
+                    "relationships",
+                    "timeline"
+                  ]
+                },
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "owner",
+              "repo",
+              "number"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "pull_request_context",
+          "title": "Pull request context",
+          "description": "Return a pull request's description, changed files, reviews, review threads and check results in one bounded result. Text beyond the budget is truncated and reported as such.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "owner": {
+                "type": "string",
+                "description": "Repository owner."
+              },
+              "repo": {
+                "type": "string",
+                "description": "Repository name."
+              },
+              "number": {
+                "type": "integer",
+                "description": "Pull request number.",
+                "minimum": 1
+              },
+              "sections": {
+                "type": "array",
+                "description": "Sections to include.",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "files",
+                    "diff",
+                    "reviews",
+                    "threads",
+                    "checks",
+                    "comments"
+                  ]
+                },
+                "uniqueItems": true
+              },
+              "textBudget": {
+                "type": "integer",
+                "description": "Maximum characters of text across sections.",
+                "minimum": 1,
+                "maximum": 32000,
+                "default": 8000
+              }
+            },
+            "required": [
+              "owner",
+              "repo",
+              "number"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "demo-containers",
+      "tools": [
+        {
+          "name": "stacks_search",
+          "title": "Search stacks",
+          "description": "Search deployed stacks by name or tag.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Name or tag filter."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              }
+            }
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "stacks_status",
+          "title": "Stack status",
+          "description": "Return each service's state, image and restart count for one stack.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "stack": {
+                "type": "string",
+                "description": "Stack name."
+              }
+            },
+            "required": [
+              "stack"
+            ]
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "stack": {
+                "type": "string"
+              },
+              "services": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "running",
+                        "exited",
+                        "restarting",
+                        "paused",
+                        "created"
+                      ]
+                    },
+                    "image": {
+                      "type": "string"
+                    },
+                    "restarts": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "state"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "stack",
+              "services"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "stacks_deploy",
+          "title": "Deploy stack",
+          "description": "Pull images and redeploy a stack from its stored definition. Services restart; dependent stacks are not touched.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "stack": {
+                "type": "string",
+                "description": "Stack name."
+              },
+              "pull": {
+                "type": "boolean",
+                "description": "Pull images before deploying.",
+                "default": true
+              },
+              "services": {
+                "type": "array",
+                "description": "Limit to these services.",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "stack"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "stacks_logs",
+          "title": "Stack logs",
+          "description": "Return the most recent log lines of one stack's services.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "stack": {
+                "type": "string",
+                "description": "Stack name."
+              },
+              "service": {
+                "type": "string",
+                "description": "Limit to one service."
+              },
+              "tail": {
+                "type": "integer",
+                "description": "Lines per service.",
+                "minimum": 1,
+                "maximum": 2000,
+                "default": 200
+              }
+            },
+            "required": [
+              "stack"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "stacks_restart",
+          "title": "Restart stack",
+          "description": "Restart a stack's services without pulling images.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "stack": {
+                "type": "string",
+                "description": "Stack name."
+              },
+              "services": {
+                "type": "array",
+                "description": "Limit to these services.",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "stack"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "stacks_stop",
+          "title": "Stop stack",
+          "description": "Stop every service in a stack. The stack stays stopped until it is deployed or started again.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "stack": {
+                "type": "string",
+                "description": "Stack name."
+              }
+            },
+            "required": [
+              "stack"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "demo-storage",
+      "tools": [
+        {
+          "name": "buckets_list",
+          "title": "List buckets",
+          "description": "List buckets with their size and object counts.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "objects_list",
+          "title": "List objects",
+          "description": "List objects in a bucket under an optional prefix.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "bucket": {
+                "type": "string",
+                "description": "Bucket name."
+              },
+              "prefix": {
+                "type": "string",
+                "description": "Key prefix."
+              },
+              "delimiter": {
+                "type": "string",
+                "description": "Grouping delimiter, usually '/'."
+              },
+              "cursor": {
+                "type": "string",
+                "description": "Opaque continuation cursor returned by a previous call."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              }
+            },
+            "required": [
+              "bucket"
+            ]
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "size": {
+                      "type": "integer"
+                    },
+                    "lastModified": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "etag": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "size"
+                  ]
+                }
+              },
+              "nextCursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "items"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "object_read_text",
+          "title": "Read text object",
+          "description": "Read a text object up to a size limit. Binary objects are refused; use a download link instead.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "bucket": {
+                "type": "string",
+                "description": "Bucket name."
+              },
+              "key": {
+                "type": "string",
+                "description": "Object key."
+              },
+              "maxBytes": {
+                "type": "integer",
+                "description": "Maximum bytes to read.",
+                "minimum": 1,
+                "maximum": 1048576,
+                "default": 65536
+              }
+            },
+            "required": [
+              "bucket",
+              "key"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "object_write_text",
+          "title": "Write text object",
+          "description": "Create or replace a text object.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "bucket": {
+                "type": "string",
+                "description": "Bucket name."
+              },
+              "key": {
+                "type": "string",
+                "description": "Object key."
+              },
+              "content": {
+                "type": "string",
+                "description": "UTF-8 content."
+              },
+              "contentType": {
+                "type": "string",
+                "description": "Media type.",
+                "default": "text/plain"
+              }
+            },
+            "required": [
+              "bucket",
+              "key",
+              "content"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "presign_download",
+          "title": "Presign download",
+          "description": "Return a time-limited download link for one object.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "bucket": {
+                "type": "string",
+                "description": "Bucket name."
+              },
+              "key": {
+                "type": "string",
+                "description": "Object key."
+              },
+              "expiresSeconds": {
+                "type": "integer",
+                "description": "Link lifetime.",
+                "minimum": 60,
+                "maximum": 86400,
+                "default": 900
+              }
+            },
+            "required": [
+              "bucket",
+              "key"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "presign_upload",
+          "title": "Presign upload",
+          "description": "Return a time-limited upload link for one object key.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "bucket": {
+                "type": "string",
+                "description": "Bucket name."
+              },
+              "key": {
+                "type": "string",
+                "description": "Object key."
+              },
+              "expiresSeconds": {
+                "type": "integer",
+                "description": "Link lifetime.",
+                "minimum": 60,
+                "maximum": 86400,
+                "default": 900
+              },
+              "contentType": {
+                "type": "string",
+                "description": "Media type the upload must use."
+              }
+            },
+            "required": [
+              "bucket",
+              "key"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "demo-search",
+      "tools": [
+        {
+          "name": "web_search",
+          "title": "Web search",
+          "description": "Search the web and return ranked results with titles, links and snippets. Optionally fetch the full text of the top results.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Search query."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              },
+              "after": {
+                "type": "string",
+                "description": "Only results published on or after this date.",
+                "format": "date"
+              },
+              "includeDomains": {
+                "type": "array",
+                "description": "Restrict to these domains.",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "excludeDomains": {
+                "type": "array",
+                "description": "Exclude these domains.",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "extractCount": {
+                "type": "integer",
+                "description": "Number of top results to fetch in full.",
+                "minimum": 0,
+                "maximum": 10,
+                "default": 0
+              }
+            },
+            "required": [
+              "query"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "extract",
+          "title": "Extract page",
+          "description": "Fetch one web page and return its main content as Markdown.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "HTTPS URL of the page.",
+                "format": "uri"
+              }
+            },
+            "required": [
+              "url"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "demo-network",
+      "tools": [
+        {
+          "name": "clients_search",
+          "title": "Search clients",
+          "description": "Search connected network clients by name, address or device type.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Name, IP address or MAC address."
+              },
+              "online": {
+                "type": "boolean",
+                "description": "Only clients currently online."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              }
+            }
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "devices_status",
+          "title": "Device status",
+          "description": "Return health, uptime and firmware for network devices.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "deviceIds": {
+                "type": "array",
+                "description": "Limit to these devices.",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "networks_list",
+          "title": "List networks",
+          "description": "List networks with their subnets, VLANs and DHCP settings.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "firewall_policy_configure",
+          "title": "Configure firewall policy",
+          "description": "Create or replace one firewall policy between two zones. Policies are evaluated in order; use the ordering tool to place a new policy. A policy that blocks the management network is refused.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Policy identifier. Omit to create a new policy."
+              },
+              "name": {
+                "type": "string",
+                "description": "Display name."
+              },
+              "enabled": {
+                "type": "boolean",
+                "description": "Whether the policy is active.",
+                "default": true
+              },
+              "action": {
+                "type": "string",
+                "description": "What matching traffic gets.",
+                "enum": [
+                  "allow",
+                  "block",
+                  "reject"
+                ]
+              },
+              "source": {
+                "type": "object",
+                "properties": {
+                  "zone": {
+                    "type": "string",
+                    "description": "Source zone identifier."
+                  },
+                  "matching": {
+                    "type": "string",
+                    "description": "How the source is matched.",
+                    "enum": [
+                      "any",
+                      "network",
+                      "ip",
+                      "mac",
+                      "client_group"
+                    ]
+                  },
+                  "values": {
+                    "type": "array",
+                    "description": "Values for the chosen match type.",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "zone",
+                  "matching"
+                ]
+              },
+              "destination": {
+                "type": "object",
+                "properties": {
+                  "zone": {
+                    "type": "string",
+                    "description": "Destination zone identifier."
+                  },
+                  "matching": {
+                    "type": "string",
+                    "description": "How the destination is matched.",
+                    "enum": [
+                      "any",
+                      "network",
+                      "ip",
+                      "domain",
+                      "port_group"
+                    ]
+                  },
+                  "values": {
+                    "type": "array",
+                    "description": "Values for the chosen match type.",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "ports": {
+                    "type": "array",
+                    "description": "Destination ports or ranges, for example '443' or '8000-8100'.",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[0-9]+(-[0-9]+)?$"
+                    }
+                  }
+                },
+                "required": [
+                  "zone",
+                  "matching"
+                ]
+              },
+              "protocol": {
+                "type": "string",
+                "description": "IP protocol.",
+                "enum": [
+                  "all",
+                  "tcp",
+                  "udp",
+                  "tcp_udp",
+                  "icmp"
+                ],
+                "default": "all"
+              },
+              "schedule": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "mode": {
+                        "const": "always"
+                      }
+                    },
+                    "required": [
+                      "mode"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "mode": {
+                        "const": "weekly"
+                      },
+                      "days": {
+                        "type": "array",
+                        "description": "Days of the week.",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "mon",
+                            "tue",
+                            "wed",
+                            "thu",
+                            "fri",
+                            "sat",
+                            "sun"
+                          ]
+                        }
+                      },
+                      "start": {
+                        "type": "string",
+                        "description": "Start time, HH:MM."
+                      },
+                      "end": {
+                        "type": "string",
+                        "description": "End time, HH:MM."
+                      }
+                    },
+                    "required": [
+                      "mode",
+                      "days",
+                      "start",
+                      "end"
+                    ]
+                  }
+                ],
+                "description": "When the policy applies."
+              },
+              "logging": {
+                "type": "boolean",
+                "description": "Log matching traffic.",
+                "default": false
+              }
+            },
+            "required": [
+              "name",
+              "action",
+              "source",
+              "destination"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "wifi_diagnose",
+          "title": "Diagnose Wi-Fi",
+          "description": "Diagnose a client's Wi-Fi experience: signal, roaming history and retries.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "client": {
+                "type": "string",
+                "description": "Client MAC address or name."
+              }
+            },
+            "required": [
+              "client"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "demo-browser",
+      "tools": [
+        {
+          "name": "navigate",
+          "title": "Navigate",
+          "description": "Open a URL in the current tab.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "URL to open.",
+                "format": "uri"
+              }
+            },
+            "required": [
+              "url"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "click",
+          "title": "Click",
+          "description": "Click an element identified by a reference from the latest page snapshot.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "ref": {
+                "type": "string",
+                "description": "Element reference from the snapshot."
+              },
+              "element": {
+                "type": "string",
+                "description": "Human-readable element description, used for confirmation."
+              },
+              "button": {
+                "type": "string",
+                "description": "Mouse button.",
+                "enum": [
+                  "left",
+                  "right",
+                  "middle"
+                ],
+                "default": "left"
+              },
+              "doubleClick": {
+                "type": "boolean",
+                "description": "Double-click instead of single click.",
+                "default": false
+              }
+            },
+            "required": [
+              "ref",
+              "element"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "type",
+          "title": "Type text",
+          "description": "Type text into an editable element.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "ref": {
+                "type": "string",
+                "description": "Element reference from the snapshot."
+              },
+              "element": {
+                "type": "string",
+                "description": "Human-readable element description."
+              },
+              "text": {
+                "type": "string",
+                "description": "Text to type."
+              },
+              "submit": {
+                "type": "boolean",
+                "description": "Press Enter afterwards.",
+                "default": false
+              }
+            },
+            "required": [
+              "ref",
+              "element",
+              "text"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "snapshot",
+          "title": "Page snapshot",
+          "description": "Capture an accessibility snapshot of the current page. Prefer this to a screenshot for finding elements.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "screenshot",
+          "title": "Screenshot",
+          "description": "Take a screenshot of the page or one element.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "ref": {
+                "type": "string",
+                "description": "Element reference, to capture one element."
+              },
+              "fullPage": {
+                "type": "boolean",
+                "description": "Capture the full scrollable page.",
+                "default": false
+              },
+              "type": {
+                "type": "string",
+                "description": "Image format.",
+                "enum": [
+                  "png",
+                  "jpeg"
+                ],
+                "default": "png"
+              }
+            }
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "evaluate",
+          "title": "Evaluate script",
+          "description": "Evaluate a JavaScript expression in the page and return its JSON result.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "function": {
+                "type": "string",
+                "description": "JavaScript function source, for example '() => document.title'."
+              },
+              "ref": {
+                "type": "string",
+                "description": "Element reference passed as the function argument."
+              }
+            },
+            "required": [
+              "function"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "tabs",
+          "title": "Manage tabs",
+          "description": "List, open, close or select browser tabs.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "description": "Tab action.",
+                "enum": [
+                  "list",
+                  "new",
+                  "close",
+                  "select"
+                ]
+              },
+              "index": {
+                "type": "integer",
+                "description": "Tab index for close or select.",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "fill_form",
+          "title": "Fill form",
+          "description": "Fill several form fields in one step.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "fields": {
+                "type": "array",
+                "description": "Fields to fill.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "ref": {
+                      "type": "string",
+                      "description": "Element reference."
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "Field name, for confirmation."
+                    },
+                    "type": {
+                      "type": "string",
+                      "description": "Field type.",
+                      "enum": [
+                        "textbox",
+                        "checkbox",
+                        "radio",
+                        "combobox",
+                        "slider"
+                      ]
+                    },
+                    "value": {
+                      "type": "string",
+                      "description": "Value to set; 'true' or 'false' for checkboxes."
+                    }
+                  },
+                  "required": [
+                    "ref",
+                    "name",
+                    "type",
+                    "value"
+                  ]
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "fields"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "demo-calendar",
+      "tools": [
+        {
+          "name": "list_events",
+          "title": "List events",
+          "description": "List calendar events in a time range.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "calendar": {
+                "type": "string",
+                "description": "Calendar identifier. Defaults to the primary calendar."
+              },
+              "start": {
+                "type": "string",
+                "description": "Inclusive start time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "description": "Exclusive end time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "cursor": {
+                "type": "string",
+                "description": "Opaque continuation cursor returned by a previous call."
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ]
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "summary": {
+                      "type": "string"
+                    },
+                    "start": {
+                      "type": "string"
+                    },
+                    "end": {
+                      "type": "string"
+                    },
+                    "location": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "start",
+                    "end"
+                  ]
+                }
+              },
+              "nextCursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "items"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "create_event",
+          "title": "Create event",
+          "description": "Create a calendar event and optionally invite attendees.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "calendar": {
+                "type": "string",
+                "description": "Calendar identifier."
+              },
+              "summary": {
+                "type": "string",
+                "description": "Event title."
+              },
+              "start": {
+                "type": "string",
+                "description": "Inclusive start time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "description": "Exclusive end time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "attendees": {
+                "type": "array",
+                "description": "Attendee email addresses.",
+                "items": {
+                  "type": "string",
+                  "description": "Email address.",
+                  "format": "email"
+                }
+              },
+              "location": {
+                "type": "string",
+                "description": "Location."
+              },
+              "description": {
+                "type": "string",
+                "description": "Event description."
+              }
+            },
+            "required": [
+              "summary",
+              "start",
+              "end"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "update_event",
+          "title": "Update event",
+          "description": "Change fields of an existing event. Omitted fields are unchanged.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "calendar": {
+                "type": "string",
+                "description": "Calendar identifier."
+              },
+              "id": {
+                "type": "string",
+                "description": "Event identifier."
+              },
+              "summary": {
+                "type": "string",
+                "description": "Event title."
+              },
+              "start": {
+                "type": "string",
+                "description": "Inclusive start time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "description": "Exclusive end time in RFC 3339 format.",
+                "format": "date-time"
+              },
+              "location": {
+                "type": "string",
+                "description": "Location."
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        },
+        {
+          "name": "delete_event",
+          "title": "Delete event",
+          "description": "Delete an event and notify attendees.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "calendar": {
+                "type": "string",
+                "description": "Calendar identifier."
+              },
+              "id": {
+                "type": "string",
+                "description": "Event identifier."
+              },
+              "notify": {
+                "type": "boolean",
+                "description": "Send cancellation notices.",
+                "default": true
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "demo-docs",
+      "tools": [
+        {
+          "name": "search_docs",
+          "title": "Search documentation",
+          "description": "Search indexed library documentation for a version and return the most relevant passages.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "library": {
+                "type": "string",
+                "description": "Library name."
+              },
+              "version": {
+                "type": "string",
+                "description": "Version, or omit for the latest indexed."
+              },
+              "query": {
+                "type": "string",
+                "description": "Question or keywords."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return.",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+              }
+            },
+            "required": [
+              "library",
+              "query"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "list_libraries",
+          "title": "List libraries",
+          "description": "List indexed libraries and their versions.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "fetch_url",
+          "title": "Fetch URL",
+          "description": "Fetch a documentation page and return it as Markdown.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "Page URL.",
+                "format": "uri"
+              }
+            },
+            "required": [
+              "url"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "demo-database",
+      "tools": [
+        {
+          "name": "run_query",
+          "title": "Run read-only query",
+          "description": "Run one read-only SQL statement and return up to the row limit. Statements that write are refused.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "sql": {
+                "type": "string",
+                "description": "A single SELECT statement."
+              },
+              "params": {
+                "type": "array",
+                "description": "Positional parameters.",
+                "items": {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "rowLimit": {
+                "type": "integer",
+                "description": "Maximum rows.",
+                "minimum": 1,
+                "maximum": 1000,
+                "default": 100
+              }
+            },
+            "required": [
+              "sql"
+            ]
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "columns": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "rows": {
+                "type": "array",
+                "items": {
+                  "type": "array"
+                }
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "columns",
+              "rows"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "list_tables",
+          "title": "List tables",
+          "description": "List tables and views in a schema.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "schema": {
+                "type": "string",
+                "description": "Schema name.",
+                "default": "public"
+              }
+            }
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "describe_table",
+          "title": "Describe table",
+          "description": "Return the columns, types, keys and indexes of one table.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "schema": {
+                "type": "string",
+                "description": "Schema name.",
+                "default": "public"
+              },
+              "table": {
+                "type": "string",
+                "description": "Table name."
+              }
+            },
+            "required": [
+              "table"
+            ]
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        }
+      ]
+    }
+  ]
+}

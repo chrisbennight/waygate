@@ -158,8 +158,16 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked -p waygate-mcp --example tool_context_projection
-          "${CARGO_TARGET_DIR:-target}/debug/examples/tool_context_projection" |
+          projection="${CARGO_TARGET_DIR:-target}/debug/examples/tool_context_projection"
+          "$projection" |
             node scripts/report-tool-context.mjs --budget scripts/fixtures/tool-context/standard-budget.json -
+          # A synthetic catalog the size of a real deployment, so growth that
+          # scales with the number of upstreams reaches a budget.
+          for view in full progressive; do
+            "$projection" --catalog scripts/fixtures/tool-context/realistic-catalog.json --projection "$view" |
+              node scripts/report-tool-context.mjs \
+                --budget "scripts/fixtures/tool-context/realistic-$view-budget.json" -
+          done
           # The gateway's own built-in surface. Its checked-in capture is kept
           # current by the gateway-server test builtin_tool_capture_is_current.
           node scripts/report-tool-context.mjs \
