@@ -1109,18 +1109,17 @@ impl DefaultInvocationService {
                     "catalog",
                     schema_hash.clone(),
                     self.schema_validator_cache
-                        .get_or_compile(*tool_id, schema_hash, schema),
+                        .validator(*tool_id, schema_hash, schema)
+                        .await,
                 )),
                 (ResolutionAuthority::ManifestFallback { .. }, Some(schema)) => {
                     let admission_key = format!("manifest:{}.{}", ctx.server, ctx.tool);
                     Some((
                         "manifest",
                         admission_key.clone(),
-                        self.schema_validator_cache.get_or_compile(
-                            uuid::Uuid::nil(),
-                            &admission_key,
-                            schema,
-                        ),
+                        self.schema_validator_cache
+                            .validator(uuid::Uuid::nil(), &admission_key, schema)
+                            .await,
                     ))
                 }
                 _ => None,
@@ -1596,7 +1595,8 @@ impl DefaultInvocationService {
                 ) => Some((
                     schema_hash.clone(),
                     self.schema_validator_cache
-                        .get_or_compile(*tool_id, schema_hash, schema),
+                        .validator(*tool_id, schema_hash, schema)
+                        .await,
                 )),
                 _ => None,
             }
