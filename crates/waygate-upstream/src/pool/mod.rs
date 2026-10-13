@@ -30,8 +30,9 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use rmcp::model::{
-    CallToolResponse, CallToolResult, ClientInfo, ListResourceTemplatesResult, ListResourcesResult,
-    PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, Tool,
+    CallToolResponse, CallToolResult, ClientConfig, ListResourceTemplatesResult,
+    ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult,
+    Tool,
 };
 use rmcp::service::RunningService;
 use rmcp::{ErrorData as McpError, RoleClient};
@@ -288,7 +289,7 @@ impl UpstreamEntry {
 }
 
 struct Connection {
-    client: RunningService<RoleClient, ClientInfo>,
+    client: RunningService<RoleClient, ClientConfig>,
     /// Address set resolved and pinned when this network connection was
     /// created. File downloads on the same upstream host reuse this set so a
     /// second DNS answer cannot redirect the gateway to another service.

@@ -35,7 +35,7 @@ use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock as Content,
     Implementation, ListResourcesResult, ListToolsResult, MetaObject as Meta,
     PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
-    ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo, Tool,
+    ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerConfig, Tool,
     ToolAnnotations,
 };
 use rmcp::service::RequestContext;
@@ -67,8 +67,8 @@ use super::test_identity_issuer;
 struct MockUpstream;
 
 impl ServerHandler for MockUpstream {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -151,8 +151,8 @@ struct FlakyInitializationUpstream {
 }
 
 impl ServerHandler for FlakyInitializationUpstream {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(
                 "flaky-initialization-upstream",
                 "0.0.0",
@@ -285,8 +285,8 @@ struct SlowCallUpstream {
 }
 
 impl ServerHandler for SlowCallUpstream {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("slow-call-upstream", "0.0.0"))
             .with_protocol_version(ProtocolVersion::LATEST)
     }
@@ -352,8 +352,8 @@ struct SessionRetainedUpstream {
 }
 
 impl ServerHandler for SessionRetainedUpstream {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -1216,8 +1216,8 @@ struct MutableUpstream {
 }
 
 impl ServerHandler for MutableUpstream {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("mutable-upstream", "0.0.0"))
             .with_protocol_version(ProtocolVersion::LATEST)
     }

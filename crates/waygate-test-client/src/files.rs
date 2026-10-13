@@ -659,8 +659,8 @@ mod tests {
     use axum_server::tls_rustls::RustlsConfig;
     use futures::StreamExt as _;
     use rmcp::model::{
-        ClientCapabilities, ClientInfo, ClientRequest, CustomRequest, CustomResult, Implementation,
-        ServerInfo, ServerResult,
+        ClientCapabilities, ClientConfig, ClientRequest, CustomRequest, CustomResult,
+        Implementation, ServerConfig, ServerResult,
     };
     use rmcp::{ServerHandler, ServiceExt};
     use serde_json::json;
@@ -700,8 +700,8 @@ mod tests {
     }
 
     impl ServerHandler for AuthorizationServer {
-        fn get_info(&self) -> ServerInfo {
-            ServerInfo::default()
+        fn get_info(&self) -> ServerConfig {
+            ServerConfig::default()
         }
 
         async fn on_custom_request(
@@ -948,8 +948,8 @@ mod tests {
         serde_json::from_value(result.0).unwrap()
     }
 
-    fn test_client_info() -> ClientInfo {
-        ClientInfo::new(
+    fn test_client_info() -> ClientConfig {
+        ClientConfig::new(
             ClientCapabilities::default(),
             Implementation::new("file-transfer-reference-host", env!("CARGO_PKG_VERSION")),
         )

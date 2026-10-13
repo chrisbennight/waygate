@@ -148,7 +148,7 @@ impl ResourceRequest {
 }
 
 async fn send_resource_request(
-    client: &RunningService<RoleClient, ClientInfo>,
+    client: &RunningService<RoleClient, ClientConfig>,
     request: ResourceRequest,
 ) -> Result<ResourceResponse, ServiceError> {
     match request {
@@ -190,7 +190,7 @@ async fn send_resource_request(
 
 pub(super) struct SessionResourceReader<'a> {
     pub(super) server: &'a str,
-    pub(super) client: &'a RunningService<RoleClient, ClientInfo>,
+    pub(super) client: &'a RunningService<RoleClient, ClientConfig>,
     pub(super) timeout: Option<Duration>,
     pub(super) bounded_reads_supported: bool,
 }

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock as Content,
     Implementation, ListToolsResult, MetaObject as Meta, PaginatedRequestParams, ProtocolVersion,
-    ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
+    ServerCapabilities, ServerConfig, Tool, ToolAnnotations,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -87,7 +87,7 @@ struct ContractUpstream;
 struct ChangingContractUpstream(Arc<std::sync::RwLock<Tool>>);
 
 impl ServerHandler for ChangingContractUpstream {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         ContractUpstream.get_info()
     }
     async fn list_tools(
@@ -480,8 +480,8 @@ async fn durable_quarantine_blocks_dispatch_survives_restart_and_releases_only_r
 }
 
 impl ServerHandler for ContractUpstream {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("contract-upstream", "0.0.0"))
             .with_protocol_version(ProtocolVersion::LATEST)
     }

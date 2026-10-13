@@ -16,7 +16,8 @@ use std::time::Duration;
 use axum::Router;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CancelledNotificationParam, Implementation,
-    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig,
+    Tool,
 };
 use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -44,8 +45,8 @@ struct WaitingUpstream {
 }
 
 impl ServerHandler for WaitingUpstream {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("waiting-upstream", "0.0.0"))
             .with_protocol_version(ProtocolVersion::LATEST)
     }

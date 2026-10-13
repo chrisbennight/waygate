@@ -14,8 +14,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::Router;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, ContentBlock as Content,
-    ErrorData as McpError, Implementation, Tool,
+    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig,
+    ContentBlock as Content, ErrorData as McpError, Implementation, Tool,
 };
 use rmcp::service::{MaybeSendFuture, NotificationContext, ServiceError, ServiceExt};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -339,12 +339,12 @@ where
 async fn connect_named_client(
     addr: std::net::SocketAddr,
     name: &str,
-) -> rmcp::service::RunningService<RoleClient, ClientInfo> {
+) -> rmcp::service::RunningService<RoleClient, ClientConfig> {
     let uri: Arc<str> = Arc::from(format!("http://{addr}/mcp"));
     let transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(uri),
     );
-    ClientInfo::new(
+    ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new(name, "test"),
     )
@@ -2860,7 +2860,7 @@ async fn mrtr_pause_and_retry_round_trip_over_the_wire() {
     let transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(uri),
     );
-    let client = ClientInfo::new(
+    let client = ClientConfig::new(
         ClientCapabilities::builder().enable_elicitation().build(),
         Implementation::new("mrtr-client", "test"),
     )
@@ -3183,7 +3183,7 @@ async fn tasks_update_routes_with_the_selected_continuations_governance() {
     let transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(uri),
     );
-    let client = ClientInfo::new(
+    let client = ClientConfig::new(
         ClientCapabilities::builder().enable_tasks().build(),
         Implementation::new("tasks-client", "test"),
     )
@@ -3296,7 +3296,7 @@ async fn check_catalog_subscription(skills_enabled: bool) {
             let transport = StreamableHttpClientTransport::from_config(
                 StreamableHttpClientTransportConfig::with_uri(uri),
             );
-            ClientInfo::new(
+            ClientConfig::new(
                 ClientCapabilities::default(),
                 Implementation::new(name, "test"),
             )

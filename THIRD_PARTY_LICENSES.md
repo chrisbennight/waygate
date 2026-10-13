@@ -10140,7 +10140,7 @@ Used by:
 - [portable-atomic 1.13.1](https://crates.io/crates/portable-atomic/1.13.1)
 - [prettyplease 0.2.37](https://crates.io/crates/prettyplease/0.2.37)
 - [proc-macro2 1.0.106](https://crates.io/crates/proc-macro2/1.0.106)
-- [process-wrap 9.1.0](https://crates.io/crates/process-wrap/9.1.0)
+- [process-wrap 10.0.1](https://crates.io/crates/process-wrap/10.0.1)
 - [quote 1.0.45](https://crates.io/crates/quote/1.0.45)
 - [rand 0.10.1](https://crates.io/crates/rand/0.10.1)
 - [rand 0.8.6](https://crates.io/crates/rand/0.8.6)
@@ -10148,8 +10148,8 @@ Used by:
 - [rand_chacha 0.9.0](https://crates.io/crates/rand_chacha/0.9.0)
 - [ref-cast-impl 1.0.25](https://crates.io/crates/ref-cast-impl/1.0.25)
 - [ref-cast 1.0.25](https://crates.io/crates/ref-cast/1.0.25)
-- [rmcp-macros 3.0.1](https://crates.io/crates/rmcp-macros/3.0.1)
-- [rmcp 3.0.1](https://crates.io/crates/rmcp/3.0.1)
+- [rmcp-macros 3.5.1](https://crates.io/crates/rmcp-macros/3.5.1)
+- [rmcp 3.5.1](https://crates.io/crates/rmcp/3.5.1)
 - [rustc-hash 2.1.2](https://crates.io/crates/rustc-hash/2.1.2)
 - [rustc-literal-escaper 0.0.7](https://crates.io/crates/rustc-literal-escaper/0.0.7)
 - [rustversion 1.0.22](https://crates.io/crates/rustversion/1.0.22)
@@ -11903,8 +11903,11 @@ SOFTWARE.
 
 Used by:
 - [darling 0.23.0](https://crates.io/crates/darling/0.23.0)
+- [darling 0.24.1](https://crates.io/crates/darling/0.24.1)
 - [darling_core 0.23.0](https://crates.io/crates/darling_core/0.23.0)
+- [darling_core 0.24.1](https://crates.io/crates/darling_core/0.24.1)
 - [darling_macro 0.23.0](https://crates.io/crates/darling_macro/0.23.0)
+- [darling_macro 0.24.1](https://crates.io/crates/darling_macro/0.24.1)
 
 ~~~~~~~~~~text
 MIT License

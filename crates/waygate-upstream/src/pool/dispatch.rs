@@ -120,7 +120,7 @@ impl ToolCallFailurePhase {
 /// an unknown outcome and must not be replayed.
 #[cfg(test)]
 pub(super) async fn call_tool_once_classified(
-    service: &RunningService<RoleClient, rmcp::model::ClientInfo>,
+    service: &RunningService<RoleClient, rmcp::model::ClientConfig>,
     params: CallToolRequestParams,
     timeout: Option<std::time::Duration>,
 ) -> Result<CallToolResponse, ToolCallAttemptError> {
@@ -128,7 +128,7 @@ pub(super) async fn call_tool_once_classified(
 }
 
 pub(super) async fn call_tool_once_with_meta(
-    service: &RunningService<RoleClient, rmcp::model::ClientInfo>,
+    service: &RunningService<RoleClient, rmcp::model::ClientConfig>,
     params: CallToolRequestParams,
     meta: Option<rmcp::model::RequestMetaObject>,
     timeout: Option<std::time::Duration>,
@@ -173,7 +173,7 @@ enum Abandoned {
 /// through the SDK, as [`deliver_cancellation`] describes. The gateway owns the
 /// deadline so that one timer both ends the wait and tells the upstream.
 pub(super) async fn send_once_classified(
-    service: &RunningService<RoleClient, rmcp::model::ClientInfo>,
+    service: &RunningService<RoleClient, rmcp::model::ClientConfig>,
     request: ClientRequest,
     meta: Option<rmcp::model::RequestMetaObject>,
     timeout: Option<std::time::Duration>,
@@ -265,7 +265,7 @@ pub(super) async fn send_once_classified(
 /// scope and before its session closes, so it is awaited within the budget the
 /// gateway gives any interactive write. The outcome is unknown either way.
 async fn deliver_cancellation(
-    service: &RunningService<RoleClient, rmcp::model::ClientInfo>,
+    service: &RunningService<RoleClient, rmcp::model::ClientConfig>,
     handle: RequestHandle<RoleClient>,
     reason: &'static str,
 ) {
@@ -965,7 +965,7 @@ pub(super) async fn per_call_dial(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmcp::model::{ClientInfo, Implementation};
+    use rmcp::model::{ClientConfig, Implementation};
     use rmcp::{ServerHandler, ServiceExt};
 
     #[derive(Clone)]
@@ -997,7 +997,7 @@ mod tests {
                 .expect("server initializes");
             server.waiting().await.expect("server worker joins");
         });
-        let info = ClientInfo::new(
+        let info = ClientConfig::new(
             ClientCapabilities::default(),
             Implementation::new("handoff-test-client", "0.0.0"),
         );
@@ -1026,8 +1026,9 @@ mod tests {
     struct LegacyUpstreamTestServer;
 
     impl ServerHandler for LegacyUpstreamTestServer {
-        fn get_info(&self) -> rmcp::model::ServerInfo {
-            rmcp::model::ServerInfo::default().with_protocol_version(ProtocolVersion::V_2025_11_25)
+        fn get_info(&self) -> rmcp::model::ServerConfig {
+            rmcp::model::ServerConfig::default()
+                .with_protocol_version(ProtocolVersion::V_2025_11_25)
         }
 
         async fn call_tool(
@@ -1058,7 +1059,7 @@ mod tests {
                 .expect("server initializes");
             server.waiting().await.expect("server worker joins");
         });
-        let info = ClientInfo::new(
+        let info = ClientConfig::new(
             ClientCapabilities::default(),
             Implementation::new("legacy-upstream-test-client", "0.0.0"),
         )

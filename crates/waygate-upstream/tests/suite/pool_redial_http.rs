@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock as Content,
     Implementation, ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities,
-    ServerInfo, Tool,
+    ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -129,8 +129,8 @@ impl EvidenceRecorder for GatedBestEffortSink {
 }
 
 impl ServerHandler for DynamicCatalogUpstream {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("dynamic-catalog-upstream", "0.0.0"))
             .with_protocol_version(ProtocolVersion::LATEST)
     }
@@ -352,8 +352,8 @@ async fn spawn_dynamic_catalog() -> (std::net::SocketAddr, Arc<DynamicCatalogCon
 }
 
 impl ServerHandler for TaggedUpstream {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("tagged-upstream", "0.0.0"))
             .with_protocol_version(ProtocolVersion::LATEST)
     }
@@ -474,6 +474,14 @@ fn dynamic_manifest_at(addr: std::net::SocketAddr) -> UpstreamManifest {
         .into_iter()
         .map(|name| ToolClassification::new(name, RiskTier::Low, false, false))
         .collect();
+    manifest
+}
+
+/// [`dynamic_manifest_at`] on the legacy handshake. A 2026-07-28 listing must
+/// carry a cache hint, so only a legacy upstream can list without one.
+fn legacy_dynamic_manifest_at(addr: std::net::SocketAddr) -> UpstreamManifest {
+    let mut manifest = dynamic_manifest_at(addr);
+    manifest.protocol = waygate_upstream::UpstreamProtocol::Legacy;
     manifest
 }
 
@@ -2886,7 +2894,7 @@ async fn exported_tools_list_reader_traverses_every_page() {
 
     let transport =
         rmcp::transport::StreamableHttpClientTransport::from_uri(format!("http://{addr}/mcp"));
-    let client = rmcp::model::ClientInfo::default()
+    let client = rmcp::model::ClientConfig::default()
         .serve(transport)
         .await
         .expect("dial mock upstream");
@@ -2917,7 +2925,7 @@ async fn tools_list_reader_keeps_the_strictest_page_ttl_hint() {
         control_setup(&control);
         let transport =
             rmcp::transport::StreamableHttpClientTransport::from_uri(format!("http://{addr}/mcp"));
-        let client = rmcp::model::ClientInfo::default()
+        let client = rmcp::model::ClientConfig::default()
             .serve(transport)
             .await
             .expect("dial mock upstream");
@@ -2954,7 +2962,8 @@ async fn tools_list_reader_keeps_the_strictest_page_ttl_hint() {
 /// The freshness schedule: hints may shorten the maximum catalog age, while
 /// unhinted connected upstreams use that maximum as their fallback; the floor
 /// and ceiling clamp hints in both directions; and a refresh re-anchors the
-/// deadline.
+/// deadline. A 2026-07-28 listing always carries a hint, so the unhinted
+/// upstream here is a legacy one.
 #[tokio::test]
 async fn catalog_refresh_due_is_hint_driven_clamped_and_reanchored() {
     let (hinted_addr, hinted_control) = spawn_dynamic_catalog().await;
@@ -2965,6 +2974,7 @@ async fn catalog_refresh_due_is_hint_driven_clamped_and_reanchored() {
     hinted.name = "hinted".into();
     let mut legacy = dynamic_manifest_at(legacy_addr);
     legacy.name = "legacy".into();
+    legacy.protocol = waygate_upstream::UpstreamProtocol::Legacy;
     let pool = UpstreamPool::connect(BTreeMap::from([
         ("hinted".to_owned(), hinted),
         ("legacy".to_owned(), legacy),
@@ -3098,7 +3108,8 @@ async fn catalog_refresh_due_is_hint_driven_clamped_and_reanchored() {
 /// `ttlMs` hint can add a discriminator value after deployment. The gateway
 /// must retain the last-good admitted schema until its bounded fallback fires,
 /// then publish the new enum and validator identity through the normal refresh
-/// pipeline without a process restart.
+/// pipeline without a process restart. A 2026-07-28 listing always carries a
+/// hint, so the unhinted upstream is a legacy one.
 #[tokio::test]
 async fn unhinted_fallback_refreshes_a_stale_operation_enum() {
     let (addr, control) = spawn_dynamic_catalog().await;
@@ -3106,7 +3117,7 @@ async fn unhinted_fallback_refreshes_a_stale_operation_enum() {
     let sink = Arc::new(InMemorySink::new());
     let pool = UpstreamPool::connect(BTreeMap::from([(
         "mock".to_owned(),
-        dynamic_manifest_at(addr),
+        legacy_dynamic_manifest_at(addr),
     )]))
     .await
     .with_evidence(sink.clone());
@@ -3214,7 +3225,7 @@ async fn failed_unhinted_fallback_stays_due_for_retry() {
     let (addr, control) = spawn_dynamic_catalog().await;
     let pool = UpstreamPool::connect(BTreeMap::from([(
         "mock".to_owned(),
-        dynamic_manifest_at(addr),
+        legacy_dynamic_manifest_at(addr),
     )]))
     .await;
     control.fail_list.store(true, Ordering::SeqCst);
@@ -3264,7 +3275,7 @@ async fn tools_list_freshness_anchor_precedes_the_first_page() {
     *control.ttl_ms_first_page.lock().unwrap() = Some(60_000);
     let transport =
         rmcp::transport::StreamableHttpClientTransport::from_uri(format!("http://{addr}/mcp"));
-    let client = rmcp::model::ClientInfo::default()
+    let client = rmcp::model::ClientConfig::default()
         .serve(transport)
         .await
         .expect("dial mock upstream");

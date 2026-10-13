@@ -17,7 +17,7 @@ use rmcp::model::{
     Implementation, InputRequest, InputRequiredResult, JsonObject, ListResourceTemplatesResult,
     ListResourcesResult, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
     ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, ResourceContents,
-    ResultType, ServerCapabilities, ServerInfo, TaskPayload, TaskStatus, Tool, ToolAnnotations,
+    ResultType, ServerCapabilities, ServerConfig, TaskPayload, TaskStatus, Tool, ToolAnnotations,
     UpdateTaskParams, TASKS_EXTENSION_ID,
 };
 use rmcp::service::{Peer, RequestContext};
@@ -4902,7 +4902,7 @@ impl ServerHandler for GatewayServer {
             .map(Into::into)
     }
 
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         // `enable_tool_list_changed` arms the capability so strict clients
         // (those that gate tool invocation on presence in the latest
         // `tools/list`) know to re-fetch after a `searchTools` call reveals
@@ -4973,7 +4973,7 @@ impl ServerHandler for GatewayServer {
         } else {
             LEGACY_SEARCH_INSTRUCTIONS
         };
-        ServerInfo::new(capabilities)
+        ServerConfig::new(capabilities)
             .with_server_info(
                 Implementation::new("mcp-tool-search-gateway", env!("CARGO_PKG_VERSION"))
                     .with_title("Waygate"),
