@@ -80,8 +80,10 @@ from the exact returned definition. An exact fully-qualified query selects an al
 operation. An empty result means no visible lexical match: reformulate with an
 operation-specific term or known source, rather than dumping the catalog.
 
-Code Mode follows the same sequence: `codemode.search` with a bounded `limit`,
-then `codemode.describe` with the returned `name`. The description's `binding`
+Both searches return 20 results unless the caller sets `limit`, and neither
+returns schemas or snapshot hashes. Code Mode follows the same sequence:
+`codemode.search` with a bounded `limit`, then `codemode.describe` with the
+returned `name`, which also returns the contract's snapshot identity. The description's `binding`
 gives the `connector` and `operation` a program calls as
 `connectors[connector][operation]`. The returned `description` contains
 the complete operation documentation, including text

@@ -59,7 +59,7 @@ use crate::process_mode::codemode_protocol::{
 };
 
 pub const NAMESPACE: &str = waygate_core::CODEMODE_BUILTIN_NAMESPACE;
-const DEFAULT_SEARCH_LIMIT: usize = 50;
+const DEFAULT_SEARCH_LIMIT: usize = waygate_mcp::discovery::DEFAULT_SEARCH_RESULTS;
 const DEFAULT_ARTIFACT_LIMIT: usize = 50;
 const MAX_ARTIFACT_CURSOR_LENGTH: usize = 20;
 const DEFAULT_EXECUTION_LIST_LIMIT: usize = 50;
@@ -1057,10 +1057,7 @@ impl CodeModeTools {
         let mut tools = Vec::with_capacity(end.saturating_sub(start));
         for tool in candidates.into_iter().skip(start).take(end - start) {
             let fully_qualified = tool.identity.qualified_name();
-            tools.push(
-                summary(&fully_qualified, &tool)
-                    .expect("stable Code Mode catalog retains only callable contracts"),
-            );
+            tools.push(summary(&fully_qualified, &tool));
         }
 
         let next_cursor = has_more
@@ -6112,13 +6109,12 @@ fn validate_search_params(params: &SearchParams) -> Result<(), McpError> {
     Ok(())
 }
 
-fn summary(name: &str, tool: &CatalogTool) -> Option<ConnectorSummary> {
-    Some(ConnectorSummary {
+fn summary(name: &str, tool: &CatalogTool) -> ConnectorSummary {
+    ConnectorSummary {
         name: name.to_owned(),
         description: waygate_mcp::compact_tool_description(tool.definition.description.as_deref()),
-        identity: catalog_identity(tool)?,
         governance: Governance::from_admission(&tool.facts, Some(&tool.authorization)),
-    })
+    }
 }
 
 fn catalog_identity(tool: &CatalogTool) -> Option<SnapshotIdentity> {
@@ -6248,7 +6244,7 @@ struct SearchParams {
     /// Exclusive cursor returned by a prior search response.
     #[schemars(length(max = MAX_CURSOR_LENGTH))]
     cursor: Option<String>,
-    /// Maximum returned tools. Defaults to 50.
+    /// Maximum returned tools. Defaults to 20.
     #[schemars(range(min = 1))]
     limit: Option<usize>,
 }
@@ -6799,11 +6795,10 @@ struct ConnectorSummary {
     /// Fully-qualified `<connector>.<operation>` name to pass unchanged to
     /// `codemode.describe`; it is also the direct `tools/call` name.
     name: String,
-    /// Bounded operation preview; use `codemode.describe` for the exact contract.
+    /// Bounded operation preview; use `codemode.describe` for the exact
+    /// contract and its snapshot identity.
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    /// Immutable authority and schema-version identity.
-    identity: SnapshotIdentity,
     /// Governance facts admitted with this tool snapshot.
     governance: Governance,
 }
@@ -7374,8 +7369,8 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
             format!("{NAMESPACE}.search"),
             "Search the governed direct catalog across upstream and gateway-local connectors. Returns only tools this \
              caller may discover after profile restrictions, quarantine state, and Cedar \
-             decisions. Results carry immutable snapshot identity and governance facts; pass a \
-             result's `name` unchanged to `codemode.describe` for the exact connector schemas.",
+             decisions. Results carry governance facts; pass a result's `name` unchanged to \
+             `codemode.describe` for the exact connector schemas and snapshot identity.",
             input_schema::<SearchParams>(),
         )
         .with_title("Search Code Mode connectors")
@@ -9579,7 +9574,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_and_describe_return_the_same_admitted_snapshot() {
+    async fn search_finds_and_describe_identifies_the_admitted_snapshot() {
         let catalog: SharedCatalog = Arc::new(FakeCatalog::with_tools(&[
             ("email", "read", false),
             ("email", "send", true),
@@ -9600,14 +9595,10 @@ mod tests {
         assert_eq!(structured(&search)["tools"].as_array().unwrap().len(), 1);
         let found = &structured(&search)["tools"][0];
         assert_eq!(found["name"], "email.send");
-        assert_eq!(found["identity"]["authority"], "catalog");
-        assert_eq!(found["identity"]["catalog_schema_hash"], "hash-email-send");
-        assert!(found["identity"]["input_schema_hash"]
-            .as_str()
-            .is_some_and(|hash| !hash.is_empty()));
-        assert!(found["identity"]["output_schema_hash"]
-            .as_str()
-            .is_some_and(|hash| !hash.is_empty()));
+        assert!(
+            found.get("identity").is_none(),
+            "search leaves snapshot identity to describe"
+        );
         assert_eq!(found["governance"]["side_effects"], true);
         assert_eq!(found["governance"]["requires_approval"], true);
 
@@ -9619,7 +9610,17 @@ mod tests {
             .await
             .expect("describe succeeds");
         let described = structured(&describe);
-        assert_eq!(described["identity"], found["identity"]);
+        assert_eq!(described["identity"]["authority"], "catalog");
+        assert_eq!(
+            described["identity"]["catalog_schema_hash"],
+            "hash-email-send"
+        );
+        assert!(described["identity"]["input_schema_hash"]
+            .as_str()
+            .is_some_and(|hash| !hash.is_empty()));
+        assert!(described["identity"]["output_schema_hash"]
+            .as_str()
+            .is_some_and(|hash| !hash.is_empty()));
         assert_eq!(described["binding"]["connector"], "email");
         assert_eq!(described["binding"]["operation"], "send");
         assert_eq!(described["input_schema"]["required"][0], "value");
@@ -9674,7 +9675,11 @@ mod tests {
         let authz: SharedAuthz = Arc::new(SelectiveAuthz);
         let server = GatewayServer::with_authz(catalog.clone(), authz.clone())
             .with_builtin_tools(Arc::new(code_mode_tools(catalog, authz)));
-        for (limit, expected) in [(None, 50), (Some(120), 120), (Some(usize::MAX), 150)] {
+        for (limit, expected) in [
+            (None, DEFAULT_SEARCH_LIMIT),
+            (Some(120), 120),
+            (Some(usize::MAX), 150),
+        ] {
             let mut args = json!({});
             if let Some(limit) = limit {
                 args["limit"] = json!(limit);
@@ -9718,7 +9723,6 @@ mod tests {
         assert_eq!(catalog.resolve_call_count(), 1);
         let found = &structured(&result)["tools"][0];
         assert_eq!(found["description"], "email read operation");
-        assert_eq!(found["identity"]["catalog_schema_hash"], "hash-email-read");
         let described = tools
             .describe(
                 &reader(),
@@ -9734,6 +9738,10 @@ mod tests {
         assert_eq!(
             structured(&described)["description"],
             "email read operation"
+        );
+        assert_eq!(
+            structured(&described)["identity"]["catalog_schema_hash"],
+            "hash-email-read"
         );
     }
 
@@ -9755,7 +9763,7 @@ mod tests {
             false,
             false,
         );
-        let preview = summary("gateway-test.read", &record).unwrap();
+        let preview = summary("gateway-test.read", &record);
         assert_eq!(preview.description.unwrap().chars().count(), 480);
         assert_eq!(preview.name, "gateway-test.read");
         let complete = connector_contract_for_tool(&record).unwrap();
