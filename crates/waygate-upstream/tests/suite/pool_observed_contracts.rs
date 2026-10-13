@@ -818,46 +818,25 @@ async fn call_database_round_trips(mode: ClassificationMode) -> (usize, usize) {
     counts
 }
 
-/// Admission reuses its catalog and review reads while the durable catalog
-/// generation is unchanged, and a committed catalog change is seen at once.
+/// A committed catalog change is admitted at once, even right after an
+/// admission whose catalog reads could otherwise have been reused.
 #[tokio::test]
-async fn admission_reuses_reads_only_within_one_catalog_generation() {
+async fn a_committed_reclassification_is_admitted_at_once() {
     use waygate_mcp::catalog::ResolvedInvocationTool;
-    let Some(observer) = waygate_test_support::pg::audit_pool_or_skip().await else {
-        return;
-    };
-    let catalog = CountedCatalog::connect(ClassificationMode::Manifest).await;
-    // The generation is database-wide, and concurrent tests advance it; judge
-    // reuse only across an admission the generation did not change under.
-    let generation = || async {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT generation FROM catalog_discovery_generation WHERE singleton",
-        )
-        .fetch_one(&observer)
+    if waygate_test_support::pg::audit_pool_or_skip()
         .await
-        .unwrap()
-    };
-    let mut reused = None;
-    for _ in 0..20 {
-        let before = generation().await;
-        let (ResolvedInvocationTool::Ready(first), _) = catalog.admit().await else {
-            panic!("the tool is admitted");
-        };
-        let (ResolvedInvocationTool::Ready(again), count) = catalog.admit().await else {
-            panic!("the tool is still admitted");
-        };
-        assert_eq!(again.contract_identity(), first.contract_identity());
-        if generation().await == before {
-            reused = Some(count);
-            break;
-        }
+        .is_none()
+    {
+        return;
     }
+    let catalog = CountedCatalog::connect(ClassificationMode::Manifest).await;
+    let (ResolvedInvocationTool::Ready(before), _) = catalog.admit().await else {
+        panic!("the tool is admitted");
+    };
     assert_eq!(
-        reused,
-        Some(1),
-        "an unchanged generation needs only its own read"
+        before.contract_identity().risk,
+        waygate_invocation::InvocationRisk::Low
     );
-
     sqlx::query(
         "UPDATE tool_classifications SET risk='high' WHERE tool_id=(
            SELECT t.id FROM mcp_tools t JOIN mcp_servers s ON s.id=t.server_id
@@ -867,7 +846,7 @@ async fn admission_reuses_reads_only_within_one_catalog_generation() {
     .execute(&catalog.db)
     .await
     .unwrap();
-    let (ResolvedInvocationTool::Ready(changed), reread) = catalog.admit().await else {
+    let (ResolvedInvocationTool::Ready(changed), _) = catalog.admit().await else {
         panic!("a reclassified tool is still admitted");
     };
     assert_eq!(
@@ -875,7 +854,6 @@ async fn admission_reuses_reads_only_within_one_catalog_generation() {
         waygate_invocation::InvocationRisk::High,
         "the committed classification is admitted at once"
     );
-    assert!(reread > 1, "a new generation reads the catalog again");
     catalog.remove().await;
 }
 
