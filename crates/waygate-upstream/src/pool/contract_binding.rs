@@ -383,6 +383,101 @@ pub(super) struct DiscoveryReads {
     pub(super) transition: Option<CatalogTransition>,
 }
 
+/// The catalog and review reads behind admitting one tool, reused while the
+/// durable catalog generation they were read under is current. Every column
+/// these reads depend on advances that generation in the transaction that
+/// changes it, and the gateway keeps its review store in the catalog's
+/// database, so a reuse returns exactly what a fresh read would.
+#[derive(Default)]
+pub(super) struct AdmissionReadCache {
+    generation: Option<i64>,
+    entries: HashMap<(String, String, String), AdmissionReads>,
+}
+
+#[derive(Clone)]
+struct AdmissionReads {
+    review: Option<(String, bool)>,
+    catalog: waygate_catalog::ResolvedTool,
+}
+
+impl UpstreamPool {
+    /// The reads behind admitting `tool`, reused when the durable catalog
+    /// generation still matches the one they were read under. `None` sends
+    /// the caller down the uncached path, which reads again and reports any
+    /// failure itself.
+    pub(super) async fn admission_reads(
+        &self,
+        tenant: &str,
+        server: &str,
+        tool: &str,
+        mode: crate::ClassificationMode,
+        advertised: Option<&Tool>,
+    ) -> Option<DiscoveryReads> {
+        let catalog = self.catalog.as_ref()?;
+        let transition = self.catalog_transition_state(server, tool);
+        let generation = catalog.discovery_generation().await.ok()??;
+        let key = (tenant.to_owned(), server.to_owned(), tool.to_owned());
+        let cached = {
+            let cache = self
+                .admission_reads
+                .lock()
+                .expect("admission read cache lock poisoned");
+            (cache.generation == Some(generation))
+                .then(|| cache.entries.get(&key).cloned())
+                .flatten()
+        };
+        let reads = match cached {
+            Some(reads) => reads,
+            None => {
+                let review = match self.tool_reviews.as_ref() {
+                    Some(store) => store
+                        .review_state(waygate_core::TenantId::DEFAULT, server, tool)
+                        .await
+                        .ok()?,
+                    None => None,
+                };
+                let reads = AdmissionReads {
+                    review,
+                    catalog: catalog
+                        .resolve_tool(tenant, &format!("{server}.{tool}"))
+                        .await
+                        .ok()?,
+                };
+                // Keep only live tools, so the cache is bounded by the
+                // catalog, and only reads taken within one generation.
+                if matches!(reads.catalog, waygate_catalog::ResolvedTool::Live(_))
+                    && catalog.discovery_generation().await.ok().flatten() == Some(generation)
+                {
+                    let mut cache = self
+                        .admission_reads
+                        .lock()
+                        .expect("admission read cache lock poisoned");
+                    match cache.generation {
+                        Some(cached) if cached > generation => {}
+                        Some(cached) if cached == generation => {
+                            cache.entries.insert(key, reads.clone());
+                        }
+                        _ => {
+                            cache.generation = Some(generation);
+                            cache.entries.clear();
+                            cache.entries.insert(key, reads.clone());
+                        }
+                    }
+                }
+                reads
+            }
+        };
+        let review_allows = self
+            .review_allows_with(server, tool, advertised, mode, reads.review)
+            .await;
+        Some(DiscoveryReads {
+            review_allows,
+            catalog: Some(Ok(reads.catalog)),
+            transition,
+        })
+    }
+}
+
 impl UpstreamPool {
     /// Resolve the governed snapshot for one tool from explicit inputs.
     ///
