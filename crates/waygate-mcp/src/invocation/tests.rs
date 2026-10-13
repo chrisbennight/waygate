@@ -74,7 +74,8 @@ mod retained_response_pipeline_tests {
     use std::sync::Arc;
 
     use rmcp::model::{
-        CallToolResult, ErrorData, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
+        CallToolResult, ContentBlock, ErrorData, ReadResourceRequestParams, ReadResourceResult,
+        ResourceContents,
     };
     use serde_json::json;
 
@@ -585,10 +586,110 @@ mod retained_response_pipeline_tests {
         }
     }
 
+    async fn deliver_with_threshold(
+        result: CallToolResult,
+        threshold: usize,
+    ) -> (CallToolResult, Arc<RetainedFiles>) {
+        let files = Arc::new(RetainedFiles {
+            threshold: Some(threshold),
+            ..Default::default()
+        });
+        let service = DefaultInvocationService::new(
+            Arc::new(RetainedCatalog {
+                inline: Some(result),
+                ..Default::default()
+            }),
+            Arc::new(AllowAllGate),
+            Arc::new(NullSink),
+        )
+        .with_file_output_processor(Some(files.clone()));
+        let InvocationResponse::Unary(result) = service
+            .invoke(
+                Some(&principal_with_profile(None)),
+                InvocationRequest::new("connector", "content"),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("unary")
+        };
+        (result, files)
+    }
+
+    fn texts(result: &CallToolResult) -> Vec<String> {
+        result
+            .content
+            .iter()
+            .filter_map(|block| block.as_text().map(|text| text.text.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_mirrored_copy_alone_does_not_make_a_result_a_file() {
+        let original = CallToolResult::structured(json!({"data": "row ".repeat(512)}));
+        let full = serde_json::to_vec(&original).unwrap().len();
+        let structured = serde_json::to_vec(&original.structured_content)
+            .unwrap()
+            .len();
+        // Between the structured payload and the whole result with its mirror.
+        let threshold = structured + (full - structured) / 2;
+        let (result, files) = deliver_with_threshold(original.clone(), threshold).await;
+        assert_eq!(files.published.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            serde_json::to_vec(&result).unwrap(),
+            serde_json::to_vec(&original).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_filed_result_keeps_its_own_summary_without_repeating_the_envelope() {
+        let mut original = CallToolResult::structured(json!({"rows": vec!["match"; 4096]}));
+        original.content.insert(
+            0,
+            ContentBlock::text("Found 4096 matches; the first is `match`."),
+        );
+        original.meta.get_or_insert_with(Default::default).insert(
+            "io.modelcontextprotocol/trust-annotations".into(),
+            json!({"sensitive": false, "untrusted": false}),
+        );
+        let (result, files) = deliver_with_threshold(original, 256).await;
+        assert_eq!(files.published.load(Ordering::SeqCst), 1);
+        let texts = texts(&result);
+        assert_eq!(texts[0], "Found 4096 matches; the first is `match`.");
+        assert!(texts[1].starts_with("The complete result ("));
+        assert_eq!(texts.len(), 2, "the envelope is not repeated as text");
+        assert!(matches!(
+            result.content.last(),
+            Some(ContentBlock::ResourceLink(_))
+        ));
+        assert_eq!(
+            result.structured_content.unwrap()["_gateway_delivery"]["delivery_status"],
+            "file"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_filed_sensitive_result_shows_no_upstream_text() {
+        let mut original = large_inline_result();
+        original
+            .content
+            .insert(0, ContentBlock::text("Account summary for the caller."));
+        let (result, files) = deliver_with_threshold(original, 256).await;
+        assert_eq!(files.published.load(Ordering::SeqCst), 1);
+        let texts = texts(&result);
+        assert_eq!(texts.len(), 1);
+        assert!(texts[0].starts_with("The complete result ("));
+    }
+
     #[tokio::test]
     async fn server_response_threshold_overrides_the_default_for_every_tool() {
         let original = large_inline_result();
         let size = serde_json::to_vec(&original).unwrap().len();
+        // Text that only mirrors the structured content does not count, so a
+        // threshold below the structured payload alone forces a file.
+        let structured_size = serde_json::to_vec(&original.structured_content)
+            .unwrap()
+            .len();
         for global_threshold in [1, size] {
             for (server, retained) in [
                 ("compact", true),
@@ -605,7 +706,7 @@ mod retained_response_pipeline_tests {
                         response_thresholds: std::collections::BTreeMap::from([
                             (
                                 "compact".into(),
-                                std::num::NonZeroUsize::new(size - 1).unwrap(),
+                                std::num::NonZeroUsize::new(structured_size - 1).unwrap(),
                             ),
                             (
                                 "inline".into(),

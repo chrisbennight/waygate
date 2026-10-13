@@ -1,5 +1,107 @@
 use super::*;
 
+/// Whether `text` only repeats `structured` for clients that cannot read
+/// structured content. The compact encoding is compared while it is produced;
+/// any other formatting of the same value is recognized by parsing it.
+fn mirrors_structured(text: &str, structured: &serde_json::Value) -> bool {
+    struct Compare<'a> {
+        expected: &'a [u8],
+        position: usize,
+    }
+    impl std::io::Write for Compare<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let end = self.position + buf.len();
+            if self.expected.get(self.position..end) != Some(buf) {
+                return Err(std::io::ErrorKind::Other.into());
+            }
+            self.position = end;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut compare = Compare {
+        expected: text.as_bytes(),
+        position: 0,
+    };
+    if serde_json::to_writer(&mut compare, structured).is_ok() && compare.position == text.len() {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(text).is_ok_and(|value| value == *structured)
+}
+
+/// Whether `output` fits `threshold` once text that only mirrors its
+/// structured content is left out, so a mirror alone never makes a result a
+/// file.
+fn fits_without_mirror(output: &CallToolResult, threshold: usize) -> bool {
+    #[derive(serde::Serialize)]
+    struct Unmirrored<'a> {
+        content: Vec<&'a rmcp::model::ContentBlock>,
+        #[serde(rename = "structuredContent")]
+        structured_content: &'a serde_json::Value,
+        #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+        meta: Option<&'a rmcp::model::MetaObject>,
+    }
+    let Some(structured) = output.structured_content.as_ref() else {
+        return false;
+    };
+    let mirrors = |block: &rmcp::model::ContentBlock| {
+        block
+            .as_text()
+            .is_some_and(|text| mirrors_structured(&text.text, structured))
+    };
+    if !output.content.iter().any(mirrors) {
+        return false;
+    }
+    let unmirrored = Unmirrored {
+        content: output
+            .content
+            .iter()
+            .filter(|block| !mirrors(block))
+            .collect(),
+        structured_content: structured,
+        meta: output.meta.as_ref(),
+    };
+    super::encoded_len_within(&unmirrored, threshold).unwrap_or(false)
+}
+
+/// The text of a result delivered as a file: the upstream's own text, when it
+/// is not sensitive and fits the inline budget, followed by what the file
+/// holds. Mirrors of the structured content are left to the file.
+fn file_preview(
+    output: &CallToolResult,
+    sensitive: bool,
+    threshold: usize,
+    size: usize,
+) -> Vec<rmcp::model::ContentBlock> {
+    let mut preview = Vec::new();
+    if !sensitive {
+        let mut budget = threshold;
+        for block in &output.content {
+            let Some(text) = block.as_text() else {
+                continue;
+            };
+            if output
+                .structured_content
+                .as_ref()
+                .is_some_and(|structured| mirrors_structured(&text.text, structured))
+            {
+                continue;
+            }
+            let Some(remaining) = budget.checked_sub(text.text.len()) else {
+                break;
+            };
+            budget = remaining;
+            preview.push(rmcp::model::ContentBlock::text(text.text.clone()));
+        }
+    }
+    preview.push(rmcp::model::ContentBlock::text(format!(
+        "The complete result ({size} bytes of JSON) is saved as a gateway file, linked below."
+    )));
+    preview
+}
+
 impl DefaultInvocationService {
     #[must_use]
     pub fn with_file_input_processor(
@@ -387,6 +489,7 @@ impl DefaultInvocationService {
         }
         let bytes = match super::encoded_len_within(&output, threshold) {
             Ok(true) => return Ok(output),
+            Ok(false) if fits_without_mirror(&output, threshold) => return Ok(output),
             Ok(false) => serde_json::to_vec(&output),
             Err(error) => Err(error),
         };
@@ -400,6 +503,7 @@ impl DefaultInvocationService {
                 )
             }
         };
+        let size = bytes.len();
         let trust = super::result_trust::parse(&output).ok();
         let sensitive = trust.map_or(ctx.facts().pii, |trust| trust.sensitive);
         let mut compact = CallToolResult::success(Vec::new());
@@ -436,6 +540,9 @@ impl DefaultInvocationService {
                 file: prepared.file.clone(),
             },
         );
+        // The structured envelope already names the file; the text tells a
+        // reader whether it needs the file at all instead of repeating it.
+        compact.content = file_preview(&output, sensitive, threshold, size);
         compact
             .content
             .push(rmcp::model::ContentBlock::resource_link(
