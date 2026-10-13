@@ -16,10 +16,11 @@ approval, policy and profile checks to each access.
 | Supports prompts | Each workflow is also a prompt, described under [command shortcuts](#command-shortcuts). |
 | Any client | The `gateway-skills.search`, `gateway-skills.load` and `gateway-skills.read_file` tools, described below. |
 
-Extensions are opt-in on both sides, so a client that does not declare the
-Skills extension never sees it. The official
+The gateway advertises the extension to every caller that can access an
+approved skill; a client uses it only if it also supports it, and other
+clients ignore the advertisement. The official
 [client support matrix](https://modelcontextprotocol.io/extensions/client-matrix)
-lists which clients declare it.
+lists which clients support it.
 
 ## Discover and use a workflow
 
