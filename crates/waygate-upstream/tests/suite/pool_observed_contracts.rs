@@ -683,3 +683,125 @@ async fn unknown_server_is_none_and_disconnected_is_unobservable() {
         "an unobservable catalog reports no tools rather than an empty upstream"
     );
 }
+
+/// Database round trips one call makes against a governed catalog and durable
+/// tool reviews, counted as acquisitions from a single-connection pool that
+/// nothing else uses. Admission is the Stage-1 resolution; dispatch includes
+/// the mid-call contract check, the per-call dial and its contract
+/// observation. A transaction counts once.
+async fn call_database_round_trips(mode: ClassificationMode) -> (usize, usize) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use waygate_catalog::{
+        tool_reviews::PgCatalogStore, ImportServer, ImportTool, ManifestImporter,
+    };
+    use waygate_mcp::catalog::ResolvedInvocationTool;
+    let acquisitions = Arc::new(AtomicUsize::new(0));
+    let counted = acquisitions.clone();
+    let db = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .min_connections(1)
+        .test_before_acquire(false)
+        .before_acquire(move |_, _| {
+            counted.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async { Ok(true) })
+        })
+        .connect(&std::env::var("AUDIT_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let annotation = mode == ClassificationMode::McpAnnotations;
+    let mut manifest = manifest_at(spawn_contract_upstream().await, mode);
+    manifest.name = format!("round-trips-{}", uuid::Uuid::new_v4());
+    let approved = tool_behavior_hash(&annotated_tool());
+    if annotation {
+        manifest.tools = vec![annotation_classification("stable", &approved)];
+    }
+    let name = manifest.name.clone();
+    ManifestImporter::new(db.clone())
+        .import_atomic(
+            "default",
+            &[ImportServer {
+                tenant_id: "default".into(),
+                name: name.clone(),
+                transport: "http".into(),
+                runtime_target: serde_json::json!({"url": manifest.url}),
+                classification_mode: if annotation {
+                    "mcp_annotations".into()
+                } else {
+                    "manifest".into()
+                },
+                tools: manifest
+                    .tools
+                    .iter()
+                    .map(|t| ImportTool {
+                        name: t.name.clone(),
+                        approved_behavior_hash: annotation.then(|| approved.clone()),
+                        risk: "low".into(),
+                        side_effects: false,
+                        pii: false,
+                        discriminator: None,
+                        operations: vec![],
+                    })
+                    .collect(),
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    let store = Arc::new(PgCatalogStore::new(db.clone()));
+    let pool = UpstreamPool::connect(BTreeMap::from([(name.clone(), manifest)]))
+        .await
+        .with_quarantine_threshold(waygate_upstream::pool::QuarantineThreshold::All)
+        .with_tool_reviews(store.clone())
+        .await
+        .with_authoritative_catalog(store);
+    // The first call records the session's observation; measure a later one.
+    let mut counts = (0, 0);
+    for _ in 0..2 {
+        acquisitions.store(0, Ordering::Relaxed);
+        let ResolvedInvocationTool::Ready(snapshot) = pool
+            .resolve_invocation_tool("default", &name, "stable")
+            .await
+        else {
+            panic!("the tool is admitted");
+        };
+        let admission = acquisitions.load(Ordering::Relaxed);
+        acquisitions.store(0, Ordering::Relaxed);
+        pool.call_tool(
+            &name,
+            "stable",
+            None,
+            None,
+            Some(&snapshot.contract_identity()),
+        )
+        .await
+        .expect("dispatch succeeds");
+        counts = (admission, acquisitions.load(Ordering::Relaxed));
+    }
+    sqlx::query("DELETE FROM mcp_servers WHERE tenant_id='default' AND name=$1")
+        .bind(&name)
+        .execute(&db)
+        .await
+        .unwrap();
+    counts
+}
+
+#[tokio::test]
+#[ignore = "opt-in database round-trip diagnostic; run with --ignored against a disposable AUDIT_DATABASE_URL"]
+async fn call_database_round_trips_per_classification_mode() {
+    if waygate_test_support::pg::audit_pool_or_skip()
+        .await
+        .is_none()
+    {
+        return;
+    }
+    for mode in [
+        ClassificationMode::Manifest,
+        ClassificationMode::McpAnnotations,
+    ] {
+        let (admission, dispatch) = call_database_round_trips(mode).await;
+        println!(
+            "CALL_ROUND_TRIPS {}",
+            serde_json::json!({"mode": format!("{mode:?}"), "admission": admission, "dispatch": dispatch})
+        );
+    }
+}

@@ -217,6 +217,34 @@ impl PgCatalogStore {
         block_changes: bool,
         approved_hash: Option<&str>,
     ) -> Result<bool, CatalogError> {
+        self.observe_decision(
+            tenant,
+            server,
+            tool,
+            hash,
+            contract,
+            block_changes,
+            approved_hash,
+        )
+        .await
+        .map(|(changed, _)| changed)
+    }
+
+    /// [`Self::observe_against_approval`], also returning the admission
+    /// decision the observation leaves in place, as [`Self::review_state`]
+    /// would read it, so admission needs no second read. `None` means the
+    /// tool has no recorded review.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn observe_decision(
+        &self,
+        tenant: &str,
+        server: &str,
+        tool: &str,
+        hash: &str,
+        contract: &Value,
+        block_changes: bool,
+        approved_hash: Option<&str>,
+    ) -> Result<(bool, Option<(String, bool)>), CatalogError> {
         // An observation that matches the stored decision changes nothing.
         // Confirm that from one unlocked snapshot, so observing an unchanged
         // contract neither writes nor waits behind catalog reconciliation.
@@ -239,10 +267,9 @@ impl PgCatalogStore {
         if let Some(current) = current {
             let durable_approval: Option<String> = current.get("durable_approval");
             let approved_hash = durable_approval.as_deref().or(approved_hash);
-            if current.get::<String, _>("observed_hash") == hash
-                && !baseline_needs_repair(&current, hash, approved_hash)
-            {
-                return Ok(false);
+            let observed_hash: String = current.get("observed_hash");
+            if observed_hash == hash && !baseline_needs_repair(&current, hash, approved_hash) {
+                return Ok((false, Some((observed_hash, current.get("quarantined")))));
             }
         }
         let mut tx = self.pool.begin().await?;
@@ -274,7 +301,7 @@ impl PgCatalogStore {
         let Some(id) = id else {
             // Newly configured tools are not authoritative until catalog
             // reconciliation creates their identity. Admission refuses absence.
-            return Ok(false);
+            return Ok((false, None));
         };
         let previous = sqlx::query(
             "SELECT observed_hash, approved_hash, quarantined FROM tool_contract_reviews WHERE tool_id=$1 FOR UPDATE",
@@ -376,8 +403,14 @@ impl PgCatalogStore {
             .execute(&mut *tx)
             .await?;
         }
+        let decision: (String, bool) = sqlx::query_as(
+            "SELECT observed_hash, quarantined FROM tool_contract_reviews WHERE tool_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
         tx.commit().await?;
-        Ok(old != hash || repair_baseline)
+        Ok((old != hash || repair_baseline, Some(decision)))
     }
 
     pub async fn get(
