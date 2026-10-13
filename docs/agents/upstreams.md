@@ -207,7 +207,10 @@ the default `per_call` isolation, and the pooled long-lived session under
 extra upstream round-trip per call in either isolation mode; it is the price
 of the exact-hash binding. Manifest mode retains its existing schema and
 description hash coverage; durable review adds a refusal check when a database
-is configured.
+is configured. Observing a contract that matches the stored review decision
+and the latest durable approval takes one unlocked read and writes nothing;
+only a difference takes the tenant catalog lock to record the change and
+quarantine it.
 Annotation-mode authorization facts now DERIVE from the reviewed claims:
 side-effect behavior from the standard hints, sensitivity from the
 input/return classifications, and the approval requirement from

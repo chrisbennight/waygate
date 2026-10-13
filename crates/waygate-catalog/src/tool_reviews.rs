@@ -11,6 +11,39 @@ use uuid::Uuid;
 pub use crate::CatalogError as ReviewError;
 use ReviewError as CatalogError;
 
+/// The latest durable acceptance of tool `t` on server `s`: catalog activation
+/// of a version or an exact review approval, whichever is newer. The unlocked
+/// comparison and the locked observation share it, so they cannot disagree
+/// about which approval is current.
+macro_rules! latest_approval {
+    () => {
+        "(SELECT approval_hash FROM (
+            (SELECT schema_hash AS approval_hash, approved_at AS accepted_at, 0 AS priority
+             FROM mcp_tool_versions WHERE tool_id=t.id AND approved_at IS NOT NULL
+             ORDER BY approved_at DESC LIMIT 1)
+            UNION ALL
+            (SELECT subject_version_hash AS approval_hash, created_at AS accepted_at, 1 AS priority
+             FROM catalog_approvals WHERE tenant_id=s.tenant_id AND subject_type='tool_version'
+             AND subject_id=t.id AND action='approved' AND reason='Accepted observed tool contract'
+             ORDER BY created_at DESC, id DESC LIMIT 1)
+         ) approvals ORDER BY accepted_at DESC, priority DESC LIMIT 1)"
+    };
+}
+
+/// An approval of a different contract keeps its own baseline and holds the
+/// observed contract in quarantine; the stored review must say exactly that.
+fn baseline_needs_repair(
+    stored: &sqlx::postgres::PgRow,
+    hash: &str,
+    approved_hash: Option<&str>,
+) -> bool {
+    approved_hash.is_some_and(|approved| {
+        approved != hash
+            && (stored.get::<String, _>("approved_hash") != approved
+                || !stored.get::<bool, _>("quarantined"))
+    })
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolReview {
     pub tool_id: Uuid,
@@ -184,6 +217,34 @@ impl PgCatalogStore {
         block_changes: bool,
         approved_hash: Option<&str>,
     ) -> Result<bool, CatalogError> {
+        // An observation that matches the stored decision changes nothing.
+        // Confirm that from one unlocked snapshot, so observing an unchanged
+        // contract neither writes nor waits behind catalog reconciliation.
+        // Any difference takes the locked path, which reads again and decides.
+        let current = sqlx::query(concat!(
+            "SELECT r.observed_hash, r.approved_hash, r.quarantined,
+             CASE WHEN $4 THEN ",
+            latest_approval!(),
+            " END AS durable_approval
+             FROM tool_contract_reviews r JOIN mcp_tools t ON t.id=r.tool_id
+             JOIN mcp_servers s ON s.id=t.server_id
+             WHERE s.tenant_id=$1 AND s.name=$2 AND t.name=$3"
+        ))
+        .bind(tenant)
+        .bind(server)
+        .bind(tool)
+        .bind(approved_hash.is_some())
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(current) = current {
+            let durable_approval: Option<String> = current.get("durable_approval");
+            let approved_hash = durable_approval.as_deref().or(approved_hash);
+            if current.get::<String, _>("observed_hash") == hash
+                && !baseline_needs_repair(&current, hash, approved_hash)
+            {
+                return Ok(false);
+            }
+        }
         let mut tx = self.pool.begin().await?;
         crate::import::lock_tenant_catalog(&mut tx, tenant).await?;
         if approved_hash == Some("") {
@@ -224,18 +285,14 @@ impl PgCatalogStore {
         // locks shared with import and review writes, so session lag cannot
         // replace a newer acceptance or erase its retained comparison.
         let durable_approval = if approved_hash.is_some() {
-            sqlx::query_scalar::<_, String>(
-                "SELECT approval_hash FROM (
-                    (SELECT schema_hash AS approval_hash, approved_at AS accepted_at, 0 AS priority
-                     FROM mcp_tool_versions WHERE tool_id=$1 AND approved_at IS NOT NULL
-                     ORDER BY approved_at DESC LIMIT 1)
-                    UNION ALL
-                    (SELECT subject_version_hash AS approval_hash, created_at AS accepted_at, 1 AS priority
-                     FROM catalog_approvals WHERE tenant_id=$2 AND subject_type='tool_version'
-                     AND subject_id=$1 AND action='approved' AND reason='Accepted observed tool contract'
-                     ORDER BY created_at DESC, id DESC LIMIT 1)
-                 ) approvals ORDER BY accepted_at DESC, priority DESC LIMIT 1",
-            ).bind(id).bind(tenant).fetch_optional(&mut *tx).await?
+            sqlx::query_scalar::<_, Option<String>>(concat!(
+                "SELECT ",
+                latest_approval!(),
+                " FROM mcp_tools t JOIN mcp_servers s ON s.id=t.server_id WHERE t.id=$1"
+            ))
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?
         } else {
             None
         };
@@ -280,9 +337,7 @@ impl PgCatalogStore {
             ).bind(id).fetch_one(&mut *tx).await?,
         };
         let old: String = previous.get("observed_hash");
-        let repair_baseline = approval_mismatch
-            && (previous.get::<String, _>("approved_hash") != baseline_hash
-                || !previous.get::<bool, _>("quarantined"));
+        let repair_baseline = baseline_needs_repair(&previous, hash, approved_hash);
         if repair_baseline {
             sqlx::query("UPDATE tool_contract_reviews SET
                 approved_contract=CASE WHEN approved_hash=$2 THEN approved_contract ELSE 'null'::jsonb END,
