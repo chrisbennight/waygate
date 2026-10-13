@@ -874,7 +874,10 @@ impl SkillTools {
             return Err(unavailable());
         }
         let result = LoadResult { skill: summary(skill, &snapshot.revision()), instructions: read.text.ok_or_else(unavailable)?, files,
-            guidance: format!("{GUIDANCE} Retain this complete response with its URI, revision, document_hash, and files inventory. Reuse it during the task; when a freshness check is needed, pass known_document_hash only while the complete response remains available. After losing instructions, omit the hash and reload. Resolve relative paths against this files inventory and read only files the task needs. Fetch helpers and templates before using client-local tools. File responses contain text or base64; programmatic clients can save them without putting bytes into model context. Metadata retention is bounded; the latest approved serving revision can be restored from Git. An unavailable older revision requires an explicit reload. Never substitute the current revision during an active task.") };
+            // The general skill workflow is already in the server instructions
+            // and the skill tools' descriptions; only advice about this
+            // response is repeated with each load.
+            guidance: "Retain this complete response with its URI, revision, document_hash, and files inventory. Reuse it during the task; when a freshness check is needed, pass known_document_hash only while the complete response remains available. After losing instructions, omit the hash and reload. Resolve relative paths against this files inventory and read only files the task needs. Fetch helpers and templates before using client-local tools. File responses contain text or base64; programmatic clients can save them without putting bytes into model context. Metadata retention is bounded; the latest approved serving revision can be restored from Git. An unavailable older revision requires an explicit reload. Never substitute the current revision during an active task.".to_owned() };
         self.inspect_metadata(&result, principal).await?;
         self.reader
             .check_skill_approval(snapshot, uri, principal)
