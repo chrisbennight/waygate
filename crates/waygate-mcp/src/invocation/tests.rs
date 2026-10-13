@@ -692,6 +692,24 @@ mod retained_response_pipeline_tests {
     }
 
     #[tokio::test]
+    async fn a_filed_result_with_an_unreadable_trust_label_shows_no_upstream_text() {
+        let mut original = CallToolResult::structured(json!({"rows": vec!["match"; 4096]}));
+        original
+            .content
+            .insert(0, ContentBlock::text("Account summary for the caller."));
+        // `sensitive` without the required `untrusted` cannot be parsed.
+        original.meta.get_or_insert_with(Default::default).insert(
+            "io.modelcontextprotocol/trust-annotations".into(),
+            json!({"sensitive": true}),
+        );
+        let (result, files) = deliver_with_threshold(original, 256).await;
+        assert_eq!(files.published.load(Ordering::SeqCst), 1);
+        let texts = texts(&result);
+        assert_eq!(texts.len(), 1);
+        assert!(texts[0].starts_with("The complete result ("));
+    }
+
+    #[tokio::test]
     async fn a_filed_sensitive_result_shows_no_upstream_text() {
         let mut original = large_inline_result();
         original

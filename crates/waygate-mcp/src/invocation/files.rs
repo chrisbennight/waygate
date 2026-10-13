@@ -72,17 +72,17 @@ fn fits_without_mirror(output: &CallToolResult, threshold: usize) -> bool {
     super::encoded_len_within(&unmirrored, threshold).unwrap_or(false)
 }
 
-/// The text of a result delivered as a file: the upstream's own text, when it
-/// is not sensitive and fits the inline budget, followed by what the file
-/// holds. Mirrors of the structured content are left to the file.
+/// The text of a result delivered as a file: the upstream's own text, unless
+/// the caller withholds it, as far as it fits the inline budget, followed by
+/// what the file holds. Mirrors of the structured content are left to the file.
 fn file_preview(
     output: &CallToolResult,
-    sensitive: bool,
+    withhold_text: bool,
     threshold: usize,
     size: usize,
 ) -> Vec<rmcp::model::ContentBlock> {
     let mut preview = Vec::new();
-    if !sensitive {
+    if !withhold_text {
         let mut budget = threshold;
         for block in &output.content {
             let Some(text) = block.as_text() else {
@@ -518,7 +518,7 @@ impl DefaultInvocationService {
         // Carry only bounded trust labels into the compact envelope. All
         // original metadata, text and structured data remain in the saved file.
         compact.meta.get_or_insert_with(Default::default).insert(
-            "io.modelcontextprotocol/trust-annotations".to_owned(),
+            super::result_trust::TRUST_ANNOTATIONS_KEY.to_owned(),
             serde_json::json!({"sensitive": sensitive, "untrusted": trust.is_none_or(|trust| trust.untrusted)}),
         );
         let prepared = processor
@@ -550,7 +550,15 @@ impl DefaultInvocationService {
         );
         // The structured envelope already names the file; the text tells a
         // reader whether it needs the file at all instead of repeating it.
-        compact.content = file_preview(&output, sensitive, threshold, size);
+        // Upstream text is shown only for a result known not to be sensitive:
+        // a trust label that cannot be read withholds it.
+        let unreadable_label = trust.is_none()
+            && output
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta.contains_key(super::result_trust::TRUST_ANNOTATIONS_KEY));
+        let withhold_text = sensitive || ctx.facts().pii || unreadable_label;
+        compact.content = file_preview(&output, withhold_text, threshold, size);
         compact
             .content
             .push(rmcp::model::ContentBlock::resource_link(
