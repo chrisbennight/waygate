@@ -8933,9 +8933,13 @@ mod tests {
             tenant_id: &str,
             id: Uuid,
         ) -> Result<Option<ExecutionStatusRecord>, StoreError> {
+            #[allow(
+                deprecated,
+                reason = "try_update requires Rust 1.95; the workspace supports 1.88"
+            )]
             let failing = self
                 .status_read_failures
-                .try_update(
+                .fetch_update(
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
                     |left| left.checked_sub(1),
