@@ -266,8 +266,10 @@ Metric semantics and operational uses:
   upstream runtime state" panel.
 - `mcp_requests_total{protocol_generation,protocol_version,client}` — every
   downstream MCP request a gateway handler serves, counted once at the start
-  of the handler, whether it succeeds or is refused. Pings and methods the
-  gateway does not implement are answered by the MCP SDK and not counted. `protocol_generation` is `legacy` or `2026-07-28`;
+  of the handler, whether it succeeds or is refused. An unrecognized custom
+  method is counted too, because the gateway's custom-request handler refuses
+  it. Pings and standard methods the gateway does not implement are answered
+  by the MCP SDK and not counted. `protocol_generation` is `legacy` or `2026-07-28`;
   `protocol_version` is the negotiated version, one of the versions the
   transport can negotiate, `other` or `unknown`. `client` is the self-reported
   `clientInfo.name`, lower-cased with characters outside letters, digits and
