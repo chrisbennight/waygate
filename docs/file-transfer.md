@@ -128,8 +128,20 @@ envelope. That envelope describes a file instead of repeating the upstream
 `data` and is governed by the gateway delivery contract. Published upstream
 output schemas accept either the upstream response or a structured
 `_gateway_delivery` envelope containing the file descriptor or delivery error.
+`tools/list` and discovery inspection carry a compact form of that alternative,
+which requires `delivery_status` and `operation_status` but does not repeat the
+fields below for every tool; `codemode.describe` returns the full form.
+
+| Field of `_gateway_delivery` | Present when | Meaning |
+| --- | --- | --- |
+| `delivery_status` | Always | `file` when the result was saved as a file, `unavailable` when it could not be delivered. |
+| `operation_status` | Always | `succeeded`: the operation itself completed, whatever happened to its result. |
+| `file` | `delivery_status` is `file` | The file descriptor: `uri`, and when known `name`, `mimeType`, `size` and `digest` (`algorithm` and a base64url `value`). |
+| `error` | `delivery_status` is `unavailable` | A machine-readable reason the result could not be delivered. |
+| `retry_operation` | `delivery_status` is `unavailable` | Always `false`: the operation succeeded, so repeating it is not a recovery. |
+
 The gateway validates the inspected body against the original upstream schema
-and the final delivery envelope against its own schema. Its byte count describes
+and the final delivery envelope against the full schema. Its byte count describes
 the stored replacement. The adapter reuses
 file ownership, storage budgets, retention, SHA-256 calculation, publication,
 download authorization, and cleanup. Response inspection does not establish

@@ -53,18 +53,62 @@ pub(crate) fn validator() -> &'static jsonschema::Validator {
     })
 }
 
+/// The delivery alternative listed in every tool's output schema. It accepts
+/// every envelope the gateway emits but leaves out the file descriptor and
+/// error fields, which are the same for every tool: listing them once per
+/// tool multiplied the size of each output schema. The full form is returned
+/// on request by [`detailed_output_schema`], and the gateway still checks each
+/// envelope it emits against it ([`validator`]).
+fn listed_envelope_schema() -> &'static Value {
+    static SCHEMA: OnceLock<Value> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        let statuses: Vec<Value> = envelope_schema()["properties"][FIELD]["oneOf"]
+            .as_array()
+            .expect("delivery forms are alternatives")
+            .iter()
+            .map(|form| form["properties"]["delivery_status"]["const"].clone())
+            .collect();
+        json!({
+            "type": "object",
+            "required": [FIELD],
+            "properties": {
+                FIELD: {
+                    "type": "object",
+                    "required": ["delivery_status", "operation_status"],
+                    "properties": {"delivery_status": {"enum": statuses}}
+                }
+            }
+        })
+    })
+}
+
 /// Keep upstream-local references scoped to the original schema when adding
 /// the gateway's alternative response form. The source schema remains the
 /// authority for validating recovered upstream bodies.
-pub fn output_schema(upstream: &Map<String, Value>) -> Map<String, Value> {
+fn with_delivery_alternative(
+    upstream: &Map<String, Value>,
+    delivery: &Value,
+) -> Map<String, Value> {
     let mut upstream = upstream.clone();
     upstream
         .entry("$id")
         .or_insert_with(|| json!("urn:mcp-gateway:upstream-output"));
-    json!({"type":"object", "anyOf":[upstream, envelope_schema()]})
+    json!({"type":"object", "anyOf":[upstream, delivery]})
         .as_object()
         .expect("object schema")
         .clone()
+}
+
+/// The output schema listed for an upstream tool: the upstream's own schema
+/// or the compact delivery envelope.
+pub fn output_schema(upstream: &Map<String, Value>) -> Map<String, Value> {
+    with_delivery_alternative(upstream, listed_envelope_schema())
+}
+
+/// [`output_schema`] with the delivery envelope described in full, for a
+/// caller that asked for one tool's contract.
+pub fn detailed_output_schema(upstream: &Map<String, Value>) -> Map<String, Value> {
+    with_delivery_alternative(upstream, envelope_schema())
 }
 
 pub(crate) fn attach(result: &mut CallToolResult, delivery: Delivery) {
@@ -94,7 +138,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn published_schema_accepts_upstream_data_and_delivery_with_local_references() {
+    fn listed_and_detailed_schemas_accept_upstream_data_and_every_delivery_form() {
         let upstream = json!({
             "type": "object",
             "required": ["data"],
@@ -102,8 +146,18 @@ mod tests {
             "$defs": {"Body": {"type": "string"}},
             "additionalProperties": false
         });
-        let schema = Value::Object(output_schema(upstream.as_object().unwrap()));
-        let client = jsonschema::validator_for(&schema).unwrap();
+        let listed = Value::Object(output_schema(upstream.as_object().unwrap()));
+        let detailed = Value::Object(detailed_output_schema(upstream.as_object().unwrap()));
+        for schema in [&listed, &detailed] {
+            assert_accepts_upstream_data_and_every_delivery_form(schema);
+        }
+        assert!(listed.to_string().len() < detailed.to_string().len());
+    }
+
+    /// `schema` keeps the upstream's local references scoped, so upstream
+    /// data still validates against them, and accepts each delivery form.
+    fn assert_accepts_upstream_data_and_every_delivery_form(schema: &Value) {
+        let client = jsonschema::validator_for(schema).unwrap();
         assert!(client.is_valid(&json!({"data": "response"})));
         assert!(!client.is_valid(&json!({"data": 42})));
         assert!(!client.is_valid(&json!({})));

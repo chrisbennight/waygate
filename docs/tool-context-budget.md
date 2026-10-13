@@ -98,8 +98,12 @@ per-tool entry. The same ratchet rule applies: growth needs an explicit budget
 diff with a reason, and a reduction lowers the budget in the same change.
 
 The output-schema budget includes the gateway's retained-response delivery
-alternative. Strict clients need the file descriptor and delivery-error schema
-alongside the upstream data schema to validate the result they receive. The limits in the budget file include that schema.
+alternative, which strict clients need to validate a result delivered as a
+file. Listed tools carry a compact form of it that accepts every delivery
+envelope without describing the file descriptor and error fields, because
+those fields are the same for every tool. `codemode.describe` returns the full
+form for one tool, and the [file transfer guide](file-transfer.md) documents
+it. The limits in the budget file include the compact form.
 
 ### Realistic catalog
 

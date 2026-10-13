@@ -3,17 +3,17 @@
   "reportFormatVersion": 3,
   "expectedToolCount": 3,
   "maximums": {
-    "toolsJsonBytes": 2756,
+    "toolsJsonBytes": 1679,
     "fieldValueBytes.names": 63,
     "fieldValueBytes.titles": 47,
     "fieldValueBytes.descriptions": 138,
     "fieldValueBytes.inputSchemas": 581,
-    "fieldValueBytes.outputSchemas": 1451,
+    "fieldValueBytes.outputSchemas": 374,
     "fieldValueBytes.annotations": 267,
     "fieldValueBytes.meta": 0,
     "repeatedStringBytes": 0,
     "repeatedDescriptionLeadingBlockBytes": 0,
     "repeatedOutputSchemaBytes": 0,
-    "largestDeclarationBytes": 1888
+    "largestDeclarationBytes": 811
   }
 }
