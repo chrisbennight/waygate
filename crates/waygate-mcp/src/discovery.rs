@@ -40,6 +40,11 @@ impl CatalogToolSource {
     }
 }
 
+/// Results a discovery search returns when the caller sets no limit. Gateway
+/// discovery and Code Mode search share it, so the same query gives the same
+/// first page on both surfaces.
+pub const DEFAULT_SEARCH_RESULTS: usize = 20;
+
 /// Stable structured identity for one tool in the aggregate gateway catalog.
 ///
 /// Keeping source kind, source name, and bare tool name separate avoids

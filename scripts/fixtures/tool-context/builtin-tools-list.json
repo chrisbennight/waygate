@@ -2105,7 +2105,7 @@
       {
         "name": "codemode.search",
         "title": "Search Code Mode connectors",
-        "description": "Search the governed direct catalog across upstream and gateway-local connectors. Returns only tools this caller may discover after profile restrictions, quarantine state, and Cedar decisions. Results carry immutable snapshot identity and governance facts; pass a result's `name` unchanged to `codemode.describe` for the exact connector schemas.",
+        "description": "Search the governed direct catalog across upstream and gateway-local connectors. Returns only tools this caller may discover after profile restrictions, quarantine state, and Cedar decisions. Results carry governance facts; pass a result's `name` unchanged to `codemode.describe` for the exact connector schemas and snapshot identity.",
         "inputSchema": {
           "additionalProperties": false,
           "title": "SearchParams",
@@ -2136,7 +2136,7 @@
               ]
             },
             "limit": {
-              "description": "Maximum returned tools. Defaults to 50.",
+              "description": "Maximum returned tools. Defaults to 20.",
               "minimum": 1,
               "format": "uint",
               "anyOf": [
@@ -2170,7 +2170,7 @@
                   "type": "string"
                 },
                 "description": {
-                  "description": "Bounded operation preview; use `codemode.describe` for the exact contract.",
+                  "description": "Bounded operation preview; use `codemode.describe` for the exact\ncontract and its snapshot identity.",
                   "anyOf": [
                     {
                       "type": "string"
@@ -2180,10 +2180,6 @@
                     }
                   ]
                 },
-                "identity": {
-                  "description": "Immutable authority and schema-version identity.",
-                  "$ref": "#/$defs/SnapshotIdentity"
-                },
                 "governance": {
                   "description": "Governance facts admitted with this tool snapshot.",
                   "$ref": "#/$defs/Governance"
@@ -2191,191 +2187,7 @@
               },
               "required": [
                 "name",
-                "identity",
                 "governance"
-              ]
-            },
-            "SnapshotIdentity": {
-              "oneOf": [
-                {
-                  "description": "Gateway-owned built-in definition, versioned by its complete published\nbehavior contract and exact schemas.",
-                  "type": "object",
-                  "properties": {
-                    "behavior_hash": {
-                      "type": "string"
-                    },
-                    "input_schema_hash": {
-                      "type": "string"
-                    },
-                    "output_schema_hash": {
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "authority": {
-                      "type": "string",
-                      "const": "builtin"
-                    }
-                  },
-                  "required": [
-                    "authority",
-                    "behavior_hash",
-                    "input_schema_hash"
-                  ]
-                },
-                {
-                  "description": "Governed catalog identity plus hashes of the exact admitted schemas.",
-                  "type": "object",
-                  "properties": {
-                    "tool_id": {
-                      "type": "string"
-                    },
-                    "catalog_schema_hash": {
-                      "description": "Historical catalog-version discriminator. This is provenance, not\nthe connector contract hash: imported catalog rows can use a\nclassification-only value.",
-                      "type": "string"
-                    },
-                    "input_schema_hash": {
-                      "description": "Canonical hash of the exact admitted input schema returned here.",
-                      "type": "string"
-                    },
-                    "output_schema_hash": {
-                      "description": "Canonical hash of the exact admitted output schema returned here.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "tool_annotations_hash": {
-                      "description": "Canonical hash of standard MCP behavior annotations.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "action_metadata_hash": {
-                      "description": "Canonical hash of the namespaced action metadata.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "operations_hash": {
-                      "description": "Canonical hash of the reviewed per-operation definition — the\ndiscriminator and the classifications keyed by its values. Absent\nwhen the tool is classified by name alone.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "authority": {
-                      "type": "string",
-                      "const": "catalog"
-                    }
-                  },
-                  "required": [
-                    "authority",
-                    "tool_id",
-                    "catalog_schema_hash",
-                    "input_schema_hash"
-                  ]
-                },
-                {
-                  "description": "Transitional manifest authority with exact admitted schema hashes.",
-                  "type": "object",
-                  "properties": {
-                    "approved_behavior_hash": {
-                      "description": "The manifest-approved behavior hash bound at admission for an\nannotation-native upstream (`None` in legacy manifest mode) —\nkeeps separately approved generations distinguishable even when\nthey differ only outside the four schema hashes.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "input_schema_hash": {
-                      "description": "Canonical hash of the exact admitted input schema returned here.",
-                      "type": "string"
-                    },
-                    "output_schema_hash": {
-                      "description": "Canonical hash of the exact admitted output schema returned here.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "tool_annotations_hash": {
-                      "description": "Canonical hash of standard MCP behavior annotations.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "action_metadata_hash": {
-                      "description": "Canonical hash of the namespaced action metadata.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "operations_hash": {
-                      "description": "Canonical hash of the reviewed per-operation definition — the\ndiscriminator and the classifications keyed by its values. Absent\nwhen the tool is classified by name alone.",
-                      "anyOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "approval_requirements_known": {
-                      "type": "boolean"
-                    },
-                    "authority": {
-                      "type": "string",
-                      "const": "manifest_fallback"
-                    }
-                  },
-                  "required": [
-                    "authority",
-                    "input_schema_hash",
-                    "approval_requirements_known"
-                  ]
-                }
               ]
             },
             "Governance": {
@@ -4216,7 +4028,7 @@
               "type": "string"
             },
             "limit": {
-              "description": "Maximum number of compact results to return.",
+              "description": "Maximum number of compact results to return. Defaults to 20.",
               "default": null,
               "format": "uint",
               "minimum": 1,

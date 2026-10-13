@@ -31,7 +31,7 @@ use waygate_oidc::{Principal, Scope};
 use crate::mcp_builtin::{schema_obj, structured};
 
 pub const NAMESPACE: &str = waygate_core::DISCOVERY_BUILTIN_NAMESPACE;
-const DEFAULT_LIMIT: usize = 20;
+const DEFAULT_LIMIT: usize = waygate_mcp::discovery::DEFAULT_SEARCH_RESULTS;
 const MAX_QUERY_LENGTH: usize = 256;
 const MAX_CURSOR_LENGTH: usize = 1_024;
 const MAX_SUMMARY_TITLE_CHARS: usize = 160;
@@ -440,7 +440,7 @@ struct SearchParams {
     /// Natural-language or keyword query. Names, source names, titles, and
     /// descriptions participate in lexical relevance.
     query: String,
-    /// Maximum number of compact results to return.
+    /// Maximum number of compact results to return. Defaults to 20.
     #[serde(default)]
     #[schemars(range(min = 1))]
     limit: Option<usize>,
