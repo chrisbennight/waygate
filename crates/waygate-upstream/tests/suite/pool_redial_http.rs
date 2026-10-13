@@ -3531,12 +3531,19 @@ async fn auto_bridges_to_legacy_through_every_observed_discovery_refusal() {
 }
 
 /// A legacy upstream that counts discovery probes and can later upgrade:
-/// once upgraded it answers discovery and refuses the legacy handshake.
+/// once upgraded it answers discovery and refuses, and counts, the legacy
+/// handshake.
 async fn spawn_upgradable_legacy(
     id: &'static str,
-) -> (std::net::SocketAddr, Arc<AtomicUsize>, Arc<AtomicBool>) {
+) -> (
+    std::net::SocketAddr,
+    Arc<AtomicUsize>,
+    Arc<AtomicBool>,
+    Arc<AtomicUsize>,
+) {
     let probes = Arc::new(AtomicUsize::new(0));
     let upgraded = Arc::new(AtomicBool::new(false));
+    let refused_handshakes = Arc::new(AtomicUsize::new(0));
     let upstream = TaggedUpstream {
         id,
         calls: Arc::new(AtomicUsize::new(0)),
@@ -3547,12 +3554,14 @@ async fn spawn_upgradable_legacy(
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default().with_legacy_session_mode(true),
     );
-    let (counted, switch) = (probes.clone(), upgraded.clone());
+    let (counted, switch, refusals) =
+        (probes.clone(), upgraded.clone(), refused_handshakes.clone());
     let app = axum::Router::new()
         .nest_service("/mcp", svc)
         .layer(axum::middleware::from_fn(
             move |req: axum::extract::Request, next: axum::middleware::Next| {
-                let (probes, upgraded) = (counted.clone(), switch.clone());
+                let (probes, upgraded, refused_handshakes) =
+                    (counted.clone(), switch.clone(), refusals.clone());
                 async move {
                     use axum::response::IntoResponse as _;
                     let (parts, body) = req.into_parts();
@@ -3574,11 +3583,14 @@ async fn spawn_upgradable_legacy(
                                 refuse_discovery(DISCOVERY_REFUSALS[0], req, next).await
                             }
                         }
-                        Some("initialize") if upgraded => (
-                            axum::http::StatusCode::BAD_REQUEST,
-                            "Bad Request: initialize is no longer supported",
-                        )
-                            .into_response(),
+                        Some("initialize") if upgraded => {
+                            refused_handshakes.fetch_add(1, Ordering::SeqCst);
+                            (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                "Bad Request: initialize is no longer supported",
+                            )
+                                .into_response()
+                        }
                         _ => next.run(req).await,
                     }
                 }
@@ -3589,7 +3601,7 @@ async fn spawn_upgradable_legacy(
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (addr, probes, upgraded)
+    (addr, probes, upgraded, refused_handshakes)
 }
 
 fn per_call_manifest_at(addr: std::net::SocketAddr) -> UpstreamManifest {
@@ -3607,7 +3619,7 @@ fn per_call_manifest_at(addr: std::net::SocketAddr) -> UpstreamManifest {
 /// per-call dial does not probe discovery again on every call.
 #[tokio::test]
 async fn per_call_dials_reuse_the_lanes_legacy_generation() {
-    let (addr, probes, _upgraded) = spawn_upgradable_legacy("gen-memo").await;
+    let (addr, probes, _upgraded, _refused) = spawn_upgradable_legacy("gen-memo").await;
     let pool = UpstreamPool::connect(BTreeMap::from([(
         "mock".to_owned(),
         per_call_manifest_at(addr),
@@ -3625,11 +3637,11 @@ async fn per_call_dials_reuse_the_lanes_legacy_generation() {
 }
 
 /// An upstream that upgraded after its lane negotiated legacy refuses the
-/// legacy handshake; the per-call dial then negotiates in full and the call
-/// still succeeds.
+/// legacy handshake; the per-call dial then tries discovery alone and the
+/// call still succeeds.
 #[tokio::test]
 async fn a_per_call_dial_renegotiates_when_the_upstream_has_upgraded() {
-    let (addr, probes, upgraded) = spawn_upgradable_legacy("gen-upgraded").await;
+    let (addr, probes, upgraded, refused) = spawn_upgradable_legacy("gen-upgraded").await;
     let pool = UpstreamPool::connect(BTreeMap::from([(
         "mock".to_owned(),
         per_call_manifest_at(addr),
@@ -3640,9 +3652,14 @@ async fn a_per_call_dial_renegotiates_when_the_upstream_has_upgraded() {
 
     assert_eq!(call_id(&pool).await, "gen-upgraded");
     assert_eq!(
+        refused.load(Ordering::SeqCst),
+        1,
+        "the remembered legacy handshake is tried first, and only once"
+    );
+    assert_eq!(
         probes.load(Ordering::SeqCst),
         after_boot + 1,
-        "the refused legacy handshake falls back to full negotiation"
+        "the refused legacy handshake falls back to discovery"
     );
 }
 
