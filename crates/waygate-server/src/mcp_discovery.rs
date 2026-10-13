@@ -24,7 +24,7 @@ use waygate_core::RiskTier;
 use waygate_mcp::{
     compact_tool_description, rank_visible_tools, AuthorizedCatalog, BuiltinCatalog,
     BuiltinProfileScope, BuiltinSurfaceDescriptor, BuiltinTools, CatalogAuthorization,
-    CatalogChannel, CatalogTool, CatalogToolSource, ToolCatalogEpoch,
+    CatalogChannel, CatalogTool, CatalogToolIdentity, CatalogToolSource, ToolCatalogEpoch,
 };
 use waygate_oidc::{Principal, Scope};
 
@@ -186,14 +186,12 @@ impl DiscoveryTools {
         principal: &Principal,
         params: InspectParams,
     ) -> Result<CallToolResult, McpError> {
-        validate_selector(&params.source, "source")?;
         validate_selector(&params.name, "name")?;
-        let source = match params.source_kind {
-            SourceKind::Upstream => CatalogToolSource::Upstream(params.source),
-            SourceKind::Builtin => CatalogToolSource::Builtin(params.source),
+        let Some(identity) = CatalogToolIdentity::from_qualified_name(&params.name) else {
+            return Err(unavailable_tool());
         };
         let record = self
-            .stable_visible_tool(principal, &source, &params.name)
+            .stable_visible_tool(principal, &identity.source, &identity.name)
             .await?;
         let Some(record) = record else {
             return Err(unavailable_tool());
@@ -471,11 +469,8 @@ impl From<&CatalogToolSource> for SourceKind {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct InspectParams {
-    /// Whether the source is an upstream MCP server or a gateway-local surface.
-    source_kind: SourceKind,
-    /// Exact server name or built-in namespace returned by `search`.
-    source: String,
-    /// Exact bare tool name returned by `search`.
+    /// Fully-qualified `<server>.<tool>` name, exactly as `search` returns
+    /// it and `tools/call` accepts it.
     name: String,
 }
 
@@ -491,14 +486,8 @@ struct SearchResponse {
 
 #[derive(Debug, Serialize, JsonSchema)]
 struct ToolSummary {
-    /// Fully-qualified name to invoke through ordinary MCP `tools/call`.
+    /// Fully-qualified name to pass unchanged to `inspect` and `tools/call`.
     name: String,
-    /// Whether `source` names an upstream server or gateway-local namespace.
-    source_kind: SourceKind,
-    /// Exact upstream server or gateway-local namespace.
-    source: String,
-    /// Exact bare tool name within the source.
-    tool: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -512,9 +501,6 @@ impl ToolSummary {
         let governance = Governance::from_tool(&tool);
         Self {
             name: tool.identity.qualified_name(),
-            source_kind: SourceKind::from(&tool.identity.source),
-            source: tool.identity.source.name().to_owned(),
-            tool: tool.identity.name,
             title: compact_optional(tool.definition.title.as_deref(), MAX_SUMMARY_TITLE_CHARS),
             description: compact_tool_description(tool.definition.description.as_deref()),
             governance,
@@ -775,7 +761,7 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
     vec![
         Tool::new(
             format!("{NAMESPACE}.search"),
-            "Search every currently admitted upstream and gateway-local MCP tool without knowing its source first. Authorization and credential-profile restrictions are applied before lexical ranking, so hidden tools cannot affect hits or pagination. Results are compact and omit schemas; pass the returned structured source identity to `gateway-discovery.inspect` for the exact contract, then invoke the returned fully-qualified name through ordinary `tools/call`.",
+            "Search every currently admitted upstream and gateway-local MCP tool without knowing its source first. Authorization and credential-profile restrictions are applied before lexical ranking, so hidden tools cannot affect hits or pagination. Results are compact and omit schemas; pass a result's `name` unchanged to `gateway-discovery.inspect` for the exact contract and to ordinary `tools/call` to invoke it.",
             input_schema::<SearchParams>(),
         )
         .with_title("Search the governed tool catalog")
@@ -783,7 +769,7 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         .annotate(ToolAnnotations::new().read_only(true).destructive(false)),
         Tool::new(
             format!("{NAMESPACE}.inspect"),
-            "Return the exact current MCP definition and gateway governance facts for one tool selected by the structured `source_kind`, `source`, and bare `name` returned by `gateway-discovery.search`. Denied, quarantined, stale, and unknown selectors all return the same unavailable shape. This tool never executes the inspected operation; call its fully-qualified identity through ordinary `tools/call` so the original typed authorization and audit path remains authoritative.",
+            "Return the exact current MCP definition and gateway governance facts for one tool selected by the fully-qualified `name` returned by `gateway-discovery.search`. Denied, quarantined, stale, and unknown selectors all return the same unavailable shape. This tool never executes the inspected operation; call its fully-qualified identity through ordinary `tools/call` so the original typed authorization and audit path remains authoritative.",
             input_schema::<InspectParams>(),
         )
         .with_title("Inspect an exact governed tool contract")
@@ -1085,9 +1071,7 @@ mod tests {
             .inspect(
                 &principal(),
                 InspectParams {
-                    source_kind: SourceKind::Upstream,
-                    source: "payments".to_owned(),
-                    name: "refund_charge".to_owned(),
+                    name: "payments.refund_charge".to_owned(),
                 },
             )
             .await
@@ -1104,9 +1088,7 @@ mod tests {
             .inspect(
                 &principal(),
                 InspectParams {
-                    source_kind: SourceKind::Upstream,
-                    source: "github".to_owned(),
-                    name: "create_issue".to_owned(),
+                    name: "github.create_issue".to_owned(),
                 },
             )
             .await
@@ -1149,9 +1131,7 @@ mod tests {
             .inspect(
                 &principal(),
                 InspectParams {
-                    source_kind: SourceKind::Upstream,
-                    source: "inventory".to_owned(),
-                    name: "lookup".to_owned(),
+                    name: "inventory.lookup".to_owned(),
                 },
             )
             .await
@@ -1168,9 +1148,7 @@ mod tests {
             .inspect(
                 &principal(),
                 InspectParams {
-                    source_kind: SourceKind::Upstream,
-                    source: "inventory".to_owned(),
-                    name: "lookup".to_owned(),
+                    name: "inventory.lookup".to_owned(),
                 },
             )
             .await
@@ -1554,7 +1532,10 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("gateway-skills"));
-        assert_eq!(summary.tool, long_name);
+        assert_eq!(
+            CatalogToolIdentity::from_qualified_name(&summary.name).map(|identity| identity.name),
+            Some(long_name)
+        );
         assert_eq!(
             summary.title.unwrap().chars().count(),
             MAX_SUMMARY_TITLE_CHARS
@@ -1563,7 +1544,7 @@ mod tests {
             summary.description.unwrap().chars().count(),
             MAX_SUMMARY_DESCRIPTION_CHARS
         );
-        assert!(validate_selector(&summary.tool, "name").is_ok());
+        assert!(validate_selector(&summary.name, "name").is_ok());
     }
 
     #[test]
@@ -1602,9 +1583,6 @@ mod tests {
                 serde_json::to_value(SearchResponse {
                     tools: vec![ToolSummary {
                         name: "kagi.search".to_owned(),
-                        source_kind: SourceKind::Upstream,
-                        source: "kagi".to_owned(),
-                        tool: "search".to_owned(),
                         title: Some("Search the web".to_owned()),
                         description: Some("Find relevant web pages".to_owned()),
                         governance: Governance {

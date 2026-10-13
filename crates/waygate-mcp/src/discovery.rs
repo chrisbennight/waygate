@@ -55,6 +55,28 @@ impl CatalogToolIdentity {
     pub fn qualified_name(&self) -> String {
         format!("{}.{}", self.source.name(), self.name)
     }
+
+    /// The identity a fully-qualified name selects, read the way `tools/call`
+    /// routes it, so a client passes the same name to search, inspection,
+    /// description and calls without splitting it. Server names cannot
+    /// contain a dot and built-in namespaces are reserved against them, so
+    /// the first dot separates the source from the tool and the reserved
+    /// list decides which kind of source it is.
+    pub fn from_qualified_name(name: &str) -> Option<Self> {
+        let (source, tool) = name.split_once('.')?;
+        if source.is_empty() || tool.is_empty() {
+            return None;
+        }
+        let source = if waygate_core::RESERVED_BUILTIN_NAMESPACES.contains(&source) {
+            CatalogToolSource::Builtin(source.to_owned())
+        } else {
+            CatalogToolSource::Upstream(source.to_owned())
+        };
+        Some(Self {
+            source,
+            name: tool.to_owned(),
+        })
+    }
 }
 
 /// One exact, governed tool snapshot suitable for every discovery consumer.
@@ -721,6 +743,30 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_qualified_name_selects_the_identity_it_was_built_from() {
+        for identity in [
+            CatalogToolIdentity {
+                source: CatalogToolSource::Upstream("demo-mail".to_owned()),
+                name: "messages.send".to_owned(),
+            },
+            CatalogToolIdentity {
+                source: CatalogToolSource::Builtin(
+                    waygate_core::DISCOVERY_BUILTIN_NAMESPACE.to_owned(),
+                ),
+                name: "inspect".to_owned(),
+            },
+        ] {
+            assert_eq!(
+                CatalogToolIdentity::from_qualified_name(&identity.qualified_name()),
+                Some(identity)
+            );
+        }
+        for unqualified in ["", "send", ".send", "demo-mail."] {
+            assert_eq!(CatalogToolIdentity::from_qualified_name(unqualified), None);
+        }
+    }
     use crate::authz::{AuthzGate, AuthzVerdict};
     use crate::builtin::{BuiltinCatalog, BuiltinTools};
     use crate::catalog::{

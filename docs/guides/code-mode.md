@@ -8,9 +8,9 @@ call passes through the same invocation pipeline as a direct MCP call.
 ## Discover before executing
 
 Use `codemode.search` to find an operation and `codemode.describe` to load its
-typed contract. Pass its binding's connector as `connector` and operation as
-`operation_id`. Use these identifiers exactly;
-a dot inside a name is not a separator to infer. Bindings are synchronous:
+typed contract: pass the `name` search returned, unchanged. Call the operation
+with the `connector` and `operation` from the description's `binding`, exactly
+as given; do not split a name at a dot yourself. Bindings are synchronous:
 
 ```javascript
 const first = connectors["demo"]["greet"]({ name: "Ada" });
