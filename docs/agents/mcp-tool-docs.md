@@ -39,10 +39,12 @@ one of the two for the model:
 
 No client found shows the model both copies, so the text mirror costs
 transfer bytes but not model context, and text-only clients depend on it.
-Gateway-built results therefore keep it: they use the MCP library's
-structured-result constructor, which always adds the mirror, and there is no
-per-client switch. Recheck this table when a client changes how it presents
-tool results.
+Gateway-built results therefore keep it, with no per-client switch: they use
+the MCP library's structured-result constructor, which always adds the mirror.
+The one exception is a single-use payload such as
+`gateway-admin.get_change_secret`, whose text is deliberately only a notice, as
+described under the standard's fourth point below. Recheck this table when a
+client changes how it presents tool results.
 
 The other direction matters more. Text that is not a copy of the structured
 value, such as guidance or a preview, is invisible to Claude Code and Codex
