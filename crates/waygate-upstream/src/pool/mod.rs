@@ -1949,25 +1949,16 @@ impl UpstreamPool {
                 // the current-state admission above while executing claims
                 // the earlier stages never saw. Breaker-neutral: a local
                 // configuration race, not an upstream-health signal.
+                // Re-resolving the admitted identity applies the same review
+                // check to this connection's contract, so the standalone check
+                // runs only when there is no admitted identity to compare.
                 let raw_contract = conn
                     .live_tools
                     .iter()
                     .find(|tool| tool.name.as_ref() == tool_name);
-                if !self
-                    .review_allows(
-                        server,
-                        tool_name,
-                        raw_contract,
-                        current_manifest.classification_mode,
-                    )
-                    .await
-                {
-                    permit.neutral();
-                    return Err(contract_changed_error(server, tool_name));
-                }
-                if let Some(admitted) = admitted {
-                    if !self
-                        .admitted_contract_is_current(
+                let contract_current = match admitted {
+                    Some(admitted) => {
+                        self.admitted_contract_is_current(
                             tenant,
                             server,
                             tool_name,
@@ -1976,10 +1967,20 @@ impl UpstreamPool {
                             admitted,
                         )
                         .await
-                    {
-                        permit.neutral();
-                        return Err(contract_changed_error(server, tool_name));
                     }
+                    None => {
+                        self.review_allows(
+                            server,
+                            tool_name,
+                            raw_contract,
+                            current_manifest.classification_mode,
+                        )
+                        .await
+                    }
+                };
+                if !contract_current {
+                    permit.neutral();
+                    return Err(contract_changed_error(server, tool_name));
                 }
                 // The recovery module owns the complete pre-dispatch attempt:
                 // dial, annotation contract read, and request handoff. It may
@@ -2079,25 +2080,12 @@ impl UpstreamPool {
                 // below runs on this connection while we hold its read lock,
                 // so a mismatch here is the last point the race can be
                 // refused. Breaker-neutral: a local configuration race.
-                let raw_contract = conn
-                    .live_tools
-                    .iter()
-                    .find(|tool| tool.name.as_ref() == tool_name);
-                if !self
-                    .review_allows(
-                        server,
-                        tool_name,
-                        raw_contract,
-                        current_manifest.classification_mode,
-                    )
-                    .await
-                {
-                    permit.neutral();
-                    return Err(contract_changed_error(server, tool_name));
-                }
-                if let Some(admitted) = admitted {
-                    if !self
-                        .admitted_contract_is_current(
+                // Re-resolving the admitted identity applies the same review
+                // check to this connection's contract, so the standalone check
+                // runs only when there is no admitted identity to compare.
+                let contract_current = match admitted {
+                    Some(admitted) => {
+                        self.admitted_contract_is_current(
                             tenant,
                             server,
                             tool_name,
@@ -2106,10 +2094,22 @@ impl UpstreamPool {
                             admitted,
                         )
                         .await
-                    {
-                        permit.neutral();
-                        return Err(contract_changed_error(server, tool_name));
                     }
+                    None => {
+                        self.review_allows(
+                            server,
+                            tool_name,
+                            conn.live_tools
+                                .iter()
+                                .find(|tool| tool.name.as_ref() == tool_name),
+                            current_manifest.classification_mode,
+                        )
+                        .await
+                    }
+                };
+                if !contract_current {
+                    permit.neutral();
+                    return Err(contract_changed_error(server, tool_name));
                 }
                 // Populate THIS slot's identity cell (if identity-forwarding)
                 // with a drop-guard so an early return / panic / cancellation
@@ -2175,7 +2175,7 @@ impl UpstreamPool {
                     let current_tool = session_tools
                         .iter()
                         .find(|tool| tool.name.as_ref() == tool_name);
-                    if self
+                    let Ok(mut decisions) = self
                         .observe_tool_reviews(
                             &entry,
                             server,
@@ -2184,17 +2184,17 @@ impl UpstreamPool {
                             true,
                         )
                         .await
-                        .is_err()
-                    {
+                    else {
                         permit.neutral();
                         return Err(contract_changed_error(server, tool_name));
-                    }
+                    };
                     if !self
-                        .review_allows(
+                        .review_allows_with(
                             server,
                             tool_name,
                             current_tool,
                             current_manifest.classification_mode,
+                            decisions.remove(tool_name),
                         )
                         .await
                     {

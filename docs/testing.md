@@ -108,6 +108,19 @@ The default is three samples per catalog size. For a selected case, set
 `WAYGATE_DISCOVERY_BENCH_SAMPLES` to a value from `1` through `3` to change the
 sample count. Report sample counts and failed responses alongside comparisons.
 
+The opt-in call diagnostic counts the database round trips one tool call makes
+against a governed catalog and durable tool reviews, in each classification
+mode:
+
+```sh
+cargo test --workspace --locked call_database_round_trips_per_classification_mode -- --ignored --nocapture
+```
+
+It uses the same disposable `AUDIT_DATABASE_URL` and the same counting method,
+and reports admission and dispatch separately in `CALL_ROUND_TRIPS` records. A
+transaction counts once. The pre-parse gate, quota, delivery settings and audit
+writes are wired by the server and are not part of this count.
+
 The opt-in audit-chain diagnostic measures what the per-tenant hash chain's
 serialization costs: the sequential rate one tenant's chain sustains on each
 write path, whether per-write cost grows with chain length, and concurrent

@@ -94,6 +94,10 @@ impl UpstreamPool {
         self
     }
 
+    /// Record each tool's observed contract and refresh the local refusal
+    /// cache. Returns the admission decision each observation left in place,
+    /// keyed by tool name, so a caller admitting the call needs no second read;
+    /// a tool absent from the result has no recorded review.
     pub(super) async fn observe_tool_reviews(
         &self,
         entry: &UpstreamEntry,
@@ -101,9 +105,10 @@ impl UpstreamPool {
         manifest: &UpstreamManifest,
         tools: &[Tool],
         emit_evidence: bool,
-    ) -> Result<(), waygate_catalog::tool_reviews::ReviewError> {
+    ) -> Result<HashMap<String, (String, bool)>, waygate_catalog::tool_reviews::ReviewError> {
+        let mut decisions = HashMap::new();
         let Some(store) = self.tool_reviews.as_ref() else {
-            return Ok(());
+            return Ok(decisions);
         };
         for tool in tools {
             let annotation_mode =
@@ -125,8 +130,8 @@ impl UpstreamPool {
             {
                 continue;
             }
-            let changed = store
-                .observe_against_approval(
+            let (changed, decision) = store
+                .observe_decision(
                     waygate_core::TenantId::DEFAULT,
                     name,
                     tool.name.as_ref(),
@@ -140,20 +145,20 @@ impl UpstreamPool {
                     ),
                 )
                 .await?;
-            if let Some((_, blocked)) = store
-                .review_state(waygate_core::TenantId::DEFAULT, name, tool.name.as_ref())
-                .await?
-            {
+            if let Some((_, blocked)) = decision.as_ref() {
                 let mut quarantined = entry
                     .quarantined
                     .write()
                     .expect("upstream quarantine lock poisoned");
-                if blocked {
+                if *blocked {
                     quarantined.insert(tool.name.to_string());
                 } else {
                     quarantined.remove(tool.name.as_ref());
                 }
                 waygate_telemetry::metrics::set_tool_quarantined(name, quarantined.len() as i64);
+            }
+            if let Some(decision) = decision {
+                decisions.insert(tool.name.to_string(), decision);
             }
             if changed && emit_evidence {
                 if let (Some(evidence), Some(review)) = (
@@ -178,7 +183,7 @@ impl UpstreamPool {
                 }
             }
         }
-        Ok(())
+        Ok(decisions)
     }
 
     /// Verify the reviewed identity against every connected lane's raw catalog.
@@ -227,19 +232,6 @@ impl UpstreamPool {
         let Some(store) = self.tool_reviews.as_ref() else {
             return true;
         };
-        let protected = self.entries.load().get(server).is_some_and(|entry| {
-            let manifest = entry.manifest_snapshot();
-            manifest
-                .tools
-                .iter()
-                .find(|c| c.name == tool)
-                .is_some_and(|c| {
-                    self.quarantine_threshold.covers(
-                        c.risk,
-                        c.side_effects || matches!(mode, crate::ClassificationMode::McpAnnotations),
-                    )
-                })
-        });
         let review = match store
             .review_state(waygate_core::TenantId::DEFAULT, server, tool)
             .await
@@ -254,6 +246,33 @@ impl UpstreamPool {
                 return false;
             }
         };
+        self.review_allows_with(server, tool, contract, mode, review)
+            .await
+    }
+
+    /// [`Self::review_allows`] for a review decision the caller already read,
+    /// such as the one an observation just returned.
+    pub(super) async fn review_allows_with(
+        &self,
+        server: &str,
+        tool: &str,
+        contract: Option<&Tool>,
+        mode: crate::ClassificationMode,
+        review: Option<(String, bool)>,
+    ) -> bool {
+        let protected = self.entries.load().get(server).is_some_and(|entry| {
+            let manifest = entry.manifest_snapshot();
+            manifest
+                .tools
+                .iter()
+                .find(|c| c.name == tool)
+                .is_some_and(|c| {
+                    self.quarantine_threshold.covers(
+                        c.risk,
+                        c.side_effects || matches!(mode, crate::ClassificationMode::McpAnnotations),
+                    )
+                })
+        });
         self.review_allows_from_state(server, tool, contract, mode, protected, review)
             .await
     }

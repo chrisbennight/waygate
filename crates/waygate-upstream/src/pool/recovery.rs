@@ -203,6 +203,9 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
             open_requests,
             ..
         } = connected;
+        // In annotation mode the session's observation reads the review
+        // decision once; both post-dial checks below use that read.
+        let mut observed_decision = None;
         if matches!(
             setup.current_manifest.classification_mode,
             crate::ClassificationMode::McpAnnotations
@@ -211,39 +214,51 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
                 .pool
                 .session_tools_bounded(&service, remaining(setup.deadline))
                 .await;
+            let decision = match &session_tools {
+                Ok(tools) => setup
+                    .pool
+                    .observe_tool_reviews(
+                        setup.entry,
+                        setup.server,
+                        setup.current_manifest,
+                        tools
+                            .iter()
+                            .find(|tool| tool.name.as_ref() == setup.tool_name)
+                            .map(std::slice::from_ref)
+                            .unwrap_or_default(),
+                        true,
+                    )
+                    .await
+                    .ok()
+                    .map(|mut decisions| decisions.remove(setup.tool_name)),
+                Err(_) => None,
+            };
             match session_tools {
                 Ok(tools)
-                    if setup
-                        .pool
-                        .observe_tool_reviews(
-                            setup.entry,
-                            setup.server,
-                            setup.current_manifest,
-                            tools
-                                .iter()
-                                .find(|tool| tool.name.as_ref() == setup.tool_name)
-                                .map(std::slice::from_ref)
-                                .unwrap_or_default(),
-                            true,
-                        )
-                        .await
-                        .is_ok()
-                        && setup
-                            .pool
-                            .review_allows(
-                                setup.server,
-                                setup.tool_name,
-                                tools
-                                    .iter()
-                                    .find(|tool| tool.name.as_ref() == setup.tool_name),
-                                setup.current_manifest.classification_mode,
-                            )
-                            .await
-                        && admission::tool_is_admitted_in_catalog(
-                            setup.current_manifest,
-                            &tools,
-                            setup.tool_name,
-                        ) => {}
+                    if match decision.clone() {
+                        Some(decision) => {
+                            setup
+                                .pool
+                                .review_allows_with(
+                                    setup.server,
+                                    setup.tool_name,
+                                    tools
+                                        .iter()
+                                        .find(|tool| tool.name.as_ref() == setup.tool_name),
+                                    setup.current_manifest.classification_mode,
+                                    decision,
+                                )
+                                .await
+                        }
+                        None => false,
+                    } && admission::tool_is_admitted_in_catalog(
+                        setup.current_manifest,
+                        &tools,
+                        setup.tool_name,
+                    ) =>
+                {
+                    observed_decision = decision;
+                }
                 Ok(_) => {
                     if attempts > 1 {
                         dispatch::record_retry_exhausted(setup.server);
@@ -311,16 +326,32 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
             }
         }
 
-        if !setup
-            .pool
-            .review_allows(
-                setup.server,
-                setup.tool_name,
-                setup.advertised_tool,
-                setup.current_manifest.classification_mode,
-            )
-            .await
-        {
+        let advertised_allowed = match observed_decision {
+            Some(decision) => {
+                setup
+                    .pool
+                    .review_allows_with(
+                        setup.server,
+                        setup.tool_name,
+                        setup.advertised_tool,
+                        setup.current_manifest.classification_mode,
+                        decision,
+                    )
+                    .await
+            }
+            None => {
+                setup
+                    .pool
+                    .review_allows(
+                        setup.server,
+                        setup.tool_name,
+                        setup.advertised_tool,
+                        setup.current_manifest.classification_mode,
+                    )
+                    .await
+            }
+        };
+        if !advertised_allowed {
             close_service(service, &open_requests, setup.deadline).await;
             return PerCallExecutionOutcome::Failed {
                 error: admission::contract_changed_error(setup.server, setup.tool_name),
