@@ -814,9 +814,12 @@ impl ExecutionStore for PgExecutionStore {
             SELECT id, tenant_id, principal_sub, principal_issuer, source_digest,
                    execution_profile, status, terminal_reason_code,
                    result_payload IS NOT NULL AS result_available,
-                   resume_context -> 'checkpoint' AS checkpoint,
+                   CASE WHEN status = 'waiting_for_resume'
+                        THEN resume_context -> 'checkpoint'
+                   END AS checkpoint,
                    claim_owner, claim_expires_at, cancellation_requested_at,
-                   submitted_at, updated_at, completed_at, retention_until
+                   submitted_at, updated_at, completed_at, retention_until,
+                   now() AS observed_at
               FROM codemode_executions
              WHERE tenant_id = $1 AND id = $2
             "#,
@@ -846,6 +849,7 @@ impl ExecutionStore for PgExecutionStore {
                 updated_at: row.get("updated_at"),
                 completed_at: row.get("completed_at"),
                 retention_until: row.get("retention_until"),
+                observed_at: row.get("observed_at"),
             }
         }))
     }

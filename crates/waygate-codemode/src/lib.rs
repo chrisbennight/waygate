@@ -263,7 +263,8 @@ pub struct ExecutionStatusRecord {
     pub status: ExecutionStatus,
     pub terminal_reason_code: Option<String>,
     pub result_available: bool,
-    /// The `checkpoint` member of the resume context, when one is recorded.
+    /// The checkpoint of a run waiting for resume, the only state that
+    /// reports one.
     pub checkpoint: Option<Value>,
     pub claim_owner: Option<Uuid>,
     pub claim_expires_at: Option<OffsetDateTime>,
@@ -272,13 +273,17 @@ pub struct ExecutionStatusRecord {
     pub updated_at: OffsetDateTime,
     pub completed_at: Option<OffsetDateTime>,
     pub retention_until: OffsetDateTime,
+    /// When the record was read, by the clock of the store that holds it, so
+    /// time checks agree with the store's own reconciliation.
+    pub observed_at: OffsetDateTime,
 }
 
 impl ExecutionStatusRecord {
     /// Whether the run may have lost its worker, so abandonment
     /// reconciliation is worth attempting. Mirrors that reconciliation's
     /// eligibility, which re-checks it inside its own update.
-    pub fn may_be_abandoned(&self, submission_grace: Duration, now: OffsetDateTime) -> bool {
+    pub fn may_be_abandoned(&self, submission_grace: Duration) -> bool {
+        let now = self.observed_at;
         if self.completed_at.is_some() {
             return false;
         }
@@ -296,6 +301,12 @@ impl ExecutionStatusRecord {
             _ => false,
         }
     }
+
+    /// Whether a finished run has passed its retention and is no longer
+    /// reported.
+    pub fn retention_expired(&self) -> bool {
+        self.status.is_terminal() && self.retention_until <= self.observed_at
+    }
 }
 
 impl From<&Execution> for ExecutionStatusRecord {
@@ -310,11 +321,15 @@ impl From<&Execution> for ExecutionStatusRecord {
             status: execution.status,
             terminal_reason_code: execution.terminal_reason_code.clone(),
             result_available: execution.result_payload.is_some(),
-            checkpoint: execution
-                .resume_context
-                .as_ref()
-                .and_then(|context| context.get("checkpoint"))
-                .cloned(),
+            checkpoint: (execution.status == ExecutionStatus::WaitingForResume)
+                .then(|| {
+                    execution
+                        .resume_context
+                        .as_ref()
+                        .and_then(|context| context.get("checkpoint"))
+                        .cloned()
+                })
+                .flatten(),
             claim_owner: execution.claim_owner,
             claim_expires_at: execution.claim_expires_at,
             cancellation_requested_at: execution.cancellation_requested_at,
@@ -322,6 +337,7 @@ impl From<&Execution> for ExecutionStatusRecord {
             updated_at: execution.updated_at,
             completed_at: execution.completed_at,
             retention_until: execution.retention_until,
+            observed_at: OffsetDateTime::now_utc(),
         }
     }
 }
@@ -903,6 +919,7 @@ mod tests {
                 updated_at: now,
                 completed_at: None,
                 retention_until,
+                observed_at: now,
             }
         };
         let later = now + time::Duration::minutes(5);
@@ -962,7 +979,7 @@ mod tests {
                 false,
             ),
         ] {
-            assert_eq!(record.may_be_abandoned(grace, now), expected, "{case}");
+            assert_eq!(record.may_be_abandoned(grace), expected, "{case}");
         }
     }
 }

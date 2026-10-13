@@ -4409,12 +4409,11 @@ impl CodeModeTools {
         {
             return Ok(None);
         }
-        let now = time::OffsetDateTime::now_utc();
-        if record.status.is_terminal() && record.retention_until <= now {
+        if record.retention_expired() {
             return Ok(None);
         }
         // A healthy run needs no reconciliation transaction.
-        if !record.may_be_abandoned(self.claim_lease(), now) {
+        if !record.may_be_abandoned(self.claim_lease()) {
             return Ok(Some(record));
         }
         let reconciled = store

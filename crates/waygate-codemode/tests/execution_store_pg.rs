@@ -2800,6 +2800,15 @@ async fn a_status_read_matches_the_full_row_without_its_content() {
             ),
         ),
         (
+            "resumed",
+            Some(
+                r#"UPDATE codemode_executions
+                      SET status = 'running', claim_owner = gen_random_uuid(),
+                          claim_expires_at = now() + interval '5 minutes'
+                    WHERE tenant_id = $1 AND id = $2"#,
+            ),
+        ),
+        (
             "succeeded",
             Some(
                 r#"UPDATE codemode_executions
@@ -2827,7 +2836,9 @@ async fn a_status_read_matches_the_full_row_without_its_content() {
             .await
             .expect("status read")
             .expect("execution exists");
-        assert_eq!(status, ExecutionStatusRecord::from(&full), "{stage}");
+        let mut expected = ExecutionStatusRecord::from(&full);
+        expected.observed_at = status.observed_at;
+        assert_eq!(status, expected, "{stage}");
     }
 
     cleanup(&pool, &tenant).await;
