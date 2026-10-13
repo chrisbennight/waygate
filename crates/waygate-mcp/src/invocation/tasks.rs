@@ -248,7 +248,11 @@ impl DefaultInvocationService {
                 .admit_task_status(&mut ctx, &route.upstream_id, &route.created_at, status)
                 .await;
             self.record_outcome(&mut ctx, &outcome).await;
-            self.flush_pending_redactions(&mut ctx).await;
+            // Redaction evidence counts payloads that were forwarded, so a
+            // refused status discards it, as an ordinary call does.
+            if outcome.is_ok() {
+                self.flush_pending_redactions(&mut ctx).await;
+            }
             outcome?;
             // Preserve the stable client handle; polling never extends its lifetime.
             status.task.task.task_id = handle.to_owned();

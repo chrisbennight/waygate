@@ -933,10 +933,9 @@ async fn a_refused_status_read_still_leaves_its_lifecycle_row() {
     redact.0.store(true, Ordering::SeqCst);
     let refused = rpc(&gateway, "tasks/get", json!({"taskId":id}), "alice", true).await;
     assert!(refused.get("error").is_some(), "{refused}");
-    // One row records the refused read, the other the inspector's finding.
-    let mut outcomes = evidence.outcomes("TaskGet");
-    outcomes.sort_unstable();
-    assert_eq!(outcomes, ["execution_error", "success"], "{outcomes:?}");
+    // The refused read is recorded; the redaction is not, because nothing
+    // redacted was forwarded.
+    assert_eq!(evidence.outcomes("TaskGet"), ["execution_error"]);
     worker.abort();
     upstream_worker.abort();
 }
