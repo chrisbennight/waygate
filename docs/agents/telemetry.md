@@ -279,6 +279,8 @@ Metric semantics and operational uses:
   `ListToolsResult` JSON before the request-specific JSON-RPC envelope and
   transport framing. The dashboard charts p95 values so a rollout exposes
   catalog expansion without per-client or per-tool cardinality.
+  [Reading production size metrics](../tool-context-budget.md#read-production-size-metrics)
+  relates them to the synthetic catalog budgets.
 - `mcp_discovery_operation_duration_seconds{operation,outcome}` — end-to-end
   authorization-scoped gateway and Code Mode discovery latency. Both labels use
   closed enums; the dashboard charts p95 by operation and outcome.

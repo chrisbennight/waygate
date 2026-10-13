@@ -15,6 +15,7 @@ POLICY_DIR = Path("crates/waygate-authz/tests/fixtures/policies")
 GOLDEN_DIR = Path("crates/waygate-authz/tests/golden")
 TOOL_CAPTURE = Path("scripts/fixtures/tool-context/standard-tools-list.json")
 TOOL_PRODUCER = Path("crates/waygate-mcp/examples/tool_context_projection.rs")
+REALISTIC_CATALOG = Path("scripts/fixtures/tool-context/realistic-catalog.json")
 
 RUST_SERVER_FIXTURES = (
     Path("crates/waygate-authz/src/cedar.rs"),
@@ -135,6 +136,11 @@ if not producer_servers:
 for server in producer_servers:
     if not DEMO_SERVER.fullmatch(server):
         fail(TOOL_PRODUCER, f"catalog server must use demo-*, found {server!r}")
+
+realistic = json.loads(REALISTIC_CATALOG.read_text(encoding="utf-8"))
+for entry in realistic["servers"]:
+    if not DEMO_SERVER.fullmatch(entry["name"]):
+        fail(REALISTIC_CATALOG, f"catalog server must use demo-*, found {entry['name']!r}")
 
 if failures:
     for failure in failures:

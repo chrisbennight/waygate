@@ -1,0 +1,19 @@
+{
+  "formatVersion": 1,
+  "reportFormatVersion": 3,
+  "expectedToolCount": 78,
+  "maximums": {
+    "toolsJsonBytes": 66546,
+    "fieldValueBytes.names": 2049,
+    "fieldValueBytes.titles": 1193,
+    "fieldValueBytes.descriptions": 5968,
+    "fieldValueBytes.inputSchemas": 25749,
+    "fieldValueBytes.outputSchemas": 19465,
+    "fieldValueBytes.annotations": 6937,
+    "fieldValueBytes.meta": 0,
+    "repeatedStringBytes": 5536,
+    "repeatedDescriptionLeadingBlockBytes": 583,
+    "repeatedOutputSchemaBytes": 3126,
+    "largestDeclarationBytes": 2432
+  }
+}

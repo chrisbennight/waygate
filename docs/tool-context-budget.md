@@ -101,6 +101,41 @@ The output-schema budget includes the gateway's retained-response delivery
 alternative. Strict clients need the file descriptor and delivery-error schema
 alongside the upstream data schema to validate the result they receive. The limits in the budget file include that schema.
 
+### Realistic catalog
+
+The representative catalog has two upstreams, so a cost the gateway adds once
+per upstream or once per tool barely registers in it.
+`scripts/fixtures/tool-context/realistic-catalog.json` is a synthetic catalog
+closer to a real deployment: fifteen upstreams of common kinds, schemas with
+nested objects, enumerations, arrays and alternatives, output schemas on some
+tools, and one home automation server deployed twice under two names, as
+deployments often do. Its server names use the `demo-*` form that
+`scripts/check-synthetic-policy-fixtures.sh` enforces; real deployment details
+belong in operators' repositories.
+
+CI measures two views of it, each against its own budget:
+
+- the full list, which MCP 2026 clients and eager legacy sessions receive,
+  against `realistic-full-budget.json`; and
+- the progressive list a new legacy session receives before it discloses any
+  tool, one `searchTools` adapter per upstream, against
+  `realistic-progressive-budget.json`.
+
+The Code Mode-only view lists built-in tools alone, which the built-in budget
+already covers. To reproduce a view locally:
+
+```sh
+cargo run --quiet -p waygate-mcp --example tool_context_projection -- \
+  --catalog scripts/fixtures/tool-context/realistic-catalog.json \
+  --projection full |
+  node scripts/report-tool-context.mjs \
+    --budget scripts/fixtures/tool-context/realistic-full-budget.json -
+```
+
+Use `--projection progressive` and `realistic-progressive-budget.json` for the
+other view. A change to what the gateway adds to every tool or every upstream
+should quote the reports for both views before and after the change. The same
+ratchet rule applies to both budgets.
 
 The checked-in fixture at
 `scripts/fixtures/tool-context/standard-tools-list.json` is intentionally a
@@ -114,6 +149,30 @@ tool that declares it: clients use `outputSchema` to understand and validate
 `structuredContent`. Likewise, a repeated leading description block is a
 candidate for inspection; the downstream-authored remainder remains part of
 the tool contract.
+
+## Read production size metrics
+
+A deployment's own catalog is measured by two histograms,
+`mcp_tools_list_returned_tools` and `mcp_tools_list_serialized_bytes`, labelled
+by protocol generation, discovery mode and client class; see
+[the metrics reference](agents/telemetry.md#prometheus-metrics). The bundled
+dashboard charts their 95th percentiles.
+
+- Serialized bytes cover the compact `ListToolsResult` JSON of one response,
+  which is close to the reporter's `toolsJsonBytes` for the same view.
+- An MCP 2026 response is one page of up to 50 tools, and pages differ in
+  size, so its series describe pages rather than the catalog; a percentile
+  cannot be added up across pages. To compare a whole catalog with the
+  realistic full view, capture every page as described under
+  [reproducible report](#reproducible-report).
+- A legacy `progressive` series covers every list a progressive session
+  receives: the per-upstream adapters alone at first, then the adapters plus
+  the tools the session has disclosed. To measure the adapter-only cost, which
+  grows with the number of upstreams, capture a new session's first list. If
+  that capture is close to the full list for the same authorization view,
+  progressive disclosure is no longer saving context.
+- For a breakdown by field or by tool, or to find repeated content, capture
+  `tools/list` for one authorization view and run the reporter on it.
 
 ## Optimization boundary
 
