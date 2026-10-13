@@ -3176,8 +3176,6 @@ impl CodeModeTools {
                     .await;
                 return Ok(ExecuteResponse {
                     contract_version: ContractVersion::V1,
-                    sdk_contract_version: SdkContractVersion::V4,
-                    runner_contract_version: RunnerContractVersion::V7,
                     execution_id: attempt.execution_id,
                     source_ref,
                     status: ExecutionResponseStatus::WaitingForResume,
@@ -3204,8 +3202,6 @@ impl CodeModeTools {
                     .await;
                 return Ok(ExecuteResponse {
                     contract_version: ContractVersion::V1,
-                    sdk_contract_version: SdkContractVersion::V4,
-                    runner_contract_version: RunnerContractVersion::V7,
                     execution_id: attempt.execution_id,
                     source_ref,
                     status: ExecutionResponseStatus::WaitingForApproval,
@@ -3240,8 +3236,6 @@ impl CodeModeTools {
             .await;
         Ok(ExecuteResponse {
             contract_version: ContractVersion::V1,
-            sdk_contract_version: SdkContractVersion::V4,
-            runner_contract_version: RunnerContractVersion::V7,
             execution_id: attempt.execution_id,
             source_ref,
             status: ExecutionResponseStatus::Completed,
@@ -4036,6 +4030,8 @@ impl BuiltinTools for CodeModeTools {
             "limits" => {
                 let _: LimitsParams = parse_args(&arguments, "limits")?;
                 Ok(structured(&LimitsResponse {
+                    sdk_contract_version: SdkContractVersion::V4,
+                    runner_contract_version: RunnerContractVersion::V7,
                     resources: limits().clone(),
                     global_concurrency: self.execution_capacity.limits.global,
                     tenant_concurrency: self.execution_capacity.limits.per_tenant,
@@ -6860,10 +6856,6 @@ struct ConnectorBinding {
 struct ExecuteResponse {
     /// Version of the Code Mode execution contract.
     contract_version: ContractVersion,
-    /// Version of the `connectors[server][operation]` binding contract.
-    sdk_contract_version: SdkContractVersion,
-    /// Version of the parent/runner capability protocol.
-    runner_contract_version: RunnerContractVersion,
     /// Parent identity stamped onto every governed nested invocation and its
     /// evidence rows.
     execution_id: uuid::Uuid,
@@ -7352,6 +7344,12 @@ struct LimitsParams {}
 
 #[derive(Serialize, JsonSchema)]
 struct LimitsResponse {
+    /// Version of the `connectors[server][operation]` binding contract
+    /// programs run against. Constant for a gateway build, so it is stated
+    /// here once rather than on every execution response.
+    sdk_contract_version: SdkContractVersion,
+    /// Version of the parent/runner capability protocol.
+    runner_contract_version: RunnerContractVersion,
     /// Effective process resource budgets; byte sizes refer to UTF-8 or serialized JSON.
     resources: crate::codemode_limits::CodeModeLimits,
     /// Maximum active runners in this gateway process.
@@ -9661,6 +9659,20 @@ mod tests {
         assert!(structured(&describe)["governance"]
             .get("required_step_up_scope")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn limits_state_the_build_wide_contract_versions_once() {
+        let catalog: SharedCatalog = Arc::new(FakeCatalog::with_tools(&[("email", "read", false)]));
+        let authz: SharedAuthz = Arc::new(SelectiveAuthz);
+        let server = GatewayServer::with_authz(catalog.clone(), authz.clone())
+            .with_builtin_tools(Arc::new(code_mode_tools(catalog, authz)));
+        let limits = server
+            .dispatch_tool_call(call("codemode.limits", json!({})), Some(&reader()))
+            .await
+            .expect("limits succeed");
+        assert_eq!(structured(&limits)["sdk_contract_version"], "4");
+        assert_eq!(structured(&limits)["runner_contract_version"], "7");
     }
 
     #[tokio::test]
@@ -13317,8 +13329,6 @@ mod tests {
 
         let sample = super::structured(&ExecuteResponse {
             contract_version: ContractVersion::V1,
-            sdk_contract_version: SdkContractVersion::V4,
-            runner_contract_version: RunnerContractVersion::V7,
             execution_id: uuid::Uuid::now_v7(),
             source_ref: SourceReference {
                 sha256: source_digest("return null;"),
@@ -13335,8 +13345,9 @@ mod tests {
             }),
             artifacts: Vec::new(),
         });
-        assert_eq!(structured(&sample)["sdk_contract_version"], "4");
-        assert_eq!(structured(&sample)["runner_contract_version"], "7");
+        // Build-wide versions are stated once, by `codemode.limits`.
+        assert!(structured(&sample).get("sdk_contract_version").is_none());
+        assert!(structured(&sample).get("runner_contract_version").is_none());
         for name in ["codemode.execute", "codemode.resume"] {
             let definition = tool_defs()
                 .into_iter()

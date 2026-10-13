@@ -948,8 +948,6 @@
         "outputSchema": {
           "required": [
             "contract_version",
-            "sdk_contract_version",
-            "runner_contract_version",
             "execution_id",
             "source_ref",
             "status",
@@ -962,19 +960,6 @@
               "type": "string",
               "enum": [
                 "1"
-              ]
-            },
-            "SdkContractVersion": {
-              "description": "The caller-facing spelling of the stamps a row carries. These are the same\ntwo numbers as `SDK_CONTRACT_VERSION` and `RUNNER_CONTRACT_VERSION` and must\nadvance with them: a response that advertised the previous contract while\nthe sandbox offered a new one would tell a client the program surface is\nsomething other than what it ran against.",
-              "type": "string",
-              "enum": [
-                "4"
-              ]
-            },
-            "RunnerContractVersion": {
-              "type": "string",
-              "enum": [
-                "7"
               ]
             },
             "SourceReference": {
@@ -1158,14 +1143,6 @@
             "contract_version": {
               "description": "Version of the Code Mode execution contract.",
               "$ref": "#/$defs/ContractVersion"
-            },
-            "sdk_contract_version": {
-              "description": "Version of the `connectors[server][operation]` binding contract.",
-              "$ref": "#/$defs/SdkContractVersion"
-            },
-            "runner_contract_version": {
-              "description": "Version of the parent/runner capability protocol.",
-              "$ref": "#/$defs/RunnerContractVersion"
             },
             "execution_id": {
               "description": "Parent identity stamped onto every governed nested invocation and its\nevidence rows.",
@@ -1468,12 +1445,27 @@
         },
         "outputSchema": {
           "required": [
+            "sdk_contract_version",
+            "runner_contract_version",
             "resources",
             "global_concurrency",
             "tenant_concurrency",
             "detached_concurrency"
           ],
           "$defs": {
+            "SdkContractVersion": {
+              "description": "The caller-facing spelling of the stamps a row carries. These are the same\ntwo numbers as `SDK_CONTRACT_VERSION` and `RUNNER_CONTRACT_VERSION` and must\nadvance with them: a response that advertised the previous contract while\nthe sandbox offered a new one would tell a client the program surface is\nsomething other than what it ran against.",
+              "type": "string",
+              "enum": [
+                "4"
+              ]
+            },
+            "RunnerContractVersion": {
+              "type": "string",
+              "enum": [
+                "7"
+              ]
+            },
             "CodeModeLimits": {
               "description": "Effective operator resource budgets. Byte limits count UTF-8 or serialized JSON bytes.",
               "type": "object",
@@ -1674,6 +1666,14 @@
           },
           "type": "object",
           "properties": {
+            "sdk_contract_version": {
+              "description": "Version of the `connectors[server][operation]` binding contract\nprograms run against. Constant for a gateway build, so it is stated\nhere once rather than on every execution response.",
+              "$ref": "#/$defs/SdkContractVersion"
+            },
+            "runner_contract_version": {
+              "description": "Version of the parent/runner capability protocol.",
+              "$ref": "#/$defs/RunnerContractVersion"
+            },
             "resources": {
               "description": "Effective process resource budgets; byte sizes refer to UTF-8 or serialized JSON.",
               "$ref": "#/$defs/CodeModeLimits"
@@ -1816,8 +1816,6 @@
         "outputSchema": {
           "required": [
             "contract_version",
-            "sdk_contract_version",
-            "runner_contract_version",
             "execution_id",
             "source_ref",
             "status",
@@ -1830,19 +1828,6 @@
               "type": "string",
               "enum": [
                 "1"
-              ]
-            },
-            "SdkContractVersion": {
-              "description": "The caller-facing spelling of the stamps a row carries. These are the same\ntwo numbers as `SDK_CONTRACT_VERSION` and `RUNNER_CONTRACT_VERSION` and must\nadvance with them: a response that advertised the previous contract while\nthe sandbox offered a new one would tell a client the program surface is\nsomething other than what it ran against.",
-              "type": "string",
-              "enum": [
-                "4"
-              ]
-            },
-            "RunnerContractVersion": {
-              "type": "string",
-              "enum": [
-                "7"
               ]
             },
             "SourceReference": {
@@ -2026,14 +2011,6 @@
             "contract_version": {
               "description": "Version of the Code Mode execution contract.",
               "$ref": "#/$defs/ContractVersion"
-            },
-            "sdk_contract_version": {
-              "description": "Version of the `connectors[server][operation]` binding contract.",
-              "$ref": "#/$defs/SdkContractVersion"
-            },
-            "runner_contract_version": {
-              "description": "Version of the parent/runner capability protocol.",
-              "$ref": "#/$defs/RunnerContractVersion"
             },
             "execution_id": {
               "description": "Parent identity stamped onto every governed nested invocation and its\nevidence rows.",
