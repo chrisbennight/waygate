@@ -18,6 +18,26 @@ struct CacheKey {
     schema_value_hash: String,
 }
 
+impl CacheKey {
+    fn new(tool_id: Uuid, schema_hash: &str, schema: &serde_json::Value) -> Self {
+        Self {
+            tool_id,
+            schema_hash: schema_hash.to_owned(),
+            schema_value_hash: waygate_catalog::validator_schema_hash(schema),
+        }
+    }
+}
+
+fn compile(schema: &serde_json::Value) -> CachedValidator {
+    match jsonschema::validator_for(schema) {
+        Ok(validator) => CachedValidator::Ready(Arc::new(validator)),
+        Err(_) => {
+            waygate_telemetry::metrics::record_schema_validator_compile_failure();
+            CachedValidator::Invalid
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum CachedValidator {
     Ready(Arc<jsonschema::Validator>),
@@ -65,23 +85,61 @@ impl SchemaValidatorCache {
         }
     }
 
+    /// The validator for an exact approved schema version. A compiled entry is
+    /// returned directly; compiling a miss, or waiting for another caller's
+    /// compilation of it, runs on the blocking pool so an async worker never
+    /// stalls on a slow schema.
+    pub(super) async fn validator(
+        self: &Arc<Self>,
+        tool_id: Uuid,
+        schema_hash: &str,
+        schema: &serde_json::Value,
+    ) -> CachedValidator {
+        let key = CacheKey::new(tool_id, schema_hash, schema);
+        if let Some(ready) = self.ready(&key) {
+            return ready;
+        }
+        let schema = schema.clone();
+        self.get_or_compile_off_worker(key, move || compile(&schema))
+            .await
+    }
+
+    async fn get_or_compile_off_worker(
+        self: &Arc<Self>,
+        key: CacheKey,
+        compile: impl FnOnce() -> CachedValidator + Send + 'static,
+    ) -> CachedValidator {
+        let cache = Arc::clone(self);
+        match tokio::task::spawn_blocking(move || cache.get_or_compile_with(key, compile)).await {
+            Ok(validator) => validator,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => panic!("schema validator compilation did not run: {error}"),
+        }
+    }
+
+    /// A compiled entry for `key`, without waiting for one still compiling.
+    fn ready(&self, key: &CacheKey) -> Option<CachedValidator> {
+        let ready = self
+            .state
+            .lock()
+            .expect("schema validator cache mutex poisoned")
+            .entries
+            .get(key)?
+            .get()?
+            .clone();
+        waygate_telemetry::metrics::record_schema_validator_cache_hit();
+        Some(ready)
+    }
+
+    #[cfg(test)]
     pub(super) fn get_or_compile(
         &self,
         tool_id: Uuid,
         schema_hash: &str,
         schema: &serde_json::Value,
     ) -> CachedValidator {
-        let key = CacheKey {
-            tool_id,
-            schema_hash: schema_hash.to_owned(),
-            schema_value_hash: waygate_catalog::validator_schema_hash(schema),
-        };
-        self.get_or_compile_with(key, || match jsonschema::validator_for(schema) {
-            Ok(validator) => CachedValidator::Ready(Arc::new(validator)),
-            Err(_) => {
-                waygate_telemetry::metrics::record_schema_validator_compile_failure();
-                CachedValidator::Invalid
-            }
+        self.get_or_compile_with(CacheKey::new(tool_id, schema_hash, schema), || {
+            compile(schema)
         })
     }
 
@@ -180,13 +238,47 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{CacheKey, CachedValidator, SchemaValidatorCache};
+    use super::{compile, CacheKey, CachedValidator, SchemaValidatorCache};
 
     fn ready(result: CachedValidator) -> Arc<jsonschema::Validator> {
         match result {
             CachedValidator::Ready(validator) => validator,
             CachedValidator::Invalid => panic!("test schema must compile"),
         }
+    }
+
+    /// A miss compiles off the async worker: on a single-threaded runtime,
+    /// another task must still run while that compilation waits for it.
+    #[test]
+    fn a_compiling_miss_leaves_the_async_worker_free() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cache = Arc::new(SchemaValidatorCache::with_capacity(4));
+            let schema = json!({"type": "integer"});
+            let key = CacheKey::new(Uuid::new_v4(), "miss", &schema);
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let compiling = {
+                let cache = Arc::clone(&cache);
+                tokio::spawn(async move {
+                    cache
+                        .get_or_compile_off_worker(key, move || {
+                            assert!(
+                                release_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+                                "the compilation held the only async worker"
+                            );
+                            compile(&schema)
+                        })
+                        .await
+                })
+            };
+            let releasing = tokio::spawn(async move { release_tx.send(()).unwrap() });
+            ready(compiling.await.unwrap());
+            releasing.await.unwrap();
+            assert_eq!(cache.compilation_count(), 1);
+        });
     }
 
     #[test]
