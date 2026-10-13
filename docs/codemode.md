@@ -184,8 +184,10 @@ uploaded bytes with another retention request may extend it.
 
 Retained source is content storage and therefore requires both a configured
 database and `GATEWAY_CODEMODE_RESULT_STORAGE=allow`. The default `disabled`
-posture refuses retention with `source_artifact_unavailable` and preserves its
-no-content storage contract; ordinary blocking execution remains available.
+posture refuses retention with `source_artifact_unavailable`; ordinary
+blocking execution remains available. That posture still journals each
+execution's source with its worker claim, as described under the durability
+model, but never stores program input, artifacts, checkpoints, or results.
 
 Retention defaults to 64 sources and 64 MiB per owner, and 1,024 sources and
 1 GiB per tenant. Operators can configure the count and byte quotas; byte
@@ -593,8 +595,9 @@ the message and the code is `connector_failure`. A direct-authority call
 surfaces the same approval or step-up refusal as the corresponding direct MCP
 call. Resume incompatibility surfaces
 as the structured `execution_resume_incompatible` refusal on the
-`codemode.resume` call itself. `ambiguous` is reserved for the
-mutation-recovery epic's uncertain-outcome state.
+`codemode.resume` call itself. `ambiguous` is a reserved status that no current
+path sets: a run interrupted during a side effect is reported as `expired` with
+the reason `effect_outcome_unknown` instead.
 Structured logging rides the artifact channel — emit an artifact with your
 own discriminating shape (for example `{kind: "log", …}`) rather than a
 parallel logging API; artifacts are bounded, durable, and retrievable with
@@ -711,7 +714,10 @@ from older releases that recorded a resumable profile return to
 `waiting_for_resume` instead. Without that storage decision or durable storage,
 the bounded blocking execution path remains available without advertising task
 augmentation or claiming restart durability. MCP Tasks projects the internal
-journal rather than becoming a competing execution store.
+journal rather than becoming a competing execution store. For what survives a
+restart, a client disconnect, or a replica change, set against the gateway's
+other kinds of work, see
+[the survival summary](agents/tasks.md#what-survives-restarts-disconnects-and-replica-changes).
 
 When durable content storage is enabled, the generated SDK exposes
 `execution.artifactsAvailable` and
