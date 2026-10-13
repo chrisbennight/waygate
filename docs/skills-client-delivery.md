@@ -5,6 +5,23 @@ prompts. A client does not need the draft Skills extension to discover and read
 them. The authoring repository remains the source of truth; these interfaces
 use its existing verified catalog and individual resource reader.
 
+## Which path a client gets
+
+Every path reads the same verified catalog and applies the same distribution
+approval, policy and profile checks to each access.
+
+| Client | Path |
+| --- | --- |
+| Declares the `io.modelcontextprotocol/skills` extension | `skills/list` and `skills/get`, with supporting files read through `resources/read`, as the [Skills extension](https://modelcontextprotocol.io/extensions/skills/overview) defines. |
+| Supports prompts | Each workflow is also a prompt, described under [command shortcuts](#command-shortcuts). |
+| Any client | The `gateway-skills.search`, `gateway-skills.load` and `gateway-skills.read_file` tools, described below. |
+
+The gateway advertises the extension to every caller that can access an
+approved skill; a client uses it only if it also supports it, and other
+clients ignore the advertisement. The official
+[client support matrix](https://modelcontextprotocol.io/extensions/client-matrix)
+lists which clients support it.
+
 ## Discover and use a workflow
 
 1. Call `gateway-skills.search` with a short task description, such as

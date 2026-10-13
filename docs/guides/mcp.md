@@ -46,6 +46,7 @@ The modern path has a stable authorized direct catalog. See the
 | Discovery, typed tools, resources, prompts | Core MCP | Standard client-facing methods and governed upstream routing. |
 | Self-contained requests and `server/discover` | MCP 2026-07-28 | Request-local version/capability handling with a stable, paginated direct-tool catalog. |
 | Legacy initialization | Compatibility | Stateful MCP sessions alongside the modern request model. |
+| MCP Apps | Official `io.modelcontextprotocol/ui` extension | Passed through: a tool's `_meta.ui` reference, its `ui://` resource and result metadata reach clients unchanged, and the resource is read under ordinary resource authorization. The gateway's shared upstream sessions declare no client extensions, so an upstream that lists app tools only to clients declaring the extension does not list them through the gateway. |
 | Durable Tasks | Official `io.modelcontextprotocol/tasks` extension | Configured Code Mode executions project status, results, cancellation, and continuation input through the extension. Durability requires explicit storage configuration. |
 | Enterprise-managed authorization | Official MCP authorization extension, built on an IETF draft | Opt-in ID-JAG issuance and redemption using the gateway's policy and directory state. See [identity capabilities](security.md). |
 | Progressive `searchTools` | Closed SEP-1888 draft compatibility | An optional search projection; ordinary tools remain the portable interface. |
