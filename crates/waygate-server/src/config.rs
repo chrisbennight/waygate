@@ -205,9 +205,9 @@ pub struct Config {
     /// Idle timeout the streamable-HTTP session manager applies to each
     /// `Mcp-Session-Id`. After this much inactivity the rmcp session worker
     /// quits and the next request on that session ID gets `404 Session not
-    /// found`. The MCP spec says clients SHOULD re-handshake on that error,
-    /// but Claude Code (issue #27142) does not — so the practical effect of
-    /// a short timeout is a hung CLI until the user restarts. Default 7 days
+    /// found`. The MCP spec says clients must re-initialize on that error,
+    /// but some do not (older Claude Code releases among them), so for them
+    /// a short timeout means a hung client until it is reconnected. Default 7 days
     /// — long enough to outlast any realistic CLI idle gap while still being
     /// a finite safety net for half-open HTTP/2 streams. Floor 60s. `0`
     /// disables the timeout entirely (`None`) — sessions then live until the

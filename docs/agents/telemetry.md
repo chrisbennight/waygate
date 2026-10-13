@@ -264,13 +264,27 @@ Metric semantics and operational uses:
   reconciles the complete active set so a racing stale snapshot cannot leave
   a permanent nonzero series. Charted on the dashboard's "Authoritative
   upstream runtime state" panel.
+- `mcp_requests_total{protocol_generation,protocol_version,client}` — every
+  served downstream MCP request, counted once when its client context is
+  resolved. `protocol_generation` is `legacy` or `2026-07-28`;
+  `protocol_version` is the negotiated version, one of the versions the
+  transport can negotiate, `other` or `unknown`. `client` is the self-reported
+  `clientInfo.name`, lower-cased with characters outside letters, digits and
+  `-_./ ` replaced by `_` and cut to 64 characters, or `unknown` when absent.
+  Only the first 32 distinct names a process sees get their own series; later
+  names share `other` until the process restarts. This is the usage evidence
+  for the [protocol support policy](../guides/mcp.md#protocol-support-policy).
+  It shows which clients still use the session path and at which version, and
+  is charted on the dashboard's "Downstream requests by protocol version and
+  client" panel.
 - `mcp_tools_list_requests_total{protocol_generation,discovery_mode,client_class}` —
   downstream catalog requests split across `legacy` progressive,
   process-wide eager, and per-client eager modes plus the MCP `2026-07-28`
   stable-full projection. All labels come from one closed enum; `client_class`
   distinguishes stateless, allowlisted legacy, other legacy, and the global
-  override without recording the self-asserted client name. Client names,
-  credentials, tool names, and payloads are never labels. This is the
+  override without recording the self-asserted client name. Credentials,
+  tool names, and payloads are never labels, and the bounded `client` label on
+  `mcp_requests_total` is the only place a client name appears. This is the
   rollout/rollback signal for the legacy projection and is charted on the
   dashboard's "Downstream tools/list projection rate" panel.
 - `mcp_tools_list_returned_tools{protocol_generation,discovery_mode,client_class}`
@@ -346,6 +360,8 @@ persists.
 
 **Cardinality discipline** — label sets are bounded at registration: `server`
 (manifest count) and closed enums (`decision`, `risk`, `outcome`, `method`).
+The one self-reported value, `client` on `mcp_requests_total`, is capped at a
+fixed number of distinct names per process.
 We deliberately do **not** label by `tool` or `user.sub`; that per-call detail
 lives on the spans (`gen_ai.tool.name`) and the audit log, not in metric
 series. A PR adding a metric or label should also grow the dashboard.

@@ -1998,23 +1998,73 @@ fn requests_by_generation() -> &'static CounterVec {
     M.get_or_init(|| {
         register_counter_vec_with_registry!(
             "mcp_requests_total",
-            "MCP requests served, keyed by negotiated protocol generation: \
-             `legacy` (2025-11-25-and-earlier sessions) or `2026-07-28` \
-             (stateless per-request negotiation). The legacy series going \
-             flat for the deprecation window is the evidence the \
-             legacy-path removal decision requires.",
-            &["protocol_generation"],
+            "MCP requests served, keyed by negotiated protocol generation \
+             (`legacy` for 2025-11-25-and-earlier sessions, `2026-07-28` for \
+             stateless per-request negotiation), the exact negotiated \
+             protocol version, and the client's self-reported name. The \
+             legacy series going flat for the deprecation window is the \
+             evidence the legacy-path removal decision requires; the version \
+             and client labels name the clients that still need it. Client \
+             names are normalized and only the first distinct names a \
+             process sees are kept; later names are recorded as `other`.",
+            &["protocol_generation", "protocol_version", "client"],
             registry()
         )
         .expect("register mcp_requests_total")
     })
 }
 
-/// Record one served MCP request under its negotiated protocol generation.
-/// Called wherever `waygate-mcp` resolves the per-request client context.
-pub fn record_protocol_generation(generation: &str) {
+/// Distinct client names one process labels individually. Client names are
+/// self-reported, so later names share `other` rather than letting callers
+/// create series without bound.
+const CLIENT_LABEL_LIMIT: usize = 32;
+/// Longest client-name label, in characters, after normalization.
+const CLIENT_LABEL_MAX_CHARS: usize = 64;
+
+/// Bound a self-reported client name to a label: lower-case ASCII letters,
+/// digits and `-_./ ` with anything else replaced by `_`, truncated, and
+/// admitted only while fewer than [`CLIENT_LABEL_LIMIT`] names are known.
+/// A missing or blank name is `unknown`.
+fn client_label(client_name: Option<&str>) -> String {
+    let normalized: String = client_name
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(CLIENT_LABEL_MAX_CHARS)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ' ') {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if normalized.is_empty() {
+        return "unknown".to_owned();
+    }
+    static KNOWN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let mut known = KNOWN
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .expect("client label registry lock poisoned");
+    if known.contains(&normalized) {
+        return normalized;
+    }
+    if known.len() < CLIENT_LABEL_LIMIT {
+        known.insert(normalized.clone());
+        return normalized;
+    }
+    "other".to_owned()
+}
+
+/// Record one served MCP request under its negotiated protocol generation
+/// and version and the client's self-reported name. `protocol_version` must
+/// already be a closed value; the caller maps anything outside the versions
+/// the transport can negotiate to `other`. Called wherever `waygate-mcp`
+/// resolves the per-request client context.
+pub fn record_mcp_request(generation: &str, protocol_version: &str, client_name: Option<&str>) {
     requests_by_generation()
-        .with_label_values(&[generation])
+        .with_label_values(&[generation, protocol_version, &client_label(client_name)])
         .inc();
 }
 
@@ -2406,6 +2456,46 @@ mod tests {
             text.contains("method=\"tools/list\"") && text.contains("outcome=\"error\""),
             "tools/list error series must be present:\n{text}"
         );
+    }
+
+    #[test]
+    fn request_counter_labels_versions_and_a_bounded_set_of_client_names() {
+        record_mcp_request("legacy", "2025-06-18", Some("  Claude-Code "));
+        record_mcp_request("2026-07-28", "2026-07-28", None);
+        record_mcp_request("legacy", "2025-11-25", Some("odd\"} 1\n#"));
+        for index in 0..CLIENT_LABEL_LIMIT {
+            record_mcp_request("legacy", "2025-11-25", Some(&format!("filler-{index}")));
+        }
+        record_mcp_request("legacy", "2025-11-25", Some("late-arrival"));
+        record_mcp_request("legacy", "2025-06-18", Some("claude-code"));
+
+        let text = crate::gather_text();
+        let series = |generation: &str, version: &str, client: &str| {
+            text.lines()
+                .find(|line| {
+                    line.starts_with("mcp_requests_total{")
+                        && line.contains(&format!("protocol_generation=\"{generation}\""))
+                        && line.contains(&format!("protocol_version=\"{version}\""))
+                        && line.contains(&format!("client=\"{client}\""))
+                })
+                .map(|line| line.rsplit(' ').next().unwrap_or_default().to_owned())
+        };
+        // A name already known keeps its own series after the limit is reached.
+        assert_eq!(
+            series("legacy", "2025-06-18", "claude-code").as_deref(),
+            Some("2"),
+            "{text}"
+        );
+        assert!(
+            series("2026-07-28", "2026-07-28", "unknown").is_some(),
+            "{text}"
+        );
+        assert!(
+            series("legacy", "2025-11-25", "odd__ 1__").is_some(),
+            "{text}"
+        );
+        assert!(series("legacy", "2025-11-25", "other").is_some(), "{text}");
+        assert!(!text.contains("late-arrival"), "{text}");
     }
 
     #[test]

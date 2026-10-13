@@ -32,6 +32,27 @@ pub enum ProtocolGeneration {
     Stateless2026,
 }
 
+/// Count one served request in `mcp_requests_total`. The version label is
+/// limited to the versions the transport can negotiate; anything else, such
+/// as an unrecognized version an `initialize` request asked for, is `other`.
+pub(crate) fn record_request(
+    generation: ProtocolGeneration,
+    version: Option<&ProtocolVersion>,
+    client_name: Option<&str>,
+) {
+    let generation = match generation {
+        ProtocolGeneration::Legacy => "legacy",
+        ProtocolGeneration::Stateless2026 => "2026-07-28",
+    };
+    let version = version.map_or("unknown", |version| {
+        ProtocolVersion::KNOWN_VERSIONS
+            .iter()
+            .find(|known| *known == version)
+            .map_or("other", ProtocolVersion::as_str)
+    });
+    waygate_telemetry::metrics::record_mcp_request(generation, version, client_name);
+}
+
 /// Everything the gateway decides per request about the calling client,
 /// resolved identically for both protocol generations.
 #[derive(Clone, Debug)]

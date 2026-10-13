@@ -81,24 +81,26 @@ pub use waygate_invocation::{
 };
 
 /// MCP spec versions this gateway serves, newest first. The first entry is
-/// the primary version named by the README's "Supported MCP spec version"
-/// line and the dashboard's system info; the full list is what
-/// `GatewayServer::supported_protocol_versions()` advertises (it is derived
-/// from this constant, so the two cannot drift). The conformance suite
+/// the primary version named by the dashboard's system info; the full list is
+/// what `GatewayServer::supported_protocol_versions()` advertises (it is
+/// derived from this constant, so the two cannot drift) and what the MCP
+/// guide's support policy names. The conformance suite
 /// under `crates/waygate-test-client/` asserts the same versions independently
 /// (not derived from this constant, so pin-vs-wire drift fails conformance
 /// rather than being tautologically green).
 ///
 /// 2026-07-28 is served statelessly with a stable, paginated,
-/// authorization-filtered direct-tool projection; 2025-11-25 and earlier are
-/// served on sessions with the legacy discovery adapter. When a spec revision
-/// is added or retired, update this list, the conformance suite, and the README
-/// in the same change, then verify against the current spec page on
-/// modelcontextprotocol.io before merging.
+/// authorization-filtered direct-tool projection; 2025-11-25 is served on
+/// sessions with the legacy discovery adapter. The transport also accepts an
+/// `initialize` that asks for an earlier version it knows and serves that
+/// session the same way, without narrowing it to what the earlier revision
+/// defined. When a spec revision is added or retired, update this list, the
+/// conformance suite, and the MCP guide in the same change, then verify
+/// against the current spec page on modelcontextprotocol.io before merging.
 pub const SUPPORTED_MCP_SPEC_VERSIONS: &[&str] = &["2026-07-28", "2025-11-25"];
 
 /// Primary (newest) supported MCP spec version — the single-version name
-/// retained for the README line, the dashboard system info, and
+/// retained for the dashboard system info, the stateless request checks, and
 /// compliance-mapping references.
 pub const MCP_SPEC_VERSION: &str = SUPPORTED_MCP_SPEC_VERSIONS[0];
 
@@ -118,7 +120,7 @@ mod spec_version_pin {
                     .any(|known| known.as_str() == *version),
                 "`{version}` is not a protocol version this rmcp release knows; \
                  update SUPPORTED_MCP_SPEC_VERSIONS (and the conformance suite + \
-                 README) in lockstep with the rmcp dependency",
+                 MCP guide) in lockstep with the rmcp dependency",
             );
         }
     }

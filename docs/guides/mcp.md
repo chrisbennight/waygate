@@ -65,6 +65,65 @@ for their own status. The gateway's file negotiation matrix documents the
 current SDK gap for legacy initialization-only file capabilities and the
 request-metadata alternative. It does not assume all hosts implement these drafts.
 
+## Protocol support policy
+
+The gateway serves two protocol generations side by side:
+
+- **MCP `2026-07-28`** has no sessions. Any replica can answer any request, so a
+  restart or a move to another replica affects only requests already in flight.
+- **MCP `2025-11-25`** uses sessions held in the memory of one gateway process.
+  An `initialize` request that asks for an earlier version (`2024-11-05`,
+  `2025-03-26` or `2025-06-18`) is accepted at that version and served the
+  same way; the gateway does not narrow its behavior to the earlier revision.
+
+New capabilities are built for `2026-07-28`. The session path keeps the
+features it has and receives security, correctness and compatibility fixes. It
+gains a new capability only when that needs no work specific to sessions.
+
+The specification sets no end date for `2025-11-25`, and
+[SEP-2567](https://modelcontextprotocol.io/seps/2567-sessionless-mcp) leaves
+that choice to each server. The gateway keeps the session path while clients
+still use it. `mcp_requests_total` counts every request by protocol generation,
+negotiated version and client name; see
+[the metrics reference](../agents/telemetry.md#prometheus-metrics). The session
+path is retired only after its `legacy` series has stayed flat for an
+observation window, and the release notes announce the removal in advance.
+
+Review this policy at each of these points:
+
+- when the first MCP revision released on or after 2027-07-28 is published,
+  the earliest point at which the
+  [deprecated features registry](https://modelcontextprotocol.io/specification/2026-07-28/deprecated)
+  allows Roots, Sampling, Logging and Dynamic Client Registration to be removed;
+- when SEP-2596 reaches Final, which starts the registry's three-month notice
+  before the HTTP+SSE transport may be removed; and
+- whenever the gateway adopts a new specification revision.
+
+### Deprecated features
+
+| Feature | Gateway as a server, toward clients | Gateway as a client, toward upstreams | Plan |
+| --- | --- | --- | --- |
+| Roots | Never requests roots. When a `2026-07-28` upstream asks for roots before it can finish a call, the gateway does not pass the request on and returns a refusal that says why. | Never declares roots. On a `2025-11-25` upstream session the MCP SDK's default handler answers an unexpected `roots/list` with an empty list. | No change. Nothing depends on the feature, so its removal needs no gateway work. |
+| Sampling | Never requests sampling. An upstream sampling request on `2026-07-28` is refused the same way as roots. | Never declares sampling. On a `2025-11-25` upstream session a sampling request is refused as an unknown method. | No change. No sampling relay will be built. |
+| Logging | Does not advertise the `logging` capability, refuses `logging/setLevel` as an unknown method and sends no `notifications/message`. | Drops upstream log notifications. | No change. The gateway reports through its own logs, metrics and audit records. |
+| Dynamic Client Registration | Not offered. The optional built-in authorization server, off by default, identifies clients by Client ID Metadata Documents. | Not used. Upstream credentials come from each manifest's `auth:` block. | No change. |
+| HTTP+SSE transport | Not served. Clients use Streamable HTTP at `/mcp`. | Opt-in per upstream with `transport: sse`, which always uses the `2025-11-25` handshake. | Kept while configured upstreams need it. When SEP-2596 reaches Final, move SSE upstreams to Streamable HTTP before the removal date the registry then sets. |
+
+### Restarts and `2025-11-25` sessions
+
+A restart, or a request routed to another replica, ends every `2025-11-25`
+session on that process. The gateway then answers the old session ID with HTTP
+404 Not Found, which the specification defines as the signal to start a new
+session. Claude Code does this automatically since the fix recorded in
+[claude-code#55970](https://github.com/anthropics/claude-code/issues/55970)
+(May 2026). Older Claude Code releases, and other clients that ignore the
+signal, keep failing until the user reconnects the server or restarts the
+client; upgrade them, or move them to `2026-07-28`, which needs no reconnection.
+
+A response stream cut off by the restart cannot be resumed. Work that must
+survive a restart belongs in a task or a detached Code Mode execution; see
+[what survives restarts](../agents/tasks.md#what-survives-restarts-disconnects-and-replica-changes).
+
 ## Verify your client
 
 Use the [host-contract probe](../host-tool-discovery.md#executable-proof) with an

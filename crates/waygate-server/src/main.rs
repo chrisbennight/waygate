@@ -584,12 +584,13 @@ async fn gateway_main() -> anyhow::Result<()> {
         &eager_tools_clients,
         &codemode_only_tools_clients,
     );
-    // Stretch the streamable-HTTP idle session timeout past Claude Code's
-    // idle-CLI gap. rmcp's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5 minutes;
-    // a Claude Code session that idles past that gets a stale Mcp-Session-Id
-    // and (per claude-code#27142) never re-handshakes, so the CLI hangs until
-    // restart. Operators override via `GATEWAY_SESSION_KEEPALIVE_SECONDS`
-    // (0 disables the timeout).
+    // Stretch the streamable-HTTP idle session timeout past an interactive
+    // client's idle gap. rmcp's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5
+    // minutes; a session that idles past that gets a stale Mcp-Session-Id,
+    // and a client that does not re-initialize on the 404 (older Claude Code
+    // releases among them) stops working until it is reconnected. Operators
+    // override via `GATEWAY_SESSION_KEEPALIVE_SECONDS` (0 disables the
+    // timeout).
     let session_manager = {
         let mut mgr = LocalSessionManager::default();
         mgr.session_config.keep_alive = cfg.session_keepalive;

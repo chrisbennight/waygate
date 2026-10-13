@@ -64,12 +64,13 @@ pub enum Transport {
 
 /// Which MCP client lifecycle the gateway runs when dialing this upstream.
 ///
-/// `auto` (the default) probes with `server/discover` and falls back to the
-/// legacy `initialize` handshake only when the upstream proves it is legacy
-/// (`METHOD_NOT_FOUND`); any other discovery error fails the dial rather
-/// than silently downgrading. `legacy` skips discovery entirely — the
-/// operator escape hatch for an upstream whose non-conforming discovery
-/// response would otherwise fail the dial. `2026-07-28` requires the new
+/// `auto` (the default) probes with `server/discover` and, if that
+/// handshake fails, makes one fresh dial with the legacy `initialize`
+/// handshake. An older server refuses the probe at the transport or session
+/// layer rather than answering `METHOD_NOT_FOUND`, so the fallback does not
+/// depend on the shape of the failure; a timeout, a failed subprocess spawn
+/// or an invalid `auth:`/`mtls:` block still fails the dial. `legacy` skips discovery entirely, saving the probe
+/// for an upstream known to be legacy. `2026-07-28` requires the new
 /// lifecycle and never falls back. SSE-transport upstreams are legacy by
 /// definition: `auto` resolves to the legacy handshake there, and an
 /// explicit `2026-07-28` is rejected at manifest validation.
