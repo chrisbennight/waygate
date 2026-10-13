@@ -297,8 +297,9 @@ This document covers:
   pins it wants a migration failure to surface, not to be downgraded past.
   SSE transport is legacy by definition: `auto` resolves to the legacy
   handshake there and an explicit `2026-07-28` is refused at manifest
-  load. Every dial runs the configured mode fresh (no lifecycle caching);
-  the negotiated generation is per-lane state, visible per server in the
+  load. Boot and re-probe dials run the configured mode fresh; per-call
+  dials reuse their lane's result as described below. The negotiated
+  generation is per-lane state, visible per server in the
   admin Servers view, `GET /api/v1/servers` (`protocol_versions`), and the
   `gateway_upstream_protocol_generation` gauge.
 
@@ -323,7 +324,7 @@ This document covers:
   `auto`, a per-call session reuses the generation its lane negotiated, so a
   legacy upstream is dialed straight into the `initialize` handshake. If that
   upstream has since upgraded and refuses the handshake, the per-call dial
-  negotiates in full, and the lane records the new generation the next time
+  tries discovery alone, and the lane records the new generation the next time
   it is re-dialed. Until then each such call pays one refused handshake.
   Migration therefore stays observable without a probe on every call. A `protocol` change is a
   connection-shape change: reloads re-dial it. The `session` block carries

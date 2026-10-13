@@ -930,15 +930,25 @@ pub(super) async fn per_call_dial(
         // Under `auto`, a lane that negotiated the legacy generation already
         // proved discovery is refused, so a per-call dial skips the probe.
         // An upstream that has since upgraded may refuse the legacy handshake;
-        // the dial then negotiates in full, as it would have anyway.
+        // the dial then tries discovery alone, since `auto` would only repeat
+        // the refused legacy leg after it.
         if lane_negotiated_legacy_under_auto(snapshot, negotiated_protocol) {
             let mut pinned = snapshot.clone();
             pinned.protocol = crate::UpstreamProtocol::Legacy;
-            match crate::transport::connect_with_destination(&pinned, issuer, cell, exchange).await
+            return match crate::transport::connect_with_destination(&pinned, issuer, cell, exchange)
+                .await
             {
-                Err(crate::transport::DialError::Init(_)) => {}
-                dialed => return dialed,
-            }
+                Err(crate::transport::DialError::Init(_)) => {
+                    crate::transport::connect_with_destination(
+                        &pinned_2026_manifest(snapshot),
+                        issuer,
+                        cell,
+                        exchange,
+                    )
+                    .await
+                }
+                dialed => dialed,
+            };
         }
         return crate::transport::connect_with_destination(snapshot, issuer, cell, exchange).await;
     }
