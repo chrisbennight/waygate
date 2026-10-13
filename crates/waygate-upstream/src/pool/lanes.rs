@@ -5,12 +5,48 @@
 
 use super::*;
 
+/// An upstream's connection slots and the queue for checking one out. There
+/// is one permit per slot and only a checkout locks a slot's `in_use`, so a
+/// caller holding a permit is owed a free slot. Permits are granted in
+/// request order, so a waiting call takes whichever slot frees first.
+pub(super) struct ConnectionSlots {
+    slots: Vec<super::ConnectionSlot>,
+    permits: tokio::sync::Semaphore,
+}
+
+impl ConnectionSlots {
+    pub(super) fn new(slots: Vec<super::ConnectionSlot>) -> Self {
+        let permits = tokio::sync::Semaphore::new(slots.len());
+        Self { slots, permits }
+    }
+}
+
+impl std::ops::Deref for ConnectionSlots {
+    type Target = [super::ConnectionSlot];
+
+    fn deref(&self) -> &Self::Target {
+        &self.slots
+    }
+}
+
+impl<'a> IntoIterator for &'a ConnectionSlots {
+    type Item = &'a super::ConnectionSlot;
+    type IntoIter = std::slice::Iter<'a, super::ConnectionSlot>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.slots.iter()
+    }
+}
+
 /// RAII handle to a checked-out [`super::ConnectionSlot`]. Holds the
 /// slot's `in_use` lock for the duration of a call, so the slot's
 /// connection and identity cell are this call's alone.
 pub(super) struct SlotCheckout<'a> {
     pub(super) slot: &'a super::ConnectionSlot,
     pub(super) _guard: tokio::sync::MutexGuard<'a, ()>,
+    /// Declared after the guard so the slot is free before the next waiter
+    /// is admitted.
+    _permit: tokio::sync::SemaphorePermit<'a>,
 }
 
 impl super::UpstreamPool {
@@ -86,7 +122,7 @@ pub(super) async fn dial_slots(
     index: Option<&SearchIndex>,
     pool_size: usize,
     dial_timeout: Duration,
-) -> (Vec<ConnectionSlot>, Option<health::UpstreamErrorClass>) {
+) -> (ConnectionSlots, Option<health::UpstreamErrorClass>) {
     let n = slot_count(manifest, pool_size);
     let mut connections = Vec::with_capacity(n);
     let mut last_error_class = None;
@@ -185,7 +221,7 @@ pub(super) async fn dial_slots(
             in_use: Mutex::new(()),
         })
         .collect();
-    (slots, last_error_class)
+    (ConnectionSlots::new(slots), last_error_class)
 }
 
 impl super::UpstreamEntry {
@@ -215,43 +251,49 @@ impl super::UpstreamEntry {
             .clone()
     }
 
-    /// Check out a connection slot for exclusive use. Prefers a free
-    /// *connected* slot (first pass), then any free slot (second pass —
-    /// the caller gets a not-connected error if it's down, which feeds
-    /// the breaker and the re-probe heals it), and finally waits on slot
-    /// 0 if every slot is busy. The returned guard releases the slot on
-    /// drop, so the slot's connection + identity cell are this call's
-    /// alone for the dispatch.
+    /// Check out a connection slot for exclusive use. Waits for a permit,
+    /// then prefers a free *connected* slot, then any free slot (the caller
+    /// gets a not-connected error if it's down, which feeds the breaker and
+    /// the re-probe heals it). The returned guard releases the slot on drop,
+    /// so the slot's connection + identity cell are this call's alone for the
+    /// dispatch.
     pub(super) async fn checkout(&self) -> SlotCheckout<'_> {
-        // Pass 1: free AND connected.
-        for slot in &self.slots {
-            if let Ok(guard) = slot.in_use.try_lock() {
-                if slot.conn.read().await.is_some() {
+        let permit = self
+            .slots
+            .permits
+            .acquire()
+            .await
+            .expect("connection slot permits are never closed");
+        loop {
+            // Nothing in the scan waits. A busy slot is skipped before its
+            // connection is read, since its call holds that lock for reading
+            // and a queued reconnect writer would hold this read behind it.
+            // Pass 1: free AND connected; a connection being replaced is
+            // not known to be connected.
+            for slot in &self.slots {
+                if let Ok(guard) = slot.in_use.try_lock() {
+                    if slot.conn.try_read().is_ok_and(|conn| conn.is_some()) {
+                        return SlotCheckout {
+                            slot,
+                            _guard: guard,
+                            _permit: permit,
+                        };
+                    }
+                }
+            }
+            // Pass 2: any free slot (may be down).
+            for slot in &self.slots {
+                if let Ok(guard) = slot.in_use.try_lock() {
                     return SlotCheckout {
                         slot,
                         _guard: guard,
+                        _permit: permit,
                     };
                 }
-                drop(guard); // free but down — keep looking
             }
-        }
-        // Pass 2: any free slot (may be down).
-        for slot in &self.slots {
-            if let Ok(guard) = slot.in_use.try_lock() {
-                return SlotCheckout {
-                    slot,
-                    _guard: guard,
-                };
-            }
-        }
-        // All busy — queue behind slot 0. (Per-waiter round-robin
-        // fairness isn't worth the complexity; under sustained
-        // saturation every lane is equally hot.)
-        let slot = &self.slots[0];
-        let guard = slot.in_use.lock().await;
-        SlotCheckout {
-            slot,
-            _guard: guard,
+            // A slot is free at every instant, but one can be released behind
+            // this scan while the slot ahead of it is taken; scan again.
+            tokio::task::yield_now().await;
         }
     }
 }

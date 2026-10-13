@@ -2012,7 +2012,7 @@ fn entry_with_slots(n: usize) -> Arc<UpstreamEntry> {
         .collect();
     Arc::new(UpstreamEntry {
         manifest: StdRwLock::new(manifest_with(false)),
-        slots,
+        slots: lanes::ConnectionSlots::new(slots),
         session_mutation: Mutex::new(()),
         forwards_identity: false,
         breaker: Breaker::new(BreakerConfig::default()),
@@ -2131,6 +2131,82 @@ async fn checkout_uses_all_slots_under_contention() {
             .expect("released holders must finish")
             .unwrap();
     }
+}
+
+/// A call waiting with every slot busy takes whichever slot frees first,
+/// rather than queueing behind one particular slot whose call may run until
+/// the upstream call timeout.
+#[tokio::test]
+async fn a_waiting_checkout_takes_whichever_slot_frees_first() {
+    let entry = entry_with_slots(2);
+    let first = entry.checkout().await;
+    let second = entry.checkout().await;
+    let waiting = {
+        let entry = entry.clone();
+        tokio::spawn(async move {
+            let co = entry.checkout().await;
+            co.slot as *const ConnectionSlot as usize
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished(), "every slot is busy");
+
+    // Free whichever slot is not the first in the pool, and keep the other.
+    let (kept, freed) = if std::ptr::eq(first.slot, &entry.slots[0]) {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let freed_slot = freed.slot as *const ConnectionSlot as usize;
+    drop(freed);
+    let taken = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+        .await
+        .expect("the waiting call proceeds once any slot is free")
+        .unwrap();
+    assert_eq!(taken, freed_slot);
+    drop(kept);
+}
+
+/// A busy slot's call holds its connection for reading, and a reconnect may
+/// queue a writer behind it. A waiting checkout must not stall on that lock
+/// while another slot is free.
+#[tokio::test]
+async fn a_waiting_checkout_does_not_stall_on_a_busy_slot_being_reconnected() {
+    let entry = entry_with_slots(2);
+    let first = entry.checkout().await;
+    let second = entry.checkout().await;
+    let (busy, other) = if std::ptr::eq(first.slot, &entry.slots[0]) {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let dispatching = busy.slot.conn.read().await;
+    let reconnect = {
+        let entry = entry.clone();
+        tokio::spawn(async move {
+            drop(entry.slots[0].conn.write().await);
+        })
+    };
+    while entry.slots[0].conn.try_read().is_ok() {
+        tokio::task::yield_now().await;
+    }
+    let waiting = {
+        let entry = entry.clone();
+        tokio::spawn(async move {
+            let co = entry.checkout().await;
+            co.slot as *const ConnectionSlot as usize
+        })
+    };
+    let other_slot = other.slot as *const ConnectionSlot as usize;
+    drop(other);
+    let taken = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+        .await
+        .expect("a queued reconnect on a busy slot must not hold up a free one")
+        .unwrap();
+    assert_eq!(taken, other_slot);
+    drop(dispatching);
+    drop(busy);
+    reconnect.await.unwrap();
 }
 
 /// Regression for the 2026-06-10 prod boot deadlock: a stdio upstream that
@@ -2612,10 +2688,10 @@ fn entry_with_classification(tool_name: &str, risk: RiskTier) -> Arc<UpstreamEnt
         .push(ToolClassification::new(tool_name, risk, false, false));
     Arc::new(UpstreamEntry {
         manifest: StdRwLock::new(manifest),
-        slots: vec![ConnectionSlot {
+        slots: lanes::ConnectionSlots::new(vec![ConnectionSlot {
             conn: RwLock::new(None),
             in_use: Mutex::new(()),
-        }],
+        }]),
         session_mutation: Mutex::new(()),
         forwards_identity: false,
         breaker: Breaker::new(BreakerConfig::default()),

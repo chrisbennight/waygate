@@ -113,7 +113,7 @@ struct UpstreamEntry {
     /// transports (HTTP/SSE) get `pool_size` slots so calls parallelize;
     /// stdio is forced to 1 (a single child process). All slots dial the
     /// same upstream and carry identical tool lists.
-    slots: Vec<ConnectionSlot>,
+    slots: lanes::ConnectionSlots,
     /// Serializes reconnect and forced catalog refresh for this upstream. Calls
     /// keep using the current slot connections while a replacement dials, but
     /// these identical-shape operations need a guard because the manifest CAS
@@ -876,10 +876,10 @@ impl UpstreamPool {
                 let entry = Arc::new(UpstreamEntry {
                     // One empty slot — disconnected fixtures never dial,
                     // and the pool size is irrelevant with no issuer.
-                    slots: vec![ConnectionSlot {
+                    slots: lanes::ConnectionSlots::new(vec![ConnectionSlot {
                         conn: RwLock::new(None),
                         in_use: Mutex::new(()),
-                    }],
+                    }]),
                     session_mutation: Mutex::new(()),
                     forwards_identity: false,
                     breaker: Breaker::new_with_open_notify(
