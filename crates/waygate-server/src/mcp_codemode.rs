@@ -6112,11 +6112,6 @@ fn validate_search_params(params: &SearchParams) -> Result<(), McpError> {
 fn summary(name: &str, tool: &CatalogTool) -> Option<ConnectorSummary> {
     Some(ConnectorSummary {
         name: name.to_owned(),
-        binding: ConnectorBinding {
-            connector: tool.identity.source.name().to_owned(),
-            operation: tool.identity.name.clone(),
-            name: name.to_owned(),
-        },
         description: waygate_mcp::compact_tool_description(tool.definition.description.as_deref()),
         identity: catalog_identity(tool)?,
         governance: Governance::from_admission(&tool.facts, Some(&tool.authorization)),
@@ -6258,14 +6253,14 @@ struct SearchParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct DescribeParams {
-    /// Conventional display name returned by `codemode.search`. Use only when
-    /// it identifies exactly one connector/operation pair.
+    /// Fully-qualified `<connector>.<operation>` name returned by
+    /// `codemode.search`.
     #[schemars(length(min = 3, max = MAX_SELECTOR_LENGTH))]
     name: Option<String>,
-    /// Exact connector namespace from `codemode.search.tools[].binding`.
+    /// Connector namespace, with `operation_id`, as an alternative to `name`.
     #[schemars(length(min = 1, max = MAX_SELECTOR_LENGTH))]
     connector: Option<String>,
-    /// Exact operation name from `codemode.search.tools[].binding`.
+    /// Operation name within `connector`.
     #[schemars(length(min = 1, max = MAX_SELECTOR_LENGTH))]
     #[serde(rename = "operation_id", alias = "operation")]
     operation: Option<String>,
@@ -6798,10 +6793,9 @@ struct SearchResponse {
 
 #[derive(Debug, Serialize, JsonSchema)]
 struct ConnectorSummary {
-    /// Fully-qualified `<connector>.<operation>` identity.
+    /// Fully-qualified `<connector>.<operation>` name to pass unchanged to
+    /// `codemode.describe`; it is also the direct `tools/call` name.
     name: String,
-    /// Unambiguous connector and operation selector for `codemode.describe`.
-    binding: ConnectorBinding,
     /// Bounded operation preview; use `codemode.describe` for the exact contract.
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
@@ -7375,9 +7369,8 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
             format!("{NAMESPACE}.search"),
             "Search the governed direct catalog across upstream and gateway-local connectors. Returns only tools this \
              caller may discover after profile restrictions, quarantine state, and Cedar \
-             decisions. Results carry immutable snapshot identity and governance facts; use \
-             `codemode.describe` with a returned binding connector/operation pair for the exact \
-             connector schemas.",
+             decisions. Results carry immutable snapshot identity and governance facts; pass a \
+             result's `name` unchanged to `codemode.describe` for the exact connector schemas.",
             input_schema::<SearchParams>(),
         )
         .with_title("Search Code Mode connectors")
@@ -7386,8 +7379,7 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         Tool::new(
             format!("{NAMESPACE}.describe"),
             "Describe one tool returned by `codemode.search` as a runtime-neutral, versioned \
-             connector contract. Pass `connector` and `operation_id` using the returned binding names for \
-             an unambiguous lookup; `name` remains accepted only when it identifies one exact pair. \
+             connector contract. Pass the `name` that search returned. \
              Returns exact admitted input/output schemas, raw connector binding names, governance \
              classification, and catalog or manifest snapshot identity. Denied, restricted, \
              quarantined, ambiguous, and unknown selectors share one unavailable error shape. \
@@ -9760,8 +9752,7 @@ mod tests {
         );
         let preview = summary("gateway-test.read", &record).unwrap();
         assert_eq!(preview.description.unwrap().chars().count(), 480);
-        assert_eq!(preview.binding.connector, "gateway-test");
-        assert_eq!(preview.binding.operation, "read");
+        assert_eq!(preview.name, "gateway-test.read");
         let complete = connector_contract_for_tool(&record).unwrap();
         assert_eq!(complete.description.as_deref(), Some(description.as_str()));
         assert_eq!(
@@ -10217,32 +10208,17 @@ mod tests {
                 },
             )
             .await
-            .expect("search returns both structured bindings");
-        let mut discovered_pairs = structured(&search)["tools"]
+            .expect("search returns both tools");
+        // Manifest validation refuses a dotted server name, so this collision
+        // cannot reach a real catalog; the fake builds it to show that the
+        // gateway still never resolves a colliding name to one contract.
+        let discovered = structured(&search)["tools"]
             .as_array()
             .expect("search tools")
             .iter()
-            .map(|tool| {
-                (
-                    tool["binding"]["connector"]
-                        .as_str()
-                        .expect("connector")
-                        .to_owned(),
-                    tool["binding"]["operation"]
-                        .as_str()
-                        .expect("operation")
-                        .to_owned(),
-                )
-            })
+            .map(|tool| tool["name"].as_str().expect("name").to_owned())
             .collect::<Vec<_>>();
-        discovered_pairs.sort();
-        assert_eq!(
-            discovered_pairs,
-            vec![
-                ("llm".to_owned(), "foo.bar".to_owned()),
-                ("llm.foo".to_owned(), "bar".to_owned())
-            ]
-        );
+        assert_eq!(discovered, ["llm.foo.bar", "llm.foo.bar"]);
 
         let bindings = tools
             .execution_bindings(&principal, CodeExecutionProfile::Direct)
@@ -10339,17 +10315,16 @@ mod tests {
             .as_array()
             .expect("search tools");
         assert_eq!(discovered.len(), 1);
-        assert_eq!(discovered[0]["binding"]["connector"], " mail ");
-        assert_eq!(discovered[0]["binding"]["operation"], " read ");
+        assert_eq!(discovered[0]["name"], " mail . read ");
 
         let described = tools
             .describe(
                 &principal,
                 DescribeParams {
                     known_document_hash: None,
-                    name: None,
-                    connector: Some(" mail ".to_owned()),
-                    operation: Some(" read ".to_owned()),
+                    name: discovered[0]["name"].as_str().map(str::to_owned),
+                    connector: None,
+                    operation: None,
                 },
             )
             .await

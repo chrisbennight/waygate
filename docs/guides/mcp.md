@@ -19,9 +19,9 @@ selection quality and prompt size; the gateway controls access and dispatch.
 See [deferred tool loading](../host-tool-discovery.md).
 
 When the owning upstream is unknown, `gateway-discovery.search` returns compact
-authorized matches across the gateway and its upstreams. Use
-`gateway-discovery.inspect` for the exact current tool definition, then invoke
-the returned tool directly. See [gateway-wide discovery](../tool-discovery.md).
+authorized matches across the gateway and its upstreams. Pass a result's
+`name` to `gateway-discovery.inspect` for the exact current tool definition,
+then invoke the same name directly. See [gateway-wide discovery](../tool-discovery.md).
 
 Code Mode adds server-side search, typed description, and programmatic calls.
 It is useful when several results need filtering or joining before returning a

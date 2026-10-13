@@ -5,18 +5,17 @@ not already know which upstream server or gateway-local namespace owns a
 capability:
 
 1. Call `gateway-discovery.search` with keywords or a natural-language query.
-   The response contains compact identity, source, description, and governance
-   facts, but no schemas. Titles and descriptions are preview text with a
+   The response contains each tool's fully-qualified `name`, a description, and
+   governance facts, but no schemas. Titles and descriptions are preview text with a
    bounded character budget; inspection remains the exact documentation
    authority.
-2. Pass the returned `source_kind`, `source`, and bare `tool` (as `name`) to
-   `gateway-discovery.inspect`. The response contains the exact current MCP
-   definition, including input and output schemas and annotations.
+2. Pass that `name` unchanged to `gateway-discovery.inspect`. The response
+   contains the exact current MCP definition, including input and output
+   schemas and annotations, and the tool's structured identity.
    When an operator enables [client schema compatibility](client-schema-compatibility.md),
    this remains the authoritative schema; the selected client's `tools/list`
    declaration can have fewer constraints while retaining the argument shape.
-3. Invoke the returned fully-qualified identity through ordinary MCP
-   `tools/call`. Discovery has no generic execute operation and cannot bypass
+3. Invoke the same `name` through ordinary MCP `tools/call`. Discovery has no generic execute operation and cannot bypass
    the original tool's typed routing, authorization, quota, inspection, or
    audit path.
 
@@ -33,8 +32,10 @@ current re-authentication requirement when one applies. Invocation always
 re-evaluates these decisions at the authoritative call boundary.
 
 The catalog contains both ordinary upstream tools and gateway-local built-ins.
-Structured source identity is authoritative; clients do not parse a dotted
-fully-qualified display name to distinguish a server from a tool name.
+One fully-qualified name identifies a tool on every surface, and clients never
+split it. The gateway reads it the way `tools/call` routes it: server names
+cannot contain a dot and built-in namespaces are reserved against them, so the
+first dot separates the source from the tool.
 Gateway-local handlers publish weak references into the per-request catalog
 registry, so discovery can include its own surface and other built-ins without
 creating an ownership cycle.
@@ -73,16 +74,16 @@ Search for the task with a small result count, for example:
 {"query":"run a remote command over SSH","limit":5}
 ```
 
-Read only `tools[].name`, `source_kind`, `source`, `tool`, and the preview needed
-to select a candidate. Pass that candidate's `source_kind`, `source`, and `tool`
-as `name` to `gateway-discovery.inspect`; then build arguments from the exact
-returned definition. An exact fully-qualified query selects an already-known
+Read only `tools[].name` and the preview needed to select a candidate. Pass
+that candidate's `name` to `gateway-discovery.inspect`; then build arguments
+from the exact returned definition. An exact fully-qualified query selects an already-known
 operation. An empty result means no visible lexical match: reformulate with an
 operation-specific term or known source, rather than dumping the catalog.
 
 Code Mode follows the same sequence: `codemode.search` with a bounded `limit`,
-then `codemode.describe` with the returned `binding.connector` and
-`binding.operation` as `operation_id`. The returned `description` contains
+then `codemode.describe` with the returned `name`. The description's `binding`
+gives the `connector` and `operation` a program calls as
+`connectors[connector][operation]`. The returned `description` contains
 the complete operation documentation, including text
 beyond the search preview. Retain the complete response and its
 `document_hash`. To recheck a retained contract, pass that hash to describe;

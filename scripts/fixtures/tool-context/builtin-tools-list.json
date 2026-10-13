@@ -401,14 +401,14 @@
       {
         "name": "codemode.describe",
         "title": "Describe a Code Mode connector",
-        "description": "Describe one tool returned by `codemode.search` as a runtime-neutral, versioned connector contract. Pass `connector` and `operation_id` using the returned binding names for an unambiguous lookup; `name` remains accepted only when it identifies one exact pair. Returns exact admitted input/output schemas, raw connector binding names, governance classification, and catalog or manifest snapshot identity. Denied, restricted, quarantined, ambiguous, and unknown selectors share one unavailable error shape. If you still hold a complete description, pass its document_hash as known_document_hash for compact unchanged content after fresh authorization and catalog resolution; omit to refresh.",
+        "description": "Describe one tool returned by `codemode.search` as a runtime-neutral, versioned connector contract. Pass the `name` that search returned. Returns exact admitted input/output schemas, raw connector binding names, governance classification, and catalog or manifest snapshot identity. Denied, restricted, quarantined, ambiguous, and unknown selectors share one unavailable error shape. If you still hold a complete description, pass its document_hash as known_document_hash for compact unchanged content after fresh authorization and catalog resolution; omit to refresh.",
         "inputSchema": {
           "additionalProperties": false,
           "title": "DescribeParams",
           "type": "object",
           "properties": {
             "name": {
-              "description": "Conventional display name returned by `codemode.search`. Use only when\nit identifies exactly one connector/operation pair.",
+              "description": "Fully-qualified `<connector>.<operation>` name returned by\n`codemode.search`.",
               "maxLength": 512,
               "minLength": 3,
               "anyOf": [
@@ -421,7 +421,7 @@
               ]
             },
             "connector": {
-              "description": "Exact connector namespace from `codemode.search.tools[].binding`.",
+              "description": "Connector namespace, with `operation_id`, as an alternative to `name`.",
               "maxLength": 512,
               "minLength": 1,
               "anyOf": [
@@ -434,7 +434,7 @@
               ]
             },
             "operation_id": {
-              "description": "Exact operation name from `codemode.search.tools[].binding`.",
+              "description": "Operation name within `connector`.",
               "maxLength": 512,
               "minLength": 1,
               "anyOf": [
@@ -2105,7 +2105,7 @@
       {
         "name": "codemode.search",
         "title": "Search Code Mode connectors",
-        "description": "Search the governed direct catalog across upstream and gateway-local connectors. Returns only tools this caller may discover after profile restrictions, quarantine state, and Cedar decisions. Results carry immutable snapshot identity and governance facts; use `codemode.describe` with a returned binding connector/operation pair for the exact connector schemas.",
+        "description": "Search the governed direct catalog across upstream and gateway-local connectors. Returns only tools this caller may discover after profile restrictions, quarantine state, and Cedar decisions. Results carry immutable snapshot identity and governance facts; pass a result's `name` unchanged to `codemode.describe` for the exact connector schemas.",
         "inputSchema": {
           "additionalProperties": false,
           "title": "SearchParams",
@@ -2166,12 +2166,8 @@
               "type": "object",
               "properties": {
                 "name": {
-                  "description": "Fully-qualified `<connector>.<operation>` identity.",
+                  "description": "Fully-qualified `<connector>.<operation>` name to pass unchanged to\n`codemode.describe`; it is also the direct `tools/call` name.",
                   "type": "string"
-                },
-                "binding": {
-                  "description": "Unambiguous connector and operation selector for `codemode.describe`.",
-                  "$ref": "#/$defs/ConnectorBinding"
                 },
                 "description": {
                   "description": "Bounded operation preview; use `codemode.describe` for the exact contract.",
@@ -2195,31 +2191,8 @@
               },
               "required": [
                 "name",
-                "binding",
                 "identity",
                 "governance"
-              ]
-            },
-            "ConnectorBinding": {
-              "type": "object",
-              "properties": {
-                "connector": {
-                  "description": "Exact upstream or gateway-local connector namespace.",
-                  "type": "string"
-                },
-                "operation": {
-                  "description": "Exact operation name within the connector.",
-                  "type": "string"
-                },
-                "name": {
-                  "description": "Conventional display identity. Use `connector` plus `operation` as the\nunambiguous selector because either component may contain dots.",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "connector",
-                "operation",
-                "name"
               ]
             },
             "SnapshotIdentity": {
@@ -4098,45 +4071,19 @@
       {
         "name": "gateway-discovery.inspect",
         "title": "Inspect an exact governed tool contract",
-        "description": "Return the exact current MCP definition and gateway governance facts for one tool selected by the structured `source_kind`, `source`, and bare `name` returned by `gateway-discovery.search`. Denied, quarantined, stale, and unknown selectors all return the same unavailable shape. This tool never executes the inspected operation; call its fully-qualified identity through ordinary `tools/call` so the original typed authorization and audit path remains authoritative.",
+        "description": "Return the exact current MCP definition and gateway governance facts for one tool selected by the fully-qualified `name` returned by `gateway-discovery.search`. Denied, quarantined, stale, and unknown selectors all return the same unavailable shape. This tool never executes the inspected operation; call its fully-qualified identity through ordinary `tools/call` so the original typed authorization and audit path remains authoritative.",
         "inputSchema": {
-          "$defs": {
-            "SourceKind": {
-              "oneOf": [
-                {
-                  "description": "Tool advertised by a configured upstream MCP server.",
-                  "type": "string",
-                  "const": "upstream"
-                },
-                {
-                  "description": "Tool implemented by the gateway in a reserved local namespace.",
-                  "type": "string",
-                  "const": "builtin"
-                }
-              ]
-            }
-          },
+          "required": [
+            "name"
+          ],
           "title": "InspectParams",
           "type": "object",
           "properties": {
-            "source_kind": {
-              "description": "Whether the source is an upstream MCP server or a gateway-local surface.",
-              "$ref": "#/$defs/SourceKind"
-            },
-            "source": {
-              "description": "Exact server name or built-in namespace returned by `search`.",
-              "type": "string"
-            },
             "name": {
-              "description": "Exact bare tool name returned by `search`.",
+              "description": "Fully-qualified `<server>.<tool>` name, exactly as `search` returns\nit and `tools/call` accepts it.",
               "type": "string"
             }
-          },
-          "required": [
-            "source_kind",
-            "source",
-            "name"
-          ]
+          }
         },
         "outputSchema": {
           "required": [
@@ -4256,7 +4203,7 @@
       {
         "name": "gateway-discovery.search",
         "title": "Search the governed tool catalog",
-        "description": "Search every currently admitted upstream and gateway-local MCP tool without knowing its source first. Authorization and credential-profile restrictions are applied before lexical ranking, so hidden tools cannot affect hits or pagination. Results are compact and omit schemas; pass the returned structured source identity to `gateway-discovery.inspect` for the exact contract, then invoke the returned fully-qualified name through ordinary `tools/call`.",
+        "description": "Search every currently admitted upstream and gateway-local MCP tool without knowing its source first. Authorization and credential-profile restrictions are applied before lexical ranking, so hidden tools cannot affect hits or pagination. Results are compact and omit schemas; pass a result's `name` unchanged to `gateway-discovery.inspect` for the exact contract and to ordinary `tools/call` to invoke it.",
         "inputSchema": {
           "required": [
             "query"
@@ -4305,19 +4252,7 @@
               "type": "object",
               "properties": {
                 "name": {
-                  "description": "Fully-qualified name to invoke through ordinary MCP `tools/call`.",
-                  "type": "string"
-                },
-                "source_kind": {
-                  "description": "Whether `source` names an upstream server or gateway-local namespace.",
-                  "$ref": "#/$defs/SourceKind"
-                },
-                "source": {
-                  "description": "Exact upstream server or gateway-local namespace.",
-                  "type": "string"
-                },
-                "tool": {
-                  "description": "Exact bare tool name within the source.",
+                  "description": "Fully-qualified name to pass unchanged to `inspect` and `tools/call`.",
                   "type": "string"
                 },
                 "title": {
@@ -4347,24 +4282,7 @@
               },
               "required": [
                 "name",
-                "source_kind",
-                "source",
-                "tool",
                 "governance"
-              ]
-            },
-            "SourceKind": {
-              "oneOf": [
-                {
-                  "description": "Tool advertised by a configured upstream MCP server.",
-                  "type": "string",
-                  "const": "upstream"
-                },
-                {
-                  "description": "Tool implemented by the gateway in a reserved local namespace.",
-                  "type": "string",
-                  "const": "builtin"
-                }
               ]
             },
             "Governance": {
