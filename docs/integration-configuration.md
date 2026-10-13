@@ -45,16 +45,27 @@ Keep provider-specific setup in your deployment configuration.
 
 ## Extension metadata identities
 
-The gateway uses these extension metadata keys:
+The gateway adds these identifiers of its own to MCP messages. Standard
+`io.modelcontextprotocol/` keys are described where the gateway uses them.
 
-| Key | Purpose |
-| --- | --- |
-| `io.cacahuate.mcp-gateway.code-mode` | Optional skill-script compatibility metadata. |
-| `io.cacahuate.mcp-gateway/retained-delivery` | Retained file-delivery metadata. |
-| `io.bennight.gateway/responseMaterializationLimitBytes` | Catalog materialization budget metadata. |
+| Identifier | Where it appears | Direction | Purpose |
+| --- | --- | --- | --- |
+| `io.cacahuate.mcp-gateway/retained-delivery` | `CallToolResult._meta` | To clients | Describes a result delivered as a gateway file, or an attachment that is unavailable. It matches `structuredContent._gateway_delivery`. An upstream cannot set it: the gateway removes it from upstream results. |
+| `io.cacahuate.mcp-gateway/catalog-revision` | `_meta` of skill prompts in `prompts/list` | To clients | The skills catalog revision a prompt was listed from. |
+| `io.cacahuate.mcp-gateway.code-mode` | Skill frontmatter `metadata` | Read from skill sources | Optional skill-script compatibility metadata. |
+| `io.bennight.gateway/responseMaterializationLimitBytes` | Request `_meta` of the gateway's `resources/read` calls | To upstreams | The largest response the gateway will materialize for that read. The gateway's own HTTP transport enforces it; an upstream may ignore it. |
+| `_gateway_delivery` | A `structuredContent` member | To clients | The delivery envelope of a result delivered as a file. Published output schemas accept it as an alternative to the upstream's own result. |
+| `urn:mcp-gateway:upstream-output` | `$id` inside published output schemas | To clients | Keeps the upstream schema's local references scoped inside that delivery alternative. |
+| `_gateway_counts` | A `structuredContent` member | To clients | Reports how a result-count argument was adjusted; see [operation envelopes](agents/tool-envelopes.md). |
+| `x-mcp-result-count` | A JSON Schema keyword on a count argument in published input schemas | To clients | Declares the count projection that `_gateway_counts` reports. |
+| `gateway:approval` | A key in `inputRequests` of an `input_required` result | To clients | The gateway's own approval request. It is removed from retried requests, and an upstream pause that uses it is refused. |
+| `gateway.search-tools.compat` | `error.data.adapter.id` | To clients | Identifies errors from the `searchTools` compatibility adapter. |
+| `X-MCP-Identity` | HTTP request header | To upstreams | The gateway's identity assertion for the caller; see [identity](agents/identity.md). |
 
 These are gateway protocol identifiers, not network destinations or MCP standard
-fields.
+fields. New gateway-specific keys use the `io.cacahuate.mcp-gateway/` prefix.
+See [protocol areas](architecture.md#9-protocol-areas-and-watched-proposals)
+for the boundary that owns each of them.
 
 ## Storage and deployment ownership
 

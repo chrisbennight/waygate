@@ -71,6 +71,12 @@ useful secret-handling capabilities inside their governed runtime boundary.
 Use argv arrays and typed parameters for untrusted input, not interpreter
 string construction. Use vetted cryptography and platform randomness.
 
+Protocol behavior in result shaping, discovery, tasks, approval and upstream
+identity belongs to one owning boundary each; see
+[protocol areas](docs/architecture.md#9-protocol-areas-and-watched-proposals).
+Keep a change inside its area's boundary, and document any new gateway-specific
+metadata key there.
+
 Shipped migrations are immutable, including comments. New migration numbers
 must be unique against current `main`; run both migration guards and recheck
 after updating your branch. See [migration rules](docs/agents/migrations.md).
