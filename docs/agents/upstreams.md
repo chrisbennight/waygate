@@ -297,8 +297,8 @@ This document covers:
   pins it wants a migration failure to surface, not to be downgraded past.
   SSE transport is legacy by definition: `auto` resolves to the legacy
   handshake there and an explicit `2026-07-28` is refused at manifest
-  load. Boot and re-probe dials run the configured mode fresh; per-call
-  dials reuse their lane's result as described below. The negotiated
+  load. Per-call tool-call dials reuse their lane's result as described
+  below; every other dial runs the configured mode fresh. The negotiated
   generation is per-lane state, visible per server in the
   admin Servers view, `GET /api/v1/servers` (`protocol_versions`), and the
   `gateway_upstream_protocol_generation` gauge.
@@ -320,12 +320,14 @@ This document covers:
   text would stop bridging the day the wording changed.
 
   The cost is one refused probe per dial against an upstream that cannot
-  discover. Boot and re-probe lanes pay it; per-call dials do not. Under
-  `auto`, a per-call session reuses the generation its lane negotiated, so a
-  legacy upstream is dialed straight into the `initialize` handshake. If that
-  upstream has since upgraded and refuses the handshake, the per-call dial
-  tries discovery alone, and the lane records the new generation the next time
-  it is re-dialed. Until then each such call pays one refused handshake.
+  discover. Boot and re-probe lanes pay it, as does every other dial except a
+  per-call tool call, including per-call resource reads and file transfers.
+  Under `auto`, a per-call tool session reuses the generation its lane
+  negotiated, so a legacy upstream is dialed straight into the `initialize`
+  handshake. If that upstream has since
+  upgraded and refuses the handshake, the per-call dial tries discovery alone,
+  and the lane records the new generation the next time it is re-dialed.
+  Until then each such call pays one refused handshake.
   Migration therefore stays observable without a probe on every call. A `protocol` change is a
   connection-shape change: reloads re-dial it. The `session` block carries
   `concurrency` (overrides the global `GATEWAY_UPSTREAM_POOL_SIZE`) and
