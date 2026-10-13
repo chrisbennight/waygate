@@ -49,7 +49,6 @@ use waygate_mcp::files::{
     AuthorizeDownloadParams, AuthorizeDownloadResult, AuthorizeUploadParams, AuthorizeUploadResult,
     AuthorizedFileDownload, AuthorizedFileUpload,
 };
-use waygate_mcp::index::SearchIndex;
 use waygate_mcp::protocol::RiskTier;
 use waygate_mcp::ToolCatalogEpoch;
 use waygate_oidc::upstream_crypto::UpstreamCrypto;
@@ -139,8 +138,7 @@ struct UpstreamEntry {
     /// (the pool's HashMap is post-boot immutable so existing in-flight
     /// callers don't trip a None-not-found mid-call), but the periodic
     /// re-probe / SIGHUP / admin reconnect paths all skip it — otherwise
-    /// auto-rediscover would silently re-dial a retired upstream and
-    /// re-populate the search index a SIGHUP just cleared.
+    /// auto-rediscover would silently re-dial a retired upstream.
     removed: AtomicBool,
     /// In-process behavior-hash baseline keyed by tool name.
     /// Populated by [`record_observed_schemas`] at the publish
@@ -151,9 +149,8 @@ struct UpstreamEntry {
     /// First observation is silent — drift is "this tool changed since
     /// the last time we looked," not "the manifest disagrees with the
     /// live schema." A synchronous mutex is required because catalog
-    /// publication must not yield after updating the shared search index but
-    /// before installing its replacement session; contention is trivially low
-    /// (one short acquire per publish pass).
+    /// publication never yields while it holds a catalog-epoch change;
+    /// contention is trivially low (one short acquire per publish pass).
     observed_schemas: StdMutex<HashMap<String, String>>,
     /// Process-local quarantine decisions when no durable review store is
     /// attached; otherwise a cache for runtime status and metrics. Durable
@@ -304,8 +301,8 @@ struct Connection {
     /// under the slot's `conn` write lock — a dispatch reading the slot
     /// always sees a cell that matches the live client.
     identity_cell: Option<IdentityCell>,
-    /// Manifest-classified subset of `live_tools`. This is the published view —
-    /// `list_tools` returns it and the search index is populated from it.
+    /// Manifest-classified subset of `live_tools`. This is the published view
+    /// that `list_tools` returns.
     tools: Vec<Tool>,
     /// Raw `tools/list` response retained from the dial. Held so a SIGHUP that
     /// only edits classifications can re-filter against the existing live view
@@ -365,13 +362,13 @@ pub struct UpstreamPool {
     /// publisher against its successor or against removal zeroes).
     /// Contended only on lane transitions and reloads, never on dispatch.
     protocol_gauge_publish: Mutex<()>,
-    /// Serializes structural map commits and the short session/index commit
-    /// sections that must prove their `UpstreamEntry` is still current. Dialing
-    /// and other slow work stay outside this lock, so a slow target cannot block
-    /// unrelated reload work. A structural commit re-reads the live map under
-    /// the lock, while a session commit checks `Arc` identity under the same
-    /// lock; this makes the last committed registry entry authoritative over the
-    /// shared search index.
+    /// Serializes structural map commits and the short session commit sections
+    /// that must prove their `UpstreamEntry` is still current. Dialing and other
+    /// slow work stay outside this lock, so a slow target cannot block unrelated
+    /// reload work. A structural commit re-reads the live map under the lock,
+    /// while a session commit checks `Arc` identity under the same lock; this
+    /// keeps an entry that a structural commit replaced from publishing
+    /// afterwards.
     reload_lock: Mutex<()>,
     /// Hands out a monotonic generation to each `reload_manifests` call (before
     /// it dials), so the structural commit can fence out a stale reload. Without
@@ -398,15 +395,10 @@ pub struct UpstreamPool {
     /// catalog reconcile for that generation succeeds; catalog-owned overrides
     /// remain authoritative outside the transition window.
     catalog_transitions: StdRwLock<HashMap<(String, String), CatalogTransition>>,
-    /// BM25 index shared with the MCP handler. Populated from each upstream's
-    /// `tools/list` at connect time and refreshed on manifest reload. `None`
-    /// in the disconnected-test constructor so unit tests don't need tantivy.
-    index: Option<SearchIndex>,
     /// Process-wide signal advanced after successful changes to the
     /// downstream-visible tool descriptors or upstream topology. Downstream
     /// MCP sessions subscribe through `waygate-server` and refetch tools when
-    /// the epoch changes. Independent of the optional BM25 index so degraded
-    /// search mode preserves catalog-change notifications.
+    /// the epoch changes.
     tool_catalog_epoch: ToolCatalogEpoch,
     reconnect_policy: reconnect::ReconnectPolicy,
     reconnect_notify: Arc<Notify>,
@@ -700,16 +692,6 @@ impl UpstreamPool {
         issuer: Option<SharedIdentityIssuer>,
         exchange: Option<ExchangeBundle>,
     ) -> Self {
-        let index = match SearchIndex::new() {
-            Ok(idx) => Some(idx),
-            Err(e) => {
-                // Falling back to the substring scan keeps the gateway usable
-                // even if tantivy fails to initialize — logged at error level
-                // so an operator can see the degradation.
-                tracing::error!(error = %e, "failed to initialize search index; BM25 disabled");
-                None
-            }
-        };
         // Per-upstream connection-pool size. Read from the env
         // at construction because it determines how many slots we dial
         // here — unlike `call_timeout`, it can't be a post-construction
@@ -725,11 +707,10 @@ impl UpstreamPool {
                 manifest,
                 issuer.as_ref(),
                 exchange.as_ref(),
-                index.as_ref(),
                 pool_size,
                 DEFAULT_BOOT_DIAL_TIMEOUT,
-                // Boot is generation 0; it publishes each entry's tools into the
-                // index during the dial (no concurrent reload races boot).
+                // Boot is generation 0; it publishes each entry's tools during
+                // the dial (no concurrent reload races boot).
                 0,
                 reconnect_policy,
                 reconnect_notify.clone(),
@@ -748,7 +729,6 @@ impl UpstreamPool {
             resource_routing: RwLock::new(()),
             resource_routing_generation: AtomicU64::new(0),
             catalog_transitions: StdRwLock::new(HashMap::new()),
-            index,
             tool_catalog_epoch: ToolCatalogEpoch::new(),
             admission_reads: StdMutex::default(),
             reconnect_policy,
@@ -774,23 +754,21 @@ impl UpstreamPool {
     }
 
     /// Build (and dial) a single upstream entry from its manifest, reusing the
-    /// pool's boot-identical wiring (`issuer` / `exchange` / search `index` /
-    /// `pool_size`). Used by boot ([`connect_inner`], `initial_gen = 0`, index
-    /// published during the dial) and by the hot-add path in [`reload_manifests`]
-    /// (`initial_gen = my_gen`, `index = None` so the index publish is DEFERRED to
-    /// the fenced commit — a superseded add never pollutes the index). Like boot,
-    /// the entry is returned even when its dial fails — the slots are allocated
-    /// and marked down, and the reconnect scheduler heals them from the now-current
-    /// manifest.
+    /// pool's boot-identical wiring (`issuer` / `exchange` / `pool_size`). Used
+    /// by boot ([`connect_inner`], `initial_gen = 0`) and by the hot-add path in
+    /// [`reload_manifests`] (`initial_gen = my_gen`; the entry becomes visible
+    /// only through the fenced commit, so a superseded add publishes nothing).
+    /// Like boot, the entry is returned even when its dial fails — the slots are
+    /// allocated and marked down, and the reconnect scheduler heals them from the
+    /// now-current manifest.
     ///
     /// `initial_gen` seeds `last_reload_gen` so a newly-added entry is fenced as
     /// of the reload that built it: an OLDER concurrent reload that finds this
     /// entry must see `older_gen < initial_gen` and skip its in-place update,
     /// rather than passing the fence against a `0` baseline and rolling the new
     /// entry's classifications/identity back.
-    // Ten params, all irreducible dial wiring (identity issuer, exchange,
-    // search index, pool size, dial timeout, generation, reconnect policy)
-    // the entry needs at
+    // Nine params, all irreducible dial wiring (identity issuer, exchange,
+    // pool size, dial timeout, generation, reconnect policy) the entry needs at
     // construction; bundling them into a struct would just move the list, not
     // shorten it.
     #[allow(clippy::too_many_arguments)]
@@ -799,7 +777,6 @@ impl UpstreamPool {
         manifest: UpstreamManifest,
         issuer: Option<&SharedIdentityIssuer>,
         exchange: Option<&ExchangeBundle>,
-        index: Option<&SearchIndex>,
         pool_size: usize,
         dial_timeout: Duration,
         initial_gen: u64,
@@ -808,16 +785,8 @@ impl UpstreamPool {
     ) -> Arc<UpstreamEntry> {
         let forwards_identity =
             issuer.is_some() && matches!(manifest.transport, Transport::Http | Transport::Sse);
-        let (slots, last_error_class) = dial_slots(
-            name,
-            &manifest,
-            issuer,
-            exchange,
-            index,
-            pool_size,
-            dial_timeout,
-        )
-        .await;
+        let (slots, last_error_class) =
+            dial_slots(name, &manifest, issuer, exchange, pool_size, dial_timeout).await;
         let mut connected_lanes = 0;
         for slot in &slots {
             connected_lanes += usize::from(slot.conn.read().await.is_some());
@@ -870,8 +839,7 @@ impl UpstreamPool {
     }
     /// Build a pool without dialing anything. Intended for tests that want to
     /// exercise catalog metadata (`tool_facts`, manifest lookup) without a
-    /// real MCP upstream. No search index is wired up — that requires live
-    /// tool lists, which disconnected entries don't have.
+    /// real MCP upstream.
     pub fn from_manifests_disconnected(manifests: BTreeMap<String, UpstreamManifest>) -> Self {
         let reconnect_policy = reconnect::ReconnectPolicy::random();
         let reconnect_notify = Arc::new(Notify::new());
@@ -918,7 +886,6 @@ impl UpstreamPool {
             resource_routing: RwLock::new(()),
             resource_routing_generation: AtomicU64::new(0),
             catalog_transitions: StdRwLock::new(HashMap::new()),
-            index: None,
             tool_catalog_epoch: ToolCatalogEpoch::new(),
             admission_reads: StdMutex::default(),
             reconnect_policy,
@@ -1043,14 +1010,6 @@ impl UpstreamPool {
     ) -> Self {
         self.peer_jwks_cache = Some(cache);
         self
-    }
-
-    /// Expose the search index so `waygate-server` can clone it into the
-    /// `GatewayServer`. Returns `None` when the pool was built disconnected
-    /// or tantivy failed to initialize — callers fall back to substring
-    /// search in that case.
-    pub fn search_index(&self) -> Option<&SearchIndex> {
-        self.index.as_ref()
     }
 
     /// Clone the process-wide signal used to notify downstream MCP sessions
@@ -1481,9 +1440,9 @@ impl UpstreamCatalog for UpstreamPool {
         // Unknown server / unknown tool falls through to the safe default
         // (Low / no-side-effects / no-pii). For any *live* upstream this
         // branch is unreachable for unclassified tools: they're filtered
-        // out of `Connection.tools` and the search index at publish
-        // time, and `call_tool_inner` rejects unclassified by-name calls
-        // before they reach the upstream. The fallback exists for
+        // out of `Connection.tools` at publish time, and `call_tool_inner`
+        // rejects unclassified by-name calls before they reach the
+        // upstream. The fallback exists for
         // catalog queries that bypass the pool's call path (e.g. authz
         // precomputing facts for a tool name lifted from a stale client
         // cache) and must stay conservative.
@@ -1612,9 +1571,9 @@ impl UpstreamPool {
         }
 
         // Reject calls to tools the operator hasn't classified. Unclassified
-        // tools are filtered out of `Connection.tools` and the search index
-        // at publish time, so an explicit by-name call is the only way to
-        // reach them — usually a hardcoded client or a stale prompt.
+        // tools are filtered out of `Connection.tools` at publish time, so an
+        // explicit by-name call is the only way to reach them — usually a
+        // hardcoded client or a stale prompt.
         // Without this check the catalog default (Low risk, no side-effects)
         // would silently apply to upstream tools the operator never audited.
         // Runs before the breaker so a flood of calls to a typo'd tool name

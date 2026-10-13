@@ -7,8 +7,8 @@ use super::*;
 
 /// Re-check annotation-native admission on the dispatch path. Publication
 /// normally filters the same contract, but this independent gate prevents
-/// a failed index publication or stale client cache from reaching a tool
-/// whose reviewed behavior hash no longer matches.
+/// a stale client cache from reaching a tool whose reviewed behavior hash no
+/// longer matches.
 pub(super) async fn entry_tool_is_admitted(
     entry: &UpstreamEntry,
     manifest: &crate::UpstreamManifest,
@@ -183,25 +183,22 @@ pub(super) fn tool_is_admitted(
     }
 }
 
-/// Publish a freshly-dialed connection's tool list into the search index,
-/// filtered to the admitted subset. Emits drift warnings for every
-/// unadmitted live tool (quarantined here — neither indexed nor callable) and
-/// every manifest-only "ghost" classification. Returns the kept slice only
-/// when the supplied publication transaction succeeds, so the caller cannot
-/// install a serving inventory that the search index rejected.
+/// Filter a freshly-dialed connection's tool list to the admitted subset the
+/// caller publishes. Emits drift warnings for every unadmitted live tool
+/// (quarantined here — neither listed nor callable) and every manifest-only
+/// "ghost" classification.
 ///
 /// Called from the boot dial loop, the reconnect path, and the
 /// `reload_manifests` re-publish path so a connected upstream's discovery
 /// surface stays in sync with classification edits without requiring a
 /// reconnect or restart.
-pub(super) fn publish_classified_tools<E>(
+pub(super) fn publish_classified_tools(
     name: &str,
     classifications: &[crate::ToolClassification],
     mode: crate::ClassificationMode,
     live: &[Tool],
     source: &'static str,
-    publish: impl FnOnce(&[Tool]) -> Result<(), E>,
-) -> Result<Vec<Tool>, E> {
+) -> Vec<Tool> {
     let (kept, unclassified, ghosts) = partition_live_tools(classifications, mode, live);
 
     for tool_name in &unclassified {
@@ -223,7 +220,7 @@ pub(super) fn publish_classified_tools<E>(
                     observed_hash = %observed_hash,
                     approved_hash = ?approved_hash,
                     metadata_error = ?metadata_error,
-                    "annotation-native tool is not admitted — metadata is invalid or its behavior hash is not approved; quarantined (not indexed, not callable)",
+                    "annotation-native tool is not admitted — metadata is invalid or its behavior hash is not approved; quarantined (not listed, not callable)",
                 );
             }
             _ => {
@@ -232,7 +229,7 @@ pub(super) fn publish_classified_tools<E>(
                     tool = %tool_name,
                     source = source,
                     classification_mode = ?mode,
-                    "tool has no admitted catalog entry — quarantined (not indexed, not callable)",
+                    "tool has no admitted catalog entry — quarantined (not listed, not callable)",
                 );
             }
         }
@@ -246,6 +243,5 @@ pub(super) fn publish_classified_tools<E>(
         );
     }
 
-    publish(&kept)?;
-    Ok(kept)
+    kept
 }

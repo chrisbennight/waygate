@@ -13,8 +13,6 @@ use waygate_upstream::{UpstreamHealth, UpstreamRuntimeState};
 
 use crate::state::AppState;
 
-const DISCOVERY_SNAPSHOT_ATTEMPTS: usize = 4;
-
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/healthz", get(healthz))
@@ -32,19 +30,11 @@ async fn healthz() -> impl IntoResponse {
 /// breakage.
 async fn readyz(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     let policies = check_policies(&s);
-    let captured = capture_discovery_catalog(&s).await;
-    let (upstream_health, catalog) = match captured {
-        Some((health, catalog)) => (health, catalog.check()),
-        None => (
-            s.upstreams.health_snapshot().await,
-            DiscoveryCatalogSnapshot::catalog_changing_check(),
-        ),
-    };
-    let upstreams = summarize_upstreams(&upstream_health);
+    let upstreams = summarize_upstreams(&s.upstreams.health_snapshot().await);
     let audit = check_audit(&s);
     let skills = check_skills(&s);
 
-    let all_ok = policies.ok && upstreams.ok && catalog.ok && audit.ok && skills.ok;
+    let all_ok = policies.ok && upstreams.ok && audit.ok && skills.ok;
     let status = if all_ok {
         StatusCode::OK
     } else {
@@ -55,7 +45,6 @@ async fn readyz(State(s): State<Arc<AppState>>) -> impl IntoResponse {
         "checks": {
             "policies": policies.body,
             "upstreams": upstreams.body,
-            "discovery_catalog": catalog.body,
             "audit": audit.body,
             "skills": skills.body,
         }
@@ -134,174 +123,6 @@ fn summarize_upstreams(health: &[UpstreamHealth]) -> Check {
     }
 }
 
-struct DiscoveryCatalogSnapshot {
-    authoritative_sources: usize,
-    authoritative_tools: usize,
-    retrieval_sources: usize,
-    retrieval_tools: usize,
-    index_state: waygate_telemetry::metrics::DiscoveryIndexState,
-    index_generation: u64,
-}
-
-async fn stable_catalog_snapshot<T, F, Fut>(
-    epoch: &waygate_mcp::ToolCatalogEpoch,
-    mut capture: F,
-) -> Option<T>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = T>,
-{
-    for _ in 0..DISCOVERY_SNAPSHOT_ATTEMPTS {
-        if let Some(generation) = epoch.stable_generation() {
-            let snapshot = capture().await;
-            if epoch.is_stable(generation) {
-                return Some(snapshot);
-            }
-        }
-        tokio::task::yield_now().await;
-    }
-    None
-}
-
-async fn capture_discovery_catalog(
-    state: &AppState,
-) -> Option<(Vec<UpstreamHealth>, DiscoveryCatalogSnapshot)> {
-    let epoch = state.upstreams.tool_catalog_epoch();
-    stable_catalog_snapshot(&epoch, || async {
-        let health = state.upstreams.health_snapshot().await;
-        let catalog = DiscoveryCatalogSnapshot::new(state, &health);
-        (health, catalog)
-    })
-    .await
-}
-
-impl DiscoveryCatalogSnapshot {
-    fn new(state: &AppState, health: &[UpstreamHealth]) -> Self {
-        let authoritative_sources = health
-            .iter()
-            .filter(|upstream| upstream.published_tool_count > 0)
-            .count();
-        let authoritative_tools = health
-            .iter()
-            .map(|upstream| upstream.published_tool_count)
-            .sum();
-        match state.search_index.as_ref() {
-            Some(index) => {
-                let index = index.health_snapshot();
-                Self {
-                    authoritative_sources,
-                    authoritative_tools,
-                    retrieval_sources: index.published_servers,
-                    retrieval_tools: index.published_tools,
-                    index_state: if index.healthy && index.stable {
-                        waygate_telemetry::metrics::DiscoveryIndexState::Healthy
-                    } else {
-                        waygate_telemetry::metrics::DiscoveryIndexState::Unhealthy
-                    },
-                    index_generation: index.generation,
-                }
-            }
-            None => Self {
-                authoritative_sources,
-                authoritative_tools,
-                retrieval_sources: 0,
-                retrieval_tools: 0,
-                index_state: waygate_telemetry::metrics::DiscoveryIndexState::Unavailable,
-                index_generation: 0,
-            },
-        }
-    }
-
-    fn check(&self) -> Check {
-        use waygate_telemetry::metrics::DiscoveryIndexState;
-
-        let skew_sources = i64::try_from(self.authoritative_sources)
-            .unwrap_or(i64::MAX)
-            .saturating_sub(i64::try_from(self.retrieval_sources).unwrap_or(i64::MAX));
-        let skew_tools = i64::try_from(self.authoritative_tools)
-            .unwrap_or(i64::MAX)
-            .saturating_sub(i64::try_from(self.retrieval_tools).unwrap_or(i64::MAX));
-        let index_status = match self.index_state {
-            DiscoveryIndexState::Healthy => "healthy",
-            DiscoveryIndexState::Unhealthy => "unhealthy",
-            DiscoveryIndexState::Unavailable => "unavailable",
-        };
-        let status = if self.index_state == DiscoveryIndexState::Healthy
-            && self.index_generation & 1 == 0
-            && skew_sources == 0
-            && skew_tools == 0
-        {
-            "ok"
-        } else {
-            "degraded"
-        };
-        Check {
-            // The compatibility index is advisory. A failure or skew is an
-            // operator signal, while the authorization-filtered catalog scan
-            // remains the correct serving fallback and keeps readiness green.
-            ok: true,
-            body: json!({
-                "status": status,
-                "authoritative_upstream": {
-                    "sources": self.authoritative_sources,
-                    "tools": self.authoritative_tools,
-                },
-                "legacy_retrieval_index": {
-                    "status": index_status,
-                    "generation": self.index_generation,
-                    "sources": self.retrieval_sources,
-                    "tools": self.retrieval_tools,
-                    "skew_sources": skew_sources,
-                    "skew_tools": skew_tools,
-                    "fallback": "authorization_filtered_catalog_scan",
-                },
-                "gateway_local": {
-                    "retrieval": "authorization_filtered_catalog_ranker",
-                    "legacy_indexed": false,
-                },
-            }),
-        }
-    }
-
-    fn catalog_changing_check() -> Check {
-        Check {
-            ok: true,
-            body: json!({
-                "status": "degraded",
-                "reason": "catalog_changing",
-                "authoritative_upstream": {
-                    "sources": null,
-                    "tools": null,
-                },
-                "legacy_retrieval_index": {
-                    "status": "unhealthy",
-                    "generation": null,
-                    "sources": null,
-                    "tools": null,
-                    "skew_sources": null,
-                    "skew_tools": null,
-                    "fallback": "authorization_filtered_catalog_scan",
-                },
-                "gateway_local": {
-                    "retrieval": "authorization_filtered_catalog_ranker",
-                    "legacy_indexed": false,
-                },
-            }),
-        }
-    }
-
-    fn publish_metrics(&self) {
-        waygate_telemetry::metrics::set_discovery_catalog_state(
-            self.authoritative_sources,
-            self.authoritative_tools,
-            self.retrieval_sources,
-            self.retrieval_tools,
-            self.index_state,
-            self.index_generation,
-        );
-    }
-}
-
 fn check_audit(s: &AppState) -> Check {
     // Audit readiness is coarse: either the sink was built (configured
     // correctly at startup) or it wasn't. A per-request DB ping would be
@@ -351,19 +172,7 @@ fn check_skills(s: &AppState) -> Check {
 }
 
 async fn metrics_placeholder(State(s): State<Arc<AppState>>) -> impl IntoResponse {
-    let captured = capture_discovery_catalog(&s).await;
-    let health = match captured {
-        Some((health, catalog)) => {
-            catalog.publish_metrics();
-            health
-        }
-        None => {
-            waygate_telemetry::metrics::set_discovery_index_state(
-                waygate_telemetry::metrics::DiscoveryIndexState::Unhealthy,
-            );
-            s.upstreams.health_snapshot().await
-        }
-    };
+    let health = s.upstreams.health_snapshot().await;
     for upstream in &health {
         waygate_telemetry::metrics::set_upstream_runtime_state(
             &upstream.name,
@@ -382,7 +191,6 @@ async fn metrics_placeholder(State(s): State<Arc<AppState>>) -> impl IntoRespons
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -401,7 +209,6 @@ mod tests {
     use waygate_upstream::{ToolClassification, Transport, UpstreamManifest, UpstreamPool};
 
     use super::*;
-    use crate::client_tool_projection::DEFAULT_EAGER_TOOLS_CLIENTS;
     use crate::config::{
         AuditMode, AuthMode, CodeModeCapacityLimits, CodeModeResultStorage, Config,
         DeploymentProfile,
@@ -491,17 +298,11 @@ mod tests {
                 None,
             )
             .unwrap(),
-            eager_tools_list: false,
             codemode_result_storage: CodeModeResultStorage::Disabled,
             codemode_capacity: CodeModeCapacityLimits::default(),
             codemode_limits: crate::codemode_limits::CodeModeLimits::default(),
-            eager_tools_clients: DEFAULT_EAGER_TOOLS_CLIENTS
-                .iter()
-                .map(|client| (*client).to_owned())
-                .collect(),
             codemode_only_tools_clients: Vec::new(),
             root_composition_clients: Vec::new(),
-            audit_discovery: false,
             upstream_reconnect_base: std::time::Duration::from_secs(60),
             upstream_reconnect_ceiling: std::time::Duration::from_secs(900),
             drain_timeout: std::time::Duration::from_secs(20),
@@ -603,11 +404,6 @@ mod tests {
         assert_eq!(body["status"], "ready");
         assert_eq!(body["checks"]["policies"]["status"], "skipped");
         assert_eq!(body["checks"]["upstreams"]["status"], "skipped");
-        assert_eq!(body["checks"]["discovery_catalog"]["status"], "degraded");
-        assert_eq!(
-            body["checks"]["discovery_catalog"]["gateway_local"]["legacy_indexed"],
-            false
-        );
     }
 
     #[tokio::test]
@@ -814,148 +610,6 @@ mod tests {
                 "gateway_upstream_runtime_state{{server=\"{removed}\",state=\"{runtime_state}\"}} 0"
             )));
         }
-    }
-
-    #[tokio::test]
-    async fn metrics_scrape_marks_unstable_catalog_unhealthy_without_replacing_counts() {
-        let _registry_guard = metrics_scrape_test_lock().lock().await;
-        waygate_telemetry::metrics::set_discovery_catalog_state(
-            2,
-            9,
-            2,
-            9,
-            waygate_telemetry::metrics::DiscoveryIndexState::Healthy,
-            12,
-        );
-
-        let pool = Arc::new(UpstreamPool::from_manifests_disconnected(BTreeMap::new()));
-        let epoch = pool.tool_catalog_epoch();
-        let change = epoch.begin_change();
-        let state = Arc::new(AppState::new(test_config(), pool, None, None, false));
-        let response = router()
-            .with_state(state)
-            .oneshot(
-                Request::builder()
-                    .uri("/metrics")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        drop(change);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let text = std::str::from_utf8(&body).unwrap();
-
-        assert!(text.contains("mcp_discovery_retrieval_index_state{state=\"healthy\"} 0"));
-        assert!(text.contains("mcp_discovery_retrieval_index_state{state=\"unhealthy\"} 1"));
-        assert!(text.contains("mcp_discovery_catalog_tools{plane=\"authoritative_upstream\"} 9"));
-        assert!(text.contains("mcp_discovery_retrieval_index_generation 12"));
-        assert!(text.contains("mcp_discovery_retrieval_index_skew_tools 0"));
-    }
-
-    #[test]
-    fn advisory_index_skew_is_degraded_but_keeps_authoritative_fallback_ready() {
-        let check = DiscoveryCatalogSnapshot {
-            authoritative_sources: 3,
-            authoritative_tools: 17,
-            retrieval_sources: 2,
-            retrieval_tools: 15,
-            index_state: waygate_telemetry::metrics::DiscoveryIndexState::Unhealthy,
-            index_generation: 8,
-        }
-        .check();
-
-        assert!(check.ok, "catalog fallback remains the serving authority");
-        assert_eq!(check.body["status"], "degraded");
-        assert_eq!(check.body["legacy_retrieval_index"]["status"], "unhealthy");
-        assert_eq!(check.body["legacy_retrieval_index"]["skew_sources"], 1);
-        assert_eq!(check.body["legacy_retrieval_index"]["skew_tools"], 2);
-        assert_eq!(
-            check.body["legacy_retrieval_index"]["fallback"],
-            "authorization_filtered_catalog_scan"
-        );
-    }
-
-    #[test]
-    fn source_count_skew_degrades_an_otherwise_matching_healthy_index() {
-        let check = DiscoveryCatalogSnapshot {
-            authoritative_sources: 3,
-            authoritative_tools: 9,
-            retrieval_sources: 2,
-            retrieval_tools: 9,
-            index_state: waygate_telemetry::metrics::DiscoveryIndexState::Healthy,
-            index_generation: 12,
-        }
-        .check();
-
-        assert!(check.ok, "catalog fallback remains the serving authority");
-        assert_eq!(check.body["status"], "degraded");
-        assert_eq!(check.body["legacy_retrieval_index"]["skew_sources"], 1);
-        assert_eq!(check.body["legacy_retrieval_index"]["skew_tools"], 0);
-    }
-
-    #[test]
-    fn matching_healthy_index_reports_ok_for_its_upstream_scope() {
-        let check = DiscoveryCatalogSnapshot {
-            authoritative_sources: 2,
-            authoritative_tools: 9,
-            retrieval_sources: 2,
-            retrieval_tools: 9,
-            index_state: waygate_telemetry::metrics::DiscoveryIndexState::Healthy,
-            index_generation: 12,
-        }
-        .check();
-
-        assert!(check.ok);
-        assert_eq!(check.body["status"], "ok");
-        assert_eq!(check.body["legacy_retrieval_index"]["generation"], 12);
-        assert_eq!(
-            check.body["gateway_local"]["retrieval"],
-            "authorization_filtered_catalog_ranker"
-        );
-    }
-
-    #[tokio::test]
-    async fn catalog_generation_change_retries_cross_snapshot_capture() {
-        let epoch = waygate_mcp::ToolCatalogEpoch::new();
-        let attempts = Cell::new(0usize);
-
-        let captured = stable_catalog_snapshot(&epoch, || {
-            let attempt = attempts.get() + 1;
-            attempts.set(attempt);
-            let epoch = epoch.clone();
-            async move {
-                if attempt == 1 {
-                    epoch.begin_change().commit();
-                    "stale"
-                } else {
-                    "coherent"
-                }
-            }
-        })
-        .await;
-
-        assert_eq!(captured, Some("coherent"));
-        assert_eq!(attempts.get(), 2);
-    }
-
-    #[tokio::test]
-    async fn active_catalog_change_refuses_comparative_snapshot() {
-        let epoch = waygate_mcp::ToolCatalogEpoch::new();
-        let change = epoch.begin_change();
-        let captures = Cell::new(0usize);
-
-        let captured = stable_catalog_snapshot(&epoch, || {
-            captures.set(captures.get() + 1);
-            std::future::ready("incoherent")
-        })
-        .await;
-
-        assert_eq!(captured, None);
-        assert_eq!(captures.get(), 0);
-        drop(change);
     }
 
     fn upstream_health(

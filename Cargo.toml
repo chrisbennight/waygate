@@ -172,10 +172,6 @@ askama = "0.16"
 # to the 5.x line.
 utoipa = { version = "5", features = ["axum_extras", "uuid", "time"] }
 
-# Full-text search — BM25 ranking for SEP #1888 `searchTools`. In-memory RAM
-# directory is populated from the upstream tool catalog at boot and on reload.
-tantivy = "0.26"
-
 # JSON-schema validator for the
 # InvocationService `validate_output` stage. Validates tool
 # response payloads against `mcp_tool_versions.output_schema`

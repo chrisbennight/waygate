@@ -127,29 +127,11 @@ pub struct Config {
     /// Browser origins allowed on MCP HTTP. Defaults to the public URL origin.
     /// GATEWAY_MCP_ALLOWED_ORIGINS replaces that default; empty denies browsers.
     pub mcp_allowed_origins: waygate_mcp::origin::OriginPolicy,
-    /// Legacy strict-client escape hatch. When `true`, session `tools/list`
-    /// returns the full upstream catalog alongside the `<server>.searchTools`
-    /// meta-tools instead of exposing tools only after that session reveals
-    /// them. Intended for legacy clients that ignore
-    /// `notifications/tools/list_changed` (e.g. Claude Code as of
-    /// claude-code#13646) and therefore never pick up dynamically-disclosed
-    /// tools. Off by default — turning it on defeats SEP #1888 progressive
-    /// disclosure and will expand every legacy client's initial context. MCP
-    /// 2026 already uses a stable full projection. Set via
-    /// `GATEWAY_EAGER_TOOLS_LIST` (truthy).
-    pub eager_tools_list: bool,
     /// Information-flow decision for persisting bounded Code Mode content.
     pub codemode_result_storage: CodeModeResultStorage,
     /// Process-wide Code Mode runner admission limits.
     pub codemode_capacity: CodeModeCapacityLimits,
     pub(crate) codemode_limits: crate::codemode_limits::CodeModeLimits,
-    /// MCP `clientInfo.name` values that receive eager `tools/list` only for
-    /// their own legacy session. Exact, ASCII-case-insensitive matches;
-    /// defaults to `claude-code` and `codex-mcp-client`, whose current clients
-    /// do not turn dynamic tool-list changes into callable bindings. Set
-    /// `GATEWAY_EAGER_TOOLS_CLIENTS` to a comma-separated replacement list, or
-    /// to an explicit empty value to disable the automatic fallback.
-    pub eager_tools_clients: Vec<String>,
     /// MCP `clientInfo.name` values whose `tools/list` projection contains
     /// only authorized gateway built-ins. Code Mode remains available as the
     /// governed discovery and invocation facade. Set
@@ -158,12 +140,6 @@ pub struct Config {
     pub codemode_only_tools_clients: Vec<String>,
     /// Opt-in client names for root-composition schema presentation.
     pub root_composition_clients: Vec<String>,
-    /// When `true`, each SEP #1888 `searchTools` discovery call records a
-    /// best-effort `Discovery` audit row so discovery activity appears in
-    /// the admin Activity feed (`searchTools` is otherwise unaudited). Off
-    /// by default — discovery is high-volume, so opting in trades audit-log
-    /// growth for visibility. Set via `GATEWAY_AUDIT_DISCOVERY` (truthy).
-    pub audit_discovery: bool,
     /// Initial full-jitter reconnect window for an unhealthy upstream.
     pub upstream_reconnect_base: Duration,
     /// Maximum full-jitter reconnect window after exponential escalation.
@@ -732,7 +708,6 @@ impl Config {
             configured_origins.as_deref(),
         )?;
 
-        let eager_tools_list = waygate_core::env::bool_default_off("GATEWAY_EAGER_TOOLS_LIST");
         let codemode_result_storage = CodeModeResultStorage::parse(
             std::env::var("GATEWAY_CODEMODE_RESULT_STORAGE")
                 .ok()
@@ -743,13 +718,10 @@ impl Config {
         }
         let codemode_limits = codemode_limits::from_env()?;
         let codemode_capacity = CodeModeCapacityLimits::from_limits(&codemode_limits)?;
-        let (eager_tools_clients, codemode_only_tools_clients) =
-            client_tool_projection::from_env(eager_tools_list)?;
+        let codemode_only_tools_clients = client_tool_projection::from_env();
         let root_composition_clients = client_tool_projection::normalize_client_names(
             waygate_core::env::csv_default("GATEWAY_ROOT_COMPOSITION_CLIENTS", &[]),
         );
-
-        let audit_discovery = waygate_core::env::bool_default_off("GATEWAY_AUDIT_DISCOVERY");
 
         let (upstream_reconnect_base, upstream_reconnect_ceiling) = reconnect::policy_from_env()?;
 
@@ -991,14 +963,11 @@ impl Config {
             authentik_additional_issuers,
             mcp_allowed_hosts,
             mcp_allowed_origins,
-            eager_tools_list,
             codemode_result_storage,
             codemode_capacity,
             codemode_limits,
-            eager_tools_clients,
             codemode_only_tools_clients,
             root_composition_clients,
-            audit_discovery,
             upstream_reconnect_base,
             upstream_reconnect_ceiling,
             drain_timeout,
@@ -1653,7 +1622,6 @@ mod tests {
     //! values it changed.
 
     use super::*;
-    use crate::client_tool_projection::DEFAULT_EAGER_TOOLS_CLIENTS;
     use waygate_mcp::protocol::RiskTier;
     use waygate_upstream::{ToolClassification, Transport, UpstreamManifest};
 
@@ -1694,17 +1662,11 @@ mod tests {
                 None,
             )
             .unwrap(),
-            eager_tools_list: false,
             codemode_result_storage: CodeModeResultStorage::Disabled,
             codemode_capacity: CodeModeCapacityLimits::default(),
             codemode_limits: crate::codemode_limits::CodeModeLimits::default(),
-            eager_tools_clients: DEFAULT_EAGER_TOOLS_CLIENTS
-                .iter()
-                .map(|client| (*client).to_owned())
-                .collect(),
             codemode_only_tools_clients: Vec::new(),
             root_composition_clients: Vec::new(),
-            audit_discovery: false,
             upstream_reconnect_base: Duration::from_secs(60),
             upstream_reconnect_ceiling: Duration::from_secs(900),
             drain_timeout: Duration::from_secs(20),

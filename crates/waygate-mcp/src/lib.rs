@@ -1,14 +1,9 @@
 //! MCP protocol surface for the gateway.
 //!
-//! MCP 2026 clients receive a stable, paginated, authorization-filtered
-//! direct-tool catalog. Legacy sessions use the gateway's SEP #1888
-//! compatibility adapter: a cold `tools/list` starts with
-//! `<server>.searchTools` meta-tools,
-//! then remembers names revealed by search and emits
-//! `notifications/tools/list_changed` as that session-local set grows. The
-//! adapter is gateway-owned; upstream servers expose ordinary MCP tools and
-//! are not coupled to either downstream projection. See [`disclosed`] and
-//! `docs/sep-1888.md`.
+//! Every client receives a stable, authorization-filtered direct-tool
+//! catalog; MCP 2026 clients receive it paginated. Clients that cannot accept
+//! the full catalog can be given the compact Code Mode-only projection, whose
+//! `codemode.search` and `codemode.describe` tools provide governed discovery.
 
 // `audit` / `budget` / `cache` / `usage` live in `waygate-evidence`
 // so the crates below the MCP layer that implement the traits do not
@@ -22,13 +17,10 @@ pub mod builtin;
 pub mod catalog;
 pub mod catalog_changes;
 pub mod client_schema;
-pub mod compat;
 mod count_bounds;
-pub mod disclosed;
 pub mod discovery;
 pub mod error;
 pub mod files;
-pub mod index;
 pub mod inspection;
 pub mod invocation;
 pub mod origin;
@@ -36,7 +28,6 @@ pub mod ping;
 pub mod protocol;
 pub mod request_meta;
 pub mod retained_delivery;
-pub mod search_tools;
 pub mod server;
 pub mod skills;
 pub(crate) mod subscriptions;
@@ -55,13 +46,11 @@ pub use builtin::{
 };
 pub use catalog::{SharedCatalog, UpstreamCatalog};
 pub use catalog_changes::ToolCatalogEpoch;
-pub use disclosed::DisclosedTools;
 pub use discovery::{
     compact_tool_description, rank_visible_tools, AuthorizedCatalog, BuiltinRegistry,
     CatalogAuthorization, CatalogChannel, CatalogTool, CatalogToolIdentity, CatalogToolSource,
 };
 pub use error::{Error, Result};
-pub use index::{SearchIndex, SearchIndexHealth};
 pub use invocation::{
     build_default_invocation_service, DefaultInvocationService, InvocationStage,
     InvocationStageObserver, InvocationStageStatus, SchemaValidatorCache,

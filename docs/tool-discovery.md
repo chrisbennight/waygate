@@ -95,11 +95,8 @@ and reload. A hash alone cannot supply the contract. Direct clients invalidate
 cached discovery on catalog change notifications and restart rejected cursors;
 invocation always rechecks current admission and authorization.
 
-Compatibility clients can request `detail: "nameDescription"` and a bounded
-`limit` on `<server>.searchTools`, then use the selected name's `#input` handle
-with `mode: "types"`. Compact descriptions have a character budget on all
-search surfaces. Compatibility `detail: "full"`, exact inspection, and ordinary
-`tools/list` retain complete descriptions and schemas.
+Compact descriptions have a character budget on all search surfaces. Exact
+inspection and ordinary `tools/list` retain complete descriptions and schemas.
 
 Some client adapters prepend server instructions to every tool in their local
 catalog. Filtering those full descriptions for `search` can therefore match
@@ -110,10 +107,10 @@ names before loading selected schemas; avoid serializing the full catalog.
 ## Catalog lifecycle
 
 The governed catalog is a published snapshot, not a set of independently
-mutable index rows:
+mutable rows:
 
 - A new or refreshed upstream becomes discoverable only after its complete
-  admitted tool set and lexical index are ready. Failed first contact publishes
+  admitted tool set is ready. Failed first contact publishes
   nothing. Failed later refreshes keep the last-known-good snapshot and report
   degraded or stale source health rather than erasing working tools.
 - A successful upstream `notifications/tools/list_changed` event and the
@@ -128,17 +125,8 @@ mutable index rows:
   wakes subscribed clients, and fences late refreshes so an obsolete task cannot
   resurrect the source.
 - Structural additions, rebuilds, and removals prepare their async state while
-  the old view remains valid, then rebuild the complete BM25 snapshot in one
-  [Tantivy commit](https://github.com/quickwit-oss/tantivy/blob/main/ARCHITECTURE.md)
-  before swapping the authoritative map under the catalog epoch. If commit or
-  reader reload fails, the old map remains authoritative and BM25 returns no
-  opinion so search uses the catalog fallback rather than a split index. The
-  index retains its last successfully published slices as a recovery image, not
-  a catalog authority. While unhealthy, the next ordinary source refresh rolls
-  back uncommitted writer work and upgrades itself to a complete delete-all,
-  repopulate, commit, and reader-reload transaction; only that successful full
-  handoff restores BM25. This follows Tantivy's documented [rollback and
-  delete-all rebuild model](https://docs.rs/tantivy/latest/tantivy/indexer/struct.IndexWriter.html).
+  the old view remains valid, then swap the authoritative map under the catalog
+  epoch.
 - Gateway-local tools enter the same canonical catalog through the built-in
   registry. Their definitions are deployment-owned; policy reloads can change
   their visibility without a restart just as they can for upstream tools.
@@ -198,9 +186,8 @@ matches. Neither splices pages across catalog or policy generations.
 
 Search accepts a positive explicit result count without a local count ceiling;
 omitting it retains the surface's compact default. Large counts select only
-available authorized records. The legacy `searchTools` adapter ranks the full
-eligible catalog before taking a page, so its index cannot silently impose an
-earlier result ceiling. Cursor freshness and response inspection still apply.
+available authorized records. Cursor freshness and response inspection still
+apply.
 
 Listing and search read governed catalog and review decisions in bounded
 groups instead of a serial database round trip for each tool. Definitions and
@@ -212,8 +199,7 @@ each storage read is bounded. Invocation continues to check current admission
 at the call boundary.
 
 The [discovery diagnostic](testing.md#performance-and-context-measurements)
-measures HTTP listing and the legacy `searchTools` adapter against synthetic
-catalogs and a disposable database. Its elapsed times are local comparison
+measures HTTP listing against synthetic catalogs and a disposable database. Its elapsed times are local comparison
 evidence, not a production capacity guarantee. The governed search and Code Mode
 surfaces use the same batched authorized catalog reader.
 
@@ -302,37 +288,15 @@ request, second catalog, or alternate authorization path.
 
 ## Operations
 
-`/readyz` exposes `checks.discovery_catalog` alongside policy, upstream, and
-audit checks. Its `authoritative_upstream` counts come from the live published
-upstream snapshots. `legacy_retrieval_index` reports Tantivy health,
-publication generation, indexed upstream counts, tool-count skew, and the
-serving fallback. `gateway_local.legacy_indexed` is always false by design:
-gateway and Code Mode discovery rank gateway-local definitions directly in the
-authorization-filtered canonical catalog.
-
-The readiness and metrics paths compare authoritative and index counts only
-when both were captured inside one stable catalog publication epoch. If
-publication keeps changing across the bounded capture attempts, readiness
-reports `catalog_changing` with unavailable comparative counts and metrics keep
-the last coherent counts, generation, and skew rather than publishing a false
-comparison. The index-state gauge changes to `unhealthy` until a later coherent
-scrape restores the observed state.
-
-The legacy index is an accelerator for the closed-draft `searchTools`
-compatibility adapter. An unavailable, unhealthy, or skewed index marks the
-discovery check `degraded`, but does not make readiness fail because the
-authorization-filtered catalog scan remains correct. The index never becomes a
-second catalog authority.
+Gateway and Code Mode discovery rank the authorization-filtered canonical
+catalog directly. Per-source health, including published tool counts, appears under
+`checks.upstreams` in `/readyz`.
 
 The Prometheus surface and Grafana dashboard cover:
 
-- authoritative and indexed source/tool counts, signed tool-count skew, index
-  state, and publication generation;
 - gateway search, gateway inspection, Code Mode search, and Code Mode describe
   duration by closed outcome;
-- accepted and rejected gateway and Code Mode continuation attempts;
-- slice, full, and recovery publication outcomes plus bounded fallback reasons;
-  and
+- accepted and rejected gateway and Code Mode continuation attempts; and
 - atomic manifest-to-catalog reconciliation duration and outcome.
 
 The existing `mcp_authz_latency_seconds` family covers authorization latency,
@@ -347,20 +311,11 @@ and [metrics concepts](https://opentelemetry.io/docs/concepts/signals/metrics/).
 
 Use this recovery sequence:
 
-1. Compare `authoritative_upstream` with `legacy_retrieval_index`. Do not add
-   gateway-local tools to either side to make the counts match.
-2. For an unhealthy or unavailable index, inspect publication errors and
-   fallback reasons. Refresh the affected source through the dashboard,
-   `POST /api/v1/servers/{name}/catalog/refresh`, or
-   `gateway-control.refresh_server_catalog`. The next successful ordinary
-   source refresh automatically performs a complete recovery rebuild when the
-   index is unhealthy.
-3. For non-zero skew with a healthy index, first check the affected source's
+1. When a tool is missing from discovery, first check the affected source's
    runtime drift-quarantine count. Quarantined tools are absent from the
-   authoritative served count but can remain in the advisory index, so an
-   ordinary source refresh alone does not repair that skew. Diagnose and
-   correct the contract drift. With durable tool-change review configured,
-   [review and accept the exact replacement](guides/security.md#review-an-upstream-tool-change).
+   served catalog, so an ordinary source refresh alone does not restore them.
+   Diagnose and correct the contract drift. With durable tool-change review
+   configured, [review and accept the exact replacement](guides/security.md#review-an-upstream-tool-change).
    Otherwise use the audited runtime recovery path
    (`upstream.reconnect` with `clear_quarantine`,
    `upstream.quarantine.clear`, or
@@ -368,26 +323,18 @@ Use this recovery sequence:
    rechecking. This runtime action is distinct from restoring a durable
    quarantined catalog row, which requires the governed
    `catalog.server.unquarantine` change. When no runtime quarantine is present,
-   identify the source whose published catalog changed and refresh it. Treat an
-   odd publication generation as transient; sustained odd generations or
-   `generation_churn` fallbacks indicate a publication that is not converging.
-4. Cursor rejection is expected after catalog, policy, governance, or
+   refresh the source through the dashboard,
+   `POST /api/v1/servers/{name}/catalog/refresh`, or
+   `gateway-control.refresh_server_catalog`.
+2. Cursor rejection is expected after catalog, policy, governance, or
    definition changes because the client must restart at page one. Each
    rejection is logged with the check that failed; `changed_view` is the
    expected reason. A standard `tools/list` traversal sees it only when it
    outlives its held view or continues on another replica. Investigate a
    sustained rejection rate only after ruling out expected publication
    activity.
-5. For reconciliation errors, inspect the manifest validation or catalog-store
-   error and correct the source configuration. Do not repair Tantivy directly;
-   a successful authoritative reconciliation and source refresh repopulates the
-   advisory index.
-
-Rollout and reversal are additive. Deployments can observe the new readiness
-projection and metrics before alerting on them. Reverting the binary removes
-the added telemetry and panels without migrating data or changing the canonical
-catalog. Compare evaluation reports and dashboard signals across the rollout;
-do not introduce a parallel serving index as a rollback mechanism.
+3. For reconciliation errors, inspect the manifest validation or catalog-store
+   error and correct the source configuration.
 
 ## Upgrade compatibility
 
@@ -410,6 +357,4 @@ contracts. Block's guidance additionally motivates treating discovery metadata
 and guardrails as one published layer, while Goose's guidance reinforces
 loading only the tools needed for the current task. Kagi is one useful canary
 for these source-lifecycle cases, not a source-specific exception.
-The gateway's closed-draft `searchTools` adapter remains a separate legacy
-compatibility projection; it is not this product surface and upstream servers
-do not implement either gateway-owned adapter.
+Upstream servers do not implement any gateway-owned discovery contract.

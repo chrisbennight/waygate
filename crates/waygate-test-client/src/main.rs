@@ -2,10 +2,9 @@
 //!
 //! Mirrors the auth UX of Claude Code (CIMD client_id URL + ephemeral
 //! loopback callback) while also covering the `bearer` / `none` modes we use
-//! in local development. Optional SEP #1888 discovery lets the operator
-//! enumerate, describe, and invoke tools via the gateway's progressive
-//! disclosure surface; the conformance subcommand bundles the checks into
-//! a pass/fail suite.
+//! in local development. The `tools` and `repl` subcommands enumerate,
+//! describe, and invoke tools from the gateway's `tools/list` catalog; the
+//! conformance subcommand bundles the checks into a pass/fail suite.
 
 mod auth;
 mod cli;
@@ -15,7 +14,6 @@ mod gateway;
 mod host_contract;
 mod output;
 mod repl;
-mod sep1888;
 mod tools;
 
 use std::process::ExitCode;
@@ -69,7 +67,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Logout => auth::cache::logout(&ctx).await,
         Command::Tools(cmd) => match cmd {
             ToolsCommand::List => tools::list::run(&ctx).await,
-            ToolsCommand::Search(args) => tools::search::run(&ctx, args).await,
             ToolsCommand::Describe(args) => tools::describe::run(&ctx, args).await,
             ToolsCommand::Call(args) => tools::call::run(&ctx, args).await,
         },

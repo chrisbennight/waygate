@@ -84,8 +84,8 @@ presented to an authorized client. Record inputs and resource conditions so
 comparisons remain reproducible.
 
 The opt-in discovery diagnostic exercises a real loopback MCP upstream, the
-gateway's HTTP first and subsequent tool-list pages, and broad tool search at
-100, 1,000, and 10,000 tools:
+gateway's HTTP first and subsequent tool-list pages at 100, 1,000, and 10,000
+tools:
 
 ```sh
 cargo test --workspace --locked discovery_latency_and_database_queries -- --ignored --nocapture

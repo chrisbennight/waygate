@@ -16,7 +16,7 @@ GATEWAY_ROOT_COMPOSITION_CLIENTS=claude-code
 Use the client's actual MCP `clientInfo.name`. Names are comma-separated,
 trimmed, and matched exactly ignoring ASCII case. The default is empty: no
 client receives adaptation until the operator opts in. The setting is
-independent of eager or compact discovery and never grants tool access.
+independent of the compact Code Mode-only catalog and never grants tool access.
 It works for legacy sessions and stateless MCP requests. Reconnect legacy
 clients after restarting the gateway.
 
@@ -40,8 +40,7 @@ contract. For a size cap that depends on mode:
 | `{"mode":"small","size":1000000}` | Accepted |
 | `{"mode":"small","size":1500000000}` | Rejected before upstream dispatch |
 
-`gateway-discovery.inspect`, legacy `searchTools` type results, and
-`codemode.describe` continue to return the **authoritative** schema as result
+`gateway-discovery.inspect` and `codemode.describe` continue to return the **authoritative** schema as result
 data. Their argument shape and tool identity agree with the presented tool;
 their constraints can be stricter. Use `tools/list` for the selected client's
 registration declaration, not an inspection result as a replacement declaration.
@@ -69,14 +68,12 @@ to a restricted client, the existing compact option can be used instead:
 
 ```sh
 GATEWAY_CODEMODE_ONLY_CLIENTS=claude-code
-GATEWAY_EAGER_TOOLS_CLIENTS=codex-mcp-client
-GATEWAY_EAGER_TOOLS_LIST=false
 ```
 
-Preserve other configured client names; a name cannot appear in both the compact
-and eager allowlists. Code Mode uses existing permissions and validation. It
-does not require durable result storage for ordinary execution. See
-[discovery compatibility](sep-1888.md) for these settings.
+Preserve other configured client names. Code Mode uses existing permissions and
+validation. It does not require durable result storage for ordinary execution.
+See [the compact catalog](tools-list.md#compact-code-mode-only-clients) for this
+setting.
 
 ## Reproduce and verify
 

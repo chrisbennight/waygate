@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use waygate_invocation::InvocationHierarchy;
-use waygate_mcp::audit::{AuditOutcome, EvidenceCategory, EvidencePosture, InMemorySink};
+use waygate_mcp::audit::{AuditOutcome, EvidencePosture, InMemorySink};
 use waygate_mcp::authz::{AuthzGate, AuthzVerdict, BuiltinAuthz, SharedAuthz, ToolFacts};
 use waygate_mcp::catalog::{SharedCatalog, UpstreamCatalog};
 use waygate_mcp::protocol::RiskTier;
@@ -140,64 +140,6 @@ async fn assert_single_posture(sink: &InMemorySink, expected: EvidencePosture) {
 
 fn obj(v: Value) -> Map<String, Value> {
     v.as_object().cloned().expect("object literal")
-}
-
-fn search_tools_call(server: &str, mode: &str) -> CallToolRequestParams {
-    CallToolRequestParams::new(format!("{server}.searchTools"))
-        .with_arguments(obj(json!({ "mode": mode })))
-}
-
-/// With `GATEWAY_AUDIT_DISCOVERY` on (via `with_audit_discovery`), a
-/// `searchTools` call records exactly one best-effort `Discovery` row —
-/// server + principal + outcome — so SEP #1888 discovery shows up in the
-/// Activity feed (it was previously unaudited).
-#[tokio::test]
-async fn searchtools_records_discovery_when_enabled() {
-    let (server, sink) = build(AuthzVerdict::Allow { policy_ids: vec![] }, false);
-    let server = server.with_audit_discovery(true);
-    server
-        .dispatch_tool_call(
-            search_tools_call("example-messages", "operations"),
-            Some(&principal()),
-        )
-        .await
-        .expect("discovery ok");
-
-    let events = sink.snapshot().await;
-    let disc: Vec<_> = events
-        .iter()
-        .filter(|e| e.category == EvidenceCategory::Discovery)
-        .collect();
-    assert_eq!(disc.len(), 1, "exactly one discovery row");
-    let e = disc[0];
-    assert_eq!(e.action, "SearchTools");
-    assert_eq!(e.outcome, AuditOutcome::Success);
-    assert_eq!(e.server.as_deref(), Some("example-messages"));
-    assert_eq!(e.tool.as_deref(), Some("searchTools"));
-    assert_eq!(e.principal.as_ref().map(|p| p.sub.as_str()), Some("carol"));
-    assert_single_posture(&sink, EvidencePosture::BestEffort).await;
-}
-
-/// Discovery auditing is OFF by default (it is high-volume), so a
-/// `searchTools` call records no `Discovery` row unless explicitly enabled.
-#[tokio::test]
-async fn searchtools_no_discovery_audit_by_default() {
-    let (server, sink) = build(AuthzVerdict::Allow { policy_ids: vec![] }, false);
-    server
-        .dispatch_tool_call(
-            search_tools_call("example-messages", "operations"),
-            Some(&principal()),
-        )
-        .await
-        .expect("discovery ok");
-
-    let events = sink.snapshot().await;
-    assert!(
-        events
-            .iter()
-            .all(|e| e.category != EvidenceCategory::Discovery),
-        "no discovery audit unless GATEWAY_AUDIT_DISCOVERY is enabled",
-    );
 }
 
 #[tokio::test]

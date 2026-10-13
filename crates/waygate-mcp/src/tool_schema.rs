@@ -942,20 +942,4 @@ mod tests {
             .expect("valid self-contained schemas are not withheld because of nesting depth");
         assert!(inspector_portable_schema(&Value::Object(portable)));
     }
-
-    #[test]
-    fn gateway_owned_search_tools_schemas_pass_inspector_portability_rules() {
-        let input = Value::Object(
-            crate::compat::search_tools_v1::input_schema()
-                .as_ref()
-                .clone(),
-        );
-        let output = Value::Object(
-            crate::compat::search_tools_v1::output_schema()
-                .as_ref()
-                .clone(),
-        );
-        assert!(inspector_portable_schema(&input));
-        assert!(inspector_portable_schema(&output));
-    }
 }

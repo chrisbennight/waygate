@@ -11,7 +11,7 @@ and a policy refusal. Then choose a workflow below.
 
 | You want to… | Start here | Reference |
 | --- | --- | --- |
-| Connect MCP clients and discover tools efficiently | [MCP capabilities](guides/mcp.md) | [Host discovery contract](host-tool-discovery.md), [upstream manifests](agents/upstreams.md) |
+| Connect MCP clients and discover tools efficiently | [MCP capabilities](guides/mcp.md) | [Host discovery contract](host-tool-discovery.md), [`tools/list` catalog](tools-list.md), [upstream manifests](agents/upstreams.md) |
 | Move files without filling model context | [File workflow](guides/files.md) | [Transfer protocol and storage](file-transfer.md) |
 | Find and use reviewed workflows | [Skills workflow](guides/skills.md) | [Git integrity](skills-git-source.md), [distribution review](skill-distribution-review.md) |
 | Combine tool calls and recover an interrupted workflow | [Code Mode workflow](guides/code-mode.md) | [Execution contract](codemode.md) |

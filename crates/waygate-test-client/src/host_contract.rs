@@ -15,7 +15,6 @@ use crate::auth::resolve_bearer;
 use crate::cli::{Context, HostContractArgs};
 use crate::gateway::rpc;
 use crate::output;
-use crate::sep1888::SEARCH_TOOLS_SUFFIX;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,13 +86,6 @@ fn validate_tool_name(name: &str) -> Result<()> {
     if !qualified {
         anyhow::bail!("--tool must be fully qualified as `<server>.<tool>`");
     }
-    if name.ends_with(SEARCH_TOOLS_SUFFIX) {
-        anyhow::bail!(
-            "--tool cannot prove an ambiguous `<server>.searchTools` target: the MCP wire name \
-             may identify either the gateway compatibility adapter or an ordinary upstream \
-             collision; choose another ordinary direct tool"
-        );
-    }
     Ok(())
 }
 
@@ -134,12 +126,11 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_qualified_tool_is_the_only_accepted_probe_target() {
+    fn probe_target_must_be_fully_qualified() {
         assert!(validate_tool_name("modern-smoke.ping").is_ok());
         assert!(validate_tool_name("ping").is_err());
         assert!(validate_tool_name(".ping").is_err());
         assert!(validate_tool_name("modern-smoke.").is_err());
-        assert!(validate_tool_name("modern-smoke.searchTools").is_err());
     }
 
     #[test]

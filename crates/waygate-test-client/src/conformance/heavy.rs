@@ -1,28 +1,21 @@
-//! Heavy conformance tier — adds cursor pagination, filter matrix, error
-//! shapes, refresh-token round-trip, and types-mode checks on top of light.
+//! Heavy conformance tier — adds the unsupported-version refusal shape,
+//! unknown-tool routing, and refresh-token round-trip checks on top of light.
 //!
 //! Expected to be run against a live, representative gateway rather than a
 //! minimal dev stand-up. Any PASS here should imply the gateway is ready
 //! for a production cut.
 
-use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
 use reqwest::Client as HttpClient;
 use rmcp::model::CallToolRequestParams;
-use serde_json::{json, Map, Value};
 
 use crate::auth::{cache, cimd, resolve_bearer, ResolvedAuth};
 use crate::cli::{AuthModeArg, Context};
-use crate::conformance::light::parse_operations;
 use crate::conformance::report::Report;
 use crate::gateway::{
     discover,
     rpc::{self, Client},
-};
-use crate::sep1888::{
-    server_from_search_tool, Mode, SearchToolsRequest, TypesResponse, SEARCH_TOOLS_SUFFIX,
 };
 
 pub async fn run(ctx: &Context, report: &mut Report) {
@@ -50,247 +43,23 @@ pub async fn run(ctx: &Context, report: &mut Report) {
             return;
         }
     };
-    let servers: Vec<String> = listed
-        .tools
-        .iter()
-        .filter_map(|t| server_from_search_tool(t.name.as_ref()).map(str::to_owned))
-        .collect();
-
-    if servers.is_empty() {
-        report.skip("heavy.*", "no searchTools upstreams to probe");
-        let _ = client.cancel().await;
-        return;
+    let server = listed.tools.iter().find_map(|t| {
+        t.name
+            .split_once('.')
+            .map(|(server, _)| server)
+            .filter(|server| !server.is_empty())
+    });
+    match server {
+        Some(server) => prefix_routing_check(&client, server, report).await,
+        None => report.skip(
+            "heavy.prefix_routing",
+            "tools/list returned no `<server>.<tool>` names",
+        ),
     }
-
-    let server = &servers[0];
-    let tool_name = format!("{server}{SEARCH_TOOLS_SUFFIX}");
-
-    cursor_paging_check(&client, &tool_name, report).await;
-    filter_matrix_check(&client, &tool_name, report).await;
-    error_shapes_check(&client, &tool_name, report).await;
-    types_mode_check(&client, &tool_name, report).await;
-    prefix_routing_check(&client, server, report).await;
 
     let _ = client.cancel().await;
 
     refresh_round_trip_check(ctx, &auth, report).await;
-}
-
-async fn cursor_paging_check(client: &Client, tool_name: &str, report: &mut Report) {
-    let label = "heavy.cursor_paging";
-    let start = Instant::now();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut cursor: Option<String> = None;
-    let mut pages = 0usize;
-    loop {
-        let req = SearchToolsRequest {
-            mode: Mode::Operations,
-            filters: None,
-            name: None,
-            cursor: cursor.clone(),
-            limit: Some(1),
-        };
-        let args = match to_object(&req) {
-            Ok(o) => o,
-            Err(e) => {
-                report.fail(label, start.elapsed(), e.to_string());
-                return;
-            }
-        };
-        let params = CallToolRequestParams::new(tool_name.to_owned()).with_arguments(args);
-        let result = match client.call_tool(params).await {
-            Ok(r) => r,
-            Err(e) => {
-                report.fail(label, start.elapsed(), format!("{e:#}"));
-                return;
-            }
-        };
-        if result.is_error.unwrap_or(false) {
-            report.fail(label, start.elapsed(), "isError=true".to_owned());
-            return;
-        }
-        let resp = match parse_operations(&result) {
-            Ok(r) => r,
-            Err(e) => {
-                report.fail(label, start.elapsed(), e);
-                return;
-            }
-        };
-        for op in &resp.operations {
-            if !seen.insert(op.name.clone()) {
-                report.fail(
-                    label,
-                    start.elapsed(),
-                    format!("cursor paging returned duplicate `{}`", op.name),
-                );
-                return;
-            }
-        }
-        pages += 1;
-        match resp.next_cursor {
-            Some(next) if !next.is_empty() && pages < 50 => cursor = Some(next),
-            _ => break,
-        }
-    }
-    report.pass(label, start.elapsed());
-}
-
-async fn filter_matrix_check(client: &Client, tool_name: &str, report: &mut Report) {
-    let cases: &[(&str, Map<String, Value>)] = &[
-        (
-            "heavy.filter.resourceType",
-            single_filter("resourceType", "message"),
-        ),
-        ("heavy.filter.action", single_filter("action", "read")),
-        ("heavy.filter.scope", single_filter("scope", "mcp:invoke")),
-        ("heavy.filter.riskLevel", single_filter("riskLevel", "low")),
-        ("heavy.filter.query", single_filter("query", "send")),
-    ];
-    for (label, filters) in cases {
-        let start = Instant::now();
-        let args = json!({
-            "mode": "operations",
-            "filters": filters,
-        });
-        let args = match args.as_object().cloned() {
-            Some(m) => m,
-            None => {
-                report.fail(
-                    label.to_owned(),
-                    start.elapsed(),
-                    "bad filter json".to_owned(),
-                );
-                continue;
-            }
-        };
-        let params = CallToolRequestParams::new(tool_name.to_owned()).with_arguments(args);
-        match client.call_tool(params).await {
-            Ok(r) if !r.is_error.unwrap_or(false) => match parse_operations(&r) {
-                Ok(_) => report.pass(label.to_owned(), start.elapsed()),
-                Err(e) => report.fail(label.to_owned(), start.elapsed(), e),
-            },
-            Ok(_) => report.fail(label.to_owned(), start.elapsed(), "isError=true".to_owned()),
-            Err(e) => report.fail(label.to_owned(), start.elapsed(), format!("{e:#}")),
-        }
-    }
-}
-
-async fn error_shapes_check(client: &Client, tool_name: &str, report: &mut Report) {
-    // Bogus `mode` — must surface as a tool-side error (isError=true or
-    // JSON-RPC error), not a 5xx the transport would have mapped into an
-    // rmcp error first.
-    let start = Instant::now();
-    let label = "heavy.error.bogus_mode";
-    let bogus = json!({"mode": "bogus"}).as_object().cloned().unwrap();
-    let params = CallToolRequestParams::new(tool_name.to_owned()).with_arguments(bogus);
-    match client.call_tool(params).await {
-        Ok(r) if r.is_error.unwrap_or(false) => report.pass(label, start.elapsed()),
-        Ok(_) => report.fail(label, start.elapsed(), "expected isError=true".to_owned()),
-        Err(e) => {
-            // A JSON-RPC error is also acceptable — what we *don't* want is a
-            // panic or a transport reset, and either of those presents as an
-            // anyhow error here. We log it as a PASS because the surface is
-            // still structured.
-            if is_structured_rpc_error(&e.to_string()) {
-                report.pass(label, start.elapsed());
-            } else {
-                report.fail(label, start.elapsed(), format!("{e:#}"));
-            }
-        }
-    }
-
-    let start = Instant::now();
-    let label = "heavy.error.huge_limit";
-    let req = json!({"mode": "operations", "limit": 10_000})
-        .as_object()
-        .cloned()
-        .unwrap();
-    let params = CallToolRequestParams::new(tool_name.to_owned()).with_arguments(req);
-    match client.call_tool(params).await {
-        // Either a clamp (success) or a structured error is fine.
-        Ok(r) if r.is_error.unwrap_or(false) => report.pass(label, start.elapsed()),
-        Ok(_) => report.pass(label, start.elapsed()),
-        Err(e) if is_structured_rpc_error(&e.to_string()) => report.pass(label, start.elapsed()),
-        Err(e) => report.fail(label, start.elapsed(), format!("{e:#}")),
-    }
-
-    let start = Instant::now();
-    let label = "heavy.error.tampered_cursor";
-    let req = json!({"mode": "operations", "cursor": "tampered_cursor_for_test"})
-        .as_object()
-        .cloned()
-        .unwrap();
-    let params = CallToolRequestParams::new(tool_name.to_owned()).with_arguments(req);
-    match client.call_tool(params).await {
-        Ok(r) if r.is_error.unwrap_or(false) => report.pass(label, start.elapsed()),
-        Ok(_) => report.pass(label, start.elapsed()),
-        Err(e) if is_structured_rpc_error(&e.to_string()) => report.pass(label, start.elapsed()),
-        Err(e) => report.fail(label, start.elapsed(), format!("{e:#}")),
-    }
-}
-
-async fn types_mode_check(client: &Client, tool_name: &str, report: &mut Report) {
-    // Look for an operation to describe, then run mode=types on it.
-    let start = Instant::now();
-    let label = "heavy.types_mode";
-    let req = SearchToolsRequest {
-        mode: Mode::Operations,
-        filters: None,
-        name: None,
-        cursor: None,
-        limit: Some(5),
-    };
-    let args = match to_object(&req) {
-        Ok(a) => a,
-        Err(e) => {
-            report.fail(label, start.elapsed(), e.to_string());
-            return;
-        }
-    };
-    let params = CallToolRequestParams::new(tool_name.to_owned()).with_arguments(args);
-    let result = match client.call_tool(params).await {
-        Ok(r) => r,
-        Err(e) => {
-            report.fail(label, start.elapsed(), format!("{e:#}"));
-            return;
-        }
-    };
-    let ops_resp = match parse_operations(&result) {
-        Ok(r) => r,
-        Err(e) => {
-            report.fail(label, start.elapsed(), e);
-            return;
-        }
-    };
-    let Some(op) = ops_resp.operations.first() else {
-        report.skip(label, "no operations available to describe");
-        return;
-    };
-    let types_req = json!({"mode": "types", "name": op.name})
-        .as_object()
-        .cloned()
-        .unwrap();
-    let params = CallToolRequestParams::new(tool_name.to_owned()).with_arguments(types_req);
-    match client.call_tool(params).await {
-        Ok(r) if !r.is_error.unwrap_or(false) => {
-            let parsed: std::result::Result<TypesResponse, _> = if let Some(sc) =
-                r.structured_content.as_ref()
-            {
-                serde_json::from_value(sc.clone())
-            } else if let Some(text) = r.content.iter().find_map(|c| c.as_text().map(|t| &t.text)) {
-                serde_json::from_str(text)
-            } else {
-                report.fail(label, start.elapsed(), "no content returned".to_owned());
-                return;
-            };
-            match parsed {
-                Ok(_) => report.pass(label, start.elapsed()),
-                Err(e) => report.fail(label, start.elapsed(), e.to_string()),
-            }
-        }
-        Ok(_) => report.fail(label, start.elapsed(), "isError=true".to_owned()),
-        Err(e) => report.fail(label, start.elapsed(), format!("{e:#}")),
-    }
 }
 
 async fn prefix_routing_check(client: &Client, server: &str, report: &mut Report) {
@@ -389,19 +158,6 @@ async fn refresh_round_trip_check(ctx: &Context, auth: &ResolvedAuth, report: &m
 
     // Silence discover unused when only used to preserve ctx lifetimes above.
     let _ = discover::fetch_resource_metadata;
-}
-
-fn single_filter(key: &str, value: &str) -> Map<String, Value> {
-    let mut m = Map::new();
-    m.insert(key.to_owned(), Value::String(value.to_owned()));
-    m
-}
-
-fn to_object(req: &SearchToolsRequest) -> Result<Map<String, Value>> {
-    match serde_json::to_value(req)? {
-        Value::Object(m) => Ok(m),
-        other => anyhow::bail!("SearchToolsRequest did not serialize as object: {other:?}"),
-    }
 }
 
 fn is_structured_rpc_error(text: &str) -> bool {

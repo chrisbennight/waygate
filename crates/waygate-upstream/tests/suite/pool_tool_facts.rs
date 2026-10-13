@@ -70,8 +70,8 @@ async fn unknown_server_returns_low_default() {
 
 /// An unclassified tool name must
 /// not reach the upstream even if a client crafts an explicit `call_tool`
-/// for it. Live unclassified tools are filtered out of the search index
-/// and `Connection.tools` at publish time, but a hardcoded by-name call
+/// for it. Live unclassified tools are filtered out of `Connection.tools`
+/// at publish time, but a hardcoded by-name call
 /// would otherwise still hit the rmcp client and run against the catalog
 /// default (Low / no-side-effects). The pool rejects with `invalid_params`
 /// before the breaker is touched, so a flood of typo'd calls can't drain

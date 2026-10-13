@@ -999,9 +999,9 @@ async fn reload_does_not_mutate_transport_url_or_command() {
 /// Adding a brand-new classification (the "promotion" case) and dropping
 /// an existing one (the "demotion" case) both flip `classifications_updated`
 /// in the report, so the SIGHUP handler logs the change. Verification of the
-/// re-publish into `Connection.tools` and the search index requires a live
-/// upstream (covered by the unit test on `partition_live_tools` and by
-/// inspection of `reload_manifests`).
+/// re-publish into `Connection.tools` requires a live upstream (covered by
+/// the unit test on `partition_live_tools` and by inspection of
+/// `reload_manifests`).
 #[tokio::test]
 async fn reload_flags_added_and_removed_classifications() {
     let pool = seed();

@@ -11,9 +11,8 @@
 //!
 //! ## Tenant scoping
 //!
-//! Reads use `principal.tenant`. The store's `list_models` is the same
-//! `list_llm_models` query the `searchTools` discovery surface and the boot
-//! seeder use — enabled rows only, ordered by alias.
+//! Reads use `principal.tenant`. The store's `list_models` runs the shared
+//! `list_llm_models` query — enabled rows only, ordered by alias.
 //!
 //! ## Admin gate
 //!

@@ -128,8 +128,7 @@ async fn discovery_and_direct_dispatch_enforce_operational_role_matrix() {
     let engine = CedarEngine::from_source(POLICY).expect("valid synthetic policy");
     let upstream = Arc::new(Upstream::default());
     let server =
-        GatewayServer::with_authz(upstream.clone(), Arc::new(CedarGate::new(Arc::new(engine))))
-            .with_eager_tools_list(true);
+        GatewayServer::with_authz(upstream.clone(), Arc::new(CedarGate::new(Arc::new(engine))));
     // allow, deny, and approval-required are distinct outcomes. Approval never
     // grants an underlying permit and discovery never authorizes execution.
     for (role, expected) in [

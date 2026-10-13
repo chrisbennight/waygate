@@ -813,45 +813,6 @@ async fn envelope_aliases_share_validation_policy_hashes_and_dispatch() {
     }
 }
 
-#[tokio::test]
-async fn legacy_discovery_search_selects_more_than_five_hundred_ranked_tools() {
-    let tools: Vec<_> = (0..600)
-        .map(|i| {
-            Tool::new(
-                format!("tool{i:04}"),
-                "fixture inventory",
-                Arc::new(json!({"type":"object"}).as_object().unwrap().clone()),
-            )
-        })
-        .collect();
-    let index = waygate_mcp::index::SearchIndex::new().unwrap();
-    index.replace_server("example-secrets", &tools).unwrap();
-    let catalog = Arc::new(EnvelopeCatalog {
-        snapshot: executor_snapshot(),
-        tools,
-        seen: Mutex::default(),
-    });
-    let server = waygate_mcp::GatewayServer::new(catalog).with_index(index);
-    for (limit, expected) in [(None, 50), (Some(100_000), 600), (Some(usize::MAX), 600)] {
-        let mut arguments = json!({"query":"fixture","detail":"nameOnly"});
-        if let Some(limit) = limit {
-            arguments["limit"] = json!(limit);
-        }
-        let result = server
-            .dispatch_tool_call(
-                rmcp::model::CallToolRequestParams::new("example-secrets.searchTools")
-                    .with_arguments(arguments.as_object().unwrap().clone()),
-                None,
-            )
-            .await
-            .unwrap()
-            .structured_content
-            .unwrap();
-        assert_eq!(result["operations"].as_array().unwrap().len(), expected);
-        assert_eq!(result.get("nextCursor").is_some(), expected < 600);
-    }
-}
-
 #[test]
 fn envelope_normalization_preserves_declared_business_fields() {
     let snapshot = InvocationToolSnapshot::catalog(

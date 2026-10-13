@@ -1,6 +1,5 @@
 //! `tools list` — MCP `tools/list` against the gateway. Returns the flat
-//! inventory (in SEP #1888 mode that's one `.searchTools` meta-tool per
-//! upstream).
+//! authorized tool inventory.
 
 use anyhow::Result;
 

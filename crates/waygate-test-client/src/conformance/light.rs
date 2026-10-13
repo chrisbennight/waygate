@@ -1,27 +1,17 @@
 //! Light conformance tier — meant to run against a live gateway in a handful
 //! of seconds. Covers the shape of the well-known endpoints, the
-//! `WWW-Authenticate` signal, the initialize+listTools round-trip, and one
-//! `searchTools` invocation per discovered upstream (with a best-effort
-//! no-side-effect tool call when one is available).
+//! `WWW-Authenticate` signal, the initialize+listTools round-trip, and the
+//! stateless 2026-07-28 and session-based 2025-11-25 protocol generations.
 
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
 use reqwest::Client as HttpClient;
-use rmcp::model::CallToolRequestParams;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::auth::{resolve_bearer, ResolvedAuth};
 use crate::cli::{AuthModeArg, Context};
 use crate::conformance::report::Report;
-use crate::gateway::{
-    discover,
-    rpc::{self, Client},
-};
-use crate::sep1888::{
-    server_from_search_tool, Mode, OperationDescriptor, OperationsResponse, RiskTier,
-    SearchToolsRequest, TypesResponse, SEARCH_TOOLS_SUFFIX,
-};
+use crate::gateway::{discover, rpc};
 
 pub async fn run(ctx: &Context, report: &mut Report) {
     let http = match HttpClient::builder()
@@ -48,7 +38,7 @@ pub async fn run(ctx: &Context, report: &mut Report) {
         }
     };
 
-    list_tools_and_search(ctx, &auth, report).await;
+    initialize_and_list_tools(ctx, &auth, report).await;
     check_dual_generation(ctx, &http, &auth, report).await;
 }
 
@@ -321,7 +311,7 @@ async fn check_unauth_challenge(
     }
 }
 
-async fn list_tools_and_search(ctx: &Context, auth: &ResolvedAuth, report: &mut Report) {
+async fn initialize_and_list_tools(ctx: &Context, auth: &ResolvedAuth, report: &mut Report) {
     let start = Instant::now();
     let client = match rpc::connect(ctx, auth).await {
         Ok(c) => c,
@@ -333,89 +323,13 @@ async fn list_tools_and_search(ctx: &Context, auth: &ResolvedAuth, report: &mut 
     report.pass("mcp.initialize", start.elapsed());
 
     let start = Instant::now();
-    let listed = match client.list_tools(Default::default()).await {
-        Ok(l) => l,
+    match client.list_tools(Default::default()).await {
+        Ok(_) => report.pass("mcp.listTools", start.elapsed()),
         Err(e) => {
             report.fail("mcp.listTools", start.elapsed(), format!("{e:#}"));
             let _ = client.cancel().await;
             return;
         }
-    };
-    report.pass("mcp.listTools", start.elapsed());
-
-    let servers: Vec<String> = listed
-        .tools
-        .iter()
-        .filter_map(|t| server_from_search_tool(t.name.as_ref()).map(str::to_owned))
-        .collect();
-
-    if servers.is_empty() {
-        report.skip(
-            "searchTools.operations",
-            "no upstream advertises a searchTools meta-tool",
-        );
-        let _ = client.cancel().await;
-        return;
-    }
-
-    let mut candidate_op: Option<OperationDescriptor> = None;
-    for server in &servers {
-        let label = format!("searchTools.operations[{server}]");
-        let start = Instant::now();
-        let tool = format!("{server}{SEARCH_TOOLS_SUFFIX}");
-        let req = SearchToolsRequest {
-            mode: Mode::Operations,
-            filters: None,
-            name: None,
-            cursor: None,
-            limit: None,
-        };
-        let args = match to_object(&req) {
-            Ok(o) => o,
-            Err(e) => {
-                report.fail(label, start.elapsed(), e.to_string());
-                continue;
-            }
-        };
-        let params = CallToolRequestParams::new(tool.clone()).with_arguments(args);
-        match client.call_tool(params).await {
-            Ok(result) if !result.is_error.unwrap_or(false) => match parse_operations(&result) {
-                Ok(resp) => {
-                    if shapes_valid(&resp) {
-                        report.pass(label, start.elapsed());
-                        if candidate_op.is_none() {
-                            candidate_op = resp.operations.into_iter().find(safe_candidate);
-                        }
-                    } else {
-                        report.fail(
-                            label,
-                            start.elapsed(),
-                            "response shape failed validation".to_owned(),
-                        );
-                    }
-                }
-                Err(e) => report.fail(label, start.elapsed(), e),
-            },
-            Ok(_) => report.fail(label, start.elapsed(), "isError=true".to_owned()),
-            Err(e) => report.fail(label, start.elapsed(), format!("{e:#}")),
-        }
-    }
-
-    // Best-effort: call a low-risk, no-side-effects op. Anything else
-    // (medium/high, or any write path) is out of scope for the light tier.
-    //
-    // Before invoking, fetch the op's JSON Schema via `mode=types`. If it
-    // declares required properties, skip — the light tier does not
-    // synthesize arguments, and a tool that needs input failing on empty
-    // args would be a false negative. Otherwise call with `{}` and require
-    // `isError=false` for pass; an `isError=true` response means the tool
-    // itself reported a failure and must not be counted as green.
-    match candidate_op {
-        Some(op) => run_safe_call_probe(&client, &op, report).await,
-        None => report.skip(
-            "call.safe",
-            "no operation advertised riskLevel=low && sideEffects=false",
-        ),
     }
 
     if matches!(auth.mode, AuthModeArg::OauthCimd | AuthModeArg::Bearer) {
@@ -425,185 +339,4 @@ async fn list_tools_and_search(ctx: &Context, auth: &ResolvedAuth, report: &mut 
     }
 
     let _ = client.cancel().await;
-}
-
-async fn run_safe_call_probe(client: &Client, op: &OperationDescriptor, report: &mut Report) {
-    let label = format!("call.safe[{}]", op.name);
-    let Some((server, _)) = op.name.split_once('.') else {
-        report.skip(
-            label,
-            "candidate op name is not `<server>.<tool>`; cannot resolve searchTools meta-tool",
-        );
-        return;
-    };
-
-    let schema_start = Instant::now();
-    let tool = format!("{server}{SEARCH_TOOLS_SUFFIX}");
-    match fetch_types(client, &tool, &op.name).await {
-        Ok(types) => {
-            if schema_requires_input(&types.json_schema) {
-                report.skip(
-                    label,
-                    "candidate op requires input; light tier does not synthesize arguments",
-                );
-                return;
-            }
-        }
-        Err(reason) => {
-            report.fail(
-                label,
-                schema_start.elapsed(),
-                format!("mode=types: {reason}"),
-            );
-            return;
-        }
-    }
-
-    let call_start = Instant::now();
-    let params = CallToolRequestParams::new(op.name.clone());
-    match client.call_tool(params).await {
-        Ok(result) if !result.is_error.unwrap_or(false) => report.pass(label, call_start.elapsed()),
-        Ok(result) => report.fail(
-            label,
-            call_start.elapsed(),
-            format!("isError=true: {}", fallback_text(&result)),
-        ),
-        Err(e) => report.fail(label, call_start.elapsed(), format!("{e:#}")),
-    }
-}
-
-pub(crate) async fn fetch_types(
-    client: &Client,
-    tool_name: &str,
-    op_name: &str,
-) -> std::result::Result<TypesResponse, String> {
-    let req = SearchToolsRequest {
-        mode: Mode::Types,
-        filters: None,
-        name: Some(op_name.to_owned()),
-        cursor: None,
-        limit: None,
-    };
-    let args = to_object(&req).map_err(|e| e.to_string())?;
-    let params = CallToolRequestParams::new(tool_name.to_owned()).with_arguments(args);
-    let result = client
-        .call_tool(params)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
-    if result.is_error.unwrap_or(false) {
-        return Err(format!("isError=true: {}", fallback_text(&result)));
-    }
-    if let Some(sc) = result.structured_content.as_ref() {
-        return serde_json::from_value(sc.clone())
-            .map_err(|e| format!("parse structuredContent: {e}"));
-    }
-    if let Some(text) = result
-        .content
-        .iter()
-        .find_map(|c| c.as_text().map(|t| t.text.clone()))
-    {
-        return serde_json::from_str(&text).map_err(|e| format!("parse text content: {e}"));
-    }
-    Err("no structuredContent or text content".to_owned())
-}
-
-/// `true` iff the schema has a non-empty `required` array. Anything else
-/// (missing schema, schema without `required`, empty `required`) means the
-/// tool accepts `{}` and the probe should proceed.
-fn schema_requires_input(schema: &Value) -> bool {
-    schema
-        .get("required")
-        .and_then(Value::as_array)
-        .is_some_and(|arr| !arr.is_empty())
-}
-
-fn fallback_text(result: &rmcp::model::CallToolResult) -> String {
-    for c in &result.content {
-        if let Some(t) = c.as_text() {
-            return t.text.clone();
-        }
-    }
-    if let Some(sc) = &result.structured_content {
-        return sc.to_string();
-    }
-    "<no content>".to_owned()
-}
-
-fn shapes_valid(resp: &OperationsResponse) -> bool {
-    // Every op must carry a `name` (already guaranteed by the deserializer)
-    // and a `risk_level` within the canonical enum. `next_cursor` is optional
-    // and non-empty when present.
-    for op in &resp.operations {
-        match op.risk_level {
-            RiskTier::Low | RiskTier::Medium | RiskTier::High => {}
-        }
-        if op.name.is_empty() {
-            return false;
-        }
-    }
-    if let Some(c) = &resp.next_cursor {
-        if c.is_empty() {
-            return false;
-        }
-    }
-    true
-}
-
-fn safe_candidate(op: &OperationDescriptor) -> bool {
-    matches!(op.risk_level, RiskTier::Low) && op.side_effects == Some(false)
-}
-
-fn to_object(req: &SearchToolsRequest) -> Result<Map<String, Value>> {
-    match serde_json::to_value(req)? {
-        Value::Object(m) => Ok(m),
-        other => anyhow::bail!("SearchToolsRequest did not serialize as object: {other:?}"),
-    }
-}
-
-pub(crate) fn parse_operations(
-    result: &rmcp::model::CallToolResult,
-) -> std::result::Result<OperationsResponse, String> {
-    if let Some(sc) = &result.structured_content {
-        return serde_json::from_value(sc.clone())
-            .map_err(|e| format!("parse structuredContent: {e}"));
-    }
-    if let Some(text) = result
-        .content
-        .iter()
-        .find_map(|c| c.as_text().map(|t| &t.text))
-    {
-        return serde_json::from_str(text).map_err(|e| format!("parse text content: {e}"));
-    }
-    Err("no structuredContent or text content".to_owned())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn schema_requires_input_detects_non_empty_required() {
-        assert!(schema_requires_input(
-            &json!({"type": "object", "required": ["query"]})
-        ));
-        assert!(schema_requires_input(
-            &json!({"type": "object", "required": ["a", "b"]})
-        ));
-    }
-
-    #[test]
-    fn schema_requires_input_accepts_empty_or_missing_required() {
-        assert!(!schema_requires_input(&json!({"type": "object"})));
-        assert!(!schema_requires_input(
-            &json!({"type": "object", "required": []})
-        ));
-        assert!(!schema_requires_input(&json!({})));
-        // Malformed `required` (not an array) is treated as "no required
-        // fields" — the probe's fallback is to attempt the call, which will
-        // surface the error in its own right.
-        assert!(!schema_requires_input(
-            &json!({"type": "object", "required": "query"})
-        ));
-    }
 }

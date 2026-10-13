@@ -24,9 +24,8 @@ use std::sync::{Mutex, OnceLock};
 use prometheus::{
     register_counter_vec_with_registry, register_counter_with_registry,
     register_gauge_vec_with_registry, register_histogram_vec_with_registry,
-    register_histogram_with_registry, register_int_gauge_vec_with_registry,
-    register_int_gauge_with_registry, Counter, CounterVec, GaugeVec, Histogram, HistogramVec,
-    IntGauge, IntGaugeVec,
+    register_histogram_with_registry, register_int_gauge_vec_with_registry, Counter, CounterVec,
+    GaugeVec, Histogram, HistogramVec, IntGaugeVec,
 };
 
 use crate::registry;
@@ -329,95 +328,6 @@ fn discovery_cursor_outcomes() -> &'static CounterVec {
             registry()
         )
         .expect("register mcp_discovery_cursor_total")
-    })
-}
-
-fn discovery_index_publications() -> &'static CounterVec {
-    static M: OnceLock<CounterVec> = OnceLock::new();
-    M.get_or_init(|| {
-        register_counter_vec_with_registry!(
-            "mcp_discovery_index_publications_total",
-            "Legacy retrieval-index publications keyed by bounded publication mode and outcome.",
-            &["mode", "outcome"],
-            registry()
-        )
-        .expect("register mcp_discovery_index_publications_total")
-    })
-}
-
-fn discovery_index_fallbacks() -> &'static CounterVec {
-    static M: OnceLock<CounterVec> = OnceLock::new();
-    M.get_or_init(|| {
-        register_counter_vec_with_registry!(
-            "mcp_discovery_index_fallback_total",
-            "Legacy searchTools requests that scanned the authoritative catalog instead of using the retrieval index, keyed by a closed reason.",
-            &["reason"],
-            registry()
-        )
-        .expect("register mcp_discovery_index_fallback_total")
-    })
-}
-
-fn discovery_catalog_sources() -> &'static IntGaugeVec {
-    static M: OnceLock<IntGaugeVec> = OnceLock::new();
-    M.get_or_init(|| {
-        register_int_gauge_vec_with_registry!(
-            "mcp_discovery_catalog_sources",
-            "Current source count in each bounded discovery plane. The legacy index plane covers upstream compatibility search only.",
-            &["plane"],
-            registry()
-        )
-        .expect("register mcp_discovery_catalog_sources")
-    })
-}
-
-fn discovery_catalog_tools() -> &'static IntGaugeVec {
-    static M: OnceLock<IntGaugeVec> = OnceLock::new();
-    M.get_or_init(|| {
-        register_int_gauge_vec_with_registry!(
-            "mcp_discovery_catalog_tools",
-            "Current tool count in each bounded discovery plane. The legacy index plane covers upstream compatibility search only.",
-            &["plane"],
-            registry()
-        )
-        .expect("register mcp_discovery_catalog_tools")
-    })
-}
-
-fn discovery_retrieval_index_state() -> &'static IntGaugeVec {
-    static M: OnceLock<IntGaugeVec> = OnceLock::new();
-    M.get_or_init(|| {
-        register_int_gauge_vec_with_registry!(
-            "mcp_discovery_retrieval_index_state",
-            "One-hot legacy retrieval-index state using the closed healthy, unhealthy, and unavailable vocabulary.",
-            &["state"],
-            registry()
-        )
-        .expect("register mcp_discovery_retrieval_index_state")
-    })
-}
-
-fn discovery_retrieval_index_generation() -> &'static IntGauge {
-    static M: OnceLock<IntGauge> = OnceLock::new();
-    M.get_or_init(|| {
-        register_int_gauge_with_registry!(
-            "mcp_discovery_retrieval_index_generation",
-            "Current legacy retrieval-index publication generation; odd values identify an in-progress publication.",
-            registry()
-        )
-        .expect("register mcp_discovery_retrieval_index_generation")
-    })
-}
-
-fn discovery_retrieval_index_skew_tools() -> &'static IntGauge {
-    static M: OnceLock<IntGauge> = OnceLock::new();
-    M.get_or_init(|| {
-        register_int_gauge_with_registry!(
-            "mcp_discovery_retrieval_index_skew_tools",
-            "Authoritative upstream tool count minus legacy retrieval-index tool count. Gateway-local tools are outside both sides of this comparison.",
-            registry()
-        )
-        .expect("register mcp_discovery_retrieval_index_skew_tools")
     })
 }
 
@@ -1456,110 +1366,6 @@ pub fn record_discovery_cursor(surface: DiscoverySurface, accepted: bool) {
         .inc();
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiscoveryIndexPublication {
-    Slice,
-    Full,
-    Recovery,
-}
-
-impl DiscoveryIndexPublication {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Slice => "slice",
-            Self::Full => "full",
-            Self::Recovery => "recovery",
-        }
-    }
-}
-
-pub fn record_discovery_index_publication(mode: DiscoveryIndexPublication, ok: bool) {
-    discovery_index_publications()
-        .with_label_values(&[mode.as_str(), if ok { "success" } else { "error" }])
-        .inc();
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiscoveryIndexFallback {
-    Unavailable,
-    NoOpinion,
-    QueryError,
-    GenerationChurn,
-}
-
-impl DiscoveryIndexFallback {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Unavailable => "unavailable",
-            Self::NoOpinion => "no_opinion",
-            Self::QueryError => "query_error",
-            Self::GenerationChurn => "generation_churn",
-        }
-    }
-}
-
-pub fn record_discovery_index_fallback(reason: DiscoveryIndexFallback) {
-    discovery_index_fallbacks()
-        .with_label_values(&[reason.as_str()])
-        .inc();
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiscoveryIndexState {
-    Healthy,
-    Unhealthy,
-    Unavailable,
-}
-
-impl DiscoveryIndexState {
-    const ALL: [Self; 3] = [Self::Healthy, Self::Unhealthy, Self::Unavailable];
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Healthy => "healthy",
-            Self::Unhealthy => "unhealthy",
-            Self::Unavailable => "unavailable",
-        }
-    }
-}
-
-pub fn set_discovery_catalog_state(
-    authoritative_sources: usize,
-    authoritative_tools: usize,
-    retrieval_sources: usize,
-    retrieval_tools: usize,
-    index_state: DiscoveryIndexState,
-    index_generation: u64,
-) {
-    discovery_catalog_sources()
-        .with_label_values(&["authoritative_upstream"])
-        .set(i64::try_from(authoritative_sources).unwrap_or(i64::MAX));
-    discovery_catalog_sources()
-        .with_label_values(&["legacy_index"])
-        .set(i64::try_from(retrieval_sources).unwrap_or(i64::MAX));
-    discovery_catalog_tools()
-        .with_label_values(&["authoritative_upstream"])
-        .set(i64::try_from(authoritative_tools).unwrap_or(i64::MAX));
-    discovery_catalog_tools()
-        .with_label_values(&["legacy_index"])
-        .set(i64::try_from(retrieval_tools).unwrap_or(i64::MAX));
-    set_discovery_index_state(index_state);
-    discovery_retrieval_index_generation().set(i64::try_from(index_generation).unwrap_or(i64::MAX));
-    let authoritative = i64::try_from(authoritative_tools).unwrap_or(i64::MAX);
-    let retrieval = i64::try_from(retrieval_tools).unwrap_or(i64::MAX);
-    discovery_retrieval_index_skew_tools().set(authoritative.saturating_sub(retrieval));
-}
-
-/// Update only the retrieval-index health state while retaining the last
-/// coherent inventory, generation, and skew observations.
-pub fn set_discovery_index_state(index_state: DiscoveryIndexState) {
-    for state in DiscoveryIndexState::ALL {
-        discovery_retrieval_index_state()
-            .with_label_values(&[state.as_str()])
-            .set(i64::from(state == index_state));
-    }
-}
-
 pub fn record_catalog_reconciliation(ok: bool, seconds: f64) {
     catalog_reconciliation_duration()
         .with_label_values(&[if ok { "success" } else { "error" }])
@@ -2073,9 +1879,7 @@ pub fn record_mcp_request(generation: &str, protocol_version: &str, client_name:
 /// from becoming Prometheus cardinality.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolListProjection {
-    LegacyProgressive,
-    LegacyEagerGlobal,
-    LegacyEagerClient,
+    LegacyFull,
     LegacyCodeModeOnly,
     Stateless2026,
     StatelessCodeModeOnly,
@@ -2084,9 +1888,7 @@ pub enum ToolListProjection {
 impl ToolListProjection {
     fn labels(self) -> (&'static str, &'static str, &'static str) {
         match self {
-            Self::LegacyProgressive => ("legacy", "progressive", "legacy_other"),
-            Self::LegacyEagerGlobal => ("legacy", "eager_global", "global_override"),
-            Self::LegacyEagerClient => ("legacy", "eager_client", "legacy_allowlisted"),
+            Self::LegacyFull => ("legacy", "stable_full", "legacy_other"),
             Self::LegacyCodeModeOnly => ("legacy", "codemode_only", "compact_allowlisted"),
             Self::Stateless2026 => ("2026-07-28", "stable_full", "stateless"),
             Self::StatelessCodeModeOnly => ("2026-07-28", "codemode_only", "compact_allowlisted"),
@@ -2100,10 +1902,9 @@ fn tool_list_requests() -> &'static CounterVec {
         register_counter_vec_with_registry!(
             "mcp_tools_list_requests_total",
             "MCP tools/list requests by negotiated protocol generation and \
-             discovery mode. Labels are a closed product vocabulary: legacy \
-             progressive disclosure, process-wide eager fallback, per-client \
-             eager fallback, client-scoped Code Mode-only projection, or the \
-             stable MCP 2026 full projection. \
+             discovery mode. Labels are a closed product vocabulary: the \
+             stable full projection or the client-scoped Code Mode-only \
+             projection. \
              `client_class` is a closed projection class rather than the \
              self-asserted client name. No credential, tool name, or payload \
              is recorded.",
@@ -2501,9 +2302,7 @@ mod tests {
     #[test]
     fn tool_list_projection_metrics_export_only_closed_rollout_labels() {
         for projection in [
-            ToolListProjection::LegacyProgressive,
-            ToolListProjection::LegacyEagerGlobal,
-            ToolListProjection::LegacyEagerClient,
+            ToolListProjection::LegacyFull,
             ToolListProjection::LegacyCodeModeOnly,
             ToolListProjection::Stateless2026,
             ToolListProjection::StatelessCodeModeOnly,
@@ -2513,9 +2312,7 @@ mod tests {
 
         let text = crate::gather_text();
         for (generation, mode, client_class) in [
-            ("legacy", "progressive", "legacy_other"),
-            ("legacy", "eager_global", "global_override"),
-            ("legacy", "eager_client", "legacy_allowlisted"),
+            ("legacy", "stable_full", "legacy_other"),
             ("legacy", "codemode_only", "compact_allowlisted"),
             ("2026-07-28", "stable_full", "stateless"),
             ("2026-07-28", "codemode_only", "compact_allowlisted"),
@@ -2590,23 +2387,6 @@ mod tests {
         record_discovery_cursor(DiscoverySurface::Gateway, true);
         record_discovery_cursor(DiscoverySurface::Gateway, false);
         record_discovery_cursor(DiscoverySurface::CodeMode, true);
-        for mode in [
-            DiscoveryIndexPublication::Slice,
-            DiscoveryIndexPublication::Full,
-            DiscoveryIndexPublication::Recovery,
-        ] {
-            record_discovery_index_publication(mode, true);
-            record_discovery_index_publication(mode, false);
-        }
-        for reason in [
-            DiscoveryIndexFallback::Unavailable,
-            DiscoveryIndexFallback::NoOpinion,
-            DiscoveryIndexFallback::QueryError,
-            DiscoveryIndexFallback::GenerationChurn,
-        ] {
-            record_discovery_index_fallback(reason);
-        }
-        set_discovery_catalog_state(3, 17, 2, 15, DiscoveryIndexState::Unhealthy, 8);
         record_catalog_reconciliation(true, 0.25);
         record_catalog_reconciliation(false, 0.5);
 
@@ -2614,19 +2394,10 @@ mod tests {
         for metric in [
             "mcp_discovery_operation_duration_seconds",
             "mcp_discovery_cursor_total",
-            "mcp_discovery_index_publications_total",
-            "mcp_discovery_index_fallback_total",
-            "mcp_discovery_catalog_sources",
-            "mcp_discovery_catalog_tools",
-            "mcp_discovery_retrieval_index_state",
-            "mcp_discovery_retrieval_index_generation",
-            "mcp_discovery_retrieval_index_skew_tools",
             "mcp_discovery_catalog_reconciliation_duration_seconds",
         ] {
             assert!(text.contains(metric), "metric {metric} missing:\n{text}");
         }
-        assert!(text.contains("mcp_discovery_retrieval_index_state{state=\"unhealthy\"} 1"));
-        assert!(text.contains("mcp_discovery_retrieval_index_skew_tools 2"));
         for line in text
             .lines()
             .filter(|line| line.starts_with("mcp_discovery_"))

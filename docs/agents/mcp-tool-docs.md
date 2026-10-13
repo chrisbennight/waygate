@@ -62,9 +62,7 @@ All built-in tools in the `gateway-admin`, `gateway-observe`, and
 tools are documented by their own servers; the gateway's obligation there is
 **faithful publication of publishable contracts** — preserve whatever a
 conforming upstream declares (title, `output_schema`, annotations, and every
-schema constraint) in `tools/list`, and resolve both the
-`#input` and `#output` type handles that `<server>.searchTools mode=operations`
-advertises via `mode=types`, and return the same contract through
+schema constraint) in `tools/list`, and return the same contract through
 `gateway-discovery.inspect`. Before a schema reaches a client through any of
 these surfaces, the gateway rewrites legal JSON Schema forms that shipping MCP
 clients handle unevenly into validation-equivalent object forms: boolean

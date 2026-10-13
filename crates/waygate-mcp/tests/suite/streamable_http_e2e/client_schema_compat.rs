@@ -21,7 +21,6 @@ async fn selected_clients_register_simplified_tools_but_calls_keep_full_validati
         StreamableHttpServerConfig::default().with_allowed_hosts(vec![ALLOWED_HOST.to_owned()]),
         move || {
             GatewayServer::new(catalog.clone())
-                .with_eager_tools_list(true)
                 .with_root_composition_clients(vec!["restricted-client".to_owned()])
         },
     )
@@ -42,20 +41,6 @@ async fn selected_clients_register_simplified_tools_but_calls_keep_full_validati
         .as_deref()
         .unwrap()
         .contains("Root-composition compatibility"));
-
-    // Type discovery deliberately remains the authoritative schema as data.
-    let described = legacy
-        .call_tool(
-            CallToolRequestParams::new("demo.searchTools").with_arguments(
-                json!({"mode":"types","name":"demo.echo#input"})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            ),
-        )
-        .await
-        .unwrap();
-    assert!(described.structured_content.as_ref().unwrap()["jsonSchema"]["allOf"].is_array());
 
     for (args, valid) in [
         (json!({"mode":"large","size":1500000000}), true),

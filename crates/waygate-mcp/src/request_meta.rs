@@ -6,8 +6,8 @@
 //! `initialize` and live on the session peer. rmcp's `RequestContext`
 //! accessors already consult `_meta` first and fall back to the session's
 //! peer info, so this module is the single seam that turns those accessors
-//! into the gateway's per-request decisions — eager-catalog matching,
-//! elicitation capability, disclosure-record selection, log level — instead
+//! into the gateway's per-request decisions — client-name catalog matching,
+//! elicitation capability, log level — instead
 //! of each call site reading session state that a stateless request does
 //! not have.
 
@@ -25,7 +25,7 @@ const META_KEY_LOG_LEVEL: &str = "io.modelcontextprotocol/logLevel";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProtocolGeneration {
     /// A 2025-11-25-or-earlier session: state may live on the session
-    /// (per-session disclosure record, ping loop, GET-stream notifications).
+    /// (ping loop, GET-stream notifications).
     Legacy,
     /// A 2026-07-28 stateless request: nothing survives between requests
     /// except what the gateway keys by authenticated principal.
@@ -59,7 +59,8 @@ pub(crate) fn record_request(
 pub struct ClientContext {
     pub generation: ProtocolGeneration,
     /// `clientInfo.name` — from per-request `_meta` (stateless) or the
-    /// session handshake (legacy). Drives the eager-catalog client match.
+    /// session handshake (legacy). Drives the Code Mode-only and
+    /// root-composition client matches.
     pub client_name: Option<String>,
     /// Whether the client declared the elicitation capability. On the legacy
     /// path this gates server-initiated elicitation over the session's push

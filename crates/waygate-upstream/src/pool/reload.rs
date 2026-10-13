@@ -60,15 +60,15 @@ pub struct ReloadReport {
     /// backend that serves them. Apply the set through a process restart instead.
     pub resource_shape_restart_required: Vec<String>,
     /// Upstreams newly listed in the fresh set and dialed-and-published into the
-    /// live registry + search index by this reload (hot add — no restart). A
+    /// live registry by this reload (hot add — no restart). A
     /// failed initial dial still adds the entry (slots down); the re-probe heals
     /// it, exactly like a boot-time dial failure. A re-add of a previously
     /// hot-removed server also lands here (it is built fresh).
     pub added: Vec<String>,
-    /// Upstreams dropped from the fresh set and tombstoned, drained, removed
-    /// from the registry map, and pulled from the search index by this reload
-    /// (hot remove — no restart). In-flight callers hold their own `Arc` and
-    /// drain naturally; new lookups miss immediately.
+    /// Upstreams dropped from the fresh set and tombstoned, drained, and removed
+    /// from the registry map by this reload (hot remove — no restart). In-flight
+    /// callers hold their own `Arc` and drain naturally; new lookups miss
+    /// immediately.
     pub removed: Vec<String>,
     /// True when this reload's manifest set is NOT the one now live, so its
     /// callers MUST skip ALL control-plane writes (activation, heartbeat,
@@ -970,7 +970,7 @@ impl UpstreamPool {
                 RedialSource::CatalogRefresh,
             )
             .await;
-        // A total dial/index failure returns before `redial_entry` reaches its
+        // A failed re-dial returns before `redial_entry` reaches its
         // successful-commit registry fence. Classify that outcome against the
         // live registry under the structural lock before claiming the prior
         // inventory is still current: an overlapping reload may have replaced
@@ -1244,8 +1244,8 @@ impl UpstreamPool {
 
         // A reconnect changes one upstream-wide catalog, even when it only
         // heals one lane. Commit every prospective lane under one structural
-        // fence so the search index and every connected Connection expose the
-        // exact descriptor intersection advertised by all serving lanes.
+        // fence so every connected Connection exposes the exact descriptor
+        // intersection advertised by all serving lanes.
         // Never hold the fleet structural fence while waiting for this
         // upstream's active calls to release their lane readers. Taking the
         // lane writers first is safe only with a non-blocking structural
@@ -1353,7 +1353,7 @@ impl UpstreamPool {
                 }
                 return;
             }
-            if let Err(error) = self.publish_classifications_to(
+            self.publish_classifications_to(
                 entry,
                 dialed[publish_index]
                     .as_mut()
@@ -1367,74 +1367,69 @@ impl UpstreamPool {
                     live_tools: Some(&common_live_tools),
                 },
                 None,
-            ) {
-                last_err = Some((
-                    UpstreamErrorClass::Catalog,
-                    format!("search index publish failed: {error}"),
-                ));
-            } else {
-                let published_tools = dialed[publish_index]
-                    .as_ref()
-                    .expect("selected reconnect connection exists")
-                    .tools
-                    .clone();
-                synchronize_reconnect_catalogs(
-                    breaker_open,
-                    guards
-                        .iter_mut()
-                        .map(|guard| guard.as_mut().map(|conn| &mut conn.tools)),
-                    dialed.iter_mut().zip(&installable).map(|(conn, install)| {
-                        (*install, conn.as_mut().map(|conn| &mut conn.tools))
-                    }),
-                    &published_tools,
+            );
+            let published_tools = dialed[publish_index]
+                .as_ref()
+                .expect("selected reconnect connection exists")
+                .tools
+                .clone();
+            synchronize_reconnect_catalogs(
+                breaker_open,
+                guards
+                    .iter_mut()
+                    .map(|guard| guard.as_mut().map(|conn| &mut conn.tools)),
+                dialed
+                    .iter_mut()
+                    .zip(&installable)
+                    .map(|(conn, install)| (*install, conn.as_mut().map(|conn| &mut conn.tools))),
+                &published_tools,
+            );
+            // Same per-lane rule as the redial commit: a refusal on any
+            // live lane has to reach the operator, and only the
+            // publishing lane was normalized during publication.
+            for conn in guards.iter_mut().filter_map(|guard| guard.as_mut()) {
+                super::tool_listing::normalize_connection(name, conn);
+            }
+            for conn in dialed.iter_mut().filter_map(Option::as_mut) {
+                super::tool_listing::normalize_connection(name, conn);
+            }
+            if guards
+                .iter()
+                .filter_map(|guard| match (breaker_open, guard.as_ref()) {
+                    (false, Some(conn)) => Some(conn),
+                    _ => None,
+                })
+                .map(|conn| &conn.live_tools)
+                .chain(
+                    dialed
+                        .iter()
+                        .zip(&installable)
+                        .filter_map(
+                            |(conn, install)| {
+                                if *install {
+                                    conn.as_ref()
+                                } else {
+                                    None
+                                }
+                            },
+                        )
+                        .map(|conn| &conn.live_tools),
+                )
+                .any(|tools| *tools != common_live_tools)
+            {
+                tracing::warn!(
+                    server = %name,
+                    common_tools = common_live_tools.len(),
+                    "connected lanes advertised different tool catalogs — publishing only their exact intersection",
                 );
-                // Same per-lane rule as the redial commit: a refusal on any
-                // live lane has to reach the operator, and only the
-                // publishing lane was normalized during publication.
-                for conn in guards.iter_mut().filter_map(|guard| guard.as_mut()) {
-                    super::tool_listing::normalize_connection(name, conn);
-                }
-                for conn in dialed.iter_mut().filter_map(Option::as_mut) {
-                    super::tool_listing::normalize_connection(name, conn);
-                }
-                if guards
-                    .iter()
-                    .filter_map(|guard| match (breaker_open, guard.as_ref()) {
-                        (false, Some(conn)) => Some(conn),
-                        _ => None,
-                    })
-                    .map(|conn| &conn.live_tools)
-                    .chain(
-                        dialed
-                            .iter()
-                            .zip(&installable)
-                            .filter_map(
-                                |(conn, install)| {
-                                    if *install {
-                                        conn.as_ref()
-                                    } else {
-                                        None
-                                    }
-                                },
-                            )
-                            .map(|conn| &conn.live_tools),
-                    )
-                    .any(|tools| *tools != common_live_tools)
-                {
-                    tracing::warn!(
-                        server = %name,
-                        common_tools = common_live_tools.len(),
-                        "connected lanes advertised different tool catalogs — publishing only their exact intersection",
-                    );
-                }
-                tool_count = published_tools.len();
-                healed = candidate_healed;
-                for ((guard, conn), install) in
-                    guards.iter_mut().zip(dialed.iter_mut()).zip(&installable)
-                {
-                    if *install {
-                        **guard = conn.take();
-                    }
+            }
+            tool_count = published_tools.len();
+            healed = candidate_healed;
+            for ((guard, conn), install) in
+                guards.iter_mut().zip(dialed.iter_mut()).zip(&installable)
+            {
+                if *install {
+                    **guard = conn.take();
                 }
             }
         }
@@ -1823,10 +1818,9 @@ impl UpstreamPool {
         }
 
         // Serialize the commit with registry replacement. A slot-count-changing
-        // reload swaps a different `Arc<UpstreamEntry>` under this same lock and
-        // republishes its index before releasing it. The identity check prevents
-        // a slow refresh/redial holding the retired entry from publishing after
-        // that structural commit.
+        // reload swaps a different `Arc<UpstreamEntry>` under this same lock.
+        // The identity check prevents a slow refresh/redial holding the retired
+        // entry from publishing after that structural commit.
         let _structural_guard = self.reload_lock.lock().await;
         if !self.entry_is_current(name, entry) {
             return RedialOutcome::Superseded;
@@ -1921,10 +1915,9 @@ impl UpstreamPool {
             }
 
             // Publish the replacement inventory before advancing the manifest or
-            // installing any session. Search-index failure is transaction failure:
-            // restore the prior index slice and leave the old manifest + sessions
-            // serving. This runs synchronously under all commit locks, so
-            // cancellation cannot observe an index/session split.
+            // installing any session. This runs synchronously under all commit
+            // locks, so cancellation cannot interrupt the transaction between
+            // publication and installation.
             let previous_tools = guards
                 .iter()
                 .find_map(|guard| guard.as_ref().map(|conn| conn.tools.clone()))
@@ -1943,7 +1936,7 @@ impl UpstreamPool {
                     .collect();
                 common_tool_catalog(&catalogs, classification_mode)
             };
-            if let Err(error) = self.publish_classifications_to(
+            self.publish_classifications_to(
                 entry,
                 dialed[publish_index]
                     .as_mut()
@@ -1957,14 +1950,7 @@ impl UpstreamPool {
                     live_tools: Some(&common_live_tools),
                 },
                 None,
-            ) {
-                tracing::error!(
-                    server = %name,
-                    error = %error,
-                    "live re-dial aborted because search-index publication failed",
-                );
-                return RedialOutcome::Failed;
-            }
+            );
             let published_tools = dialed[publish_index]
                 .as_ref()
                 .expect("selected replacement connection exists")
@@ -2198,14 +2184,14 @@ impl UpstreamPool {
         }
     }
 
-    /// Publish invariant: every write to `Connection.tools` and the per-server
-    /// slice of the search index goes through this helper, and the caller MUST
-    /// hold every connection lock whose session participates in the atomic
-    /// replacement. The helper never yields: once the shared index changes,
-    /// cancellation cannot interrupt the caller before it installs the matching
-    /// replacement session(s). Callers pass the classification slice protected
-    /// by their manifest commit guard, so filtering and publication use the
-    /// exact view that the transaction validated.
+    /// Publish invariant: every write to `Connection.tools` goes through this
+    /// helper, and the caller MUST hold every connection lock whose session
+    /// participates in the atomic replacement. The helper never yields, so
+    /// cancellation cannot interrupt the caller between this publication and
+    /// installing the matching replacement session(s). Callers pass the
+    /// classification slice protected by their manifest commit guard, so
+    /// filtering and publication use the exact view that the transaction
+    /// validated.
     ///
     /// Boot is exempt because `connect_inner` builds entries before the pool is
     /// observable to any other task — its initial publish uses the dial-time
@@ -2223,7 +2209,7 @@ impl UpstreamPool {
         name: &str,
         publication: CatalogPublication<'_>,
         external_catalog_change: Option<&waygate_mcp::catalog_changes::ToolCatalogChange<'_>>,
-    ) -> Result<(), String> {
+    ) {
         let CatalogPublication {
             source,
             classifications,
@@ -2232,43 +2218,18 @@ impl UpstreamPool {
             live_tools,
         } = publication;
         let live_tools = live_tools.unwrap_or(&conn.live_tools);
-        // Index and serving-session replacement form one synchronous catalog
-        // publication. Stable discovery readers retry until both agree.
+        // Serving-session replacement is one synchronous catalog publication;
+        // stable discovery readers retry while it is in progress.
         let catalog_change = external_catalog_change
             .is_none()
             .then(|| self.tool_catalog_epoch.begin_change());
-        let tools = publish_classified_tools(
+        conn.tools = publish_classified_tools(
             name,
             classifications,
             classification_mode,
             live_tools,
             source,
-            |tools| {
-                self.index
-                    .as_ref()
-                    .map(|idx| idx.replace_server(name, tools))
-                    .transpose()
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-            },
         );
-        let tools = match tools {
-            Ok(tools) => tools,
-            Err(error) => {
-                if let Some(index) = self.index.as_ref() {
-                    if let Err(rollback_error) = index.replace_server(name, previous_tools) {
-                        tracing::error!(
-                            server = %name,
-                            error = %error,
-                            rollback_error = %rollback_error,
-                            "search index publish and rollback failed",
-                        );
-                    }
-                }
-                return Err(error);
-            }
-        };
-        conn.tools = tools;
         super::tool_listing::normalize_connection(name, conn);
         let catalog_changed = !tool_catalogs_equal(&conn.tools, previous_tools);
         // Record per-tool behavior-hash drift
@@ -2318,7 +2279,6 @@ impl UpstreamPool {
                 });
             }
         }
-        Ok(())
     }
 
     /// After a live slot-resize rebuild inherits the
@@ -2329,8 +2289,7 @@ impl UpstreamPool {
     /// rebuild's fresh dial otherwise bypasses the drift check that a same-count
     /// redial / reconnect publish runs, so a resize that lands on an upstream
     /// whose behavior drifted would accept traffic on the unverified tool. Records
-    /// against the inherited baseline only — NO index write, since the BM25
-    /// publish is deferred to the stage-2 commit — mirroring the boot seed's
+    /// against the inherited baseline only, mirroring the boot seed's
     /// "first connected slot observes for the whole entry" pattern.
     async fn detect_drift_on_rebuilt_entry(&self, entry: &UpstreamEntry, name: &str) {
         for slot in &entry.slots {
@@ -2379,10 +2338,10 @@ impl UpstreamPool {
 
     /// Apply a fresh on-disk manifest set to the live pool. Add/remove of
     /// upstreams is HOT: a newly-listed server is dialed and published into the
-    /// registry map + search index, and a delisted server is tombstoned,
-    /// drained, dropped from the map, and pulled from the index — all without a
-    /// restart. In-place edits to an EXISTING entry (tool classifications,
-    /// identity-chaining fields, a same-slot-count live re-dial) mutate through
+    /// registry map, and a delisted server is tombstoned, drained, and dropped
+    /// from the map — all without a restart. In-place edits to an EXISTING
+    /// entry (tool classifications, identity-chaining fields, a
+    /// same-slot-count live re-dial) mutate through
     /// the shared `Arc` and need no map swap. A slot-count-changing shape edit
     /// (a stdio↔network flip or a `session.concurrency` change) is REBUILT
     /// live: a fresh entry with the new slot count is dialed and swapped into
@@ -2494,9 +2453,8 @@ impl UpstreamPool {
             // leaving the map). Build a fresh, dialed entry — bounded by
             // `redial_dial_timeout` so a black-hole new target can't wedge this
             // awaited reload (the same bound the live re-dial path accepts).
-            // The index publish is DEFERRED (index = None here): a superseded add
-            // must not leave orphaned BM25 docs, so the fenced commit (stage 2)
-            // publishes the tools only for entries it actually commits. Like boot,
+            // The entry becomes visible only through the fenced commit (stage 2),
+            // so a superseded add publishes nothing. Like boot,
             // the entry is inserted even when its dial fails (slots down) — the
             // re-probe heals it from the manifest. `my_gen` stamps the new entry's
             // `last_reload_gen` so an OLDER concurrent reload that finds it is
@@ -2510,7 +2468,6 @@ impl UpstreamPool {
                     new_manifest.clone(),
                     self.issuer.as_ref(),
                     self.exchange.as_ref(),
-                    None,
                     pool_size_from_env(),
                     self.redial_dial_timeout,
                     my_gen,
@@ -2655,48 +2612,35 @@ impl UpstreamPool {
                                 .collect::<Vec<_>>();
                             common_tool_catalog(&catalogs, new_manifest.classification_mode)
                         };
-                        let mut published_tools = None;
-                        for conn_guard in &mut classification_guards {
-                            let Some(conn) = conn_guard.as_mut() else {
-                                continue;
-                            };
-                            if published_tools.is_none() {
-                                let previous_tools = conn.tools.clone();
-                                match self.publish_classifications_to(
-                                    entry,
-                                    conn,
-                                    name,
-                                    CatalogPublication {
-                                        source: "reload",
-                                        classifications: &guard.tools,
-                                        classification_mode: guard.classification_mode,
-                                        previous_tools: &previous_tools,
-                                        live_tools: Some(&common_live_tools),
-                                    },
-                                    Some(&catalog_change),
-                                ) {
-                                    Ok(()) => published_tools = Some(conn.tools.clone()),
-                                    Err(error) => tracing::error!(
-                                        server = %name,
-                                        error = %error,
-                                        "classification reload kept the prior serving and search inventory because search-index publication failed",
-                                    ),
-                                }
-                            }
-                        }
-                        if let Some(published_tools) = published_tools.as_deref() {
+                        if let Some(conn) = classification_guards
+                            .iter_mut()
+                            .find_map(|conn_guard| conn_guard.as_mut())
+                        {
+                            let previous_tools = conn.tools.clone();
+                            self.publish_classifications_to(
+                                entry,
+                                conn,
+                                name,
+                                CatalogPublication {
+                                    source: "reload",
+                                    classifications: &guard.tools,
+                                    classification_mode: guard.classification_mode,
+                                    previous_tools: &previous_tools,
+                                    live_tools: Some(&common_live_tools),
+                                },
+                                Some(&catalog_change),
+                            );
+                            let published_tools = conn.tools.clone();
                             synchronize_published_catalogs(
                                 classification_guards.iter_mut().filter_map(|conn_guard| {
                                     conn_guard.as_mut().map(|conn| &mut conn.tools)
                                 }),
-                                published_tools,
+                                &published_tools,
                             );
                         }
                         // The transition fence, manifest fields, serving
                         // inventory, drift quarantine, and every lane's
-                        // filtered catalog are one complete publication. A
-                        // failed index replacement still leaves the governance
-                        // fence visible, so it also invalidates cached lists.
+                        // filtered catalog are one complete publication.
                         catalog_change.commit();
                     }
                     // The hot-reloadable identity-chaining fields (exchange /
@@ -2795,9 +2739,8 @@ impl UpstreamPool {
 
             // A slot-count-changing shape edit is REBUILT live. Build a fresh
             // entry with the new shape (new slot count), dialed lock-free here just
-            // like a hot add — `index = None` defers the BM25 publish to the stage-2
-            // commit so a superseded / failed rebuild never pollutes the index, and
-            // `initial_gen = my_gen` fences the fresh entry as of THIS reload.
+            // like a hot add — it becomes visible only through the stage-2 commit,
+            // and `initial_gen = my_gen` fences the fresh entry as of THIS reload.
             //
             //   - ≥1 lane dials ⇒ stage it in `to_add`; the stage-2 reconcile prefers
             //     a freshly-built entry over the live one, so it REPLACES the old
@@ -2818,7 +2761,6 @@ impl UpstreamPool {
                     new_manifest.clone(),
                     self.issuer.as_ref(),
                     self.exchange.as_ref(),
-                    None,
                     pool_size_from_env(),
                     self.redial_dial_timeout,
                     my_gen,
@@ -2933,7 +2875,7 @@ impl UpstreamPool {
 
         // STAGE 2 — commit the structural change under `reload_lock`, generation-
         // fenced. Dialing and other slow work above ran without this pool-level
-        // lock; only short registry and session/index commit sections serialize.
+        // lock; only short registry and session commit sections serialize.
         // The fence makes the NEWEST reload
         // authoritative: a stale reload whose slow dial lands it here after a
         // newer reload already committed is abandoned — it must not publish its
@@ -2985,7 +2927,7 @@ impl UpstreamPool {
                     // Drain every dropped entry before starting publication, while
                     // the old map and its dispatch contract remain live. Retaining
                     // every slot guard prevents a reconnect from publishing between
-                    // this barrier and the later tombstone/index/map commit.
+                    // this barrier and the later tombstone/map commit.
                     let mut dropped_slot_guards = Vec::new();
                     for name in &dropped {
                         let entry = &live[name];
@@ -2999,8 +2941,8 @@ impl UpstreamPool {
                     // delta) means the published map is always one reload's COMPLETE
                     // view, never a merge of two divergent reloads.
                     // Slow entry reads and reconnect drains complete before the
-                    // synchronous publication. The BM25 batch and map swap are then
-                    // fenced as one discovery-visible generation.
+                    // synchronous publication. The map swap is then fenced as one
+                    // discovery-visible generation.
                     let mut built: HashMap<&str, Arc<UpstreamEntry>> = to_add
                         .iter()
                         .map(|(n, e)| (n.as_str(), e.clone()))
@@ -3075,95 +3017,60 @@ impl UpstreamPool {
                             Some(_) => {}
                         }
                     }
-                    // Prepare the complete next BM25 snapshot before entering
-                    // the non-awaiting publication section. Structural reload
-                    // is the recovery boundary for a prior index error: only a
-                    // full rebuild can prove no committed-but-unpublished slice
-                    // survives from a failed reader handoff.
-                    let mut index_slices = Vec::new();
-                    if catalog_changed && self.index.is_some() {
-                        for (name, entry) in next_arc.iter() {
-                            index_slices.push((
-                                name.clone(),
-                                entry.published_tools(self.tool_reviews.is_none()).await,
-                            ));
-                        }
-                    }
-
-                    let published = if catalog_changed {
+                    if catalog_changed {
                         let change = self.tool_catalog_epoch.begin_change();
-                        let index_result = self.index.as_ref().map_or(Ok(()), |idx| {
-                            idx.replace_all_servers(
-                                index_slices
-                                    .iter()
-                                    .map(|(name, tools)| (name.as_str(), tools.as_slice())),
-                            )
-                        });
-                        if let Err(error) = index_result {
-                            tracing::warn!(
-                                error = %error,
-                                "structural reload kept the prior topology because search-index publication failed",
-                            );
-                            report.superseded = true;
-                            false
-                        } else {
-                            for name in &dropped {
-                                let entry = &live[name];
-                                entry.removed.store(true, Ordering::Release);
-                                entry.retire_reconnect(name);
-                            }
-                            for name in &added {
-                                if let Some(manifest) = fresh.get(name) {
-                                    self.mark_catalog_transitions(
-                                        name,
-                                        manifest.tools.iter().map(|tool| tool.name.clone()),
-                                        my_gen,
-                                    );
-                                }
-                            }
-                            self.entries.store(next_arc.clone());
-                            report.added.extend(added.iter().cloned());
-                            report.removed.extend(dropped.iter().cloned());
-                            change.commit();
-                            true
+                        for name in &dropped {
+                            let entry = &live[name];
+                            entry.removed.store(true, Ordering::Release);
+                            entry.retire_reconnect(name);
                         }
+                        for name in &added {
+                            if let Some(manifest) = fresh.get(name) {
+                                self.mark_catalog_transitions(
+                                    name,
+                                    manifest.tools.iter().map(|tool| tool.name.clone()),
+                                    my_gen,
+                                );
+                            }
+                        }
+                        self.entries.store(next_arc.clone());
+                        report.added.extend(added.iter().cloned());
+                        report.removed.extend(dropped.iter().cloned());
+                        change.commit();
                     } else {
                         self.entries.store(next_arc.clone());
-                        true
-                    };
+                    }
                     drop(dropped_slot_guards);
 
-                    if published {
-                        for name in &dropped {
-                            // A removed upstream publishes nothing, so its
-                            // server-labelled gauges must not retain stale facts.
-                            waygate_telemetry::metrics::set_rejected_output_schemas(name, 0);
-                            waygate_telemetry::metrics::set_unregisterable_input_schemas(name, 0);
-                            self.zero_protocol_generation_gauge(name).await;
-                            self.forget_audited_refusals(name).await;
-                        }
-                        // Hot-added and slot-resized entries were dialed above and
-                        // are only now the committed topology, so this is the
-                        // first point their rejection sets can be attributed to a
-                        // live upstream. Without it, a server added or resized at
-                        // runtime strips malformed schemas silently.
-                        for (name, _) in &to_add {
-                            self.refresh_rejected_output_schemas(name).await;
-                            if let Some(entry) = next_arc.get(name) {
-                                let state = entry
-                                    .reconnect
-                                    .lock()
-                                    .expect("upstream reconnect lock poisoned");
-                                super::reconnect::publish_schedule(name, &state);
-                            }
-                        }
-                        self.reconnect_notify.notify_waiters();
+                    for name in &dropped {
+                        // A removed upstream publishes nothing, so its
+                        // server-labelled gauges must not retain stale facts.
+                        waygate_telemetry::metrics::set_rejected_output_schemas(name, 0);
+                        waygate_telemetry::metrics::set_unregisterable_input_schemas(name, 0);
+                        self.zero_protocol_generation_gauge(name).await;
+                        self.forget_audited_refusals(name).await;
                     }
+                    // Hot-added and slot-resized entries were dialed above and
+                    // are only now the committed topology, so this is the
+                    // first point their rejection sets can be attributed to a
+                    // live upstream. Without it, a server added or resized at
+                    // runtime strips malformed schemas silently.
+                    for (name, _) in &to_add {
+                        self.refresh_rejected_output_schemas(name).await;
+                        if let Some(entry) = next_arc.get(name) {
+                            let state = entry
+                                .reconnect
+                                .lock()
+                                .expect("upstream reconnect lock poisoned");
+                            super::reconnect::publish_schedule(name, &state);
+                        }
+                    }
+                    self.reconnect_notify.notify_waiters();
                 }
             } else {
                 // Superseded by a newer reload — abandon the structural commit
-                // (the dialed `to_add` entries just drop, and they never published
-                // to the index). Flag it so the doorbell / SIGHUP callers skip the
+                // (the dialed `to_add` entries just drop without ever becoming
+                // visible). Flag it so the doorbell / SIGHUP callers skip the
                 // activation + heartbeat audit: this reload's manifest set is NOT
                 // the one now live, and recording it would claim the replica is
                 // serving a config that didn't win. The in-place

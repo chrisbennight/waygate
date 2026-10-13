@@ -41,7 +41,6 @@ impl UpstreamRuntimeState {
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamErrorClass {
     Authentication,
-    Catalog,
     Configuration,
     Dns,
     Protocol,
@@ -53,7 +52,6 @@ impl UpstreamErrorClass {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Authentication => "authentication",
-            Self::Catalog => "catalog",
             Self::Configuration => "configuration",
             Self::Dns => "dns",
             Self::Protocol => "protocol",

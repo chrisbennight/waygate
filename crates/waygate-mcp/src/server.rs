@@ -1,8 +1,7 @@
 //! `GatewayServer` — the `rmcp::ServerHandler` the gateway mounts at `/mcp`.
 //!
-//! `list_tools` projects one stable full catalog for MCP 2026 clients and the
-//! legacy session-local `searchTools` compatibility view for older clients.
-//! `call_tool` either services a search invocation directly or proxies a
+//! `list_tools` projects one stable, authorization-filtered catalog for every
+//! client. `call_tool` either answers a gateway built-in locally or proxies a
 //! fully-qualified `<server>.<tool>` call to the upstream pool.
 
 use std::collections::HashSet;
@@ -20,7 +19,7 @@ use rmcp::model::{
     ResultType, ServerCapabilities, ServerConfig, TaskPayload, TaskStatus, Tool, ToolAnnotations,
     UpdateTaskParams, TASKS_EXTENSION_ID,
 };
-use rmcp::service::{Peer, RequestContext};
+use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -42,22 +41,13 @@ use crate::catalog::{
     SharedCatalog,
 };
 use crate::catalog_changes::ToolCatalogEpoch;
-use crate::compat::search_tools_v1::{
-    self, Mode, OperationDescriptor, OperationsResponse, SearchToolsRequest, SearchToolsResponse,
-    TypesResponse,
-};
-use crate::disclosed::DisclosedTools;
 use crate::discovery::CatalogTool;
-use crate::index::{self, SearchIndex};
 use crate::invocation::DefaultInvocationService;
 use crate::protocol::RiskTier;
 use crate::request_meta::{ClientContext, ProtocolGeneration};
-use crate::tool_schema::{
-    input_schema_has_object_root, make_tool_schemas_portable, portable_schema_object,
-};
+use crate::tool_schema::{input_schema_has_object_root, make_tool_schemas_portable};
 use waygate_invocation::{InvocationError, InvocationRequest, SharedInvocation};
 
-const SEARCH_TOOLS_SUFFIX: &str = ".searchTools";
 const MAX_CATALOG_SNAPSHOT_RETRIES: usize = 3;
 const MAX_RESOURCE_CURSOR_BYTES: usize = 4096;
 const MAX_RESOURCE_RESOLUTION_PAGES: usize = 50;
@@ -73,8 +63,6 @@ pub const DEFAULT_RESOURCE_RESPONSE_MAX_BYTES: usize = 4 * 1024 * 1024;
 const RESOURCE_INSPECTION_BLOCKED_ERROR: &str = "response_inspection_blocked";
 pub(crate) const FULL_CATALOG_INSTRUCTIONS: &str =
     "Call tools as `<server>.<toolName>`; the authorized catalog is in `tools/list`.";
-pub(crate) const LEGACY_SEARCH_INSTRUCTIONS: &str =
-    "Use `<server>.searchTools` to discover tools or schemas; call results as `<server>.<toolName>`.";
 pub(crate) const CODEMODE_ONLY_INSTRUCTIONS: &str =
     "Use `codemode.search` to discover governed operations and `codemode.describe` for exact schemas. `codemode.execute` can invoke every operation this client is directly authorized to call. Upstream tools are not listed directly for this client.";
 
@@ -213,18 +201,16 @@ pub async fn authorize_builtin_call(
 
 /// Which direct-tool projection a `tools/list` request receives.
 ///
-/// The 2026 protocol uses `Full`: one stable, authorization-filtered catalog
-/// that is independent of prior calls. Legacy sessions may still use their
-/// session-local disclosure record for the closed-draft `searchTools`
-/// compatibility adapter.
+/// Every client gets `Full`, one stable, authorization-filtered catalog that
+/// is independent of prior calls, unless it was selected for the compact
+/// Code Mode-only catalog of built-ins.
 #[derive(Clone, Copy)]
-enum ToolProjection<'a> {
+enum ToolProjection {
     Full { canonical_order: bool },
-    SessionDisclosed(&'a DisclosedTools),
     BuiltinsOnly { canonical_order: bool },
 }
 
-impl ToolProjection<'_> {
+impl ToolProjection {
     /// The presentation a captured tool-list view must match to continue a
     /// traversal of this projection.
     fn presentation(
@@ -233,7 +219,6 @@ impl ToolProjection<'_> {
     ) -> crate::tool_list_pagination::ToolListPresentation {
         let (projection, canonical_order) = match self {
             Self::Full { canonical_order } => ("full", canonical_order),
-            Self::SessionDisclosed(_) => ("session_disclosed", false),
             Self::BuiltinsOnly { canonical_order } => ("builtins_only", canonical_order),
         };
         crate::tool_list_pagination::ToolListPresentation {
@@ -242,18 +227,6 @@ impl ToolProjection<'_> {
             schema_adapted,
         }
     }
-}
-
-/// Resolution of the one qualified name shared by the compatibility adapter
-/// and a possible ordinary upstream `searchTools` tool.
-enum SearchToolsNameResolution {
-    /// The caller cannot discover the upstream itself. Return the same shape
-    /// as an unknown server before inspecting either meaning of the name.
-    ServerHidden,
-    /// No caller-visible, admitted ordinary tool occupies the name.
-    Adapter,
-    /// A caller-visible, admitted ordinary upstream tool occupies the name.
-    DirectTool,
 }
 
 /// The answer for a URI no upstream this caller can see advertises — and,
@@ -546,37 +519,13 @@ pub const EMA_EXTENSION_ID: &str = "io.modelcontextprotocol/enterprise-managed-a
 pub struct GatewayServer {
     catalog: SharedCatalog,
     /// Authz gate retained on `GatewayServer` (alongside being threaded
-    /// into `DefaultInvocationService`) because the discovery / list
-    /// paths consult `may_discover_server` / `may_call_tool` directly to
-    /// filter the meta-tool catalog and search results. Those paths
-    /// don't go through `InvocationService` (yet — `discover` lands in
-    /// a later phase per the plan), so the gate has to stay reachable
-    /// from here too.
+    /// into `DefaultInvocationService`) because the `tools/list` and
+    /// resource paths consult `may_discover_server` / `may_call_tool`
+    /// directly, outside `InvocationService`.
     authz: SharedAuthz,
-    /// BM25 index used when `searchTools` carries a `query`. `None` means the
-    /// handler falls back to a linear substring scan — acceptable in tests
-    /// that don't bother wiring an index, fail-open rather than empty
-    /// result set in production.
-    index: Option<SearchIndex>,
-    /// Tools this session has discovered via `searchTools`. Surfaced in
-    /// subsequent `tools/list` responses so strict clients (which refuse to
-    /// invoke tools that never appeared in `tools/list`) can still call them.
-    /// Per-session isolation is provided by the `StreamableHttpService`
-    /// factory, which creates a fresh `GatewayServer` per session.
-    disclosed: DisclosedTools,
-    /// When true, legacy-session `tools/list` returns the full upstream
-    /// catalog alongside the meta-tools. The 2026 projection is always full.
-    eager_tools_list: bool,
-    /// Exact MCP `clientInfo.name` matches that opt only their own legacy
-    /// session into eager discovery while other legacy clients stay progressive.
-    eager_tools_clients: Vec<String>,
-    /// Set during `initialize` when this session's client name matches
-    /// [`Self::eager_tools_clients`]. Shared across clones of this one session.
-    client_eager_tools_list: Arc<AtomicBool>,
     /// Exact MCP `clientInfo.name` matches whose tool catalog contains only
     /// authorized gateway built-ins. This keeps the Code Mode facade available
-    /// to clients that can neither accept the full upstream catalog nor refresh
-    /// a progressively disclosed direct-tool list.
+    /// to clients that cannot accept the full upstream catalog.
     codemode_only_tools_clients: Vec<String>,
     /// Freshness hint stamped on stateless `tools/list` results. `None` keeps
     /// the do-not-cache hint (`ttlMs: 0`).
@@ -595,17 +544,9 @@ pub struct GatewayServer {
     /// (fail-closed wrapper, quota-gated wrapper, etc.) without
     /// touching this crate.
     invocation: SharedInvocation,
-    /// Audit sink for SEP #1888 discovery events. The same handle
-    /// the invocation service uses, retained here because the discovery
-    /// path does not go through `InvocationService`, so it needs its own
-    /// way to record a best-effort `Discovery` row. Gated by
-    /// `audit_discovery`.
+    /// Audit sink shared with the invocation service, for the evidence this
+    /// adapter records itself (resource reads and skill access).
     audit: SharedEvidence,
-    /// When true, each `searchTools` call records a best-effort `Discovery`
-    /// audit row. Off by default (discovery is high-volume; opt in via
-    /// `GATEWAY_AUDIT_DISCOVERY`). See
-    /// [`with_audit_discovery`](Self::with_audit_discovery).
-    audit_discovery: bool,
     /// Gateway-local tool namespaces (e.g. `gateway-admin.*`,
     /// `gateway-observe.*`, `gateway-control.*`). Calls whose name is in one of
     /// these namespaces are answered by the gateway itself instead of proxied
@@ -874,18 +815,12 @@ impl GatewayServer {
         Self {
             catalog,
             authz,
-            index: None,
-            disclosed: DisclosedTools::new(),
-            eager_tools_list: false,
-            eager_tools_clients: Vec::new(),
-            client_eager_tools_list: Arc::new(AtomicBool::new(false)),
             codemode_only_tools_clients: Vec::new(),
             tools_list_cache_ttl: None,
             root_composition_clients: Vec::new(),
             client_codemode_only_tools_list: Arc::new(AtomicBool::new(false)),
             invocation,
             audit,
-            audit_discovery: false,
             builtins: Vec::new(),
             advertise_ema: false,
             client_ping_interval: None,
@@ -953,16 +888,6 @@ impl GatewayServer {
         inspectors: Vec<crate::inspection::SharedInspector>,
     ) -> Self {
         self.resource_inspectors = inspectors;
-        self
-    }
-
-    /// Attach a populated [`SearchIndex`] for BM25-ranked `searchTools`.
-    /// Must be called before the server is handed to rmcp — the index is
-    /// cheap to clone (`Arc` under the hood) but swapping it at runtime
-    /// would require a lock the hot path doesn't need.
-    #[must_use]
-    pub fn with_index(mut self, index: SearchIndex) -> Self {
-        self.index = Some(index);
         self
     }
 
@@ -1040,27 +965,6 @@ impl GatewayServer {
             .with_reviewed_skills(approved)
     }
 
-    /// Return the full upstream catalog from `tools/list` instead of gating
-    /// discovery behind `searchTools`. Opt-in escape hatch for MCP clients
-    /// that ignore `notifications/tools/list_changed` — turning it on means
-    /// every connected client pays the full-catalog context cost on its first
-    /// `tools/list`, so the default stays off.
-    #[must_use]
-    pub fn with_eager_tools_list(mut self, enabled: bool) -> Self {
-        self.eager_tools_list = enabled;
-        self
-    }
-
-    /// Return the full authorized upstream catalog only for legacy sessions
-    /// whose MCP `clientInfo.name` matches one of `clients`. Matching is exact
-    /// and ASCII-case-insensitive. The process-wide
-    /// [`Self::with_eager_tools_list`] override still wins.
-    #[must_use]
-    pub fn with_eager_tools_clients(mut self, clients: Vec<String>) -> Self {
-        self.eager_tools_clients = clients;
-        self
-    }
-
     /// Return only authorized gateway built-ins to clients whose MCP
     /// `clientInfo.name` matches one of `clients`. Matching is exact and
     /// ASCII-case-insensitive. Code Mode remains directly listed and provides
@@ -1103,10 +1007,6 @@ impl GatewayServer {
         )
     }
 
-    fn eager_tools_list_active(&self) -> bool {
-        self.eager_tools_list || self.client_eager_tools_list.load(Ordering::Relaxed)
-    }
-
     fn client_name_matches(client_name: Option<&str>, allowed: &[String]) -> bool {
         client_name.is_some_and(|client_name| {
             allowed
@@ -1123,58 +1023,6 @@ impl GatewayServer {
                     &self.codemode_only_tools_clients,
                 )
             })
-    }
-
-    /// Resolve the shared `searchTools` name at the same authorization and
-    /// admission boundary as `tools/list`. Distinguishing a hidden server from
-    /// a hidden direct tool matters: the former must look unknown, while the
-    /// latter leaves the gateway-owned adapter visible.
-    async fn resolve_search_tools_name(
-        &self,
-        principal: Option<&Principal>,
-        server: &str,
-    ) -> SearchToolsNameResolution {
-        if let Some(principal) = principal {
-            if profile_blocks_server(principal, server)
-                || !self.authz.may_discover_server(principal, server).await
-            {
-                return SearchToolsNameResolution::ServerHidden;
-            }
-            if profile_blocks_tool(principal, server, "searchTools") {
-                return SearchToolsNameResolution::Adapter;
-            }
-        }
-        let Ok(tools) = self.catalog.list_tools(server).await else {
-            return SearchToolsNameResolution::Adapter;
-        };
-        if !tools.iter().any(|tool| tool.name == "searchTools") {
-            return SearchToolsNameResolution::Adapter;
-        }
-        let tenant = principal
-            .map(|principal| principal.tenant.as_str())
-            .unwrap_or(waygate_core::TenantId::DEFAULT);
-        let ResolvedInvocationTool::Ready(snapshot) = self
-            .catalog
-            .resolve_discovery_tool(tenant, server, "searchTools")
-            .await
-        else {
-            return SearchToolsNameResolution::Adapter;
-        };
-        match principal {
-            Some(principal)
-                if !self
-                    .authz
-                    .may_call_tool(principal, snapshot.facts())
-                    .await
-                    .is_discoverable() =>
-            {
-                SearchToolsNameResolution::Adapter
-            }
-            _ if CatalogTool::from_upstream_snapshot(server, snapshot).is_some() => {
-                SearchToolsNameResolution::DirectTool
-            }
-            _ => SearchToolsNameResolution::Adapter,
-        }
     }
 
     /// SEP-2549 cache hints for a gateway-owned result, stamped only for
@@ -1220,16 +1068,6 @@ impl GatewayServer {
             client.client_name.as_deref(),
         );
         client
-    }
-
-    /// Enable best-effort `Discovery` audit rows for each `searchTools`
-    /// call. Off by default (discovery is high-volume and non-security-
-    /// critical); the composition root flips it on from
-    /// `GATEWAY_AUDIT_DISCOVERY`.
-    #[must_use]
-    pub fn with_audit_discovery(mut self, enabled: bool) -> Self {
-        self.audit_discovery = enabled;
-        self
     }
 
     /// Register a gateway-local tool namespace (e.g. the HITL `gateway-admin.*`
@@ -1291,35 +1129,9 @@ impl GatewayServer {
         self
     }
 
-    /// Access the session's [`DisclosedTools`] record. Exposed so integration
-    /// tests can assert disclosure/notification behavior; production callers
-    /// should not need this.
-    pub fn disclosed(&self) -> &DisclosedTools {
-        &self.disclosed
-    }
-
-    fn make_search_tool(server: &str) -> Tool {
-        let description =
-            format!("Search callable operations and type schemas on the `{server}` upstream.");
-        Tool::new(
-            format!("{server}{SEARCH_TOOLS_SUFFIX}"),
-            description,
-            search_tools_v1::input_schema(),
-        )
-        .with_title(format!("{server} — search tools"))
-        .with_raw_output_schema(search_tools_v1::output_schema())
-        .annotate(
-            ToolAnnotations::new()
-                .read_only(true)
-                .destructive(false)
-                .idempotent(true)
-                .open_world(false),
-        )
-    }
-
     /// Dispatch a `tools/call` independent of the rmcp `RequestContext`. The
     /// `ServerHandler::call_tool` impl is a thin wrapper around this so that
-    /// tests can exercise the meta-tool and proxy paths directly.
+    /// tests can exercise the built-in and proxy paths directly.
     ///
     /// `principal` is `None` in the `disabled` auth mode tests; the
     /// [`AllowAllGate`] is forgiving there, but a real [`AuthzGate`] must be
@@ -1338,8 +1150,6 @@ impl GatewayServer {
             .dispatch_tool_call_with(
                 request,
                 principal,
-                ProtocolGeneration::Legacy,
-                Some(&self.disclosed),
                 &MrtrCaller::CANNOT,
                 CancellationToken::new(),
             )
@@ -1354,20 +1164,15 @@ impl GatewayServer {
         }
     }
 
-    /// [`Self::dispatch_tool_call`] with an optional legacy disclosure record.
-    /// Stateless 2026 calls pass `None`, so `searchTools` remains callable as
-    /// a compatibility/search surface without mutating subsequent lists.
-    /// `caller` is the downstream client's MRTR posture: whether an
-    /// `input_required` pause may be returned to it at all, and which
-    /// capabilities the upstream leg may rely on it answering. `cancellation`
-    /// fires when the downstream request is abandoned, and cancels the
-    /// upstream request it dispatched.
+    /// [`Self::dispatch_tool_call`] for a connected caller. `caller` is the
+    /// downstream client's MRTR posture: whether an `input_required` pause may
+    /// be returned to it at all, and which capabilities the upstream leg may
+    /// rely on it answering. `cancellation` fires when the downstream request
+    /// is abandoned, and cancels the upstream request it dispatched.
     async fn dispatch_tool_call_with(
         &self,
         mut request: CallToolRequestParams,
         principal: Option<&Principal>,
-        generation: ProtocolGeneration,
-        disclosed: Option<&DisclosedTools>,
         caller: &MrtrCaller,
         cancellation: CancellationToken,
     ) -> Result<CallToolResponse, McpError> {
@@ -1376,75 +1181,14 @@ impl GatewayServer {
         // Built-in namespaces (e.g. `gateway-admin.propose_change`,
         // `gateway-observe.query_audit`): answered by the gateway itself, not
         // proxied. Intercepted FIRST so each reserved namespace is hermetic — a
-        // probe of `gateway-admin.foo` (or even `gateway-admin.searchTools`)
-        // lands in the built-in handler's unknown-tool path rather than leaking
-        // through the upstream catalog or the SEP #1888 meta-tool path. The
-        // impl re-checks authorization. First matching namespace wins.
+        // probe of `gateway-admin.foo` lands in the built-in handler's
+        // unknown-tool path rather than leaking through the upstream catalog.
+        // The impl re-checks authorization. First matching namespace wins.
         if let Some((builtin, tool)) = self.authorized_builtin(name, principal).await? {
             return builtin
                 .call(tool, request.arguments, principal)
                 .await
                 .map(Into::into);
-        }
-
-        if let Some(server) = name.strip_suffix(SEARCH_TOOLS_SUFFIX) {
-            // The closed-draft adapter and an ordinary upstream tool named
-            // `searchTools` share one qualified name. Standard 2026 clients
-            // get the direct tool when that valid upstream shape exists;
-            // a legacy peer cannot disambiguate the shared name, so fail with
-            // a stable, instructive collision error instead of silently
-            // shadowing either contract.
-            let name_resolution = self.resolve_search_tools_name(principal, server).await;
-            if matches!(name_resolution, SearchToolsNameResolution::ServerHidden) {
-                return Err(McpError::invalid_params(
-                    format!("unknown upstream: {server}"),
-                    None,
-                ));
-            }
-            let visible_upstream_collision =
-                matches!(name_resolution, SearchToolsNameResolution::DirectTool);
-            if generation == ProtocolGeneration::Stateless2026 && visible_upstream_collision {
-                // Fall through to the ordinary governed direct-tool pipeline.
-            } else if generation == ProtocolGeneration::Legacy && visible_upstream_collision {
-                return Err(McpError::invalid_params(
-                    format!(
-                        "legacy searchTools adapter name collision: `{server}.searchTools` is \
-                         also an ordinary upstream tool; use MCP 2026 for direct-tool \
-                         precedence or rename the upstream tool"
-                    ),
-                    Some(json!({
-                        "error": "legacy_search_tools_name_collision",
-                        "adapter": {
-                            "id": search_tools_v1::ADAPTER_ID,
-                            "version": search_tools_v1::ADAPTER_VERSION,
-                        },
-                        "tool": format!("{server}.searchTools"),
-                    })),
-                ));
-            } else {
-                let args = request.arguments.unwrap_or_default();
-                let req: SearchToolsRequest =
-                    serde_json::from_value(Value::Object(args)).map_err(|e| {
-                        McpError::invalid_params(format!("searchTools args: {e}"), None)
-                    })?;
-                let req = req.normalize().map_err(|reason| {
-                    McpError::invalid_params(
-                        format!("searchTools args: {reason}"),
-                        Some(json!({
-                            "error": "invalid_search_tools_arguments",
-                            "adapter": {
-                                "id": search_tools_v1::ADAPTER_ID,
-                                "version": search_tools_v1::ADAPTER_VERSION,
-                            },
-                            "reason": reason,
-                        })),
-                    )
-                })?;
-                return self
-                    .handle_search_tools(server, req, principal, disclosed)
-                    .await
-                    .map(Into::into);
-            }
         }
 
         let (server, tool_name) = name.split_once('.').ok_or_else(|| {
@@ -1981,20 +1725,6 @@ impl GatewayServer {
             }
         }
         allowed
-    }
-
-    /// Same indirection for `tools/list` — build the meta-tool list without a
-    /// `RequestContext`. When a principal is supplied we filter servers to
-    /// only those the caller can discover.
-    pub async fn list_meta_tools(&self, principal: Option<&Principal>) -> Vec<Tool> {
-        // The projection owns tool order: a catalog may report its servers in
-        // any order, and that order must not reach the listed array.
-        let mut servers = self.visible_upstream_servers(principal).await;
-        servers.sort_unstable();
-        servers
-            .into_iter()
-            .map(|server| Self::make_search_tool(&server))
-            .collect()
     }
 
     fn decode_resource_cursor(cursor: &str) -> Result<ResourceCursor, McpError> {
@@ -3275,25 +3005,19 @@ impl GatewayServer {
         Ok(owners)
     }
 
-    /// The full `tools/list` payload for this session: meta-tools plus any
-    /// upstream tools already disclosed via `searchTools`. Authorization is
-    /// re-evaluated per call so tools whose policy flipped to deny after
-    /// disclosure drop out. Tools are renamed to their fully-qualified
-    /// `<server>.<tool>` form so the `tools/call` dispatcher can route them.
-    ///
-    /// When the process-wide eager override is set, or this session's MCP
-    /// client name matched the configured fallback allowlist, the full
-    /// upstream catalog is appended regardless of what the session has
-    /// disclosed. Authorization and runtime-admission filters still apply.
+    /// The full `tools/list` payload: authorized gateway built-ins and every
+    /// admitted upstream tool the caller may discover, in canonical order.
+    /// Authorization is re-evaluated per call so tools whose policy flipped to
+    /// deny drop out. Tools carry their fully-qualified `<server>.<tool>` name
+    /// so the `tools/call` dispatcher can route them.
     pub async fn list_visible_tools(&self, principal: Option<&Principal>) -> Vec<Tool> {
-        let projection = if self.eager_tools_list_active() {
+        self.list_visible_tools_with(
+            principal,
             ToolProjection::Full {
                 canonical_order: true,
-            }
-        } else {
-            ToolProjection::SessionDisclosed(&self.disclosed)
-        };
-        self.list_visible_tools_with(principal, projection).await
+            },
+        )
+        .await
     }
 
     /// The stable authorized tool view as `client` is shown it, including any
@@ -3302,7 +3026,7 @@ impl GatewayServer {
         &self,
         client: &ClientContext,
         principal: Option<&Principal>,
-        projection: ToolProjection<'_>,
+        projection: ToolProjection,
     ) -> Result<Vec<Tool>, McpError> {
         let mut visible = self
             .stable_list_visible_tools_with(principal, projection)
@@ -3319,7 +3043,7 @@ impl GatewayServer {
     async fn stable_list_visible_tools_with(
         &self,
         principal: Option<&Principal>,
-        projection: ToolProjection<'_>,
+        projection: ToolProjection,
     ) -> Result<Vec<Tool>, McpError> {
         for _ in 0..MAX_CATALOG_SNAPSHOT_RETRIES {
             let durable_before = self.catalog.discovery_generation().await?;
@@ -3355,38 +3079,23 @@ impl GatewayServer {
         ))
     }
 
-    /// [`Self::list_visible_tools`] with the protocol projection resolved by
-    /// the caller. The enum prevents a 2026 request from accidentally
-    /// consulting legacy session disclosure memory.
+    /// [`Self::list_visible_tools`] with the projection resolved by the
+    /// caller.
     async fn list_visible_tools_with(
         &self,
         principal: Option<&Principal>,
-        projection: ToolProjection<'_>,
+        projection: ToolProjection,
     ) -> Vec<Tool> {
-        // A full projection already lists every tool the caller may call, so
-        // the per-server search adapters would only repeat the gateway's own
-        // discovery tools. They stay with session disclosure, and remain
-        // callable by name.
-        let (include_meta_tools, full_projection, canonical_order) = match projection {
-            ToolProjection::Full { canonical_order } => (false, true, canonical_order),
-            ToolProjection::SessionDisclosed(_) => (true, false, false),
-            ToolProjection::BuiltinsOnly { canonical_order } => (false, false, canonical_order),
+        let canonical_order = match projection {
+            ToolProjection::Full { canonical_order }
+            | ToolProjection::BuiltinsOnly { canonical_order } => canonical_order,
         };
-        let mut out = if include_meta_tools {
-            self.list_meta_tools(principal).await
-        } else {
-            Vec::new()
-        };
+        let mut out = Vec::new();
 
-        // Built-in (gateway-local) tools, listed directly rather than behind a
-        // searchTools meta-tool: the set is small and fixed, and each impl
-        // gates its tools on its own scope (HITL `gateway-admin.*` needs
-        // `mcp:propose`; the `gateway-observe.*` read plane needs
-        // `mcp:observe`), so a caller without that scope sees nothing extra.
-        // Appended here — alongside the always-available meta-tools and
-        // *before* the session-disclosure logic — because built-ins are not
-        // session-disclosed and the disclosure path can `return out` early
-        // for a fresh session that has revealed nothing yet.
+        // Built-in (gateway-local) tools: each impl gates its tools on its own
+        // scope (HITL `gateway-admin.*` needs `mcp:propose`; the
+        // `gateway-observe.*` read plane needs `mcp:observe`), so a caller
+        // without that scope sees nothing extra.
         for builtin in &self.builtins {
             // Namespace-scoped built-ins are hidden from a principal confined
             // to another server. A delegated data-plane surface applies that
@@ -3466,40 +3175,8 @@ impl GatewayServer {
             return out;
         }
 
-        // Which `<server>.<tool>` names to surface in `tools/list` beyond the
-        // meta-tools. Eager mode uses the whole catalog; the SEP #1888 path
-        // uses just what this session has disclosed via `searchTools`.
-        // Keys/values are owned so borrow lifetimes stay tidy across the
-        // async loop below.
-        let mut by_server: std::collections::BTreeMap<String, Vec<String>> =
-            std::collections::BTreeMap::new();
-        if full_projection {
-            for server in self.catalog.list_servers().await {
-                by_server.insert(server, Vec::new());
-            }
-        } else {
-            let ToolProjection::SessionDisclosed(disclosed) = projection else {
-                unreachable!("the full projection returned above")
-            };
-            let revealed = disclosed.snapshot();
-            if revealed.is_empty() {
-                retain_publishable_tools(&mut out);
-                return out;
-            }
-            for fq in revealed {
-                if let Some((server, tool_name)) = fq.split_once('.') {
-                    by_server
-                        .entry(server.to_owned())
-                        .or_default()
-                        .push(tool_name.to_owned());
-                }
-            }
-        }
-
-        for (server, wanted) in by_server {
+        for server in self.catalog.list_servers().await {
             if let Some(p) = principal {
-                // Same profile filter
-                // as list_meta_tools — skip whole-server.
                 if profile_blocks_server(p, &server) {
                     continue;
                 }
@@ -3510,14 +3187,7 @@ impl GatewayServer {
             let tenant = principal
                 .map(|p| p.tenant.as_str())
                 .unwrap_or(waygate_core::TenantId::DEFAULT);
-            let resolved = if full_projection {
-                self.catalog.list_discovery_tools(tenant, &server).await
-            } else {
-                self.catalog
-                    .resolve_discovery_tools(tenant, &server, &wanted)
-                    .await
-            };
-            let Ok(resolved) = resolved else {
+            let Ok(resolved) = self.catalog.list_discovery_tools(tenant, &server).await else {
                 continue;
             };
             for resolved in resolved {
@@ -3533,8 +3203,8 @@ impl GatewayServer {
                 }
                 let facts = snapshot.facts();
                 if let Some(p) = principal {
-                    // `is_discoverable()` mirrors searchTools: step-up tools
-                    // stay listed so the client can re-auth and retry.
+                    // `is_discoverable()`: step-up tools stay listed so the
+                    // client can re-authenticate and retry.
                     if !self.authz.may_call_tool(p, facts).await.is_discoverable() {
                         continue;
                     }
@@ -3557,383 +3227,6 @@ impl GatewayServer {
             out.sort_unstable_by(|left, right| left.name.cmp(&right.name));
         }
         out
-    }
-
-    async fn handle_search_tools(
-        &self,
-        server: &str,
-        req: SearchToolsRequest,
-        principal: Option<&Principal>,
-        disclosed: Option<&DisclosedTools>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = match req.mode() {
-            Mode::Operations => {
-                self.handle_operations(server, &req, principal, disclosed)
-                    .await
-            }
-            // handle_types needs
-            // the principal to apply profile + Cedar gates.
-            // Without it a profile-restricted key could request
-            // a disallowed tool's schema via mode=types.
-            Mode::Types => self.handle_types(server, &req, principal).await,
-        };
-        // Best-effort `Discovery` audit. `searchTools` was previously
-        // unaudited, so SEP #1888 discovery never appeared in the Activity
-        // feed at all. Best-effort because discovery is high-volume and
-        // non-security-critical — an audit hiccup must never fail a
-        // discovery call. Gated by `GATEWAY_AUDIT_DISCOVERY` (off by
-        // default). Records server + outcome + mode; no result payload.
-        if self.audit_discovery {
-            let mode = match req.mode() {
-                Mode::Operations => "operations",
-                Mode::Types => "types",
-            };
-            let outcome = if result.is_ok() {
-                AuditOutcome::Success
-            } else {
-                AuditOutcome::ExecutionError
-            };
-            self.audit
-                .record_best_effort(
-                    AuditEvent::new("SearchTools", outcome)
-                        .with_category(EvidenceCategory::Discovery)
-                        .with_principal(principal)
-                        .with_tool(server, "searchTools")
-                        .with_reason(format!("mode={mode}")),
-                )
-                .await;
-        }
-        result
-    }
-
-    async fn handle_operations(
-        &self,
-        server: &str,
-        req: &SearchToolsRequest,
-        principal: Option<&Principal>,
-        disclosed: Option<&DisclosedTools>,
-    ) -> Result<CallToolResult, McpError> {
-        let durable_before = self.catalog.discovery_generation().await?;
-        let errors_before = self.catalog.discovery_error_generation();
-        let local_generation = match self.tool_catalog_epoch.as_ref() {
-            Some(epoch) => Some(epoch.stable_generation().ok_or_else(|| {
-                McpError::internal_error(
-                    "the governed tool catalog is changing; retry the search",
-                    Some(json!({"error":"catalog_changing", "retryable":true})),
-                )
-            })?),
-            None => None,
-        };
-        let query = req
-            .filters
-            .as_ref()
-            .and_then(|f| f.query.as_deref())
-            .filter(|q| !q.trim().is_empty());
-
-        // BM25 path: ask the index for a ranked list of tool names, then
-        // reorder the finite catalog view before applying pagination.
-        // The index generation fences the separately-awaited catalog snapshot:
-        // a refresh that lands between them forces a retry, and sustained churn
-        // falls back to filtering one fresh catalog snapshot without BM25.
-        // If the index rejects the query (parse error, empty input) we fall
-        // back to substring match so weird user input still surfaces
-        // something sensible.
-        let tools = match (self.index.as_ref(), query) {
-            (Some(idx), Some(q)) => {
-                let mut stable = None;
-                for _ in 0..MAX_CATALOG_SNAPSHOT_RETRIES {
-                    let generation = idx.generation();
-                    let tools = self.catalog.list_tools(server).await?;
-                    let (ranked, fallback) = match idx.search(server, q, usize::MAX) {
-                        Ok(Some(names)) => (index::reorder_by_names(tools, &names), None),
-                        Ok(None) => (
-                            tools
-                                .into_iter()
-                                .filter(|t| index::matches(t, req.filters.as_ref()))
-                                .collect(),
-                            Some(waygate_telemetry::metrics::DiscoveryIndexFallback::NoOpinion),
-                        ),
-                        Err(_) => (
-                            tools
-                                .into_iter()
-                                .filter(|t| index::matches(t, req.filters.as_ref()))
-                                .collect(),
-                            Some(waygate_telemetry::metrics::DiscoveryIndexFallback::QueryError),
-                        ),
-                    };
-                    if idx.is_stable_generation(generation) {
-                        if let Some(reason) = fallback {
-                            waygate_telemetry::metrics::record_discovery_index_fallback(reason);
-                        }
-                        stable = Some(ranked);
-                        break;
-                    }
-                }
-                match stable {
-                    Some(tools) => tools,
-                    None => {
-                        waygate_telemetry::metrics::record_discovery_index_fallback(
-                            waygate_telemetry::metrics::DiscoveryIndexFallback::GenerationChurn,
-                        );
-                        self.catalog
-                            .list_tools(server)
-                            .await?
-                            .into_iter()
-                            .filter(|t| index::matches(t, req.filters.as_ref()))
-                            .collect()
-                    }
-                }
-            }
-            (None, Some(_)) => {
-                waygate_telemetry::metrics::record_discovery_index_fallback(
-                    waygate_telemetry::metrics::DiscoveryIndexFallback::Unavailable,
-                );
-                self.catalog
-                    .list_tools(server)
-                    .await?
-                    .into_iter()
-                    .filter(|t| index::matches(t, req.filters.as_ref()))
-                    .collect()
-            }
-            (_, None) => self
-                .catalog
-                .list_tools(server)
-                .await?
-                .into_iter()
-                .filter(|t| index::matches(t, req.filters.as_ref()))
-                .collect(),
-        };
-
-        let risk_filter = req.filters.as_ref().and_then(|f| f.risk_level);
-        // SEP #1888 `scope` facet: filter to tools whose required OAuth scope
-        // matches. Applied here (not in `matches_non_query`) because the
-        // scope is derived from the tool's resolved risk facts — same place
-        // and reason `risk_level` is applied.
-        let scope_filter = req
-            .filters
-            .as_ref()
-            .and_then(|f| f.scope.as_deref())
-            .map(str::to_owned);
-        let mut matched: Vec<OperationDescriptor> = Vec::with_capacity(tools.len());
-        let tenant = principal
-            .map(|p| p.tenant.as_str())
-            .unwrap_or(waygate_core::TenantId::DEFAULT);
-        let tools: Vec<_> = tools
-            .into_iter()
-            .filter(|t| index::matches_non_query(t, req.filters.as_ref()))
-            .collect();
-        let names = tools
-            .iter()
-            .map(|tool| tool.name.to_string())
-            .collect::<Vec<_>>();
-        let resolved = self
-            .catalog
-            .resolve_discovery_tools(tenant, server, &names)
-            .await?;
-        for (t, resolved) in tools.iter().zip(resolved) {
-            // Quarantined/retired servers' tools are hidden from search
-            // results (and refused at dispatch); only an admitted snapshot is listable.
-            let ResolvedInvocationTool::Ready(snapshot) = resolved else {
-                continue;
-            };
-            let facts = snapshot.facts();
-            if let Some(target) = risk_filter {
-                if facts.risk != target {
-                    continue;
-                }
-            }
-            if let Some(want) = scope_filter.as_deref() {
-                if crate::authz::required_scope_for(facts.risk) != Some(want) {
-                    continue;
-                }
-            }
-            if let Some(p) = principal {
-                // Profile-restricted
-                // keys must not even SEE disallowed servers/
-                // tools in searchTools results. The dispatch
-                // gate would refuse later, but discovery still
-                // leaks the existence of tools the operator
-                // has bound the key away from.
-                if profile_blocks_server(p, server) || profile_blocks_tool(p, server, &t.name) {
-                    continue;
-                }
-                // Step-up tools stay discoverable on purpose: the whole
-                // point of step-up is that the client can re-authorize
-                // and then call, so hiding the tool would defeat the UX.
-                if !self.authz.may_call_tool(p, facts).await.is_discoverable() {
-                    continue;
-                }
-            }
-            let Some(record) = CatalogTool::from_upstream_snapshot(server, snapshot) else {
-                tracing::warn!(
-                    %server,
-                    tool = %t.name,
-                    "withholding tool whose admitted input schema is not publishable",
-                );
-                continue;
-            };
-            matched.push(tool_to_descriptor(&record));
-        }
-
-        let durable_after = self.catalog.discovery_generation().await?;
-        if !catalog_projection_is_stable(
-            self.tool_catalog_epoch.as_ref(),
-            local_generation,
-            durable_before,
-            durable_after,
-            errors_before,
-            self.catalog.discovery_error_generation(),
-        ) {
-            return Err(McpError::internal_error(
-                "the governed tool catalog changed or became unavailable during search; retry the request",
-                Some(json!({"error":"catalog_changing", "retryable":true})),
-            ));
-        }
-        let (operations, next_cursor) = index::paginate(matched, req.cursor.as_deref(), req.limit);
-
-        // Record each operation surfaced in this response as disclosed for the
-        // session. Names are already fully qualified. Any newly-disclosed tool
-        // arms `pending_notify` so `call_tool` emits `tools/list_changed`.
-        // Done BEFORE the verbosity projection so disclosure tracking is
-        // independent of how much detail the client asked for.
-        if let Some(disclosed) = disclosed {
-            disclosed.record(operations.iter().map(|op| op.name.clone()));
-        }
-
-        // Project to the requested verbosity (default `Full` = unchanged).
-        let detail = req.detail.unwrap_or_default();
-        let operations: Vec<OperationDescriptor> = operations
-            .into_iter()
-            .map(|op| op.project(detail))
-            .collect();
-
-        let resp = SearchToolsResponse::Operations(OperationsResponse {
-            operations,
-            next_cursor,
-        });
-        structured_ok(&resp)
-    }
-
-    async fn handle_types(
-        &self,
-        server: &str,
-        req: &SearchToolsRequest,
-        principal: Option<&Principal>,
-    ) -> Result<CallToolResult, McpError> {
-        let Some(name) = req.name.as_deref() else {
-            return Err(McpError::invalid_params("mode=types requires `name`", None));
-        };
-
-        // Type lookup resolves to the tool's own input_schema,
-        // addressable by its (server-qualified) name. Dot-notation into nested
-        // type definitions lands alongside the tantivy index upgrade.
-        let tools = self.catalog.list_tools(server).await?;
-        let qualified = name.strip_prefix(&format!("{server}.")).unwrap_or(name);
-        // SEP #1888 type names carry an optional `#input` / `#output` role suffix
-        // — exactly what the operation descriptor advertises as `input_type` /
-        // `output_type`. Split it off so the advertised `output_type` is actually
-        // resolvable here; a bare name defaults to the input schema (preserved
-        // behavior, so existing `{server}.{tool}` lookups are unchanged).
-        let (bare, want_output, echo_suffix) = match qualified.rsplit_once('#') {
-            Some((n, "input")) => (n, false, "#input"),
-            Some((n, "output")) => (n, true, "#output"),
-            Some(_) => {
-                return Err(McpError::invalid_params(
-                    format!("unknown type: {name}"),
-                    None,
-                ))
-            }
-            None => (qualified, false, ""),
-        };
-        let Some(t) = tools.iter().find(|t| t.name == bare) else {
-            return Err(McpError::invalid_params(
-                format!("unknown type: {name}"),
-                None,
-            ));
-        };
-        // Gate the type-fetch on the same profile, runtime-admission, and
-        // Cedar checks as the operations path. Return the same "unknown type"
-        // shape for every withheld case so the response cannot distinguish a
-        // missing tool from one the caller may not discover.
-        if let Some(p) = principal {
-            if profile_blocks_server(p, server) || profile_blocks_tool(p, server, &t.name) {
-                return Err(McpError::invalid_params(
-                    format!("unknown type: {name}"),
-                    None,
-                ));
-            }
-        }
-        let tenant = principal
-            .map(|principal| principal.tenant.as_str())
-            .unwrap_or(waygate_core::TenantId::DEFAULT);
-        let ResolvedInvocationTool::Ready(snapshot) = self
-            .catalog
-            .resolve_discovery_tool(tenant, server, &t.name)
-            .await
-        else {
-            return Err(McpError::invalid_params(
-                format!("unknown type: {name}"),
-                None,
-            ));
-        };
-        if let Some(p) = principal {
-            if !self
-                .authz
-                .may_call_tool(p, snapshot.facts())
-                .await
-                .is_discoverable()
-            {
-                return Err(McpError::invalid_params(
-                    format!("unknown type: {name}"),
-                    None,
-                ));
-            }
-        }
-        let Some(record) = CatalogTool::from_upstream_snapshot(server, snapshot) else {
-            return Err(McpError::invalid_params(
-                format!("unknown type: {name}"),
-                None,
-            ));
-        };
-        let definition = &record.definition;
-        // Resolve the schema for the requested role. The same
-        // validation-equivalent portability projection used by `tools/list`
-        // applies here so the advertised type handle cannot return a schema a
-        // client then refuses. A non-self-contained remote reference cannot be
-        // projected without inventing its target and remains unavailable.
-        let schema: JsonObject = if want_output {
-            match definition.output_schema.as_ref() {
-                Some(s) => portable_schema_object(s).ok_or_else(|| {
-                    McpError::invalid_params(
-                        format!(
-                            "{server}.{} publishes an output schema with an unresolved remote reference",
-                            record.identity.name
-                        ),
-                        None,
-                    )
-                })?,
-                None => {
-                    return Err(McpError::invalid_params(
-                        format!(
-                            "{server}.{} publishes no output schema — the upstream \
-                             declared none, declared one whose root did not describe \
-                             an object, or the serving sessions disagreed about it",
-                            record.identity.name
-                        ),
-                        None,
-                    ))
-                }
-            }
-        } else {
-            portable_schema_object(&definition.input_schema)
-                .ok_or_else(|| McpError::invalid_params(format!("unknown type: {name}"), None))?
-        };
-        let resp = SearchToolsResponse::Types(TypesResponse {
-            name: format!("{}{echo_suffix}", record.identity.qualified_name()),
-            references: schema_def_names(&schema),
-            json_schema: Value::Object(schema),
-        });
-        structured_ok(&resp)
     }
 }
 
@@ -4068,45 +3361,6 @@ pub fn profile_blocks_builtin(p: &Principal, namespace: &str, tool: &str) -> boo
     profile_blocks_server(p, namespace) || profile_blocks_tool(p, namespace, tool)
 }
 
-fn tool_to_descriptor(tool: &CatalogTool) -> OperationDescriptor {
-    let qualified_name = tool.identity.qualified_name();
-    OperationDescriptor {
-        name: qualified_name.clone(),
-        description: tool.definition.description.as_ref().map(|d| d.to_string()),
-        risk_level: tool.facts.risk,
-        resource_type: None,
-        action: None,
-        // The step-up scope the tool's risk tier maps to (what a
-        // StepUpRequired verdict advises), exposed for client visibility and
-        // filtering. Same `required_scope_for` mapping; actual enforcement is
-        // the deployment's Cedar policy.
-        scope: crate::authz::required_scope_for(tool.facts.risk).map(str::to_owned),
-        input_type: Some(format!("{qualified_name}#input")),
-        output_type: tool.definition.output_schema.as_ref().and_then(|schema| {
-            portable_schema_object(schema).map(|_| format!("{qualified_name}#output"))
-        }),
-        side_effects: Some(tool.facts.side_effects),
-    }
-}
-
-/// Names declared under a schema's `$defs` / `definitions` blocks, sorted and
-/// de-duplicated. Surfaced as `TypesResponse.references` so a `mode=types`
-/// caller can see the named sub-types a tool's input schema declares (the
-/// definitions themselves are already inlined in `json_schema`; this is the
-/// index into them). Empty for the common flat schema with no nested defs —
-/// which is why this replaced the previous unconditional `Vec::new()`.
-fn schema_def_names(schema: &JsonObject) -> Vec<String> {
-    let mut names: Vec<String> = ["$defs", "definitions"]
-        .into_iter()
-        .filter_map(|k| schema.get(k))
-        .filter_map(|v| v.as_object())
-        .flat_map(|defs| defs.keys().cloned())
-        .collect();
-    names.sort();
-    names.dedup();
-    names
-}
-
 /// Build the URL-mode elicitation that sends the present operator straight to a
 /// just-queued change's approval page — or `None` when it doesn't apply.
 ///
@@ -4229,12 +3483,6 @@ fn approval_elicitation(
         url,
         elicitation_id: id,
     })
-}
-
-fn structured_ok<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
-    let json = serde_json::to_value(value)
-        .map_err(|e| McpError::internal_error(format!("serialize response: {e}"), None))?;
-    Ok(CallToolResult::structured(json))
 }
 
 /// Pull the `Principal` out of a rmcp `RequestContext`, which carries the
@@ -4727,7 +3975,7 @@ impl ServerHandler for GatewayServer {
     }
 
     // Catalog subscriptions wake on the process-wide epoch. Configured skills
-    // add prompt changes; search calls do not mutate either catalog.
+    // add prompt changes.
     fn accepted_subscription_filter(
         &self,
         requested: &rmcp::model::SubscriptionFilter,
@@ -4817,28 +4065,13 @@ impl ServerHandler for GatewayServer {
             Some(&request.protocol_version),
             Some(client_name),
         );
-        let codemode_only =
-            Self::client_name_matches(Some(client_name), &self.codemode_only_tools_clients);
-        let client_fallback = !codemode_only
-            && !self.eager_tools_list
-            && self
-                .eager_tools_clients
-                .iter()
-                .any(|allowed| allowed.eq_ignore_ascii_case(client_name));
-        if codemode_only {
+        if Self::client_name_matches(Some(client_name), &self.codemode_only_tools_clients) {
             self.client_codemode_only_tools_list
                 .store(true, Ordering::Relaxed);
             tracing::info!(
                 client_name,
                 client_version = %request.client_info.version,
                 "enabled per-session Code Mode-only tool catalog"
-            );
-        } else if client_fallback {
-            self.client_eager_tools_list.store(true, Ordering::Relaxed);
-            tracing::info!(
-                client_name,
-                client_version = %request.client_info.version,
-                "enabled per-session eager tool discovery fallback"
             );
         }
         let compatibility =
@@ -4903,10 +4136,8 @@ impl ServerHandler for GatewayServer {
     }
 
     fn get_info(&self) -> ServerConfig {
-        // `enable_tool_list_changed` arms the capability so strict clients
-        // (those that gate tool invocation on presence in the latest
-        // `tools/list`) know to re-fetch after a `searchTools` call reveals
-        // new tools. SEP #1888-aware clients ignore the notification.
+        // `enable_tool_list_changed` arms the capability so clients re-fetch
+        // `tools/list` when the governed catalog changes.
         let caps = ServerCapabilities::builder()
             .enable_tools()
             .enable_resources()
@@ -4968,10 +4199,8 @@ impl ServerHandler for GatewayServer {
         // transfer exists.
         let instructions = if self.codemode_only_tools_list_active(None) {
             CODEMODE_ONLY_INSTRUCTIONS
-        } else if self.eager_tools_list_active() {
-            FULL_CATALOG_INSTRUCTIONS
         } else {
-            LEGACY_SEARCH_INSTRUCTIONS
+            FULL_CATALOG_INSTRUCTIONS
         };
         ServerConfig::new(capabilities)
             .with_server_info(
@@ -5047,25 +4276,11 @@ impl ServerHandler for GatewayServer {
                 },
                 waygate_telemetry::metrics::ToolListProjection::StatelessCodeModeOnly,
             ),
-            (ProtocolGeneration::Legacy, false) if self.eager_tools_list => (
+            (ProtocolGeneration::Legacy, false) => (
                 ToolProjection::Full {
                     canonical_order: true,
                 },
-                waygate_telemetry::metrics::ToolListProjection::LegacyEagerGlobal,
-            ),
-            (ProtocolGeneration::Legacy, false)
-                if self.client_eager_tools_list.load(Ordering::Relaxed) =>
-            {
-                (
-                    ToolProjection::Full {
-                        canonical_order: true,
-                    },
-                    waygate_telemetry::metrics::ToolListProjection::LegacyEagerClient,
-                )
-            }
-            (ProtocolGeneration::Legacy, false) => (
-                ToolProjection::SessionDisclosed(&self.disclosed),
-                waygate_telemetry::metrics::ToolListProjection::LegacyProgressive,
+                waygate_telemetry::metrics::ToolListProjection::LegacyFull,
             ),
             (ProtocolGeneration::Stateless2026, false) => (
                 ToolProjection::Full {
@@ -5113,9 +4328,8 @@ impl ServerHandler for GatewayServer {
                 })
             }
             ProtocolGeneration::Legacy => {
-                // The compatibility projection stays unpaginated: legacy
-                // hosts that predate reliable cursor traversal must continue
-                // to receive the complete session-disclosed/eager set. An
+                // The legacy projection stays unpaginated: hosts that predate
+                // reliable cursor traversal must receive the complete set. An
                 // empty cursor is the first-page alias; no non-empty cursor is
                 // ever issued on this generation, so accepting one would hide
                 // a cross-operation or stale-cursor mistake.
@@ -5393,11 +4607,6 @@ impl ServerHandler for GatewayServer {
         // elicitation accelerator keys on it.
         let tool_name = request.name.to_string();
         let client = self.client_context(&ctx);
-        let disclosed = if client.generation == ProtocolGeneration::Legacy {
-            Some(&self.disclosed)
-        } else {
-            None
-        };
         // Task-eligible dispatch (SEP-2663): a call targeting a durable
         // built-in's task tool materializes a task instead of running
         // synchronously — but only when the client declared the tasks
@@ -5442,20 +4651,12 @@ impl ServerHandler for GatewayServer {
                 self.dispatch_tool_call_with(
                     request,
                     principal.as_ref(),
-                    client.generation,
-                    disclosed,
                     &MrtrCaller::from_client(&client),
                     ctx.ct.clone(),
                 )
                 .await
             }
         };
-        // The list_changed nudge belongs only to the legacy session adapter.
-        // A 2026 search call records no disclosure and cannot change the
-        // stable direct-tool projection.
-        if client.generation == ProtocolGeneration::Legacy {
-            self.notify_if_disclosed_changed(&ctx.peer).await;
-        }
         // When a propose_change just queued a change and the client
         // negotiated elicitation, send the present operator straight to the
         // approval page (URL-mode). Fire-and-forget + best-effort: the binding
@@ -5520,19 +4721,6 @@ impl GatewayServer {
         builtin
             .enqueue_task(tool, request.arguments.clone(), principal)
             .await
-    }
-
-    /// Fire a `notifications/tools/list_changed` on the session's peer if the
-    /// last `searchTools` call revealed new tools. Swallows transport errors:
-    /// the notification is a UX hint, not a correctness requirement, and the
-    /// most likely failure is a client that has already disconnected.
-    async fn notify_if_disclosed_changed(&self, peer: &Peer<RoleServer>) {
-        if !self.disclosed.take_pending_notify() {
-            return;
-        }
-        if let Err(err) = peer.notify_tool_list_changed().await {
-            tracing::debug!(%err, "tools/list_changed notification dropped");
-        }
     }
 }
 
@@ -5732,38 +4920,6 @@ mod elicitation_tests {
         // An error result never elicits.
         let err: Result<CallToolResponse, McpError> = Err(McpError::invalid_params("nope", None));
         assert!(approval_elicitation(&propose_tool(), &err, true).is_none());
-    }
-}
-
-#[cfg(test)]
-mod schema_def_name_tests {
-    use super::*;
-
-    fn obj(v: serde_json::Value) -> JsonObject {
-        v.as_object().expect("object literal").clone()
-    }
-
-    #[test]
-    fn lists_defs_sorted_and_dedups_across_blocks() {
-        let schema = obj(serde_json::json!({
-            "type": "object",
-            "$defs": {"TrustTier": {}, "QuotaScope": {}},
-            "definitions": {"QuotaScope": {}, "InspectorKind": {}},
-            "properties": {"x": {"$ref": "#/$defs/TrustTier"}},
-        }));
-        assert_eq!(
-            schema_def_names(&schema),
-            vec!["InspectorKind", "QuotaScope", "TrustTier"],
-        );
-    }
-
-    #[test]
-    fn flat_schema_has_no_references() {
-        let schema = obj(serde_json::json!({
-            "type": "object",
-            "properties": {"id": {"type": "string"}},
-        }));
-        assert!(schema_def_names(&schema).is_empty());
     }
 }
 
@@ -5986,14 +5142,7 @@ mod mrtr_projection_tests {
         caller: &MrtrCaller,
     ) -> Result<CallToolResponse, McpError> {
         server
-            .dispatch_tool_call_with(
-                request,
-                None,
-                ProtocolGeneration::Legacy,
-                Some(server.disclosed()),
-                caller,
-                CancellationToken::new(),
-            )
+            .dispatch_tool_call_with(request, None, caller, CancellationToken::new())
             .await
     }
 
@@ -6148,8 +5297,6 @@ mod mrtr_projection_tests {
         let cancellation = CancellationToken::new();
         gw.dispatch_tool_call_with(
             call("mock.send"),
-            None,
-            ProtocolGeneration::Stateless2026,
             None,
             &bare_2026_caller(),
             cancellation.clone(),

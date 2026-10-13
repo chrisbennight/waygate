@@ -377,8 +377,7 @@ fn build_tool_params(
 
 /// `GET /tools/drawer?server=&tool=` — htmx-loaded tool-detail drawer.
 /// Re-fetches the live tool so the operator sees the upstream's current
-/// `input_schema` (the same data `searchTools` `mode=types` returns over
-/// the wire), then renders name / description / risk / side-effects / PII
+/// `input_schema` (the same schema `tools/list` publishes), then renders name / description / risk / side-effects / PII
 /// plus a parameter table and the raw schema. Read-only GET, no CSRF —
 /// matches the activity drawer and the palette read-only contract.
 pub(crate) async fn tools_drawer(

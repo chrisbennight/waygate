@@ -49,8 +49,6 @@ struct DemoCatalog {
     resource_request_meta: Option<Arc<tokio::sync::Mutex<Option<rmcp::model::RequestMetaObject>>>>,
     /// Optional mutable tool order for stable-projection regressions.
     tool_names: Option<Arc<tokio::sync::RwLock<Vec<String>>>>,
-    /// Tool names whose fixture schema deliberately has a non-object root.
-    non_publishable_tool_names: Vec<String>,
     /// Tool names whose fixture classification requires step-up authorization.
     high_risk_tool_names: Vec<String>,
     /// Optional dispatch witness for routing-integrity regressions.
@@ -124,13 +122,7 @@ impl UpstreamCatalog for DemoCatalog {
         };
         Ok(names
             .into_iter()
-            .map(|name| {
-                let mut tool_schema = schema.clone();
-                if self.non_publishable_tool_names.contains(&name) {
-                    tool_schema.insert("type".to_string(), Value::String("string".to_string()));
-                }
-                Tool::new(name, "demo tool".to_string(), Arc::new(tool_schema))
-            })
+            .map(|name| Tool::new(name, "demo tool".to_string(), Arc::new(schema.clone())))
             .collect())
     }
 
@@ -371,76 +363,24 @@ async fn streamable_http_initialize_list_call_round_trip() {
         .await
         .expect("tools/list");
     let names: Vec<&str> = listed.tools.iter().map(|t| t.name.as_ref()).collect();
-    assert!(
-        names.contains(&"demo.searchTools"),
-        "expected demo.searchTools in tools/list, got {names:?}",
+    assert_eq!(
+        names,
+        vec!["demo.echo"],
+        "a new legacy session lists the full authorized catalog",
     );
 
-    let search = client
-        .call_tool(
-            CallToolRequestParams::new("demo.searchTools")
-                .with_arguments(json!({"mode": "operations"}).as_object().cloned().unwrap()),
-        )
+    let called = client
+        .call_tool(CallToolRequestParams::new("demo.echo"))
         .await
-        .expect("tools/call demo.searchTools");
+        .expect("tools/call demo.echo");
     assert!(
-        !search.is_error.unwrap_or(false),
-        "demo.searchTools should succeed, got: {search:?}",
+        called.content.iter().any(|content| content
+            .as_text()
+            .is_some_and(|text| text.text == "called demo.echo")),
+        "demo.echo should reach the upstream, got: {called:?}",
     );
 
     let _ = client.cancel().await;
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn eager_client_allowlist_applies_only_to_matching_session() {
-    let session_ct = CancellationToken::new();
-    let server = spawn_gateway_custom(
-        StreamableHttpServerConfig::default()
-            .with_cancellation_token(session_ct.child_token())
-            .with_allowed_hosts(vec![ALLOWED_HOST.to_owned()]),
-        move || {
-            let catalog: SharedCatalog = Arc::new(DemoCatalog::default());
-            GatewayServer::new(catalog).with_eager_tools_clients(vec!["claude-code".to_owned()])
-        },
-    )
-    .await;
-
-    let static_client = connect_named_client(server.addr, "Claude-Code").await;
-    let static_names: Vec<String> = static_client
-        .list_tools(Default::default())
-        .await
-        .expect("static client tools/list")
-        .tools
-        .into_iter()
-        .map(|tool| tool.name.to_string())
-        .collect();
-    assert!(
-        !static_names.contains(&"demo.searchTools".to_owned()),
-        "a full list carries no per-server search adapter: {static_names:?}"
-    );
-    assert!(
-        static_names.contains(&"demo.echo".to_owned()),
-        "matching client must receive the authorized catalog eagerly: {static_names:?}"
-    );
-
-    let progressive_client = connect_named_client(server.addr, "compliant-client").await;
-    let progressive_names: Vec<String> = progressive_client
-        .list_tools(Default::default())
-        .await
-        .expect("progressive client tools/list")
-        .tools
-        .into_iter()
-        .map(|tool| tool.name.to_string())
-        .collect();
-    assert!(progressive_names.contains(&"demo.searchTools".to_owned()));
-    assert!(
-        !progressive_names.contains(&"demo.echo".to_owned()),
-        "non-matching client must remain progressively disclosed: {progressive_names:?}"
-    );
-
-    let _ = static_client.cancel().await;
-    let _ = progressive_client.cancel().await;
     server.shutdown().await;
 }
 
@@ -457,7 +397,7 @@ fn mutation_catalog() -> SharedCatalog {
 }
 
 #[tokio::test]
-async fn codex_eager_catalog_supports_search_then_direct_mutation() {
+async fn codex_catalog_lists_and_directly_invokes_mutations() {
     let session_ct = CancellationToken::new();
     let mut principal = wire_principal();
     principal.scopes.push("mcp:invoke:high".to_owned());
@@ -465,10 +405,7 @@ async fn codex_eager_catalog_supports_search_then_direct_mutation() {
         StreamableHttpServerConfig::default()
             .with_cancellation_token(session_ct.child_token())
             .with_allowed_hosts(vec![ALLOWED_HOST.to_owned()]),
-        move || {
-            GatewayServer::with_authz(mutation_catalog(), Arc::new(HighRiskScopeGate))
-                .with_eager_tools_clients(vec!["codex-mcp-client".to_owned()])
-        },
+        move || GatewayServer::with_authz(mutation_catalog(), Arc::new(HighRiskScopeGate)),
         Some(principal),
     )
     .await;
@@ -485,27 +422,6 @@ async fn codex_eager_catalog_supports_search_then_direct_mutation() {
             "Codex must receive a callable declaration for {expected}: {names:?}"
         );
     }
-    assert!(
-        !names.contains(&"demo.searchTools"),
-        "a full list carries no per-server search adapter: {names:?}"
-    );
-
-    let discovered = client
-        .call_tool(
-            CallToolRequestParams::new("demo.searchTools").with_arguments(
-                json!({"mode": "operations", "detail": "full"})
-                    .as_object()
-                    .cloned()
-                    .unwrap(),
-            ),
-        )
-        .await
-        .expect("search mutation operations");
-    let discovered = serde_json::to_string(&discovered).expect("serialize search result");
-    assert!(discovered.contains("demo.api.get"), "{discovered}");
-    assert!(discovered.contains("demo.api.mutate"), "{discovered}");
-    assert!(discovered.contains("demo.api.destroy"), "{discovered}");
-    assert!(discovered.contains("mcp:invoke:high"), "{discovered}");
 
     for tool in ["demo.api.get", "demo.api.mutate", "demo.api.destroy"] {
         let called = client
@@ -531,10 +447,7 @@ async fn codex_direct_mutation_returns_structured_step_up_error_without_scope() 
         StreamableHttpServerConfig::default()
             .with_cancellation_token(session_ct.child_token())
             .with_allowed_hosts(vec![ALLOWED_HOST.to_owned()]),
-        move || {
-            GatewayServer::with_authz(mutation_catalog(), Arc::new(HighRiskScopeGate))
-                .with_eager_tools_clients(vec!["codex-mcp-client".to_owned()])
-        },
+        move || GatewayServer::with_authz(mutation_catalog(), Arc::new(HighRiskScopeGate)),
         Some(wire_principal()),
     )
     .await;
@@ -551,21 +464,6 @@ async fn codex_direct_mutation_returns_structured_step_up_error_without_scope() 
             .any(|tool| tool.name.as_ref() == "demo.api.mutate"),
         "a step-up-capable operation must remain discoverable"
     );
-
-    let discovered = client
-        .call_tool(
-            CallToolRequestParams::new("demo.searchTools").with_arguments(
-                json!({"mode": "operations", "detail": "full"})
-                    .as_object()
-                    .cloned()
-                    .unwrap(),
-            ),
-        )
-        .await
-        .expect("search mutation operations");
-    let discovered = serde_json::to_string(&discovered).expect("serialize search result");
-    assert!(discovered.contains("demo.api.mutate"), "{discovered}");
-    assert!(discovered.contains("mcp:invoke:high"), "{discovered}");
 
     let error = client
         .call_tool(CallToolRequestParams::new("demo.api.mutate"))
@@ -644,24 +542,23 @@ async fn codemode_only_client_allowlist_hides_upstream_declarations() {
         "the compact projection must preserve ordinary built-in dispatch routing: {called:?}"
     );
 
-    let progressive_client = connect_named_client(server.addr, "compliant-client").await;
-    let progressive_names: Vec<String> = progressive_client
+    let full_client = connect_named_client(server.addr, "compliant-client").await;
+    let full_names: Vec<String> = full_client
         .list_tools(Default::default())
         .await
-        .expect("progressive client tools/list")
+        .expect("full client tools/list")
         .tools
         .into_iter()
         .map(|tool| tool.name.to_string())
         .collect();
-    assert!(progressive_names.contains(&"codemode.execute".to_owned()));
-    assert!(progressive_names.contains(&"demo.searchTools".to_owned()));
+    assert!(full_names.contains(&"codemode.execute".to_owned()));
     assert!(
-        !progressive_names.contains(&"demo.echo".to_owned()),
-        "non-matching legacy client must keep progressive disclosure: {progressive_names:?}"
+        full_names.contains(&"demo.echo".to_owned()),
+        "non-matching legacy client must receive the full catalog: {full_names:?}"
     );
 
     let _ = compact_client.cancel().await;
-    let _ = progressive_client.cancel().await;
+    let _ = full_client.cancel().await;
     server.shutdown().await;
 }
 
@@ -1666,10 +1563,10 @@ async fn stateless_request_is_served_without_a_session() {
 }
 
 /// The 2026 projection is a stable, authorization-filtered direct-tool set:
-/// search remains callable as a compatibility surface but does not mutate a
-/// later `tools/list` when catalog and authorization are unchanged.
+/// an upstream that republishes the same tools in another order does not
+/// change a later `tools/list` when catalog and authorization are unchanged.
 #[tokio::test]
-async fn stateless_tools_list_is_stable_before_and_after_search() {
+async fn stateless_tools_list_is_stable_across_upstream_reorder() {
     let tool_names = Arc::new(tokio::sync::RwLock::new(vec![
         "zeta".to_string(),
         "echo".to_string(),
@@ -1711,35 +1608,18 @@ async fn stateless_tools_list_is_stable_before_and_after_search() {
         "the full projection uses canonical qualified-name order",
     );
 
-    let search = stateless_post(
-        &client,
-        &url,
-        2,
-        "tools/call",
-        json!({"name": "demo.searchTools", "arguments": {"mode": "operations"}}),
-        "probe",
-    )
-    .await
-    .text()
-    .await
-    .expect("body");
-    assert!(
-        search.contains("demo.echo"),
-        "searchTools reveals the demo tool; got: {search}"
-    );
-
     // Catalog publication treats descriptor-identical reordering as no
     // change, so the downstream array must stay byte-stable without a
     // list-changed notification.
     *tool_names.write().await = vec!["alpha".to_string(), "zeta".to_string(), "echo".to_string()];
 
     let after = stateless_response_json(
-        stateless_post(&client, &url, 3, "tools/list", json!({}), "probe").await,
+        stateless_post(&client, &url, 2, "tools/list", json!({}), "probe").await,
     )
     .await;
     assert_eq!(
         before["result"]["tools"], after["result"]["tools"],
-        "search calls must not mutate the 2026 projection"
+        "an upstream reorder must not mutate the 2026 projection"
     );
 
     server.shutdown().await;
@@ -1749,8 +1629,8 @@ async fn stateless_tools_list_is_stable_before_and_after_search() {
 /// opaque, an empty cursor starts the same traversal, and a catalog change
 /// during a traversal neither fails it nor combines generations: the
 /// continuation pages the view the traversal began with, and a new traversal
-/// sees the change. The legacy lane remains a complete unpaginated
-/// compatibility projection.
+/// sees the change. The legacy lane returns the same catalog complete and
+/// unpaginated.
 #[tokio::test]
 async fn stateless_tools_list_pages_one_catalog_view_while_legacy_stays_complete() {
     let tool_names = Arc::new(tokio::sync::RwLock::new(
@@ -1769,9 +1649,7 @@ async fn stateless_tools_list_pages_one_catalog_view_while_legacy_stays_complete
     let server = spawn_gateway_custom(
         StreamableHttpServerConfig::default().with_allowed_hosts(vec![ALLOWED_HOST.to_string()]),
         move || {
-            GatewayServer::new(catalog.clone())
-                .with_eager_tools_list(true)
-                .with_tool_list_cursor_sealer(Arc::clone(&sealer))
+            GatewayServer::new(catalog.clone()).with_tool_list_cursor_sealer(Arc::clone(&sealer))
         },
     )
     .await;
@@ -1912,178 +1790,11 @@ async fn stateless_tools_list_pages_one_catalog_view_while_legacy_stays_complete
             .expect("legacy tools")
             .len(),
         75,
-        "legacy eager listing stays complete",
+        "legacy listing stays complete",
     );
     assert!(
         legacy["result"].get("nextCursor").is_none() || legacy["result"]["nextCursor"].is_null(),
         "legacy listing does not issue a cursor",
-    );
-
-    server.shutdown().await;
-}
-
-/// An upstream may validly publish a tool named `searchTools`. On the 2026
-/// direct-tool lane it takes precedence over the gateway's closed-draft
-/// adapter, so the catalog has one faithful declaration and dispatch enters
-/// the ordinary governed upstream pipeline. Legacy precedence is unchanged.
-#[tokio::test]
-async fn stateless_upstream_search_tools_name_takes_direct_tool_precedence() {
-    let tool_names = Arc::new(tokio::sync::RwLock::new(vec![
-        "echo".to_string(),
-        "searchTools".to_string(),
-    ]));
-    let catalog: SharedCatalog = Arc::new(DemoCatalog {
-        tool_names: Some(tool_names),
-        ..DemoCatalog::default()
-    });
-    let server = spawn_gateway_custom(
-        StreamableHttpServerConfig::default().with_allowed_hosts(vec![ALLOWED_HOST.to_string()]),
-        move || GatewayServer::new(catalog.clone()),
-    )
-    .await;
-    let url = format!("http://{}/mcp", server.addr);
-    let client = reqwest::Client::new();
-
-    let listed = stateless_response_json(
-        stateless_post(&client, &url, 1, "tools/list", json!({}), "probe").await,
-    )
-    .await;
-    let collision: Vec<_> = listed["result"]["tools"]
-        .as_array()
-        .expect("tools array")
-        .iter()
-        .filter(|tool| tool["name"] == "demo.searchTools")
-        .collect();
-    assert_eq!(collision.len(), 1, "the qualified name is declared once");
-    assert_eq!(
-        collision[0]["description"], "demo tool",
-        "the declaration belongs to the ordinary upstream tool",
-    );
-
-    let called = stateless_response_json(
-        stateless_post(
-            &client,
-            &url,
-            2,
-            "tools/call",
-            json!({"name": "demo.searchTools", "arguments": {}}),
-            "probe",
-        )
-        .await,
-    )
-    .await;
-    assert!(
-        called.to_string().contains("called demo.searchTools"),
-        "the collision must dispatch through the upstream pipeline: {called}",
-    );
-
-    server.shutdown().await;
-}
-
-/// A collision that cannot enter the caller's direct projection must not
-/// shadow the adapter or disclose its raw-catalog existence through a
-/// different call result. This malformed-schema case pins the same predicate
-/// used for profile, Cedar, and runtime-admission withholding.
-#[tokio::test]
-async fn stateless_withheld_search_tools_collision_keeps_adapter_callable() {
-    let tool_names = Arc::new(tokio::sync::RwLock::new(vec![
-        "echo".to_string(),
-        "searchTools".to_string(),
-    ]));
-    let catalog: SharedCatalog = Arc::new(DemoCatalog {
-        tool_names: Some(tool_names),
-        non_publishable_tool_names: vec!["searchTools".to_string()],
-        ..DemoCatalog::default()
-    });
-    let server = spawn_gateway_custom(
-        StreamableHttpServerConfig::default().with_allowed_hosts(vec![ALLOWED_HOST.to_string()]),
-        move || GatewayServer::new(catalog.clone()),
-    )
-    .await;
-    let url = format!("http://{}/mcp", server.addr);
-    let client = reqwest::Client::new();
-
-    let listed = stateless_response_json(
-        stateless_post(&client, &url, 1, "tools/list", json!({}), "probe").await,
-    )
-    .await;
-    assert!(
-        !listed["result"]["tools"]
-            .as_array()
-            .expect("tools array")
-            .iter()
-            .any(|tool| tool["name"] == "demo.searchTools"),
-        "a full list declares neither the withheld tool nor the adapter: {listed}",
-    );
-
-    let called = stateless_response_json(
-        stateless_post(
-            &client,
-            &url,
-            2,
-            "tools/call",
-            json!({
-                "name": "demo.searchTools",
-                "arguments": {"mode": "operations"}
-            }),
-            "probe",
-        )
-        .await,
-    )
-    .await;
-    let body = called.to_string();
-    assert!(
-        body.contains("demo.echo") && !body.contains("called demo.searchTools"),
-        "the visible adapter must handle the collision without exposing the withheld tool: {called}",
-    );
-
-    server.shutdown().await;
-}
-
-/// The legacy client-name fallback cannot alter the 2026 projection: both a
-/// matching and non-matching name receive the same full authorized set.
-#[tokio::test]
-async fn stateless_tools_list_ignores_legacy_eager_client_allowlist() {
-    let catalog: SharedCatalog = Arc::new(DemoCatalog::default());
-    let server = spawn_gateway_custom(
-        StreamableHttpServerConfig::default().with_allowed_hosts(vec![ALLOWED_HOST.to_string()]),
-        move || {
-            GatewayServer::new(catalog.clone())
-                .with_eager_tools_clients(vec!["eager-probe".to_string()])
-        },
-    )
-    .await;
-    let url = format!("http://{}/mcp", server.addr);
-    let client = reqwest::Client::new();
-
-    let matched = stateless_response_json(
-        stateless_post(&client, &url, 1, "tools/list", json!({}), "eager-probe").await,
-    )
-    .await;
-    assert!(
-        matched["result"]["tools"]
-            .as_array()
-            .expect("matching tools array")
-            .iter()
-            .any(|tool| tool["name"] == "demo.echo"),
-        "a matching 2026 client gets the full catalog; got: {matched}"
-    );
-
-    let unmatched = stateless_response_json(
-        stateless_post(&client, &url, 2, "tools/list", json!({}), "other-client").await,
-    )
-    .await;
-    assert!(
-        unmatched["result"]["tools"]
-            .as_array()
-            .expect("non-matching tools array")
-            .iter()
-            .any(|tool| tool["name"] == "demo.echo"),
-        "a non-matching 2026 client gets the same full catalog; got: {unmatched}"
-    );
-    assert_eq!(
-        matched["result"]["tools"], unmatched["result"]["tools"],
-        "client name cannot change the 2026 list"
     );
 
     server.shutdown().await;
@@ -2146,9 +1857,6 @@ async fn stateless_codemode_only_client_gets_compact_catalog_and_guidance() {
             .any(|tool| tool["name"] == "demo.echo"),
         "non-matching stateless client must keep the stable full catalog: {unmatched}"
     );
-    assert!(!unmatched_tools
-        .iter()
-        .any(|tool| tool["name"] == "demo.searchTools"));
 
     server.shutdown().await;
 }
@@ -2193,8 +1901,10 @@ async fn stateless_requests_spawn_no_ping_loop() {
 #[tokio::test]
 async fn mismatched_routing_headers_are_rejected_with_header_mismatch() {
     let list_tools_calls = Arc::new(AtomicUsize::new(0));
+    let dispatches = Arc::new(AtomicUsize::new(0));
     let catalog: SharedCatalog = Arc::new(DemoCatalog {
         list_tools_calls: Some(Arc::clone(&list_tools_calls)),
+        dispatches: Some(Arc::clone(&dispatches)),
         ..DemoCatalog::default()
     });
     let server = spawn_gateway_custom(
@@ -2206,7 +1916,7 @@ async fn mismatched_routing_headers_are_rejected_with_header_mismatch() {
     let client = reqwest::Client::new();
 
     // Mcp-Method disagrees with the body method. The body is a
-    // `tools/call` of `demo.searchTools`; the response must come from header
+    // `tools/call` of `demo.echo`; the response must come from header
     // validation rather than tool dispatch.
     let resp = client
         .post(&url)
@@ -2218,12 +1928,12 @@ async fn mismatched_routing_headers_are_rejected_with_header_mismatch() {
         // mismatch is the only violation — without it the -32020 could
         // come from the independent missing-Mcp-Name check and this test
         // would not uniquely pin method-header integrity.
-        .header("mcp-name", "demo.searchTools")
+        .header("mcp-name", "demo.echo")
         .json(&json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {
-                "name": "demo.searchTools",
-                "arguments": {"mode": "operations"},
+                "name": "demo.echo",
+                "arguments": {},
                 "_meta": {
                     "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                     "io.modelcontextprotocol/clientCapabilities": {}
@@ -2251,8 +1961,8 @@ async fn mismatched_routing_headers_are_rejected_with_header_mismatch() {
         .json(&json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {
-                "name": "demo.searchTools",
-                "arguments": {"mode": "operations"},
+                "name": "demo.echo",
+                "arguments": {},
                 "_meta": {
                     "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                     "io.modelcontextprotocol/clientCapabilities": {}
@@ -2274,7 +1984,12 @@ async fn mismatched_routing_headers_are_rejected_with_header_mismatch() {
     assert_eq!(
         list_tools_calls.load(Ordering::SeqCst),
         0,
-        "routing-header mismatches must be rejected before searchTools reads the catalog",
+        "routing-header mismatches must be rejected before anything reads the catalog",
+    );
+    assert_eq!(
+        dispatches.load(Ordering::SeqCst),
+        0,
+        "routing-header mismatches must be rejected before upstream dispatch",
     );
 
     server.shutdown().await;
@@ -3241,8 +2956,8 @@ async fn tasks_update_routes_with_the_selected_continuations_governance() {
     let _ = join.await;
 }
 
-/// Search leaves the stable projection quiet; publications wake the requested
-/// tool and, when skills are configured, prompt categories.
+/// Tool calls leave the stable projection quiet; publications wake the
+/// requested tool and, when skills are configured, prompt categories.
 #[tokio::test]
 async fn subscriptions_listen_wakes_only_on_catalog_changes() {
     for skills_enabled in [false, true] {
@@ -3323,21 +3038,18 @@ async fn check_catalog_subscription(skills_enabled: bool) {
         skills_enabled.then_some(true)
     );
 
-    // A peer search call succeeds but does not mutate tools/list or notify.
-    let discloser = connect_2026("discloser").await;
-    let search = discloser
-        .call_tool(
-            CallToolRequestParams::new("demo.searchTools")
-                .with_arguments(json!({"mode": "operations"}).as_object().cloned().unwrap()),
-        )
+    // A peer tool call succeeds but does not mutate tools/list or notify.
+    let caller = connect_2026("caller").await;
+    let called = caller
+        .call_tool(CallToolRequestParams::new("demo.echo"))
         .await
-        .expect("searchTools succeeds");
-    assert!(!search.is_error.unwrap_or(false));
+        .expect("demo.echo succeeds");
+    assert!(!called.is_error.unwrap_or(false));
     assert!(
         tokio::time::timeout(Duration::from_millis(250), subscription.next())
             .await
             .is_err(),
-        "searchTools must not wake a stable 2026 subscription",
+        "a tool call must not wake a stable 2026 subscription",
     );
 
     // A real catalog publication changes the projection and wakes the stream.
@@ -3363,7 +3075,7 @@ async fn check_catalog_subscription(skills_enabled: bool) {
             rmcp::model::ServerNotification::PromptListChangedNotification(_)
         ));
     }
-    let _ = discloser.cancel().await;
+    let _ = caller.cancel().await;
     let _ = subscriber.cancel().await;
     shutdown.cancel();
     let _ = join.await;

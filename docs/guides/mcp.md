@@ -35,11 +35,10 @@ the compatibility path uses negotiated legacy sessions. Downstream and upstream
 connections can use different generations. Actual capabilities also depend on
 the configured upstream and the caller's authority.
 
-Legacy sessions normally start with the compatibility search projection and
-disclose selected tools into that session. Eager-list settings support hosts
-that do not refresh callable bindings after a catalog-change notification.
-The modern path has a stable authorized direct catalog. See the
-[projection configuration](../sep-1888.md) before choosing a client-specific mode.
+Both generations list the same authorized direct catalog; the modern path
+paginates it. Hosts that cannot accept the full catalog can be given a compact
+Code Mode-only catalog instead. See [the `tools/list` catalog](../tools-list.md)
+before choosing a client-specific mode.
 
 | Capability | Classification | What this gateway provides |
 | --- | --- | --- |
@@ -49,7 +48,6 @@ The modern path has a stable authorized direct catalog. See the
 | MCP Apps | Official `io.modelcontextprotocol/ui` extension | Passed through: a tool's `_meta.ui` reference, its `ui://` resource and result metadata reach clients unchanged, and the resource is read under ordinary resource authorization. The gateway's shared upstream sessions declare no client extensions, so an upstream that lists app tools only to clients declaring the extension does not list them through the gateway. |
 | Durable Tasks | Official `io.modelcontextprotocol/tasks` extension | Configured Code Mode executions project status, results, cancellation, and continuation input through the extension. Durability requires explicit storage configuration. |
 | Enterprise-managed authorization | Official MCP authorization extension, built on an IETF draft | Opt-in ID-JAG issuance and redemption using the gateway's policy and directory state. See [identity capabilities](security.md). |
-| Progressive `searchTools` | Closed SEP-1888 draft compatibility | An optional search projection; ordinary tools remain the portable interface. |
 | Native file authorization | SEP-2631 draft compatibility | HTTPS file transfer and `x-mcp-file` handling, with ordinary `gateway-files.*` tools for clients without the draft. |
 | Verified skills and Code Mode | Gateway capabilities with optional extension adapters | Reviewable workflow delivery and bounded execution through the ordinary authorization boundary. |
 
@@ -60,9 +58,8 @@ version list in [waygate-mcp](../../crates/waygate-mcp/src/lib.rs); projection a
 extension advertisement live in [the server adapter](../../crates/waygate-mcp/src/server.rs).
 
 Draft compatibility is intentionally explicit. Follow
-[SEP-1888](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1888)
-and [SEP-2631](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2631)
-for their own status. The gateway's file negotiation matrix documents the
+[SEP-2631](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2631)
+for its own status. The gateway's file negotiation matrix documents the
 current SDK gap for legacy initialization-only file capabilities and the
 request-metadata alternative. It does not assume all hosts implement these drafts.
 

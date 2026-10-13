@@ -265,9 +265,9 @@ impl AuthzGate for BreakGlassGate {
     /// The trait default for `may_call_tool` would
     /// delegate to `authorize_tool_call`, which is the
     /// path the override is wired into. That would burn
-    /// the single-use token on a `tools/list`,
-    /// `searchTools`, or `mode=types` call (waygate-mcp's
-    /// server.rs filters those through `may_call_tool`) —
+    /// the single-use token on a `tools/list` or
+    /// discovery call (waygate-mcp's server.rs filters
+    /// those through `may_call_tool`) —
     /// the operator's emergency token would be consumed
     /// by a routine catalog refresh BEFORE the incident-
     /// response dispatch happens, and the actual

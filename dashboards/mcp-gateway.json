@@ -1021,7 +1021,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Rate of downstream tools/list projections. Legacy eager modes are compatibility fallbacks; stable_full is the MCP 2026 projection. client_class is a closed projection class, never the self-asserted client name.",
+      "description": "Rate of downstream tools/list projections. stable_full is the full authorized catalog; codemode_only is the compact built-ins catalog. client_class is a closed projection class, never the self-asserted client name.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1249,7 +1249,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "p95 number of tool declarations returned per tools/list response. Closed projection labels expose global-eager regressions without recording client names or tool identities.",
+      "description": "p95 number of tool declarations returned per tools/list response. Closed projection labels expose catalog growth without recording client names or tool identities.",
       "fieldConfig": {
         "defaults": {
           "min": 0,
@@ -1327,98 +1327,6 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Authoritative upstream inventory compared with the legacy compatibility index. Gateway-local tools are deliberately outside this count comparison.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 144
-      },
-      "id": 37,
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "mcp_discovery_catalog_sources",
-          "legendFormat": "{{plane}} sources",
-          "refId": "A"
-        },
-        {
-          "expr": "mcp_discovery_catalog_tools",
-          "legendFormat": "{{plane}} tools",
-          "refId": "B"
-        },
-        {
-          "expr": "mcp_discovery_retrieval_index_skew_tools",
-          "legendFormat": "tool skew",
-          "refId": "C"
-        }
-      ],
-      "title": "Discovery catalog and compatibility index",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "description": "One-hot legacy compatibility-index state plus its publication generation. Unhealthy or unavailable state falls back to the authorization-filtered catalog scan.",
-      "fieldConfig": {
-        "defaults": {
-          "min": 0,
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 144
-      },
-      "id": 38,
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "mcp_discovery_retrieval_index_state",
-          "legendFormat": "{{state}}",
-          "refId": "A"
-        },
-        {
-          "expr": "mcp_discovery_retrieval_index_generation",
-          "legendFormat": "generation",
-          "refId": "B"
-        }
-      ],
-      "title": "Discovery compatibility-index state",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
       "description": "p95 end-to-end latency for authorization-scoped gateway and Code Mode discovery operations. Operation and outcome are closed label sets.",
       "fieldConfig": {
         "defaults": {
@@ -1431,7 +1339,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 152
+        "y": 144
       },
       "id": 39,
       "options": {
@@ -1470,7 +1378,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 152
+        "y": 144
       },
       "id": 40,
       "options": {
@@ -1497,50 +1405,6 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Compatibility-index publication outcomes and authoritative-catalog fallback reasons. A sustained fallback rate distinguishes normal no-opinion queries from index or generation failures.",
-      "fieldConfig": {
-        "defaults": {
-          "min": 0,
-          "unit": "reqps"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 160
-      },
-      "id": 41,
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "sum by (mode, outcome) (rate(mcp_discovery_index_publications_total[$__rate_interval]))",
-          "legendFormat": "publish {{mode}} {{outcome}}",
-          "refId": "A"
-        },
-        {
-          "expr": "sum by (reason) (rate(mcp_discovery_index_fallback_total[$__rate_interval]))",
-          "legendFormat": "fallback {{reason}}",
-          "refId": "B"
-        }
-      ],
-      "title": "Discovery index publication and fallback",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
       "description": "p95 duration of the atomic manifest-to-catalog reconciliation that establishes the serving catalog at boot or import.",
       "fieldConfig": {
         "defaults": {
@@ -1552,8 +1416,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 160
+        "x": 0,
+        "y": 152
       },
       "id": 42,
       "options": {
@@ -1581,7 +1445,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 168,
+        "y": 160,
         "w": 12,
         "h": 8
       },
@@ -1626,7 +1490,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 12,
-        "y": 168,
+        "y": 160,
         "w": 12,
         "h": 8
       },
@@ -1671,7 +1535,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 176,
+        "y": 168,
         "w": 12,
         "h": 8
       },
@@ -1716,7 +1580,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 12,
-        "y": 176,
+        "y": 168,
         "w": 12,
         "h": 8
       },
@@ -1776,7 +1640,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 184
+        "y": 176
       },
       "id": 47,
       "options": {

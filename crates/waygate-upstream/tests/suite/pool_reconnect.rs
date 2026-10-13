@@ -114,7 +114,7 @@ async fn reconnect_one_returns_false_for_failing_server() {
 /// flag, the entry stays in `self.entries` (intentional, to keep in-flight
 /// callers from getting `not found` mid-call) and `try_reconnect_disconnected`
 /// would dial it again after reload — resurrecting an upstream the operator
-/// just retired and re-populating the search index a SIGHUP just cleared.
+/// just retired.
 #[tokio::test]
 async fn try_reconnect_skips_tombstoned_entries() {
     let mut manifests = BTreeMap::new();
@@ -173,11 +173,10 @@ async fn reconnect_one_returns_false_for_tombstoned_server() {
 
 /// Pins the locking invariant of the tombstone path:
 /// `reload_manifests` holds `entry.conn.write()` across the tombstone
-/// store + index drop, which is the same lock `reconnect_entry` holds
-/// across its publish region. Without that serialization, an in-flight
-/// reconnect that had already passed the locked tombstone re-check could
-/// repopulate the search index *after* `reload_manifests` dropped it and
-/// publish a connection on a retired entry.
+/// store, which is the same lock `reconnect_entry` holds across its publish
+/// region. Without that serialization, an in-flight reconnect that had
+/// already passed the locked tombstone re-check could publish a connection
+/// on a retired entry.
 ///
 /// This test exercises the liveness side: running both paths concurrently
 /// against the same upstream must not deadlock and must converge on the

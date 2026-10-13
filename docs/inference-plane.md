@@ -85,8 +85,8 @@ These are the rules the implementation may not violate. Tests assert them.
 - **I6 — Provider-agnostic core, provider-specific edges.** A canonical request/response/usage
   model sits between the client surface and the four provider dialects. Provider quirks
   live only in translation adapters.
-- **I7 — Models are catalog entities.** Models are registered like tools: discoverable via
-  SEP-1888 `searchTools` and Cedar-gated. One catalog, one authorization model.
+- **I7 — Models are catalog entities.** Models are registered like tools: catalog entries
+  that Cedar gates. One catalog, one authorization model.
 - **I8 — Fail closed on policy/identity; fail over on transport/credential.** A denied Cedar
   decision or exhausted budget is a hard stop. A transient upstream/credential failure fails
   over to a healthy pooled credential or provider.
@@ -1010,5 +1010,5 @@ written (§14).
 
 - **Cache scoping is per-principal** — cache keys include the principal; no cross-principal
   reuse (stronger than tenant isolation; see §9, §13).
-- **Models surface via `searchTools`** — no separate `searchModels` meta-tool; models are
-  ordinary Cedar-gated catalog entries (I7).
+- **Models are catalog entries** — no separate model-search tool; models are ordinary
+  Cedar-gated catalog entries (I7).
