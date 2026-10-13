@@ -67,6 +67,9 @@ const DEFAULT_EXECUTION_LIST_LIMIT: usize = 50;
 // this; anything longer is not a cursor this surface issued.
 const MAX_EXECUTION_LIST_CURSOR_LENGTH: usize = 80;
 const MAX_SELECTOR_LENGTH: usize = 512;
+/// Longest fully-qualified name: an admitted connector and operation joined
+/// by one dot, so every name search returns can be described.
+const MAX_NAME_LENGTH: usize = MAX_SELECTOR_LENGTH + 1;
 const MAX_CURSOR_LENGTH: usize = 1_024;
 const SEARCH_CURSOR_KIND: &str = "codemode-search-v2";
 const SEARCH_CURSOR_LIFETIME_SECONDS: i64 = 5 * 60;
@@ -1124,7 +1127,7 @@ impl CodeModeTools {
                     candidate.identity.source.name() == server && candidate.identity.name == *tool
                 })
             }
-            (Some(name), None, None) if name.len() <= MAX_SELECTOR_LENGTH => {
+            (Some(name), None, None) if name.len() <= MAX_NAME_LENGTH => {
                 let mut matches = visible
                     .into_iter()
                     .filter(|candidate| candidate.identity.qualified_name() == *name);
@@ -6255,7 +6258,7 @@ struct SearchParams {
 struct DescribeParams {
     /// Fully-qualified `<connector>.<operation>` name returned by
     /// `codemode.search`.
-    #[schemars(length(min = 3, max = MAX_SELECTOR_LENGTH))]
+    #[schemars(length(min = 3, max = MAX_NAME_LENGTH))]
     name: Option<String>,
     /// Connector namespace, with `operation_id`, as an alternative to `name`.
     #[schemars(length(min = 1, max = MAX_SELECTOR_LENGTH))]
@@ -10365,6 +10368,42 @@ mod tests {
         assert_eq!(bindings[0].runner.connector, " mail ");
         assert_eq!(bindings[0].runner.operation, " read ");
         assert_eq!(bindings[0].contract, upstream_contract(padded_contract));
+    }
+
+    #[tokio::test]
+    async fn the_longest_admitted_name_can_be_described() {
+        let tool = "y".repeat(MAX_SELECTOR_LENGTH - "mail".len());
+        let fake = FakeCatalog::with_tools(&[("mail", &tool, false)]);
+        let tools = code_mode_tools(Arc::new(fake), Arc::new(SelectiveAuthz));
+        let search = tools
+            .search(
+                &reader(),
+                SearchParams {
+                    query: None,
+                    cursor: None,
+                    limit: None,
+                },
+            )
+            .await
+            .expect("the admitted tool is discoverable");
+        let name = structured(&search)["tools"][0]["name"]
+            .as_str()
+            .expect("name")
+            .to_owned();
+        assert_eq!(name.len(), MAX_NAME_LENGTH);
+        let described = tools
+            .describe(
+                &reader(),
+                DescribeParams {
+                    known_document_hash: None,
+                    name: Some(name),
+                    connector: None,
+                    operation: None,
+                },
+            )
+            .await
+            .expect("every name search returns can be described");
+        assert_eq!(structured(&described)["binding"]["operation"], tool);
     }
 
     #[tokio::test]

@@ -409,7 +409,7 @@
           "properties": {
             "name": {
               "description": "Fully-qualified `<connector>.<operation>` name returned by\n`codemode.search`.",
-              "maxLength": 512,
+              "maxLength": 513,
               "minLength": 3,
               "anyOf": [
                 {
