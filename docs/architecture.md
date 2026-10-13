@@ -514,6 +514,9 @@ Avoid these patterns:
   — reuse a shared abstraction when its contract fits.
 - **Don't cite plan or review state in comments.** Internal review identifiers do not explain behavior. State the constraint
   directly; `scripts/check-no-plan-citations.sh` rejects these citations.
+- **Don't implement a §9 protocol area outside its boundary.** A second copy
+  of result shaping, discovery, task, approval or identity behavior turns each
+  future specification change into a broad rewrite.
 - **Don't edit shipped migrations** — ever
   ([`docs/agents/migrations.md`](agents/migrations.md)).
 - **Don't consolidate what is already unified.** Audit/identity/approval
@@ -532,3 +535,47 @@ This document rots unless PRs carry it along. A PR must update it when it:
 - **retires a §1 debt row** → delete the row in the same PR.
 - **changes the lifecycle, state model, or a layering rule** → the
   relevant section.
+- **changes behavior in a §9 protocol area** → keep it inside that area's
+  boundary, or extend the boundary and its §9 row deliberately; add any new
+  gateway-specific metadata key to the
+  [extension metadata identities](integration-configuration.md#extension-metadata-identities).
+- **adopts, or depends on, a watched proposal** → update the §9 watch list.
+
+## §9 Protocol areas and watched proposals
+
+The MCP roadmap expects changes in a few areas where the gateway adds behavior
+of its own. Each area has one owning boundary, so adopting a standard version
+replaces that boundary's behavior rather than edits across the codebase. Keep
+changes in an area inside its boundary. A change that has to reach outside it
+extends the boundary deliberately and updates this table in the same PR.
+
+| Area | Owning boundary | Follows | Also implemented in |
+|---|---|---|---|
+| Tool results and error reporting | The invocation pipeline in `crates/waygate-mcp/src/invocation/` (result trust, retained responses, file delivery, output validation) and the delivery envelope in `crates/waygate-mcp/src/retained_delivery.rs`. `GatewayServer::dispatch_tool_call_with` in `crates/waygate-mcp/src/server.rs` maps `InvocationError` to MCP errors. | 2026-07-28 tool results; the experimental `io.modelcontextprotocol/trust-annotations` claim | A second error mapping for task requests in `crates/waygate-mcp/src/tasks.rs`; Code Mode's connector projection in `crates/waygate-server/src/mcp_codemode.rs`; HTTP status promotion in `crates/waygate-server/src/mcp_http_promote.rs` |
+| Discovery | The `GatewayServer` `tools/list` projection, the discovery records in `crates/waygate-mcp/src/discovery.rs`, cursor sealing in `crates/waygate-mcp/src/tool_list_pagination.rs`, and change signals in `crates/waygate-mcp/src/catalog_changes.rs` | 2026-07-28 `tools/list`, caching hints and `subscriptions/listen` | The `searchTools` compatibility adapter in `crates/waygate-mcp/src/compat/`; `gateway-discovery` and `codemode.search`/`codemode.describe` in `crates/waygate-server/src/`; separate cursor schemes for resources, skills and Code Mode search |
+| Task lifecycle | The `GatewayServer` task handlers in `crates/waygate-mcp/src/server.rs`, the `BuiltinTools` task contract in `crates/waygate-mcp/src/builtin.rs`, and the upstream task relay in `crates/waygate-mcp/src/tasks.rs` | The `io.modelcontextprotocol/tasks` extension (SEP-2663). The Rust SDK does not yet route `notifications/tasks`, so clients poll. | Code Mode's journal projection in `crates/waygate-server/src/mcp_codemode.rs`; task dispatch in `crates/waygate-upstream/src/pool/tasks.rs` |
+| Approval | Pipeline stage 8 in `crates/waygate-mcp/src/invocation/approval.rs`, over the grant store in `crates/waygate-catalog` | Gateway-specific: an approval is requested as a 2026-07-28 `input_required` pause | Code Mode's `waiting_for_approval`; the `gateway-admin` change control plane; chat agent approvals in `crates/waygate-agent-runtime` |
+| Upstream identity | `crates/waygate-upstream/src/identity_client.rs` and `crates/waygate-upstream/src/pool/session_identity.rs` | Gateway-specific identity assertions; OAuth 2.0 token exchange for exchanged identities | Identity context installed again in the pool's resource, file-transfer and recovery paths |
+
+Gateway-specific metadata keys, structured result fields and schema keywords
+are listed under
+[extension metadata identities](integration-configuration.md#extension-metadata-identities).
+New gateway-specific keys use the `io.cacahuate.mcp-gateway/` prefix, so they can
+be retired cleanly when a standard equivalent arrives.
+
+### Watched proposals
+
+Review this list when the gateway adopts a new specification revision and when
+a proposal here is merged or closed. Adopt a proposal inside its boundary.
+
+| Proposal | Status | What it would change | Area |
+|---|---|---|---|
+| SEP-2145, standardized `tools/call` failure reporting | In review | Replace the gateway's error data shapes with the standard failure report. Adopt when it lands. | Tool results |
+| SEP-2643, structured authorization denials | Proposal | Standard denial data could replace the gateway's `insufficient_scope` and denial error data, and the HTTP status promotion that reads them. | Tool results |
+| SEP-2419, cache hints on tool results | Proposal | A standard per-result cache hint in `CallToolResult._meta`. | Tool results |
+| SEP-2631, file objects and transfer | Open | The gateway's file values and `x-mcp-file` handling follow the draft; its spellings are isolated in `waygate_mcp::files`. | Tool results |
+| SEP-2694, resumable task event streams | Proposal | Pushed and resumable task events, replacing polling. | Task lifecycle |
+| SEP-2848, asynchronous approval for tool calls | Proposal | A standard approval pause could replace the gateway's reserved approval input request. | Approval |
+| SEP-1932 (DPoP) and SEP-1933 (workload identity federation) | Draft extensions | Proof-of-possession and workload identity for calls to upstreams. | Upstream identity |
+| Request idempotency | Open specification question; SEP-3182 was closed without merging | A standard way to retry a mutating call without repeating its effect. | Tool results |
+| Server-side progressive discovery | On the roadmap; no proposal yet | Would govern the gateway's own progressive disclosure and `searchTools`. | Discovery |
