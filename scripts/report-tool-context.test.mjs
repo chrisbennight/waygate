@@ -211,7 +211,7 @@ test("the checked-in standard fixture and CLI produce the complete baseline", ()
   const fixturePath = join(scriptDirectory, "fixtures/tool-context/standard-tools-list.json");
   const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
   const expected = {
-    formatVersion: 2,
+    formatVersion: 3,
     toolCount: 3,
     toolsJsonBytes: 1392,
     estimatedTokensAtFourBytesPerToken: 348,
@@ -235,6 +235,11 @@ test("the checked-in standard fixture and CLI produce the complete baseline", ()
       { name: "demo-o.query_range", bytes: 524 },
       { name: "demo-m.list_contacts", bytes: 340 },
     ],
+    declarationBytes: {
+      "demo-m.list_contacts": 340,
+      "demo-m.send_message": 524,
+      "demo-o.query_range": 524,
+    },
   };
 
   assert.deepEqual(buildReport(fixture), expected);
@@ -281,6 +286,47 @@ test("a budget reports every material regression", () => {
     "fieldValueBytes.descriptions: 139 exceeds maximum 138",
     "repeatedDescriptionLeadingBlockBytes: 1 exceeds maximum 0",
     "largestDeclarationBytes: 525 exceeds maximum 524",
+  ]);
+});
+
+test("per-tool maximums catch one tool's growth and a stale tool list", () => {
+  const fixturePath = join(scriptDirectory, "fixtures/tool-context/standard-tools-list.json");
+  const report = buildReport(JSON.parse(readFileSync(fixturePath, "utf8")));
+  const budget = {
+    formatVersion: 1,
+    reportFormatVersion: report.formatVersion,
+    expectedToolCount: report.toolCount,
+    maximums: {
+      toolsJsonBytes: report.toolsJsonBytes,
+      "fieldValueBytes.names": report.fieldValueBytes.names,
+      "fieldValueBytes.titles": report.fieldValueBytes.titles,
+      "fieldValueBytes.descriptions": report.fieldValueBytes.descriptions,
+      "fieldValueBytes.inputSchemas": report.fieldValueBytes.inputSchemas,
+      "fieldValueBytes.outputSchemas": report.fieldValueBytes.outputSchemas,
+      "fieldValueBytes.annotations": report.fieldValueBytes.annotations,
+      "fieldValueBytes.meta": report.fieldValueBytes.meta,
+      repeatedStringBytes: report.repeatedStringBytes,
+      repeatedDescriptionLeadingBlockBytes: report.repeatedDescriptionLeadingBlockBytes,
+      repeatedOutputSchemaBytes: report.repeatedOutputSchemaBytes,
+      largestDeclarationBytes: report.largestDeclarations[0].bytes,
+    },
+    toolMaximums: { ...report.declarationBytes },
+  };
+  assert.deepEqual(budgetViolations(report, budget), []);
+
+  // A small tool can grow without changing the largest declaration.
+  const regressed = structuredClone(report);
+  regressed.declarationBytes["demo-m.list_contacts"] += 1;
+  assert.deepEqual(budgetViolations(regressed, budget), [
+    "tool demo-m.list_contacts: 341 exceeds maximum 340",
+  ]);
+
+  const renamed = structuredClone(budget);
+  delete renamed.toolMaximums["demo-o.query_range"];
+  renamed.toolMaximums["demo-o.retired"] = 1;
+  assert.deepEqual(budgetViolations(report, renamed), [
+    "tool demo-o.query_range: has no per-tool maximum",
+    "tool demo-o.retired: has a per-tool maximum but is not listed",
   ]);
 });
 

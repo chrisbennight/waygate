@@ -70,6 +70,10 @@ operator can push the upstream to close the gap.
 Every built-in tool definition must satisfy all seven:
 
 1. **Action-oriented `description`.** Says *what it does* and *when to use it*.
+   Reference material an agent needs only occasionally, such as complete
+   error-code catalogs, operator settings and sandbox internals, belongs in an
+   on-demand discovery call or the guide; every client pays for each
+   description on every `tools/list`.
    For any tool with discoverable/polymorphic input, the description names the
    discovery path (e.g. "call `gateway-admin.describe_action` for the per-action
    params schema").
@@ -254,7 +258,8 @@ A tool is not done until:
   refine;
 - **the built-in context budget covers it.** The checked-in built-in
   `tools/list` capture is regenerated and stays within
-  `scripts/fixtures/tool-context/builtin-budget.json`; see
+  `scripts/fixtures/tool-context/builtin-budget.json`, including the tool's own
+  per-tool maximum; see
   [the built-in surface budget](../tool-context-budget.md#built-in-surface);
 - it is covered by the `surface_descriptor_matches_served_tools` pattern (one per
   namespace, in `mcp_builtin.rs` / `mcp_observe.rs` / `mcp_control.rs`) so the

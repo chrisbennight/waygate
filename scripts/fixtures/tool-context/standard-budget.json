@@ -1,6 +1,6 @@
 {
   "formatVersion": 1,
-  "reportFormatVersion": 2,
+  "reportFormatVersion": 3,
   "expectedToolCount": 3,
   "maximums": {
     "toolsJsonBytes": 2756,

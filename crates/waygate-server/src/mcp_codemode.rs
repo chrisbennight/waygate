@@ -7400,69 +7400,27 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         .annotate(ToolAnnotations::new().read_only(true).destructive(false)),
         Tool::new(
             format!("{NAMESPACE}.execute"),
-            "Requires `mcp:invoke`. Execute JavaScript in a fresh external runtime and return its \
-             JSON-compatible result. Provide exactly one of inline `source`, an uploaded \
-             `source_file`, a private retained `source_sha256`, or a `skill_script` \
-             URI from the active verified Agent Skills catalog. Inline, uploaded, and skill source may \
-             set `retain_for_seconds` for bounded hash reuse; the response always returns the \
-             resolved digest and `retention_state` in `source_ref`, with the exact expiry when \
-             retained. `unavailable` means retention state could not be checked and is distinct \
-             from `not_retained`. Retention requires a configured database and \
-             `GATEWAY_CODEMODE_RESULT_STORAGE=allow`. An \
-             uploaded source is copied before execution, so later upload expiry cannot interrupt \
-             admitted work. An unavailable retained hash returns `source_artifact_not_found` and \
-             must be resubmitted inline or as a fresh upload. Pass arguments as `input` rather \
-             than editing them into the program; the runtime exposes the submitted value as \
-             `execution.input` as data it never evaluates. A program is identified by its exact \
-             bytes, so an edited-in value makes a different program that cannot reuse a retained \
-             source, while `input` leaves the digest and its retention untouched. The runtime installs only concrete synchronous \
-             `connectors[server][operation]({...})` bindings generated from the caller's currently \
-             admitted direct `codemode.describe` contracts; unavailable operations are absent. \
-             The exact described contract is required again during each nested call's governed \
-             tool resolution, so same-name catalog drift is refused before dispatch. Each nested \
-             call re-enters the ordinary direct gateway invocation path under the same principal, \
-             including its current authorization, approval, validation, quota, inspection, and \
-             audit decisions. All source forms, including skill scripts, use this same \
-             authority and have no Code Mode-only call-count or mutation admission gate. Denied, \
-             quarantined, and credential-profile-restricted operations remain unavailable. The runtime exposes no filesystem, network, process, \
-             environment, module-loader, or credential APIs. Execution fails closed unless the \
-             child installs and reports the required Linux syscall-confinement profile. \
-             Programs may call `execution.wait(milliseconds)` with a finite, non-negative \
-             duration to pace polling without spinning; elapsed waiting spends the same operator \
-             execution budget as computation, and exhausting it returns `execution_timeout`. With \
-             durable result storage enabled, a program may call \
-             `execution.emitArtifact(value)` to durably publish bounded intermediate JSON and \
-             receive a stable reference before continuing. Programs may explicitly checkpoint using \
-             `execution.pause(checkpoint)` and continue through `codemode.resume`. A lost worker \
-             never causes automatic replay of a direct-authority execution. Clients may invoke this tool as an MCP Task to receive a durable task identifier \
-             after bounded admission and its fenced claim, before runner work begins; they can \
-             poll status, retrieve the completed result during the execution retention window, \
-             or request cancellation. Task augmentation is advertised only \
-             when the operator explicitly allows result storage. \
-             Failures return stable machine-readable `data.error` codes that distinguish timeouts, program \
-             errors, invalid or oversized results, runner termination, protocol violations, and \
-             transport failures. Defined codes are `execution_failed`, `execution_timeout`, \
-             `execution_setup_timeout`, \
-             `execution_result_not_json`, `execution_result_too_large`, `execution_capacity`, \
-             `tenant_execution_capacity`, `detached_execution_capacity`, \
-             `execution_unavailable`, \
-             `runner_failed`, `runner_crashed`, `runner_frame_too_large`, \
-             `runner_frame_unterminated`, `runner_frame_malformed`, `runner_protocol_error`, and \
-             `runner_transport_error`; pause can additionally return \
-             `execution_pause_unavailable`, while artifact emission can return \
-             `execution_artifact_unavailable`, `execution_artifact_too_large`, or \
-             `execution_artifact_limit_exceeded`. Source resolution additionally uses \
-             `invalid_source_selector`, \
-             `invalid_source_digest`, `invalid_source_retention`, `invalid_source_file`, \
-             `source_file_not_found`, `source_file_unavailable`, `source_not_utf8`, \
-             `source_too_large`, `source_artifact_not_found`, `source_artifact_capacity`, \
-             `source_artifact_unavailable`, and `source_locator_capacity`. Skill-script admission \
-             additionally uses `skill_script_catalog_unavailable`, `skill_script_not_found`, \
-             `skill_script_incompatible`, and `skill_script_catalog_changed`. Oversized `input` \
-             returns `execution_input_too_large`. `repeat_after` is meaningful only on the \
-             task-augmented shape, where starts are retried by converging on the retained \
-             execution and a deliberate repetition names the latest terminal one; the blocking \
-             shape refuses it with `execution_repeat_requires_detached_start`.",
+            "Run JavaScript in a fresh, confined runtime and return its JSON-compatible result. \
+             Provide exactly one source: inline `source`, an uploaded `source_file`, a retained \
+             `source_sha256`, or a `skill_script` URI from the verified Agent Skills catalog. Pass \
+             arguments as `input`, which the program reads as `execution.input`, rather than \
+             editing them into the source: a program is identified by its exact bytes, so `input` \
+             keeps a retained source reusable. `retain_for_seconds` keeps inline, uploaded or skill \
+             source reusable by digest, and `source_ref` reports the digest and its retention \
+             state. The runtime has no filesystem, network, process, environment or credential \
+             access. It exposes `connectors[server][operation]({...})` only for operations \
+             `codemode.describe` returns to this caller, and each call goes through the gateway's \
+             normal authorization, approval, validation, quota, inspection and audit under the same \
+             principal. A program can pace itself with `execution.wait(milliseconds)`, which spends \
+             its execution budget, publish intermediate JSON with `execution.emitArtifact(value)`, \
+             and checkpoint with `execution.pause(checkpoint)` to continue through \
+             `codemode.resume`. A lost worker never replays a program. `codemode.limits` reports \
+             the size and time budgets. Invoked as an MCP Task, this returns a durable task once \
+             the program is admitted; a client that cannot keep a long call open can use \
+             `codemode.start` instead. `repeat_after` applies only to those detached starts. \
+             Failures return a stable `data.error` code with a message, such as \
+             `execution_timeout`, `execution_capacity` or `execution_result_too_large`, or a \
+             `source_` or `skill_script_` code when the source cannot be resolved.",
             source_input_schema::<StartParams>(),
         )
         .with_title("Execute Code Mode JavaScript with direct authority")
@@ -7470,18 +7428,13 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         .annotate(ToolAnnotations::new().read_only(false).destructive(true)),
         Tool::new(
             format!("{NAMESPACE}.resume"),
-            "Requires `mcp:invoke`. Resume one durable Code Mode execution that returned \
-             `waiting_for_resume`. Pass the original `execution_id` and any JSON-compatible \
-             `input` requested by its checkpoint. The gateway starts a fresh confined runner, \
-             supplies the immutable checkpoint and bound input as `execution.resume`, and \
-             rechecks the original source digest, execution profile, SDK/runner contracts, \
-             current governed connector snapshot, authorization, and worker fence before any \
-             new dispatch. The resumed program may complete or call `execution.pause(...)` \
-             again. Invoke normally to wait for the next boundary, or use MCP task augmentation \
-             to atomically claim the continuation before returning and then continue polling the \
-             same execution id. Failures use \
-             `execution_resume_unavailable`, `execution_resume_incompatible`, or \
-             `execution_resume_input_too_large` with structured details.",
+            "Resume an execution that returned `waiting_for_resume`: pass its `execution_id` and \
+             the `input` its checkpoint asked for. A fresh runner receives the checkpoint and input \
+             as `execution.resume` after the source, profile, connectors and authorization are \
+             checked again, and the program may finish or pause again. This waits for the next \
+             boundary; invoke it as an MCP Task, or use `codemode.start_resume`, to return \
+             immediately. Failures use `execution_resume_unavailable`, \
+             `execution_resume_incompatible` or `execution_resume_input_too_large`.",
             input_schema::<ResumeParams>(),
         )
         .with_title("Resume a paused Code Mode execution")
@@ -7489,13 +7442,10 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         .annotate(ToolAnnotations::new().read_only(false).destructive(true)),
         Tool::new(
             format!("{NAMESPACE}.result"),
-            "Requires `mcp:invoke`. Resolve the stable final-result reference returned by a \
-             completed persisted `codemode.execute` or `codemode.resume` call. The lookup is \
-             tenant-, principal-, and effective-profile scoped, re-enters current `codemode.execute` \
-             governance, and remains available only through the execution retention window. \
-             Returns the original bounded JSON-compatible program result. When already \
-             following a task-augmented call, poll MCP `tasks/get` instead: a completed \
-             task inlines the result.",
+            "Return the final JSON-compatible result of a completed persisted execution, named by \
+             its `execution_id`, until its retention ends. The lookup is scoped to the caller and \
+             rechecks current `codemode.execute` governance. A task-augmented caller gets the \
+             result from MCP `tasks/get` instead: a completed task inlines it.",
             input_schema::<ExecutionReferenceParams>(),
         )
         .with_title("Retrieve a persisted Code Mode result")
@@ -7504,40 +7454,19 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         Tool::new(
             format!("{NAMESPACE}.start"),
             with_status_projection_guidance(
-                "Requires `mcp:invoke`. Start a program and return a handle immediately \
-             instead of waiting for it. Use this when the client cannot hold a long tool call \
-             open -- a subagent, a headless run, or any client without automatic backgrounding -- \
-             and poll `codemode.status` with the returned identifier, retrieve the result with \
-             `codemode.result` once status reports one is available, and stop it early with \
-             `codemode.cancel`. The program is admitted, quota-checked and durably claimed before \
-             this returns, so a returned handle means the work was accepted rather than merely \
-             queued; exhausted capacity is refused here rather than discovered later. The \
-             stable `detached_execution_capacity` refusal means this gateway process has no \
-             detached runner slot available; poll or cancel active work before retrying. The \
-             response is the same projection `codemode.status` returns, so the first poll and \
-             every later one have one shape. The program runs under the same governed pipeline, \
-             confinement, connector admission and operator execution budget as `codemode.execute` \
-             and reaches the same terminal states: this changes who waits, not what is allowed. \
-             Requires durable result storage and refuses without it, rather than running a \
-             program whose result nothing could retrieve. Client-authored source can invoke the \
-             same direct operations as blocking `codemode.execute`; skill scripts keep \
-             the invoking caller's authority. Starting is safe to retry: while an identical \
-             submission (same resolved source, profile, and principal) is retained, calling start again \
-             returns that execution's handle instead of running the work twice, so a caller \
-             that timed out or lost the response converges by retrying. To deliberately run \
-             identical work again, pass `repeat_after` naming the latest retained terminal \
-             execution; retrying a repetition whose response was lost converges on the newer \
-             handle. `repeat_after` failures return `execution_repeat_unavailable` or \
-             `execution_repeat_not_terminal`. Source may be inline, an uploaded `source_file`, \
-             a live private `source_sha256`, or a `skill_script`; \
-             `retain_for_seconds` on inline/uploaded/skill source keeps \
-             it reusable for up to 24 hours, and the returned `source_ref` reports the digest and \
-             explicit retention state, plus the exact expiry while live. A retention request \
-             requires the deployment's durable-content posture; one over the intrinsic owner or \
-             tenant budget returns `source_artifact_capacity`. An expired upload URI can recover \
-             an already-started handle, but cannot extend retention or authorize deliberate new \
-             work; upload retry bindings over their own intrinsic budget return \
-             `source_locator_capacity`.",
+                "Start a program and return a handle immediately instead of waiting for it. Use it when \
+                 the client cannot keep a long tool call open, such as a subagent or headless run: poll \
+                 `codemode.status` with the returned identifier, fetch the result with \
+                 `codemode.result` once status reports one, and stop early with `codemode.cancel`. \
+                 Sources, `input`, connectors, limits and terminal states are those of \
+                 `codemode.execute`; this changes who waits, not what is allowed. The program is \
+                 admitted, quota-checked and claimed before this returns, so a handle means the work \
+                 was accepted. `detached_execution_capacity` means no detached runner slot is free; \
+                 poll or cancel active work before retrying. Requires durable result storage. Starting \
+                 is safe to retry: while an identical submission (same resolved source, profile and \
+                 principal) is retained, starting it again returns its handle instead of running it \
+                 twice. To run identical work again deliberately, pass `repeat_after` naming the latest \
+                 retained terminal execution. The response has the same shape as `codemode.status`.",
             ),
             source_input_schema::<StartParams>(),
         )
@@ -7547,22 +7476,14 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         Tool::new(
             format!("{NAMESPACE}.start_resume"),
             with_status_projection_guidance(
-                "Requires `mcp:invoke`. Answer the checkpoint of a paused execution and return its \
-             handle immediately instead of waiting for what follows. This is the continuation \
-             half of the detached surface: `codemode.status` reports the checkpoint while an \
-             execution waits to be resumed, this supplies the input it asked for, and the \
-             response is the same projection status returns, so a caller alternates between the \
-             two for as many pauses as the program takes. Without it a detached caller would be \
-             forced back into a long blocking `codemode.resume` at the first pause, which is the \
-             situation this surface exists to remove. The execution is claimed before this \
-             returns, so a resume that cannot be claimed is refused rather than acknowledged and \
-             lost. A `detached_execution_capacity` refusal means this gateway process has no \
-             detached runner slot available; poll or cancel active work before retrying. The \
-             capacity check happens before the execution row is read or claimed. Omit the input \
-             when retrying an attempt whose input is already durably bound. \
-             The lookup is tenant-, principal- and effective-profile scoped, and this governs \
-             under its own name rather than borrowing the authority of the call that started the \
-             execution.",
+                "Answer a paused execution's checkpoint and return its handle immediately instead of \
+                 waiting for what follows. `codemode.status` reports the checkpoint while the execution \
+                 waits; pass the input it asks for here and keep polling status, once per pause. The \
+                 execution is claimed before this returns, so a resume that cannot be claimed is \
+                 refused rather than lost. `detached_execution_capacity` means no detached runner slot \
+                 is free; poll or cancel active work before retrying. Omit `input` when retrying an \
+                 attempt whose input is already bound. The response has the same shape as \
+                 `codemode.status`.",
             ),
             input_schema::<ResumeParams>(),
         )
@@ -7572,21 +7493,14 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         Tool::new(
             format!("{NAMESPACE}.status"),
             with_status_projection_guidance(
-                "Requires `mcp:invoke`. Report the lifecycle status of a persisted execution without \
-             returning its result. This is the poll half of the submit/poll/cancel surface and is \
-             the tool to call in a loop: the response is decision-shaped and does not grow with \
-             the work the program did, so polling stays cheap. It reports the current status, \
-             whether that status is terminal, whether a stored result is retrievable, whether \
-             cancellation has been requested, and the retention deadline after which the \
-             identifier resolves to nothing. It also reports the admitted source SHA-256 and the \
-             retained-source state and expiry while that private artifact remains reusable. An \
-             `unavailable` retention state tells the caller to retry rather than infer absence. \
-             Retrieve the result itself with `codemode.result` \
-             once this reports one is available, and artifacts with `codemode.artifacts`. The \
-             lookup is tenant-, principal-, and effective-profile scoped; unknown, unowned, and \
-             expired executions share one response so a handle is not usable by possession alone. \
-             It reads the same execution journal as MCP `tasks/get`, so a polling caller and a \
-             task-augmented client observe the same status for the same execution.",
+                "Report a persisted execution's lifecycle status without its result. This is the tool \
+                 to poll: the response stays small however much work the program did. It reports the \
+                 status, whether it is terminal, whether a result is retrievable, whether cancellation \
+                 was requested, the retention deadline, a paused execution's checkpoint, and the \
+                 retained source's state. A retention state of `unavailable` means retry rather than \
+                 assume absence. Fetch the result with `codemode.result` and artifacts with \
+                 `codemode.artifacts`. Unknown, unowned and expired executions share one response. MCP \
+                 `tasks/get` reads the same journal, so both report the same status.",
             ),
             input_schema::<ExecutionReferenceParams>(),
         )
@@ -7595,22 +7509,13 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         .annotate(ToolAnnotations::new().read_only(true).destructive(false)),
         Tool::new(
             format!("{NAMESPACE}.executions"),
-            "Requires `mcp:invoke`. List the caller's own in-flight persisted executions, newest \
-             submission first, so detached work whose handle was lost can be found again instead \
-             of running unreachable until expiry. Use it when a handle was garbled or lost with \
-             the context that held it, or to check for an existing attempt before starting \
-             another. Entries use the same status vocabulary `codemode.status` reports but never \
-             carry a checkpoint, so a page stays bounded by its row count no matter what the \
-             listed programs stored; a discovered identifier is immediately usable with \
-             `codemode.status` (which reports a paused execution's checkpoint), \
-             `codemode.result`, `codemode.artifacts`, and `codemode.cancel`. The listing is \
-             tenant-, principal-, and effective-profile scoped and returns exactly the \
-             executions those tools would serve: it reveals nothing about work belonging to any \
-             other principal, and an empty page means nothing of the caller's is in flight, not \
-             that a given identifier is invalid. Terminal executions are not listed; a known \
-             handle's outcome stays retrievable through `codemode.status` and `codemode.result` \
-             until retention expires. Pass `next_cursor` unchanged to continue a bounded page \
-             walk.",
+            "List the caller's own in-flight executions, newest first, to recover a handle that was \
+             lost or to check for an existing attempt before starting another. Entries use the \
+             `codemode.status` vocabulary without the checkpoint; a listed identifier works with \
+             `codemode.status`, `codemode.result`, `codemode.artifacts` and `codemode.cancel`. An \
+             empty page means nothing of the caller's is in flight. Finished executions are not \
+             listed, but a known handle's outcome stays available through `codemode.status` and \
+             `codemode.result` until retention ends. Pass `next_cursor` unchanged to continue.",
             input_schema::<ExecutionListParams>(),
         )
         .with_title("List the caller's in-flight Code Mode executions")
@@ -7618,15 +7523,12 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         .annotate(ToolAnnotations::new().read_only(true).destructive(false)),
         Tool::new(
             format!("{NAMESPACE}.cancel"),
-            "Requires `mcp:invoke`. Request cancellation of a persisted execution and report its \
-             resulting status. Requesting cancellation is not itself terminal: the execution \
-             reaches `cancelled` once its runner observes the request, so this waits briefly for \
-             that transition and then reports whatever status the execution actually holds rather \
-             than asserting one. A caller that sees a non-terminal status should poll \
-             `codemode.status` for the transition. Cancelling an already-terminal execution is \
-             accepted and returns its existing status unchanged, so a retry after a lost response \
-             is safe. The lookup is tenant-, principal-, and effective-profile scoped; unknown, \
-             unowned, and expired executions share one response with the status tool.",
+            "Request cancellation of a persisted execution and report its resulting status. The \
+             execution becomes `cancelled` once its runner observes the request; this waits briefly \
+             and then reports the actual status, so poll `codemode.status` if it is not yet \
+             terminal. Cancelling a finished execution returns its status unchanged, so retrying is \
+             safe. Unknown, unowned and expired executions share one response with \
+             `codemode.status`.",
             input_schema::<ExecutionReferenceParams>(),
         )
         .with_title("Cancel a persisted Code Mode execution")
@@ -7634,12 +7536,10 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         .annotate(ToolAnnotations::new().read_only(false).destructive(true)),
         Tool::new(
             format!("{NAMESPACE}.artifacts"),
-            "Requires `mcp:invoke`. Page through stable references for bounded intermediate JSON artifacts \
-             already emitted by one durable Code Mode execution. Listing works while the execution \
-             is running, paused, failed, cancelled, or completed, subject to the same owner, \
-             effective-profile, current-governance, and retention checks as result retrieval. \
-             Artifact content is never materialized by this listing; pass one returned reference \
-             to `codemode.artifact` and pass `next_cursor` unchanged to continue.",
+            "Page through references to the bounded JSON artifacts one execution has emitted, while \
+             it runs or after it ends, under the same ownership, governance and retention checks as \
+             its result. Pass a reference to `codemode.artifact` to read it, and `next_cursor` \
+             unchanged to continue.",
             input_schema::<ArtifactListParams>(),
         )
         .with_title("List Code Mode execution artifacts")
@@ -7647,10 +7547,9 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         .annotate(ToolAnnotations::new().read_only(true).destructive(false)),
         Tool::new(
             format!("{NAMESPACE}.artifact"),
-            "Requires `mcp:invoke`. Retrieve one bounded JSON artifact using the exact \
-             `execution_id` and opaque `artifact_id` returned by `execution.emitArtifact(...)` \
-             or `codemode.artifacts`. Cross-execution, cross-tenant, cross-principal, expired, and \
-             effective-profile-conflicting references share one unavailable error shape.",
+            "Read one bounded JSON artifact by the `execution_id` and `artifact_id` that \
+             `execution.emitArtifact(...)` or `codemode.artifacts` returned. A reference this \
+             caller cannot use, or one that has expired, gets the same unavailable error.",
             input_schema::<ArtifactParams>(),
         )
         .with_title("Retrieve a Code Mode artifact")
