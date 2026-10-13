@@ -250,8 +250,10 @@ pub(crate) async fn connect_with_destination(
 /// negotiates 2026-07-28, so the upstream issues an MRTR pause exactly when
 /// the caller can answer it. Every shared dial (boot/catalog lanes, reuse
 /// lanes, legacy upstreams) keeps the default empty set — the gateway itself
-/// answers no server-initiated request, so advertising nothing is the honest
-/// declaration and the pre-MRTR behavior.
+/// fulfils no server-initiated request, so advertising nothing is the honest
+/// declaration and the pre-MRTR behavior. On a legacy session the SDK's
+/// default handler still replies: it answers `ping`, returns an empty root
+/// list, declines elicitation and refuses sampling.
 pub(crate) async fn connect_with_capabilities(
     manifest: &UpstreamManifest,
     issuer: Option<&SharedIdentityIssuer>,

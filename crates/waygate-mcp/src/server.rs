@@ -1206,15 +1206,19 @@ impl GatewayServer {
         }
     }
 
-    /// Resolve the per-request client context and record the
-    /// per-generation request counter that the legacy-removal decision
-    /// (deprecation clock) reads.
+    /// Resolve the per-request client context and count the request by
+    /// protocol generation, negotiated version and client, the usage the
+    /// legacy-removal decision (deprecation clock) reads. Every request
+    /// handler other than `initialize`, which counts itself, calls this once
+    /// before anything that can refuse the request, so each served request
+    /// is counted exactly once.
     fn client_context(&self, ctx: &RequestContext<RoleServer>) -> ClientContext {
         let client = ClientContext::from_ctx(ctx);
-        waygate_telemetry::metrics::record_protocol_generation(match client.generation {
-            ProtocolGeneration::Legacy => "legacy",
-            ProtocolGeneration::Stateless2026 => "2026-07-28",
-        });
+        crate::request_meta::record_request(
+            client.generation,
+            ctx.protocol_version().as_ref(),
+            client.client_name.as_deref(),
+        );
         client
     }
 
@@ -4281,6 +4285,7 @@ impl ServerHandler for GatewayServer {
         request: CustomRequest,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CustomResult, McpError> {
+        let client = self.client_context(&ctx);
         let raw_params = request.params.unwrap_or(Value::Null);
         if crate::skills::is_method(&request.method) {
             self.skill_catalog
@@ -4293,7 +4298,6 @@ impl ServerHandler for GatewayServer {
                         None,
                     )
                 })?;
-            let client = self.client_context(&ctx);
             let principal = principal_from_ctx(&ctx);
             let result = if request.method == crate::skills::LIST_METHOD {
                 skill_tools::SkillTools::new(self.clone())
@@ -4807,8 +4811,12 @@ impl ServerHandler for GatewayServer {
         context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<rmcp::model::InitializeResult, McpError>> + Send + '_
     {
-        waygate_telemetry::metrics::record_protocol_generation("legacy");
         let client_name = request.client_info.name.as_str();
+        crate::request_meta::record_request(
+            ProtocolGeneration::Legacy,
+            Some(&request.protocol_version),
+            Some(client_name),
+        );
         let codemode_only =
             Self::client_name_matches(Some(client_name), &self.codemode_only_tools_clients);
         let client_fallback = !codemode_only
@@ -4857,6 +4865,7 @@ impl ServerHandler for GatewayServer {
         request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::ListPromptsResult, McpError> {
+        let client = self.client_context(&context);
         let principal = principal_from_ctx(&context);
         if self.skill_catalog.is_some() {
             skill_tools::require_read(principal.as_ref())?;
@@ -4876,12 +4885,7 @@ impl ServerHandler for GatewayServer {
                 )
                 .await?
         };
-        self.stamp_cache_hints(
-            &self.client_context(&context),
-            None,
-            &mut listed.ttl_ms,
-            &mut listed.cache_scope,
-        );
+        self.stamp_cache_hints(&client, None, &mut listed.ttl_ms, &mut listed.cache_scope);
         Ok(listed)
     }
 
@@ -4890,6 +4894,7 @@ impl ServerHandler for GatewayServer {
         request: rmcp::model::GetPromptRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::GetPromptResponse, McpError> {
+        let _client = self.client_context(&context);
         let principal = principal_from_ctx(&context);
         skill_tools::SkillTools::new(self.clone())
             .prompt(request, principal.as_ref())

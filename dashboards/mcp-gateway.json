@@ -1754,6 +1754,56 @@
           }
         }
       ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Rate of downstream MCP requests by negotiated protocol version and self-reported client name. Shows which clients still use the 2025-11-25 session path. Client names are capped per process; later names share `other`.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 184
+      },
+      "id": 47,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (protocol_version, client) (rate(mcp_requests_total[$__rate_interval]))",
+          "legendFormat": "{{protocol_version}} \u00b7 {{client}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Downstream requests by protocol version and client",
+      "type": "timeseries"
     }
   ]
 }
