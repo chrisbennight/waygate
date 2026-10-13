@@ -43,6 +43,9 @@ pub(crate) struct ReloadDeps {
     /// stores can't hand back a `PgPool` for a `PgListener`, so the pool is
     /// threaded here. Both doorbell channels share this one pool.
     pub(crate) db_pool: Option<PgPool>,
+    /// Running Code Mode programs woken by cancellation announcements on the
+    /// same listener.
+    pub(crate) codemode_cancellations: crate::codemode_cancellation::CancellationWatch,
     /// Hash of the policy set this replica last loaded. The
     /// doorbell/poll policy reload ([`reload_policies_only`]) compares the live
     /// on-disk hash against this to no-op an idle tick without a Cedar rebuild or
@@ -149,6 +152,7 @@ pub(crate) fn spawn_reload_task(
                 manifest_tx.clone(),
                 policy_tx.clone(),
                 deps.pool.tool_catalog_epoch(),
+                deps.codemode_cancellations.clone(),
                 shutdown.clone(),
             ));
         }
@@ -198,7 +202,8 @@ pub(crate) fn spawn_reload_task(
     })
 }
 
-/// Fleet-wide manifest, policy, and governed-catalog invalidation.
+/// Fleet-wide manifest, policy, and governed-catalog invalidation, and Code
+/// Mode cancellation announcements.
 ///
 /// One listener owns every doorbell subscription so supported small control
 /// pools retain a permit for the stores and the catalog-generation read. The
@@ -212,6 +217,7 @@ pub(crate) async fn fleet_doorbell_forwarder(
     manifest_tx: tokio::sync::mpsc::Sender<()>,
     policy_tx: tokio::sync::mpsc::Sender<()>,
     epoch: waygate_mcp::ToolCatalogEpoch,
+    cancellations: crate::codemode_cancellation::CancellationWatch,
     shutdown: CancellationToken,
 ) {
     let mut observed_generation = None;
@@ -250,6 +256,9 @@ pub(crate) async fn fleet_doorbell_forwarder(
         // setup boundary is therefore represented by this baseline or by a
         // subsequently received notification (possibly both, which is safe).
         observe_catalog_generation(&pool, &epoch, &mut observed_generation).await;
+        // A cancellation announced while this connection was not listening is
+        // caught by every running program checking once.
+        cancellations.wake_all();
         tracing::info!(
             channels = ?FLEET_RELOAD_CHANNELS,
             "fleet doorbell: LISTEN active",
@@ -264,8 +273,15 @@ pub(crate) async fn fleet_doorbell_forwarder(
                 _ = poll.tick() => {
                     observe_catalog_generation(&pool, &epoch, &mut observed_generation).await;
                 }
-                notification = listener.recv() => match notification {
-                    Ok(notification) => match FleetDoorbell::from_channel(notification.channel()) {
+                notification = listener.try_recv() => match notification {
+                    // The listener lost its connection and has already
+                    // reconnected and restored every LISTEN; anything announced
+                    // in between is caught the same way as after setup.
+                    Ok(None) => {
+                        observe_catalog_generation(&pool, &epoch, &mut observed_generation).await;
+                        cancellations.wake_all();
+                    }
+                    Ok(Some(notification)) => match FleetDoorbell::from_channel(notification.channel()) {
                         Some(FleetDoorbell::Manifest) => {
                             let _ = manifest_tx.try_send(());
                         }
@@ -274,6 +290,15 @@ pub(crate) async fn fleet_doorbell_forwarder(
                         }
                         Some(FleetDoorbell::Catalog) => {
                             observe_catalog_generation(&pool, &epoch, &mut observed_generation).await;
+                        }
+                        Some(FleetDoorbell::CodeModeCancellation) => {
+                            match notification.payload().parse::<uuid::Uuid>() {
+                                Ok(id) => cancellations.wake(id),
+                                Err(_) => tracing::warn!(
+                                    payload = notification.payload(),
+                                    "ignoring a malformed Code Mode cancellation announcement"
+                                ),
+                            }
                         }
                         None => {
                             tracing::warn!(channel = notification.channel(), "unexpected fleet doorbell channel");
@@ -296,10 +321,11 @@ pub(crate) async fn fleet_doorbell_forwarder(
 }
 
 #[cfg(unix)]
-const FLEET_RELOAD_CHANNELS: [&str; 3] = [
+const FLEET_RELOAD_CHANNELS: [&str; 4] = [
     waygate_manifest_store::MANIFEST_RELOAD_CHANNEL,
     waygate_policy::POLICY_RELOAD_CHANNEL,
     waygate_catalog::CATALOG_RELOAD_CHANNEL,
+    waygate_codemode::CANCELLATION_CHANNEL,
 ];
 
 #[cfg(unix)]
@@ -308,6 +334,7 @@ enum FleetDoorbell {
     Manifest,
     Policy,
     Catalog,
+    CodeModeCancellation,
 }
 
 #[cfg(unix)]
@@ -317,6 +344,7 @@ impl FleetDoorbell {
             waygate_manifest_store::MANIFEST_RELOAD_CHANNEL => Some(Self::Manifest),
             waygate_policy::POLICY_RELOAD_CHANNEL => Some(Self::Policy),
             waygate_catalog::CATALOG_RELOAD_CHANNEL => Some(Self::Catalog),
+            waygate_codemode::CANCELLATION_CHANNEL => Some(Self::CodeModeCancellation),
             _ => None,
         }
     }
@@ -336,7 +364,10 @@ async fn listen_for_fleet_changes(
 
 #[cfg(all(test, unix))]
 mod fleet_doorbell_tests {
-    use super::{FleetDoorbell, FLEET_RELOAD_CHANNELS};
+    use super::{fleet_doorbell_forwarder, FleetDoorbell, FLEET_RELOAD_CHANNELS};
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
 
     #[test]
     fn every_subscribed_channel_routes_to_one_distinct_plane() {
@@ -348,9 +379,83 @@ mod fleet_doorbell_tests {
                 Some(FleetDoorbell::Manifest),
                 Some(FleetDoorbell::Policy),
                 Some(FleetDoorbell::Catalog),
+                Some(FleetDoorbell::CodeModeCancellation),
             ]
         );
         assert_eq!(FleetDoorbell::from_channel("unregistered"), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancellation_requested_on_another_replica_wakes_the_running_one() {
+        use waygate_codemode::ExecutionStore as _;
+
+        let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+            return;
+        };
+        let tenant = waygate_test_support::pg::create_tenant(&pool).await;
+        let store = waygate_codemode::PgExecutionStore::new(pool.clone());
+        let id = Uuid::now_v7();
+        let source = "return 1;";
+        store
+            .submit(waygate_codemode::NewExecution {
+                program_input: None,
+                id,
+                tenant_id: tenant.clone(),
+                principal_sub: "alice".to_owned(),
+                principal_issuer: "https://issuer.test".to_owned(),
+                source: None,
+                source_digest: waygate_codemode::source_digest(source),
+                execution_profile: serde_json::json!({"name": "direct"}),
+                sdk_contract_version: 1,
+                runner_contract_version: 3,
+                retention_until: time::OffsetDateTime::now_utc() + time::Duration::days(1),
+            })
+            .await
+            .expect("submit");
+        store
+            .claim(
+                &tenant,
+                id,
+                Uuid::now_v7(),
+                Duration::from_secs(300),
+                source.to_owned(),
+                serde_json::json!({}),
+            )
+            .await
+            .expect("claim")
+            .expect("claim succeeds");
+
+        // The replica running the program listens; the request comes from a
+        // different replica, which shares only the database.
+        let cancellations = crate::codemode_cancellation::CancellationWatch::default();
+        let waiter = cancellations.watch(id);
+        waiter.notified().await;
+        let shutdown = CancellationToken::new();
+        let (manifest_tx, _manifest_rx) = tokio::sync::mpsc::channel(8);
+        let (policy_tx, _policy_rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(fleet_doorbell_forwarder(
+            pool.clone(),
+            manifest_tx,
+            policy_tx,
+            waygate_mcp::ToolCatalogEpoch::default(),
+            cancellations.clone(),
+            shutdown.clone(),
+        ));
+        // Every running program checks once the listener is listening.
+        tokio::time::timeout(Duration::from_secs(10), waiter.notified())
+            .await
+            .expect("the listener starts");
+
+        waygate_codemode::PgExecutionStore::new(pool.clone())
+            .request_cancellation(&tenant, "alice", "https://issuer.test", id)
+            .await
+            .expect("request cancellation")
+            .expect("execution exists");
+
+        tokio::time::timeout(Duration::from_secs(10), waiter.notified())
+            .await
+            .expect("the running replica hears the cancellation");
+        shutdown.cancel();
     }
 }
 

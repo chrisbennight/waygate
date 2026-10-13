@@ -500,6 +500,7 @@ fn reload_deps_for(
         policy_config_health: std::sync::Arc::new(waygate_upstream::ConfigHealth::default()),
         replica_id: "test-replica".to_owned(),
         db_pool: None,
+        codemode_cancellations: Default::default(),
         last_policy_hash: std::sync::Mutex::new(None),
         last_tenant_policy_hash: std::sync::Mutex::new(None),
     }

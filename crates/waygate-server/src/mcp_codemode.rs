@@ -132,6 +132,10 @@ const MAX_SOURCE_RETENTION_SECONDS: u32 = 24 * 60 * 60;
 /// request within this window is reported as still running rather than waited
 /// on, and the caller polls `codemode.status` for the transition.
 const EXECUTION_CANCEL_SETTLE_ATTEMPTS: u8 = 20;
+/// How long a cancellation can go unnoticed if its announcement is lost.
+const CANCELLATION_FALLBACK_INTERVAL: Duration = Duration::from_secs(5);
+/// Status polling interval for a run with no cancellation watch.
+const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const EXECUTION_CANCEL_SETTLE_INTERVAL: Duration = Duration::from_millis(25);
 /// Rolling window of program-facing contracts a binary will continue. Both
 /// stamps advance together whenever the sandbox surface changes, because a
@@ -328,6 +332,13 @@ impl CodeModeExecutionCapacity {
     }
 }
 
+/// One run's means of noticing its cancellation, kept across runner frames
+/// so its fallback timer is not restarted by each one.
+struct CancellationCheck {
+    waiter: Option<crate::codemode_cancellation::CancellationWaiter>,
+    fallback: tokio::time::Interval,
+}
+
 /// Registration of a claim held by a run in this process; released on drop.
 struct LiveClaim {
     capacity: Arc<CodeModeExecutionCapacity>,
@@ -379,6 +390,9 @@ pub struct CodeModeTools {
     search_cursor_sealer: Arc<crate::mcp_discovery::DiscoveryCursorSealer>,
     invocation: SharedInvocation,
     execution_store: Option<SharedExecutionStore>,
+    /// Announces cancellations so a running program need not poll for them.
+    /// Without one, a running program polls its status instead.
+    cancellation_watch: Option<crate::codemode_cancellation::CancellationWatch>,
     source_artifact_store: Option<SharedSourceArtifactStore>,
     source_file_reader: Option<crate::file_transfer::SharedStoredTextReader>,
     skill_catalog: Option<Arc<waygate_skills::ReloadableSkillCatalog>>,
@@ -437,6 +451,7 @@ impl CodeModeTools {
             ),
             invocation,
             execution_store: None,
+            cancellation_watch: None,
             source_artifact_store: None,
             source_file_reader: None,
             skill_catalog: None,
@@ -536,6 +551,14 @@ impl CodeModeTools {
 
     pub fn with_execution_store(mut self, execution_store: SharedExecutionStore) -> Self {
         self.execution_store = Some(execution_store);
+        self
+    }
+
+    pub(crate) fn with_cancellation_watch(
+        mut self,
+        watch: crate::codemode_cancellation::CancellationWatch,
+    ) -> Self {
+        self.cancellation_watch = Some(watch);
         self
     }
 
@@ -2529,28 +2552,57 @@ impl CodeModeTools {
         Ok(true)
     }
 
+    fn cancellation_check(&self, execution_id: uuid::Uuid) -> CancellationCheck {
+        let fallback = match self.cancellation_watch {
+            Some(_) => CANCELLATION_FALLBACK_INTERVAL,
+            None => CANCELLATION_POLL_INTERVAL,
+        };
+        let mut fallback =
+            tokio::time::interval_at(tokio::time::Instant::now() + fallback, fallback);
+        fallback.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        CancellationCheck {
+            waiter: self
+                .cancellation_watch
+                .as_ref()
+                .map(|watch| watch.watch(execution_id)),
+            fallback,
+        }
+    }
+
+    /// Resolves once a cancellation for this run has been requested. A run
+    /// checks when the cancellation watch wakes it and, rarely, on its own.
+    /// A failed check is retried at the next one rather than failing the
+    /// run: anything that needs the database to make progress reports a
+    /// persistent outage itself.
     async fn wait_for_cancellation(
         &self,
         store: &SharedExecutionStore,
         principal: &Principal,
         execution_id: uuid::Uuid,
+        check: &mut CancellationCheck,
     ) -> Result<(), McpError> {
         loop {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let execution = store
-                .get(principal.tenant.as_str(), execution_id)
+            match check.waiter.as_ref() {
+                Some(waiter) => tokio::select! {
+                    () = waiter.notified() => {}
+                    _ = check.fallback.tick() => {}
+                },
+                None => {
+                    check.fallback.tick().await;
+                }
+            }
+            match store
+                .get_status(principal.tenant.as_str(), execution_id)
                 .await
-                .map_err(|error| {
-                    tracing::error!(
-                        %error,
-                        %execution_id,
-                        "could not observe Code Mode cancellation state"
-                    );
-                    execution_unavailable()
-                })?
-                .ok_or_else(execution_unavailable)?;
-            if execution.cancellation_requested_at.is_some() {
-                return Ok(());
+            {
+                Ok(Some(record)) if record.cancellation_requested_at.is_some() => return Ok(()),
+                Ok(Some(_)) => {}
+                Ok(None) => return Err(execution_unavailable()),
+                Err(error) => tracing::warn!(
+                    %error,
+                    %execution_id,
+                    "could not check for Code Mode cancellation; retrying"
+                ),
             }
         }
     }
@@ -3213,13 +3265,24 @@ impl CodeModeTools {
         let mut mutation_calls = 0usize;
         let mut artifacts = Vec::new();
         let mut artifact_bytes = 0usize;
+        let mut cancellation = attempt
+            .claim
+            .map(|claim| self.cancellation_check(claim.execution_id));
         let result = loop {
             match bounded_by_deadline(attempt.deadline, async {
                 let read = read_runner_frame(&mut *child_stdout);
-                if let (Some(claim), Some(store)) = (attempt.claim, self.execution_store.as_ref()) {
+                if let (Some(claim), Some(store), Some(cancellation)) = (
+                    attempt.claim,
+                    self.execution_store.as_ref(),
+                    cancellation.as_mut(),
+                ) {
                     tokio::select! {
+                        // A frame the runner has already sent is handled
+                        // before a cancellation check: cancellation is
+                        // observed while the runner is quiet.
+                        biased;
                         frame = read => frame.map_err(runner_frame_failure),
-                        cancelled = self.wait_for_cancellation(store, attempt.principal, claim.execution_id) => {
+                        cancelled = self.wait_for_cancellation(store, attempt.principal, claim.execution_id, cancellation) => {
                             cancelled?;
                             self.persist_claimed_cancellation(store, claim).await?;
                             Err(execution_cancelled())
@@ -3769,6 +3832,9 @@ pub struct CodeModeSettings {
     pub execution_capacity: Arc<CodeModeExecutionCapacity>,
     pub tool_catalog_epoch: ToolCatalogEpoch,
     pub(crate) search_cursor_sealer: Arc<crate::mcp_discovery::DiscoveryCursorSealer>,
+    /// Process-wide, so every session's runs hear their cancellations from
+    /// one listener.
+    pub(crate) cancellation_watch: crate::codemode_cancellation::CancellationWatch,
 }
 
 /// External source handles shared by the Code Mode composition root.
@@ -3819,7 +3885,8 @@ pub fn configured_tools(
         .with_quota(quota)
         .with_result_persistence_allowed(result_persistence_allowed)
         .with_execution_capacity(settings.execution_capacity)
-        .with_execution_limit(settings.execution_limit);
+        .with_execution_limit(settings.execution_limit)
+        .with_cancellation_watch(settings.cancellation_watch);
     if let Some(grants) = grant_store {
         tools = tools.with_grant_store(grants);
     }
@@ -8438,6 +8505,8 @@ mod tests {
         interrupted: tokio::sync::Mutex<Vec<ExecutionClaim>>,
         /// Abandonment reconciliations attempted on owner reads.
         reconcile_calls: std::sync::atomic::AtomicUsize,
+        /// Status reads to fail before answering, simulating a brief outage.
+        status_read_failures: std::sync::atomic::AtomicUsize,
         detached_slots: tokio::sync::Mutex<HashMap<(String, String, String), uuid::Uuid>>,
         /// Detached-slot lease renewals observed while runner work was held.
         slot_renewals: tokio::sync::Mutex<Vec<Duration>>,
@@ -8857,6 +8926,33 @@ mod tests {
             }
             self.renewals.lock().await.push(lease);
             Ok(true)
+        }
+
+        async fn get_status(
+            &self,
+            tenant_id: &str,
+            id: Uuid,
+        ) -> Result<Option<ExecutionStatusRecord>, StoreError> {
+            #[allow(
+                deprecated,
+                reason = "try_update requires Rust 1.95; the workspace supports 1.88"
+            )]
+            let failing = self
+                .status_read_failures
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |left| left.checked_sub(1),
+                )
+                .is_ok();
+            if failing {
+                return Err(StoreError::Database(sqlx::Error::PoolTimedOut));
+            }
+            Ok(self
+                .get(tenant_id, id)
+                .await?
+                .as_ref()
+                .map(ExecutionStatusRecord::from))
         }
 
         async fn interrupt_claimed(
@@ -17376,6 +17472,39 @@ mod tests {
             error.message.contains("`resume`") && !error.message.contains("`resume_mutation`"),
             "the refusal must teach the valid keys: {}",
             error.message,
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_cancellation_check_is_retried_instead_of_failing_the_run() {
+        let catalog: SharedCatalog = Arc::new(FakeCatalog::with_tools(&[]));
+        let authz: SharedAuthz = Arc::new(SelectiveAuthz);
+        let store = Arc::new(RecordingExecutionStore::default());
+        let tools = code_mode_tools(catalog, authz).with_execution_store(store.clone());
+        let principal = reader();
+        let id = waiting_execution(&store, &principal, ExecutionStatus::Running).await;
+        store
+            .current
+            .lock()
+            .await
+            .as_mut()
+            .expect("planted execution")
+            .cancellation_requested_at = Some(time::OffsetDateTime::now_utc());
+        store
+            .status_read_failures
+            .store(2, std::sync::atomic::Ordering::SeqCst);
+
+        let shared: SharedExecutionStore = store.clone();
+        let mut check = tools.cancellation_check(id);
+        tools
+            .wait_for_cancellation(&shared, &principal, id, &mut check)
+            .await
+            .expect("a brief outage delays the check instead of failing the run");
+        assert_eq!(
+            store
+                .status_read_failures
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
         );
     }
 

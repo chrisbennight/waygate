@@ -248,6 +248,10 @@ pub struct Execution {
     pub retention_until: OffsetDateTime,
 }
 
+/// Postgres notification channel on which a cancellation request for a run
+/// with a live claim is announced. The payload is the execution id.
+pub const CANCELLATION_CHANNEL: &str = "codemode_cancellation";
+
 /// What a status check needs about one execution: ownership, lifecycle and
 /// timing, whether a result exists, and a paused run's checkpoint. It carries
 /// no program source or input, tool snapshot, or stored result.
