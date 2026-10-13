@@ -23,7 +23,9 @@ function usage() {
 Accepts a standard MCP tools/list JSON-RPC response, a bare {"tools": [...]}
 result, or a bare tool array. Prints a deterministic JSON context-cost report.
 Use '-' to read stdin. A budget fails when the capture exceeds a checked-in
-maximum or no longer has the budget's expected tool count.`;
+maximum or no longer has the budget's expected tool count. A budget with
+toolMaximums also fails when any one tool's declaration grows past its own
+maximum, or when the listed tools and the per-tool maximums differ.`;
 }
 
 const BUDGET_FORMAT_VERSION = 1;
@@ -284,7 +286,7 @@ export function buildReport(document, top = DEFAULT_TOP) {
   };
 
   return {
-    formatVersion: 2,
+    formatVersion: 3,
     toolCount: tools.length,
     toolsJsonBytes,
     estimatedTokensAtFourBytesPerToken: Math.ceil(toolsJsonBytes / 4),
@@ -302,6 +304,11 @@ export function buildReport(document, top = DEFAULT_TOP) {
     ),
     repeatedOutputSchemas: repeatedOutputSchemas.slice(0, top),
     largestDeclarations: declarations.slice(0, top),
+    declarationBytes: Object.fromEntries(
+      [...declarations]
+        .sort((left, right) => compareStrings(left.name, right.name))
+        .map((declaration) => [declaration.name, declaration.bytes]),
+    ),
   };
 }
 
@@ -346,7 +353,36 @@ export function budgetViolations(report, budget) {
     const maximum = budget.maximums[name];
     if (actual > maximum) violations.push(`${name}: ${actual} exceeds maximum ${maximum}`);
   }
+  if (budget.toolMaximums !== undefined) {
+    violations.push(...toolMaximumViolations(report, budget.toolMaximums));
+  }
   return violations;
+}
+
+function toolMaximumViolations(report, toolMaximums) {
+  if (!toolMaximums || typeof toolMaximums !== "object" || Array.isArray(toolMaximums)) {
+    throw new Error("budget toolMaximums must be an object");
+  }
+  for (const [name, maximum] of Object.entries(toolMaximums)) {
+    if (!Number.isSafeInteger(maximum) || maximum < 0) {
+      throw new Error(`budget tool maximum ${name} must be a non-negative safe integer`);
+    }
+  }
+  const violations = [];
+  for (const [name, bytes] of Object.entries(report.declarationBytes)) {
+    const maximum = toolMaximums[name];
+    if (maximum === undefined) {
+      violations.push(`tool ${name}: has no per-tool maximum`);
+    } else if (bytes > maximum) {
+      violations.push(`tool ${name}: ${bytes} exceeds maximum ${maximum}`);
+    }
+  }
+  for (const name of Object.keys(toolMaximums)) {
+    if (!Object.hasOwn(report.declarationBytes, name)) {
+      violations.push(`tool ${name}: has a per-tool maximum but is not listed`);
+    }
+  }
+  return violations.sort(compareStrings);
 }
 
 async function main(args) {

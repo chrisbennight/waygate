@@ -32,7 +32,8 @@ array, or stdin (`-`). It reports:
 - output schemas equivalent across JSON object-key and `required` member order,
   canonicalized so those serialization choices do not hide a repeated result
   envelope; and
-- the largest individual declarations.
+- the largest individual declarations, and the size of every declaration by
+  tool name.
 
 `estimatedTokensAtFourBytesPerToken` is only a coarse planning estimate.
 Tokenizer choice and the host's prompt serialization determine real token
@@ -90,8 +91,11 @@ node scripts/report-tool-context.mjs \
   scripts/fixtures/tool-context/builtin-tools-list.json
 ```
 
-The same ratchet rule applies: growth needs an explicit budget diff with a
-reason, and a reduction lowers the budget in the same change.
+The built-in budget also sets a maximum for each tool in `toolMaximums`, so
+one description or schema cannot grow unnoticed while the totals stay within
+their limits. Adding, renaming or removing a built-in tool needs a matching
+per-tool entry. The same ratchet rule applies: growth needs an explicit budget
+diff with a reason, and a reduction lowers the budget in the same change.
 
 The output-schema budget includes the gateway's retained-response delivery
 alternative. Strict clients need the file descriptor and delivery-error schema
