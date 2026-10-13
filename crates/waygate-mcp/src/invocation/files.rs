@@ -385,7 +385,12 @@ impl DefaultInvocationService {
         {
             return Ok(output);
         }
-        let bytes = match serde_json::to_vec(&output) {
+        let bytes = match super::encoded_len_within(&output, threshold) {
+            Ok(true) => return Ok(output),
+            Ok(false) => serde_json::to_vec(&output),
+            Err(error) => Err(error),
+        };
+        let bytes = match bytes {
             Ok(bytes) => bytes,
             Err(_) => {
                 return Self::inline_delivery_failure(
@@ -395,9 +400,6 @@ impl DefaultInvocationService {
                 )
             }
         };
-        if bytes.len() <= threshold {
-            return Ok(output);
-        }
         let trust = super::result_trust::parse(&output).ok();
         let sensitive = trust.map_or(ctx.facts().pii, |trust| trust.sensitive);
         let mut compact = CallToolResult::success(Vec::new());

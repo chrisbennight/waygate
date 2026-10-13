@@ -2515,3 +2515,12 @@ mod mrtr_dispatch_tests {
         }
     }
 }
+
+#[test]
+fn encoded_length_is_counted_exactly_up_to_the_limit() {
+    let value = serde_json::json!({"rows": [1, 2, 3], "text": "multi-byte é"});
+    let exact = serde_json::to_vec(&value).unwrap().len();
+    assert!(super::encoded_len_within(&value, exact).unwrap());
+    assert!(!super::encoded_len_within(&value, exact - 1).unwrap());
+    assert!(!super::encoded_len_within(&value, 0).unwrap());
+}

@@ -248,21 +248,22 @@ impl DefaultInvocationService {
             self.inspect_task_metadata(&mut ctx, metadata, status.meta.clone())
                 .await?;
             if let TaskPayload::Completed { result } = &mut status.task.payload {
-                let completed: CallToolResult =
-                    serde_json::from_value(Value::Object(result.clone())).map_err(|_| {
-                        invalid("upstream terminal task result is not a tool result")
-                    })?;
+                let completed: CallToolResult = serde_json::from_value(Value::Object(
+                    std::mem::take(result),
+                ))
+                .map_err(|_| invalid("upstream terminal task result is not a tool result"))?;
                 let completed = self.inspect_response(&mut ctx, Ok(completed)).await;
                 let completed = self
                     .prepare_files_and_validate_output(&mut ctx, completed)
                     .await?;
                 self.record_outcome(&mut ctx, &completed).await;
                 let completed = completed?;
-                *result = serde_json::to_value(completed)
+                let Value::Object(completed) = serde_json::to_value(completed)
                     .map_err(|_| invalid("could not encode task result"))?
-                    .as_object()
-                    .cloned()
-                    .ok_or_else(|| invalid("invalid task result"))?;
+                else {
+                    return Err(invalid("invalid task result"));
+                };
+                *result = completed;
             } else {
                 self.record_outcome(&mut ctx, &Ok(CallToolResult::success(vec![])))
                     .await;

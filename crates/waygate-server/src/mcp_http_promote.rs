@@ -179,6 +179,18 @@ async fn buffer_or_passthrough(body: Body) -> BufferOutcome {
     BufferOutcome::Complete(Bytes::from(head))
 }
 
+/// The only member of a JSON-RPC response the promotion reads. Everything
+/// else, including a success result, is skipped without being built.
+#[derive(serde::Deserialize)]
+struct Envelope {
+    error: Option<EnvelopeError>,
+}
+
+#[derive(serde::Deserialize)]
+struct EnvelopeError {
+    data: Option<serde_json::Value>,
+}
+
 /// Inspect the JSON-RPC body bytes. Returns the (status,
 /// optional response header) to apply.
 ///
@@ -194,7 +206,7 @@ fn classify(
     original_status: StatusCode,
 ) -> (StatusCode, Option<(axum::http::HeaderName, HeaderValue)>) {
     let default = (original_status, None);
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+    let Ok(envelope) = serde_json::from_slice::<Envelope>(bytes) else {
         return default;
     };
 
@@ -208,7 +220,8 @@ fn classify(
     //         ...
     //       }
     //   }}
-    let data = v.get("error").and_then(|e| e.get("data"));
+    let data = envelope.error.and_then(|error| error.data);
+    let data = data.as_ref();
     let kind = data.and_then(|d| d.get("error")).and_then(|s| s.as_str());
 
     match kind {
