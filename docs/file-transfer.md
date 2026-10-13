@@ -48,9 +48,17 @@ development without a database uses the initial 16 KiB default.
 An optional `GATEWAY_INLINE_RESPONSE_THRESHOLD_BYTES` environment override takes
 precedence over the saved app default. A server override takes precedence over
 both. The Settings page shows the effective global threshold and whether the
-environment override is active. The gateway measures the complete serialized
-MCP tool result, including both `content` and `structuredContent`; repeated text
-in those fields counts twice. A result equal to the threshold stays inline.
+environment override is active. The gateway measures the serialized MCP tool
+result. A text block that only repeats `structuredContent` for clients that
+cannot read structured results is not counted, so the duplicate alone never
+turns a result into a file. A result equal to the threshold stays inline.
+
+A result delivered as a file keeps the `_gateway_delivery` envelope in
+`structuredContent` and a resource link to the file. Its text no longer repeats
+the envelope: it carries the upstream's own text, other than a copy of the
+structured result, when that text fits within the threshold and the result is
+not labeled sensitive, followed by one line giving the file's size. A reader
+can decide from that whether it needs the file at all.
 
 To override every tool on an upstream server, open **Servers**, expand that
 server's configuration, and select **Responses**. Enter a byte count, select

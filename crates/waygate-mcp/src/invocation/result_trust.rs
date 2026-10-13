@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use super::{AuditOutcome, InvocationContext, InvocationError, SharedEvidence};
 
-const TRUST_ANNOTATIONS_KEY: &str = "io.modelcontextprotocol/trust-annotations";
+pub(super) const TRUST_ANNOTATIONS_KEY: &str = "io.modelcontextprotocol/trust-annotations";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ResultTrust {
