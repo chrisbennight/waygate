@@ -160,14 +160,17 @@ dashboard charts their 95th percentiles.
 
 - Serialized bytes cover the compact `ListToolsResult` JSON of one response,
   which is close to the reporter's `toolsJsonBytes` for the same view.
-- An MCP 2026 response is one page of up to 50 tools, so its series measures a
-  page. Multiply by the number of pages, or capture every page as described
-  under [reproducible report](#reproducible-report), to compare a whole
-  catalog with the realistic full view.
-- A legacy `progressive` series measures what new sessions receive, and grows
-  with the number of upstreams. If it approaches the `eager_client` or
-  `eager_global` series for the same deployment, progressive disclosure is no
-  longer saving context for those clients.
+- An MCP 2026 response is one page of up to 50 tools, and pages differ in
+  size, so its series describe pages rather than the catalog; a percentile
+  cannot be added up across pages. To compare a whole catalog with the
+  realistic full view, capture every page as described under
+  [reproducible report](#reproducible-report).
+- A legacy `progressive` series covers every list a progressive session
+  receives: the per-upstream adapters alone at first, then the adapters plus
+  the tools the session has disclosed. To measure the adapter-only cost, which
+  grows with the number of upstreams, capture a new session's first list. If
+  that capture is close to the full list for the same authorization view,
+  progressive disclosure is no longer saving context.
 - For a breakdown by field or by tool, or to find repeated content, capture
   `tools/list` for one authorization view and run the reporter on it.
 
