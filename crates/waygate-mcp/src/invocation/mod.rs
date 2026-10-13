@@ -2218,6 +2218,34 @@ fn elapsed_ms(started: std::time::Instant) -> i64 {
     started.elapsed().as_millis().min(i64::MAX as u128) as i64
 }
 
+/// Whether `value`'s JSON encoding is at most `limit` bytes. The encoding is
+/// counted rather than buffered, and counting stops at the first byte past the
+/// limit, so checking a large result against a small limit stays cheap.
+fn encoded_len_within(value: &impl serde::Serialize, limit: usize) -> serde_json::Result<bool> {
+    struct Counter {
+        written: usize,
+        limit: usize,
+    }
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written = self.written.saturating_add(buf.len());
+            if self.written > self.limit {
+                return Err(std::io::ErrorKind::Other.into());
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter { written: 0, limit };
+    match serde_json::to_writer(&mut counter, value) {
+        Ok(()) => Ok(true),
+        Err(_) if counter.written > limit => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests;
 

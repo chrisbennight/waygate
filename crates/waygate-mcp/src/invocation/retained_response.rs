@@ -243,14 +243,16 @@ impl CallToolResultProcessor for RetainedResponseProcessor<'_> {
         result: CallToolResult,
         reader: &dyn CallScopedResourceReader,
     ) -> Result<CallToolResult, CallToolResultProcessingError> {
-        let original = result.clone();
+        // Only a recognized or malformed retained envelope can fail recovery,
+        // and an envelope is compact, so an ordinary result is never copied.
+        let envelope = (!matches!(recognize(&result), Ok(None))).then(|| result.clone());
         match self
             .service
             .recover_retained_response(self.ctx, result, reader)
             .await
         {
             Ok(result) => Ok(result),
-            Err(error) if self.ctx.facts().side_effects && original.is_error != Some(true) => {
+            Err(error) if self.ctx.facts().side_effects && envelope.is_some() => {
                 // Inspection may subsequently discard this compact response.
                 // Keep the confirmed operation outcome independently of it.
                 self.ctx
@@ -280,7 +282,10 @@ impl CallToolResultProcessor for RetainedResponseProcessor<'_> {
                     },
                     _ => error.kind(),
                 };
-                Ok(delivery_failure(original, reason))
+                Ok(delivery_failure(
+                    envelope.expect("guarded by the match arm"),
+                    reason,
+                ))
             }
             Err(error) => Err(error),
         }
@@ -607,13 +612,13 @@ impl DefaultInvocationService {
             .expect("hydration supplies data");
         // The runtime consumes serialized JSON, whose escaped representation
         // can exceed the original body size. Route that case through storage.
-        let encoded_fits = ctx
-            .response_materialization_limit_bytes
-            .is_some_and(|limit| {
-                result.structured_content.as_ref().is_some_and(|value| {
-                    serde_json::to_vec(value).is_ok_and(|encoded| encoded.len() <= limit)
-                })
-            });
+        let encoded_fits =
+            ctx.response_materialization_limit_bytes
+                .is_some_and(|limit| {
+                    result.structured_content.as_ref().is_some_and(|value| {
+                        super::encoded_len_within(value, limit).unwrap_or(false)
+                    })
+                });
         *ctx.retained_response
             .lock()
             .expect("retained response lock") = Some(RecoveredResponse {
