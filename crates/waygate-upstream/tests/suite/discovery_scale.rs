@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use rmcp::model::{ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool};
+use rmcp::model::{
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+};
 use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
@@ -22,8 +24,8 @@ use waygate_upstream::{ToolClassification, Transport, UpstreamManifest, Upstream
 pub(super) struct LargeCatalog(pub(super) Arc<Vec<Tool>>);
 
 impl ServerHandler for LargeCatalog {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
     }
 
     async fn list_tools(

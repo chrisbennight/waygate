@@ -69,7 +69,7 @@ pub(super) fn client_capability_meta(
 }
 
 async fn send_file_authorization(
-    client: &RunningService<RoleClient, ClientInfo>,
+    client: &RunningService<RoleClient, ClientConfig>,
     request: &FileAuthorizationRequest,
     cleartext_control_plane: bool,
 ) -> Result<FileAuthorizationResponse, ServiceError> {

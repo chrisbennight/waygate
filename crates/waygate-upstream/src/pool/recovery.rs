@@ -1,6 +1,6 @@
 //! Conservative recovery for per-call HTTP upstream setup and request handoff.
 
-use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientInfo};
+use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientConfig};
 use rmcp::service::RunningService;
 use rmcp::{ErrorData as McpError, RoleClient};
 
@@ -131,7 +131,7 @@ fn can_retry(
 /// stop its own HTTP worker while that worker waits on a response, and a
 /// closed session must not leave its upstream working.
 async fn close_service(
-    service: RunningService<RoleClient, ClientInfo>,
+    service: RunningService<RoleClient, ClientConfig>,
     open_requests: &tokio_util::sync::CancellationToken,
     deadline: Option<tokio::time::Instant>,
 ) {

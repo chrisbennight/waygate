@@ -13,7 +13,7 @@ use axum::Router;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock as Content,
     Implementation, ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities,
-    ServerInfo, ServerNotification, SubscriptionFilter, Tool, ToolListChangedNotification,
+    ServerConfig, ServerNotification, SubscriptionFilter, Tool, ToolListChangedNotification,
 };
 use rmcp::service::{RequestContext, SubscriptionContext};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -41,8 +41,8 @@ struct ListenUpstream {
 }
 
 impl ServerHandler for ListenUpstream {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_tool_list_changed()

@@ -74,8 +74,9 @@ The gateway serves two protocol generations side by side:
   restart or a move to another replica affects only requests already in flight.
 - **MCP `2025-11-25`** uses sessions held in the memory of one gateway process.
   An `initialize` request that asks for an earlier version (`2024-11-05`,
-  `2025-03-26` or `2025-06-18`) is accepted at that version and served the
-  same way; the gateway does not narrow its behavior to the earlier revision.
+  `2025-03-26` or `2025-06-18`) is answered with `2025-11-25`, as the
+  specification prescribes when a server does not support the requested
+  version; a client that cannot use `2025-11-25` disconnects.
 
 New capabilities are built for `2026-07-28`. The session path keeps the
 features it has and receives security, correctness and compatibility fixes. It

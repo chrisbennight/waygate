@@ -244,9 +244,9 @@ impl SkillTools {
 
     pub(super) async fn project_info(
         &self,
-        mut info: ServerInfo,
+        mut info: ServerConfig,
         principal: Option<&Principal>,
-    ) -> ServerInfo {
+    ) -> ServerConfig {
         if !self.has_visible_skills(principal).await {
             info.capabilities.prompts = None;
             if let Some(extensions) = info.capabilities.extensions.as_mut() {

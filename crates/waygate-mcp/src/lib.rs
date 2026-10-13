@@ -91,10 +91,10 @@ pub use waygate_invocation::{
 ///
 /// 2026-07-28 is served statelessly with a stable, paginated,
 /// authorization-filtered direct-tool projection; 2025-11-25 is served on
-/// sessions with the legacy discovery adapter. The transport also accepts an
-/// `initialize` that asks for an earlier version it knows and serves that
-/// session the same way, without narrowing it to what the earlier revision
-/// defined. When a spec revision is added or retired, update this list, the
+/// sessions with the legacy discovery adapter. The transport answers an
+/// `initialize` that asks for an earlier version with 2025-11-25, the newest
+/// listed version that still has a session handshake. When a spec revision
+/// is added or retired, update this list, the
 /// conformance suite, and the MCP guide in the same change, then verify
 /// against the current spec page on modelcontextprotocol.io before merging.
 pub const SUPPORTED_MCP_SPEC_VERSIONS: &[&str] = &["2026-07-28", "2025-11-25"];

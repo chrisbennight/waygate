@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use rmcp::model::{ClientCapabilities, ClientInfo, Implementation, ProtocolVersion};
+use rmcp::model::{ClientCapabilities, ClientConfig, Implementation, ProtocolVersion};
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::StreamableHttpClientTransport;
@@ -15,7 +15,7 @@ use crate::cli::Context as CliContext;
 
 /// Boxed running service — simpler than carrying the concrete transport type
 /// through every caller.
-pub type Client = RunningService<RoleClient, ClientInfo>;
+pub type Client = RunningService<RoleClient, ClientConfig>;
 
 /// Build + `initialize` an MCP client.
 pub async fn connect(ctx: &CliContext, auth: &ResolvedAuth) -> Result<Client> {
@@ -28,7 +28,7 @@ pub async fn connect(ctx: &CliContext, auth: &ResolvedAuth) -> Result<Client> {
 
     let transport = StreamableHttpClientTransport::from_config(config);
 
-    let info = ClientInfo::new(
+    let info = ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new(
             concat!("mcp-test-client/", env!("CARGO_PKG_VERSION")),
@@ -55,7 +55,7 @@ pub async fn connect_2026(ctx: &CliContext, auth: &ResolvedAuth) -> Result<Clien
         config = config.auth_header(token.to_owned());
     }
     let transport = StreamableHttpClientTransport::from_config(config);
-    let info = ClientInfo::new(
+    let info = ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new(
             concat!("mcp-test-client/", env!("CARGO_PKG_VERSION")),

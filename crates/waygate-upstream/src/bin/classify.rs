@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use rmcp::model::{ClientCapabilities, ClientInfo, Implementation};
+use rmcp::model::{ClientCapabilities, ClientConfig, Implementation};
 use rmcp::service::ClientServiceExt as _;
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -123,9 +123,9 @@ fn starter_manifest(
 
 async fn connect_sse_for_classify(
     url: &str,
-    info: ClientInfo,
+    info: ClientConfig,
     handshake_timeout: Duration,
-) -> Result<RunningService<RoleClient, ClientInfo>, String> {
+) -> Result<RunningService<RoleClient, ClientConfig>, String> {
     let handshake = async {
         let http = http_policy::streaming_client()
             .map_err(|e| format!("build upstream HTTP client: {e}"))?;
@@ -341,7 +341,7 @@ async fn main() -> ExitCode {
         }
     }
 
-    let info = ClientInfo::new(
+    let info = ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new(
             concat!(
@@ -571,7 +571,7 @@ mod tests {
         });
         let url = format!("http://{addr}/sse");
         let deadline = Duration::from_millis(1000);
-        let info = ClientInfo::new(
+        let info = ClientConfig::new(
             ClientCapabilities::default(),
             Implementation::new("classify-test", "0"),
         );

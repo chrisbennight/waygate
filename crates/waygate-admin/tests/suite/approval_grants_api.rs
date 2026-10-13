@@ -1058,8 +1058,8 @@ async fn mint_grant_normalizes_aliases_and_refuses_duplicates_before_storage() {
 struct ApprovalEnvelopeUpstream;
 
 impl rmcp::ServerHandler for ApprovalEnvelopeUpstream {
-    fn get_info(&self) -> rmcp::model::ServerInfo {
-        rmcp::model::ServerInfo::new(
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        rmcp::model::ServerConfig::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
                 .build(),

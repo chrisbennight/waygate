@@ -210,7 +210,7 @@ pub struct ListedCatalog {
 /// later pages would quarantine every later-page tool at annotation-mode
 /// cutover).
 pub async fn list_all_tools(
-    client: &RunningService<RoleClient, ClientInfo>,
+    client: &RunningService<RoleClient, ClientConfig>,
 ) -> Result<ListedCatalog, String> {
     let listed_at = std::time::Instant::now();
     let mut live_tools = Vec::new();
@@ -1069,7 +1069,7 @@ impl UpstreamPool {
     /// the RPC timeout exists for.
     pub(super) async fn session_tools_bounded(
         &self,
-        client: &RunningService<RoleClient, ClientInfo>,
+        client: &RunningService<RoleClient, ClientConfig>,
         timeout: Option<std::time::Duration>,
     ) -> Result<Vec<Tool>, SessionToolsReadError> {
         let listed = match timeout {

@@ -18,7 +18,7 @@ use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use rmcp::model::{ClientCapabilities, ClientInfo, Implementation, ProtocolVersion};
+use rmcp::model::{ClientCapabilities, ClientConfig, Implementation, ProtocolVersion};
 use rmcp::service::{ClientInitializeError, ClientLifecycleMode, ClientServiceExt, RunningService};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
@@ -192,7 +192,7 @@ impl PinnedNetworkDestination {
 }
 
 pub(crate) struct ConnectedService {
-    pub(crate) service: RunningService<RoleClient, ClientInfo>,
+    pub(crate) service: RunningService<RoleClient, ClientConfig>,
     pub(crate) network_destination: Option<PinnedNetworkDestination>,
     pub(crate) cleartext_control_plane: bool,
     /// Cancel to end every request this connection still has open with the
@@ -211,7 +211,7 @@ pub(crate) async fn connect(
     issuer: Option<&SharedIdentityIssuer>,
     cell: Option<&IdentityCell>,
     exchange: Option<&ExchangeBundle>,
-) -> Result<RunningService<RoleClient, ClientInfo>, DialError> {
+) -> Result<RunningService<RoleClient, ClientConfig>, DialError> {
     connect_with_handshake_timeout(
         manifest,
         issuer,
@@ -369,7 +369,7 @@ async fn connect_with_handshake_timeout(
     exchange: Option<&ExchangeBundle>,
     capabilities: ClientCapabilities,
     handshake_timeout: Duration,
-) -> Result<RunningService<RoleClient, ClientInfo>, DialError> {
+) -> Result<RunningService<RoleClient, ClientConfig>, DialError> {
     Ok(connect_with_handshake_timeout_and_destination(
         manifest,
         issuer,
@@ -434,7 +434,7 @@ async fn dial_once(
     handshake_timeout: Duration,
     lifecycle: ClientLifecycleMode,
 ) -> Result<ConnectedService, DialError> {
-    let info = ClientInfo::new(
+    let info = ClientConfig::new(
         capabilities,
         Implementation::new(
             concat!("mcp-tool-search-gateway/", env!("CARGO_PKG_VERSION")),

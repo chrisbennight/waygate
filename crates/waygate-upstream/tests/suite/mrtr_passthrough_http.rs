@@ -24,7 +24,7 @@ use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities,
     ContentBlock as Content, ElicitRequest, ElicitRequestParams, ElicitationSchema, Implementation,
     InputRequest, InputRequiredResult, InputResponses, ListToolsResult, PaginatedRequestParams,
-    ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+    ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -56,8 +56,8 @@ struct MrtrUpstream {
 }
 
 impl ServerHandler for MrtrUpstream {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("mrtr-upstream", "0.0.0"))
             .with_protocol_version(ProtocolVersion::LATEST)
     }

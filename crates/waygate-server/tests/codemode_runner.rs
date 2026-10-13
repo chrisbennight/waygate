@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 use rmcp::model::{
-    CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation, JsonObject,
+    CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation, JsonObject,
 };
 #[cfg(target_os = "linux")]
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -592,12 +592,12 @@ async fn gateway_listener_addr(gateway_pid: u32) -> Option<std::net::SocketAddr>
 #[cfg(target_os = "linux")]
 async fn connect_gateway(
     listen_addr: std::net::SocketAddr,
-) -> rmcp::service::RunningService<rmcp::RoleClient, ClientInfo> {
+) -> rmcp::service::RunningService<rmcp::RoleClient, ClientConfig> {
     let uri: Arc<str> = Arc::from(format!("http://{listen_addr}/mcp"));
     let transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(uri),
     );
-    ClientInfo::new(
+    ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new("codemode-crash-recovery-test", env!("CARGO_PKG_VERSION")),
     )

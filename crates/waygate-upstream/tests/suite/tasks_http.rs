@@ -52,8 +52,8 @@ impl Backend {
     }
 }
 impl ServerHandler for Backend {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_tasks()

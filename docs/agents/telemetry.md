@@ -271,7 +271,9 @@ Metric semantics and operational uses:
   it. Pings and standard methods the gateway does not implement are answered
   by the MCP SDK and not counted. `protocol_generation` is `legacy` or `2026-07-28`;
   `protocol_version` is the negotiated version, one of the versions the
-  transport can negotiate, `other` or `unknown`. `client` is the self-reported
+  transport can negotiate, `other` or `unknown`; on `initialize` it is the
+  version the client asked for, which shows clients that still ask for an
+  older revision than the one they are offered. `client` is the self-reported
   `clientInfo.name`, lower-cased with characters outside letters, digits and
   `-_./ ` replaced by `_` and cut to 64 characters, or `unknown` when absent.
   Only the first 32 distinct names a process sees get their own series; later

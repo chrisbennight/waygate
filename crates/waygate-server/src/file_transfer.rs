@@ -3561,10 +3561,10 @@ mod tests {
     }
 
     use rmcp::model::{
-        CallToolRequestParams, CallToolResponse, ClientCapabilities, ClientInfo, ClientRequest,
+        CallToolRequestParams, CallToolResponse, ClientCapabilities, ClientConfig, ClientRequest,
         ContentBlock, CustomRequest, CustomResult, Implementation, ListToolsResult,
         PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
-        ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo, ServerResult, Tool,
+        ReadResourceResult, ResourceContents, ServerCapabilities, ServerConfig, ServerResult, Tool,
     };
     use rmcp::service::RequestContext;
     use rmcp::transport::streamable_http_client::{
@@ -3704,8 +3704,8 @@ mod tests {
     }
 
     impl ServerHandler for PrintableFileUpstream {
-        fn get_info(&self) -> ServerInfo {
-            ServerInfo::new(
+        fn get_info(&self) -> ServerConfig {
+            ServerConfig::new(
                 ServerCapabilities::builder()
                     .enable_tools()
                     .enable_tasks()
@@ -3986,8 +3986,8 @@ mod tests {
     }
 
     impl ServerHandler for ResourceCapabilityUpstream {
-        fn get_info(&self) -> ServerInfo {
-            ServerInfo::new(
+        fn get_info(&self) -> ServerConfig {
+            ServerConfig::new(
                 ServerCapabilities::builder()
                     .enable_tools()
                     .enable_resources()
@@ -5339,7 +5339,7 @@ mod tests {
             ))),
         );
         use rmcp::service::ClientServiceExt as _;
-        let client: rmcp::service::RunningService<RoleClient, ClientInfo> = ClientInfo::new(
+        let client: rmcp::service::RunningService<RoleClient, ClientConfig> = ClientConfig::new(
             ClientCapabilities::default(),
             Implementation::new("file-aware-test-client", "0.0.0"),
         )

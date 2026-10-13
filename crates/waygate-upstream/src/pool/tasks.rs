@@ -47,7 +47,7 @@ pub(super) fn request(rpc: &TaskRpc) -> ClientRequest {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_once(
-    service: &RunningService<RoleClient, ClientInfo>,
+    service: &RunningService<RoleClient, ClientConfig>,
     params: rmcp::model::CallToolRequestParams,
     task: Option<&TaskRpc>,
     capabilities: Option<&ClientCapabilities>,
