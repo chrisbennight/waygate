@@ -319,12 +319,13 @@ This document covers:
   text would stop bridging the day the wording changed.
 
   The cost is one refused probe per dial against an upstream that cannot
-  discover. Because HTTP isolation defaults to `per_call`, that is one
-  extra probe **per tool call**, not merely per connect. It is bounded and
-  local, but it is the reason a per-upstream generation memo — boot and
-  re-probe lanes discovering fresh, per-call lanes reusing the generation
-  the upstream last negotiated — is the natural next step; it would keep
-  migration observable while taking the probe off the hot path. A `protocol` change is a
+  discover. Boot and re-probe lanes pay it; per-call dials do not. Under
+  `auto`, a per-call session reuses the generation its lane negotiated, so a
+  legacy upstream is dialed straight into the `initialize` handshake. If that
+  upstream has since upgraded and refuses the handshake, the per-call dial
+  negotiates in full, and the lane records the new generation the next time
+  it is re-dialed. Until then each such call pays one refused handshake.
+  Migration therefore stays observable without a probe on every call. A `protocol` change is a
   connection-shape change: reloads re-dial it. The `session` block carries
   `concurrency` (overrides the global `GATEWAY_UPSTREAM_POOL_SIZE`) and
   `isolation` (`per_call` | `reuse`). Isolation defaults to the **safe**
