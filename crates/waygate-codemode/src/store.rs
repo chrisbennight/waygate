@@ -222,7 +222,18 @@ impl PgExecutionStore {
             .await?;
         }
         let execution = row_to_execution(&updated);
-        if updated.get::<bool, _>("finished_now") {
+        let finished_now = updated.get::<bool, _>("finished_now");
+        if !finished_now {
+            // A live claim finalizes when its runner next checks. Announce the
+            // request so that check runs now on whichever replica holds the
+            // claim; the notification is delivered only if this commits.
+            sqlx::query("SELECT pg_notify($1, $2)")
+                .bind(crate::CANCELLATION_CHANNEL)
+                .bind(id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        }
+        if finished_now {
             // The effective reason is the row's, not this call's: an
             // earlier requester's provenance wins the attribution.
             insert_event(

@@ -249,7 +249,10 @@ and durably claims the execution before it returns, then runs it with nobody
 waiting: a returned handle means the work was accepted, not merely queued, so
 exhausted capacity is refused at the call rather than discovered by a later
 poll. Client-authored starts use the same direct authority as blocking
-execution, including reviewed skill scripts.
+execution, including reviewed skill scripts. A cancellation reaches a running
+program through a database notification, on whichever replica runs it. The
+program checks its status on its own only rarely, in case a notification is
+missed, and a failed check is retried rather than failing the run.
 
 Starting is safe to retry. Each detached start carries a gateway-derived
 retry-equivalence identity — tenant, issuer, subject, source digest, and

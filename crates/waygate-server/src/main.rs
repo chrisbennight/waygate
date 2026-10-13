@@ -2,6 +2,7 @@ mod boot;
 mod catalog_freshness;
 mod change_notify;
 mod client_tool_projection;
+mod codemode_cancellation;
 mod codemode_limits;
 mod codemode_spool;
 mod config;
@@ -1029,6 +1030,10 @@ async fn gateway_main() -> anyhow::Result<()> {
         codemode_execution_limit,
         ct.clone(),
     );
+    let codemode_cancellation_watch = codemode_cancellation::CancellationWatch::default();
+    if let Some(pool) = db_pool.clone() {
+        codemode_cancellation_watch.spawn_listener(pool, ct.clone());
+    }
     // In-flight MCP requests and detached Code Mode runs that shutdown lets
     // finish before closing the MCP transport.
     let inflight_work = tokio_util::task::TaskTracker::new();
@@ -1070,6 +1075,7 @@ async fn gateway_main() -> anyhow::Result<()> {
         schema_validator_cache: schema_validator_cache.clone(),
         change_request_store: change_request_store.clone(),
         codemode_db_pool: db_pool.clone(),
+        codemode_cancellation_watch,
         change_notifier: change_notifier.clone(),
         public_url: cfg.public_url.clone(),
         admin_state_cell: admin_state_cell.clone(),

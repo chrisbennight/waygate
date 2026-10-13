@@ -63,6 +63,8 @@ pub(crate) struct McpServerFactory {
     /// MCP-proposed change pushes a heads-up too.
     pub change_request_store: Option<waygate_changeset::SharedChangeRequestStore>,
     pub codemode_db_pool: Option<sqlx::PgPool>,
+    /// Process-wide cancellation announcements for running Code Mode programs.
+    pub codemode_cancellation_watch: crate::codemode_cancellation::CancellationWatch,
     pub change_notifier: Option<waygate_admin::change_notify::SharedChangeNotifier>,
     pub public_url: String,
     /// Deferred `AdminState` cell: each built `ChangeProposalTools` /
@@ -208,6 +210,7 @@ impl McpServerFactory {
                 execution_capacity: self.execution_capacity.clone(),
                 tool_catalog_epoch: self.tool_catalog_epoch.clone(),
                 search_cursor_sealer: self.discovery_cursor_sealer.clone(),
+                cancellation_watch: self.codemode_cancellation_watch.clone(),
             },
         ));
         // Discovery observes every live built-in through weak handles. The
