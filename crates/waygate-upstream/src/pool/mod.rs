@@ -473,6 +473,9 @@ pub struct UpstreamPool {
     /// [`Self::with_authoritative_catalog`] after its fail-closed boot
     /// reconcile so a miss or error refuses dispatch.
     catalog: Option<waygate_catalog::SharedCatalogStore>,
+    /// Catalog and review reads behind admission, reused while the durable
+    /// catalog generation they were read under is current.
+    admission_reads: StdMutex<contract_binding::AdmissionReadCache>,
     tool_reviews: Option<Arc<waygate_catalog::tool_reviews::PgCatalogStore>>,
     /// Whether the attached catalog is the serving authority rather than a
     /// transitional dual-read aid. The production composition sets this only
@@ -746,6 +749,7 @@ impl UpstreamPool {
             catalog_transitions: StdRwLock::new(HashMap::new()),
             index,
             tool_catalog_epoch: ToolCatalogEpoch::new(),
+            admission_reads: StdMutex::default(),
             reconnect_policy,
             reconnect_notify,
             #[cfg(test)]
@@ -915,6 +919,7 @@ impl UpstreamPool {
             catalog_transitions: StdRwLock::new(HashMap::new()),
             index: None,
             tool_catalog_epoch: ToolCatalogEpoch::new(),
+            admission_reads: StdMutex::default(),
             reconnect_policy,
             reconnect_notify,
             #[cfg(test)]
@@ -1548,11 +1553,26 @@ impl UpstreamCatalog for UpstreamPool {
         }
         let published =
             schema_admission::published_tool_contract(entry.as_deref(), tool_name).await;
-        self.resolve_snapshot_from(
+        let mode = manifest
+            .as_ref()
+            .map_or(crate::ClassificationMode::Manifest, |manifest| {
+                manifest.classification_mode
+            });
+        let reads = self
+            .admission_reads(
+                tenant,
+                server,
+                tool_name,
+                mode,
+                published.advertised_definition.as_ref(),
+            )
+            .await;
+        self.resolve_snapshot_with_reads(
             tenant,
             server,
             tool_name,
             contract_binding::snapshot_inputs_for(manifest.as_ref(), server, tool_name, published),
+            reads,
         )
         .await
     }

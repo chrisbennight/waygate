@@ -200,10 +200,16 @@ fn catalog_risk_mapping() {
 }
 
 /// In-memory `CatalogStore` returning a scripted `resolve_tool`
-/// outcome, for exercising the pool's dual-read fallback.
+/// outcome, for exercising the pool's dual-read fallback. With a
+/// `generation`, it reports that durable catalog generation and can advance
+/// it while a resolution is in progress.
+#[derive(Default)]
 struct ScriptedCatalog {
     outcome: std::sync::Mutex<Option<waygate_catalog::ResolvedTool>>,
     err: bool,
+    generation: Option<std::sync::atomic::AtomicI64>,
+    advance_during_resolve: std::sync::atomic::AtomicBool,
+    resolves: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
@@ -214,11 +220,23 @@ impl waygate_catalog::CatalogStore for ScriptedCatalog {
     ) -> Result<Vec<waygate_catalog::CatalogServerSummary>, waygate_catalog::CatalogError> {
         Ok(vec![])
     }
+    async fn discovery_generation(&self) -> Result<Option<i64>, waygate_catalog::CatalogError> {
+        Ok(self
+            .generation
+            .as_ref()
+            .map(|generation| generation.load(Ordering::SeqCst)))
+    }
     async fn resolve_tool(
         &self,
         _tenant: &str,
         _fq: &str,
     ) -> Result<waygate_catalog::ResolvedTool, waygate_catalog::CatalogError> {
+        self.resolves.fetch_add(1, Ordering::SeqCst);
+        if self.advance_during_resolve.load(Ordering::SeqCst) {
+            if let Some(generation) = self.generation.as_ref() {
+                generation.fetch_add(1, Ordering::SeqCst);
+            }
+        }
         if self.err {
             return Err(waygate_catalog::CatalogError::Unknown("scripted error"));
         }
@@ -377,6 +395,72 @@ fn annotation_native_tool_facts_stay_conservative_until_policy_enforcement() {
 }
 
 #[tokio::test]
+async fn admission_reuses_catalog_reads_only_within_one_generation() {
+    let source_version =
+        waygate_catalog::manifest_classification_hash("send", "high", true, false, None, &[]);
+    let catalog = Arc::new(ScriptedCatalog {
+        outcome: std::sync::Mutex::new(Some(waygate_catalog::ResolvedTool::Live(Box::new(
+            waygate_catalog::ToolDefinition {
+                discriminator: None,
+                operations: Vec::new(),
+                tool_id: uuid_nil(),
+                server_id: uuid_nil(),
+                server_name: "example-messages".into(),
+                tool_name: "send".into(),
+                schema_hash: source_version,
+                description: "d".into(),
+                classification_mode: "manifest".into(),
+                input_schema: Some(serde_json::json!({"type": "object"})),
+                output_schema: None,
+                tool_annotations: None,
+                action_metadata: None,
+                risk: "high".into(),
+                side_effects: true,
+                pii: false,
+                data_classification: None,
+                cost_class: None,
+                requires_approval: false,
+            },
+        )))),
+        generation: Some(std::sync::atomic::AtomicI64::new(1)),
+        ..Default::default()
+    });
+    let pool = pool_with_manifest_tool().with_catalog(catalog.clone());
+    let resolves = || catalog.resolves.load(Ordering::SeqCst);
+    let admit = || pool.resolve_invocation_tool("default", "example-messages", "send");
+
+    expect_snapshot(admit().await);
+    assert_eq!(resolves(), 1);
+    expect_snapshot(admit().await);
+    assert_eq!(resolves(), 1, "an unchanged generation reuses the read");
+
+    catalog
+        .generation
+        .as_ref()
+        .unwrap()
+        .fetch_add(1, Ordering::SeqCst);
+    expect_snapshot(admit().await);
+    assert_eq!(resolves(), 2, "a new generation reads again");
+
+    // A read that a committed change overlaps is used once, never kept.
+    catalog.advance_during_resolve.store(true, Ordering::SeqCst);
+    catalog
+        .generation
+        .as_ref()
+        .unwrap()
+        .fetch_add(1, Ordering::SeqCst);
+    expect_snapshot(admit().await);
+    assert_eq!(resolves(), 3);
+    catalog
+        .advance_during_resolve
+        .store(false, Ordering::SeqCst);
+    expect_snapshot(admit().await);
+    assert_eq!(resolves(), 4, "the overlapped read was not kept");
+    expect_snapshot(admit().await);
+    assert_eq!(resolves(), 4);
+}
+
+#[tokio::test]
 async fn resolve_invocation_tool_prefers_catalog_live() {
     // Catalog says Low/no-side-effects/pii; manifest says
     // High/side_effects. The catalog Live result must win when its version is
@@ -408,6 +492,7 @@ async fn resolve_invocation_tool_prefers_catalog_live() {
             },
         )))),
         err: false,
+        ..Default::default()
     });
     let pool = pool_with_manifest_tool().with_catalog(catalog);
     let threshold = std::num::NonZeroUsize::new(64 * 1024);
@@ -477,6 +562,7 @@ async fn catalog_transition_fence_tracks_generation_without_erasing_catalog_over
             },
         )))),
         err: false,
+        ..Default::default()
     });
     let manifest_set = |risk| {
         let mut map = std::collections::BTreeMap::new();
@@ -606,6 +692,7 @@ async fn shared_catalog_generation_fences_a_replica_with_an_older_manifest() {
             },
         )))),
         err: false,
+        ..Default::default()
     });
     let pool = pool_with_manifest_tool().with_catalog(catalog);
 
@@ -621,6 +708,7 @@ async fn resolve_invocation_tool_falls_back_on_not_found() {
     let catalog: waygate_catalog::SharedCatalogStore = Arc::new(ScriptedCatalog {
         outcome: std::sync::Mutex::new(Some(waygate_catalog::ResolvedTool::NotFound)),
         err: false,
+        ..Default::default()
     });
     let pool = pool_with_manifest_tool().with_catalog(catalog);
     let facts = expect_facts(
@@ -637,6 +725,7 @@ async fn authoritative_catalog_refuses_not_found_instead_of_reviving_manifest_to
     let catalog: waygate_catalog::SharedCatalogStore = Arc::new(ScriptedCatalog {
         outcome: std::sync::Mutex::new(Some(waygate_catalog::ResolvedTool::NotFound)),
         err: false,
+        ..Default::default()
     });
     let pool = pool_with_manifest_tool().with_authoritative_catalog(catalog);
 
@@ -660,6 +749,7 @@ async fn resolve_invocation_tool_falls_back_on_pending_approval() {
             tool_name: "send".into(),
         })),
         err: false,
+        ..Default::default()
     });
     let pool = pool_with_manifest_tool().with_catalog(catalog);
     let facts = expect_facts(
@@ -685,6 +775,7 @@ async fn resolve_invocation_tool_strict_mode_refuses_pending_approval() {
             tool_name: "send".into(),
         })),
         err: false,
+        ..Default::default()
     });
     let pool = pool_with_manifest_tool()
         .with_catalog(catalog)
@@ -717,6 +808,7 @@ async fn resolve_invocation_tool_strict_mode_does_not_block_not_found() {
     let catalog: waygate_catalog::SharedCatalogStore = Arc::new(ScriptedCatalog {
         outcome: std::sync::Mutex::new(Some(waygate_catalog::ResolvedTool::NotFound)),
         err: false,
+        ..Default::default()
     });
     let pool = pool_with_manifest_tool()
         .with_catalog(catalog)
@@ -769,6 +861,7 @@ async fn resolve_invocation_tool_falls_back_on_catalog_error() {
     let catalog: waygate_catalog::SharedCatalogStore = Arc::new(ScriptedCatalog {
         outcome: std::sync::Mutex::new(None),
         err: true,
+        ..Default::default()
     });
     let pool = pool_with_manifest_tool().with_catalog(catalog);
     let snapshot = expect_snapshot(
@@ -795,6 +888,7 @@ async fn authoritative_catalog_reports_store_error_as_retryable_unavailability()
     let catalog: waygate_catalog::SharedCatalogStore = Arc::new(ScriptedCatalog {
         outcome: std::sync::Mutex::new(None),
         err: true,
+        ..Default::default()
     });
     let pool = pool_with_manifest_tool().with_authoritative_catalog(catalog);
 
@@ -861,6 +955,7 @@ async fn resolve_invocation_tool_quarantined_does_not_fall_back() {
             tool_name: "send".into(),
         })),
         err: false,
+        ..Default::default()
     });
     let pool = pool_with_manifest_tool().with_catalog(catalog);
     match pool
@@ -899,6 +994,7 @@ async fn resolved_side_effects_reports_resolver_facts_and_defaults_conservative(
             tool_name: "send".into(),
         })),
         err: false,
+        ..Default::default()
     });
     let quarantined = pool_with_manifest_tool().with_catalog(catalog);
     assert!(
@@ -3262,6 +3358,7 @@ async fn annotation_generation_mismatch_fails_closed() {
                 def,
             )))),
             err: false,
+            ..Default::default()
         });
         let pool = pool_with_manifest_tool().with_catalog(catalog);
         pool.resolve_snapshot_from(
@@ -3360,6 +3457,7 @@ async fn approval_mode_controls_catalog_requirement_independent_of_server_name()
                 approving_def(server, tool, approved),
             )))),
             err: false,
+            ..Default::default()
         });
         let pool = pool_with_manifest_tool().with_catalog(catalog);
         expect_snapshot(
@@ -3440,6 +3538,7 @@ async fn policy_only_manifest_mode_preserves_catalog_side_effect_and_pii_facts()
             },
         )))),
         err: false,
+        ..Default::default()
     });
     let pool = pool_with_manifest_tool().with_catalog(catalog);
     let snapshot = expect_snapshot(
@@ -3707,6 +3806,7 @@ async fn classification_mode_split_fails_closed() {
             live_def("mcp_annotations"),
         )))),
         err: false,
+        ..Default::default()
     });
     let pool = pool_with_manifest_tool().with_catalog(catalog);
     let resolved = pool
@@ -3723,6 +3823,7 @@ async fn classification_mode_split_fails_closed() {
             live_def("manifest"),
         )))),
         err: false,
+        ..Default::default()
     });
     let pool = pool_with_manifest_tool().with_catalog(catalog);
     let resolved = pool

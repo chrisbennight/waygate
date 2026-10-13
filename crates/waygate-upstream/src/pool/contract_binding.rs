@@ -383,6 +383,139 @@ pub(super) struct DiscoveryReads {
     pub(super) transition: Option<CatalogTransition>,
 }
 
+/// The catalog and review reads behind admitting one tool, reused while the
+/// durable catalog generation they were read under is current. Every column
+/// these reads depend on advances that generation in the transaction that
+/// changes it, and the gateway keeps its review store in the catalog's
+/// database, so a reuse returns exactly what a fresh read would.
+pub(super) struct AdmissionReadCache {
+    generation: Option<i64>,
+    entries: HashMap<AdmissionKey, AdmissionReads>,
+    order: std::collections::VecDeque<AdmissionKey>,
+    capacity: usize,
+}
+
+/// Admission reads kept at most, the oldest evicted first. A global tool is
+/// read once for each tenant that admits it, so this bound rather than the
+/// catalog size caps the memory an unchanged catalog generation can hold.
+const ADMISSION_READ_CAPACITY: usize = 1024;
+
+type AdmissionKey = (String, String, String);
+
+impl Default for AdmissionReadCache {
+    fn default() -> Self {
+        Self::with_capacity(ADMISSION_READ_CAPACITY)
+    }
+}
+
+impl AdmissionReadCache {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            generation: None,
+            entries: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            capacity,
+        }
+    }
+
+    fn get(&self, generation: i64, key: &AdmissionKey) -> Option<AdmissionReads> {
+        (self.generation == Some(generation))
+            .then(|| self.entries.get(key).cloned())
+            .flatten()
+    }
+
+    /// Keep `reads` taken entirely under `generation`. Reads under an older
+    /// generation than the cache already holds are dropped.
+    fn insert(&mut self, generation: i64, key: AdmissionKey, reads: AdmissionReads) {
+        match self.generation {
+            Some(cached) if cached > generation => return,
+            Some(cached) if cached == generation => {}
+            _ => {
+                self.generation = Some(generation);
+                self.entries.clear();
+                self.order.clear();
+            }
+        }
+        if self.entries.insert(key.clone(), reads).is_none() {
+            self.order.push_back(key);
+            if self.order.len() > self.capacity {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.entries.remove(&oldest);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AdmissionReads {
+    review: Option<(String, bool)>,
+    catalog: waygate_catalog::ResolvedTool,
+}
+
+impl UpstreamPool {
+    /// The reads behind admitting `tool`, reused when the durable catalog
+    /// generation still matches the one they were read under. `None` sends
+    /// the caller down the uncached path, which reads again and reports any
+    /// failure itself.
+    pub(super) async fn admission_reads(
+        &self,
+        tenant: &str,
+        server: &str,
+        tool: &str,
+        mode: crate::ClassificationMode,
+        advertised: Option<&Tool>,
+    ) -> Option<DiscoveryReads> {
+        let catalog = self.catalog.as_ref()?;
+        let transition = self.catalog_transition_state(server, tool);
+        let generation = catalog.discovery_generation().await.ok()??;
+        let key = (tenant.to_owned(), server.to_owned(), tool.to_owned());
+        let cached = self
+            .admission_reads
+            .lock()
+            .expect("admission read cache lock poisoned")
+            .get(generation, &key);
+        let reads = match cached {
+            Some(reads) => reads,
+            None => {
+                let review = match self.tool_reviews.as_ref() {
+                    Some(store) => store
+                        .review_state(waygate_core::TenantId::DEFAULT, server, tool)
+                        .await
+                        .ok()?,
+                    None => None,
+                };
+                let reads = AdmissionReads {
+                    review,
+                    catalog: catalog
+                        .resolve_tool(tenant, &format!("{server}.{tool}"))
+                        .await
+                        .ok()?,
+                };
+                // Keep only live tools, and only reads taken within one
+                // generation.
+                if matches!(reads.catalog, waygate_catalog::ResolvedTool::Live(_))
+                    && catalog.discovery_generation().await.ok().flatten() == Some(generation)
+                {
+                    self.admission_reads
+                        .lock()
+                        .expect("admission read cache lock poisoned")
+                        .insert(generation, key, reads.clone());
+                }
+                reads
+            }
+        };
+        let review_allows = self
+            .review_allows_with(server, tool, advertised, mode, reads.review)
+            .await;
+        Some(DiscoveryReads {
+            review_allows,
+            catalog: Some(Ok(reads.catalog)),
+            transition,
+        })
+    }
+}
+
 impl UpstreamPool {
     /// Resolve the governed snapshot for one tool from explicit inputs.
     ///
@@ -960,5 +1093,46 @@ impl UpstreamPool {
         // The contract re-check only compares tool shapes; the freshness
         // hint is captured at dial/refresh time, not on this read.
         listed.map(|l| l.tools)
+    }
+}
+
+#[cfg(test)]
+mod admission_read_cache_tests {
+    use super::*;
+
+    fn key(tool: &str) -> AdmissionKey {
+        ("tenant".into(), "server".into(), tool.into())
+    }
+
+    fn reads() -> AdmissionReads {
+        AdmissionReads {
+            review: None,
+            catalog: waygate_catalog::ResolvedTool::NotFound,
+        }
+    }
+
+    #[test]
+    fn the_oldest_entry_is_evicted_and_a_new_generation_starts_empty() {
+        let mut cache = AdmissionReadCache::with_capacity(2);
+        cache.insert(1, key("a"), reads());
+        cache.insert(1, key("b"), reads());
+        cache.insert(1, key("c"), reads());
+        assert!(
+            cache.get(1, &key("a")).is_none(),
+            "the oldest entry is evicted"
+        );
+        assert!(cache.get(1, &key("b")).is_some());
+        assert!(cache.get(1, &key("c")).is_some());
+        assert!(
+            cache.get(2, &key("c")).is_none(),
+            "another generation misses"
+        );
+
+        cache.insert(0, key("a"), reads());
+        assert!(cache.get(0, &key("a")).is_none(), "older reads are dropped");
+        cache.insert(2, key("d"), reads());
+        assert!(cache.get(1, &key("b")).is_none());
+        assert!(cache.get(2, &key("d")).is_some());
+        assert_eq!(cache.order.len(), 1);
     }
 }

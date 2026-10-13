@@ -684,105 +684,177 @@ async fn unknown_server_is_none_and_disconnected_is_unobservable() {
     );
 }
 
-/// Database round trips one call makes against a governed catalog and durable
-/// tool reviews, counted as acquisitions from a single-connection pool that
-/// nothing else uses. Admission is the Stage-1 resolution; dispatch includes
-/// the mid-call contract check, the per-call dial and its contract
-/// observation. A transaction counts once.
-async fn call_database_round_trips(mode: ClassificationMode) -> (usize, usize) {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use waygate_catalog::{
-        tool_reviews::PgCatalogStore, ImportServer, ImportTool, ManifestImporter,
-    };
-    use waygate_mcp::catalog::ResolvedInvocationTool;
-    let acquisitions = Arc::new(AtomicUsize::new(0));
-    let counted = acquisitions.clone();
-    let db = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .min_connections(1)
-        .test_before_acquire(false)
-        .before_acquire(move |_, _| {
-            counted.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async { Ok(true) })
-        })
-        .connect(&std::env::var("AUDIT_DATABASE_URL").unwrap())
-        .await
-        .unwrap();
-    let annotation = mode == ClassificationMode::McpAnnotations;
-    let mut manifest = manifest_at(spawn_contract_upstream().await, mode);
-    manifest.name = format!("round-trips-{}", uuid::Uuid::new_v4());
-    let approved = tool_behavior_hash(&annotated_tool());
-    if annotation {
-        manifest.tools = vec![annotation_classification("stable", &approved)];
+/// A pool over a governed catalog and durable tool reviews whose database
+/// reads are counted as acquisitions from a single-connection pool that
+/// nothing else uses. A transaction counts once.
+struct CountedCatalog {
+    pool: UpstreamPool,
+    name: String,
+    acquisitions: Arc<std::sync::atomic::AtomicUsize>,
+    db: sqlx::PgPool,
+}
+
+impl CountedCatalog {
+    async fn connect(mode: ClassificationMode) -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use waygate_catalog::{
+            tool_reviews::PgCatalogStore, ImportServer, ImportTool, ManifestImporter,
+        };
+        let acquisitions = Arc::new(AtomicUsize::new(0));
+        let counted = acquisitions.clone();
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .min_connections(1)
+            .test_before_acquire(false)
+            .before_acquire(move |_, _| {
+                counted.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async { Ok(true) })
+            })
+            .connect(&std::env::var("AUDIT_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        let annotation = mode == ClassificationMode::McpAnnotations;
+        let mut manifest = manifest_at(spawn_contract_upstream().await, mode);
+        manifest.name = format!("round-trips-{}", uuid::Uuid::new_v4());
+        let approved = tool_behavior_hash(&annotated_tool());
+        if annotation {
+            manifest.tools = vec![annotation_classification("stable", &approved)];
+        }
+        let name = manifest.name.clone();
+        ManifestImporter::new(db.clone())
+            .import_atomic(
+                "default",
+                &[ImportServer {
+                    tenant_id: "default".into(),
+                    name: name.clone(),
+                    transport: "http".into(),
+                    runtime_target: serde_json::json!({"url": manifest.url}),
+                    classification_mode: if annotation {
+                        "mcp_annotations".into()
+                    } else {
+                        "manifest".into()
+                    },
+                    tools: manifest
+                        .tools
+                        .iter()
+                        .map(|t| ImportTool {
+                            name: t.name.clone(),
+                            approved_behavior_hash: annotation.then(|| approved.clone()),
+                            risk: "low".into(),
+                            side_effects: false,
+                            pii: false,
+                            discriminator: None,
+                            operations: vec![],
+                        })
+                        .collect(),
+                }],
+                false,
+            )
+            .await
+            .unwrap();
+        let store = Arc::new(PgCatalogStore::new(db.clone()));
+        let pool = UpstreamPool::connect(BTreeMap::from([(name.clone(), manifest)]))
+            .await
+            .with_quarantine_threshold(waygate_upstream::pool::QuarantineThreshold::All)
+            .with_tool_reviews(store.clone())
+            .await
+            .with_authoritative_catalog(store);
+        Self {
+            pool,
+            name,
+            acquisitions,
+            db,
+        }
     }
-    let name = manifest.name.clone();
-    ManifestImporter::new(db.clone())
-        .import_atomic(
-            "default",
-            &[ImportServer {
-                tenant_id: "default".into(),
-                name: name.clone(),
-                transport: "http".into(),
-                runtime_target: serde_json::json!({"url": manifest.url}),
-                classification_mode: if annotation {
-                    "mcp_annotations".into()
-                } else {
-                    "manifest".into()
-                },
-                tools: manifest
-                    .tools
-                    .iter()
-                    .map(|t| ImportTool {
-                        name: t.name.clone(),
-                        approved_behavior_hash: annotation.then(|| approved.clone()),
-                        risk: "low".into(),
-                        side_effects: false,
-                        pii: false,
-                        discriminator: None,
-                        operations: vec![],
-                    })
-                    .collect(),
-            }],
-            false,
+
+    /// Run `work`, returning its output and the acquisitions it made.
+    async fn count<T>(&self, work: impl std::future::Future<Output = T>) -> (T, usize) {
+        use std::sync::atomic::Ordering;
+        self.acquisitions.store(0, Ordering::Relaxed);
+        let output = work.await;
+        (output, self.acquisitions.load(Ordering::Relaxed))
+    }
+
+    async fn admit(&self) -> (waygate_mcp::catalog::ResolvedInvocationTool, usize) {
+        self.count(
+            self.pool
+                .resolve_invocation_tool("default", &self.name, "stable"),
         )
         .await
-        .unwrap();
-    let store = Arc::new(PgCatalogStore::new(db.clone()));
-    let pool = UpstreamPool::connect(BTreeMap::from([(name.clone(), manifest)]))
-        .await
-        .with_quarantine_threshold(waygate_upstream::pool::QuarantineThreshold::All)
-        .with_tool_reviews(store.clone())
-        .await
-        .with_authoritative_catalog(store);
-    // The first call records the session's observation; measure a later one.
+    }
+
+    async fn remove(self) {
+        sqlx::query("DELETE FROM mcp_servers WHERE tenant_id='default' AND name=$1")
+            .bind(&self.name)
+            .execute(&self.db)
+            .await
+            .unwrap();
+    }
+}
+
+/// Admission and dispatch round trips for one call. The first call records the
+/// session's observation and fills the admission reads; a later one is counted.
+async fn call_database_round_trips(mode: ClassificationMode) -> (usize, usize) {
+    use waygate_mcp::catalog::ResolvedInvocationTool;
+    let catalog = CountedCatalog::connect(mode).await;
     let mut counts = (0, 0);
     for _ in 0..2 {
-        acquisitions.store(0, Ordering::Relaxed);
-        let ResolvedInvocationTool::Ready(snapshot) = pool
-            .resolve_invocation_tool("default", &name, "stable")
-            .await
-        else {
+        let (ResolvedInvocationTool::Ready(snapshot), admission) = catalog.admit().await else {
             panic!("the tool is admitted");
         };
-        let admission = acquisitions.load(Ordering::Relaxed);
-        acquisitions.store(0, Ordering::Relaxed);
-        pool.call_tool(
-            &name,
-            "stable",
-            None,
-            None,
-            Some(&snapshot.contract_identity()),
-        )
-        .await
-        .expect("dispatch succeeds");
-        counts = (admission, acquisitions.load(Ordering::Relaxed));
+        let (dispatched, dispatch) = catalog
+            .count(catalog.pool.call_tool(
+                &catalog.name,
+                "stable",
+                None,
+                None,
+                Some(&snapshot.contract_identity()),
+            ))
+            .await;
+        dispatched.expect("dispatch succeeds");
+        counts = (admission, dispatch);
     }
-    sqlx::query("DELETE FROM mcp_servers WHERE tenant_id='default' AND name=$1")
-        .bind(&name)
-        .execute(&db)
-        .await
-        .unwrap();
+    catalog.remove().await;
     counts
+}
+
+/// A committed catalog change is admitted at once, even right after an
+/// admission whose catalog reads could otherwise have been reused.
+#[tokio::test]
+async fn a_committed_reclassification_is_admitted_at_once() {
+    use waygate_mcp::catalog::ResolvedInvocationTool;
+    if waygate_test_support::pg::audit_pool_or_skip()
+        .await
+        .is_none()
+    {
+        return;
+    }
+    let catalog = CountedCatalog::connect(ClassificationMode::Manifest).await;
+    let (ResolvedInvocationTool::Ready(before), _) = catalog.admit().await else {
+        panic!("the tool is admitted");
+    };
+    assert_eq!(
+        before.contract_identity().risk,
+        waygate_invocation::InvocationRisk::Low
+    );
+    sqlx::query(
+        "UPDATE tool_classifications SET risk='high' WHERE tool_id=(
+           SELECT t.id FROM mcp_tools t JOIN mcp_servers s ON s.id=t.server_id
+           WHERE s.tenant_id='default' AND s.name=$1 AND t.name='stable')",
+    )
+    .bind(&catalog.name)
+    .execute(&catalog.db)
+    .await
+    .unwrap();
+    let (ResolvedInvocationTool::Ready(changed), _) = catalog.admit().await else {
+        panic!("a reclassified tool is still admitted");
+    };
+    assert_eq!(
+        changed.contract_identity().risk,
+        waygate_invocation::InvocationRisk::High,
+        "the committed classification is admitted at once"
+    );
+    catalog.remove().await;
 }
 
 #[tokio::test]
