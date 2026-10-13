@@ -6742,6 +6742,7 @@ dependencies = [
  "waygate-manifest-types",
  "waygate-mcp",
  "waygate-oidc",
+ "waygate-quota",
  "waygate-telemetry",
  "waygate-test-support",
  "zeroize",

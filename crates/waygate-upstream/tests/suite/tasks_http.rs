@@ -237,11 +237,20 @@ async fn gateway_with_files(
     gate: waygate_mcp::SharedAuthz,
     files: Option<waygate_mcp::files::SharedFileOutputProcessor>,
 ) -> (String, tokio::task::JoinHandle<()>) {
+    gateway_with_service(store, manifests, |pool| {
+        DefaultInvocationService::new(pool, gate, Arc::new(NullSink))
+            .with_file_output_processor(files)
+    })
+    .await
+}
+async fn gateway_with_service(
+    store: Arc<InMemoryTaskRouteStore>,
+    manifests: BTreeMap<String, UpstreamManifest>,
+    service: impl FnOnce(Arc<UpstreamPool>) -> DefaultInvocationService,
+) -> (String, tokio::task::JoinHandle<()>) {
     let pool = Arc::new(UpstreamPool::connect(manifests).await);
     let invocation = Arc::new(
-        DefaultInvocationService::new(pool.clone(), gate, Arc::new(NullSink))
-            .with_file_output_processor(files)
-            .with_task_router(Some(Arc::new(TaskRouter::new(store, 129600)))),
+        service(pool.clone()).with_task_router(Some(Arc::new(TaskRouter::new(store, 129600)))),
     );
     let service = StreamableHttpService::new(
         move || Ok(GatewayServer::new(pool.clone()).with_invocation_service(invocation.clone())),
@@ -725,6 +734,208 @@ async fn lifecycle_preserves_argument_dependent_policy_facts_after_gateway_repla
     assert_eq!(gate.admitted.load(Ordering::SeqCst), 5);
     assert_eq!(upstream.calls.load(Ordering::SeqCst), 1);
     assert_eq!(upstream.updates.load(Ordering::SeqCst), 1);
+    worker.abort();
+    upstream_worker.abort();
+}
+
+/// Counts every rate-limit token consumed and never refuses.
+#[derive(Default)]
+struct CountingQuota(AtomicUsize);
+#[async_trait::async_trait]
+impl waygate_quota::QuotaService for CountingQuota {
+    async fn check_and_consume(
+        &self,
+        _: &waygate_quota::QuotaContext,
+        _: &[waygate_quota::QuotaAction],
+    ) -> Result<(), waygate_quota::QuotaError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Keeps each evidence row's action, whether it was a required write, and
+/// its outcome.
+#[derive(Default)]
+struct RecordingEvidence(Mutex<Vec<(String, bool, &'static str)>>);
+impl RecordingEvidence {
+    fn required(&self, action: &str) -> usize {
+        self.count(action, true)
+    }
+    fn count(&self, action: &str, required: bool) -> usize {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(recorded, was_required, _)| recorded == action && *was_required == required)
+            .count()
+    }
+    fn outcomes(&self, action: &str) -> Vec<&'static str> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(recorded, _, _)| recorded == action)
+            .map(|(_, _, outcome)| *outcome)
+            .collect()
+    }
+}
+#[async_trait::async_trait]
+impl waygate_mcp::EvidenceRecorder for RecordingEvidence {
+    async fn record_required(
+        &self,
+        event: waygate_mcp::AuditEvent,
+    ) -> Result<uuid::Uuid, waygate_mcp::EvidenceError> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((event.action.clone(), true, event.outcome.as_str()));
+        Ok(event.id)
+    }
+    async fn record_chained_best_effort(&self, event: waygate_mcp::AuditEvent) {
+        let outcome = event.outcome.as_str();
+        self.0.lock().unwrap().push((event.action, false, outcome));
+    }
+    async fn record_best_effort(&self, event: waygate_mcp::AuditEvent) {
+        let outcome = event.outcome.as_str();
+        self.0.lock().unwrap().push((event.action, false, outcome));
+    }
+}
+
+#[tokio::test]
+async fn status_reads_and_cancellation_consume_no_execution_quota() {
+    let store = Arc::new(InMemoryTaskRouteStore::default());
+    let upstream = Backend::new("report", false);
+    let (url, upstream_worker) = backend(upstream.clone()).await;
+    let manifests = BTreeMap::from([(
+        "service".into(),
+        serde_json::from_value(json!({"name":"service","transport":"http","url":url,
+            "tools":[{"name":"work","risk":"low","side_effects":true,"pii":false}]}))
+        .unwrap(),
+    )]);
+    let quota = Arc::new(CountingQuota::default());
+    let evidence = Arc::new(RecordingEvidence::default());
+    let (gateway, worker) = gateway_with_service(store, manifests, {
+        let (quota, evidence) = (quota.clone(), evidence.clone());
+        |pool| {
+            DefaultInvocationService::new(pool, Arc::new(AllowAllGate), evidence)
+                .with_quota(Some(quota))
+                .with_audit_mode(waygate_mcp::AuditMode::FailClosed)
+        }
+    })
+    .await;
+    let created = rpc(
+        &gateway,
+        "tools/call",
+        json!({"name":"service.work"}),
+        "alice",
+        true,
+    )
+    .await;
+    let id = created["result"]["taskId"].as_str().unwrap();
+    assert_eq!(quota.0.load(Ordering::SeqCst), 1);
+    assert_eq!(evidence.required("CallTool"), 1);
+
+    for _ in 0..3 {
+        let status = rpc(&gateway, "tasks/get", json!({"taskId":id}), "alice", true).await;
+        assert_eq!(status["result"]["status"], "input_required", "{status}");
+    }
+    assert_eq!(
+        quota.0.load(Ordering::SeqCst),
+        1,
+        "status reads are not charged"
+    );
+    assert_eq!(
+        evidence.required("TaskGet"),
+        0,
+        "a status read is no execution"
+    );
+    assert_eq!(
+        evidence.count("TaskGet", false),
+        3,
+        "each read keeps its own row"
+    );
+
+    let updated = rpc(&gateway, "tasks/update", json!({"taskId":id,"inputResponses":{"answer":{"result":{"action":"accept","content":{"choice":"continue"}}}}}), "alice", true).await;
+    assert!(updated.get("error").is_none(), "{updated}");
+    assert_eq!(quota.0.load(Ordering::SeqCst), 2, "input advances the work");
+    assert_eq!(evidence.required("TaskUpdate"), 1);
+
+    let cancelled = rpc(
+        &gateway,
+        "tasks/cancel",
+        json!({"taskId":id}),
+        "alice",
+        true,
+    )
+    .await;
+    assert!(cancelled.get("error").is_none(), "{cancelled}");
+    assert_eq!(
+        quota.0.load(Ordering::SeqCst),
+        2,
+        "cancellation is not charged"
+    );
+    assert_eq!(evidence.required("TaskCancel"), 1);
+    worker.abort();
+    upstream_worker.abort();
+}
+
+/// Redacts every response once armed, which the gateway must refuse for task
+/// metadata rather than relay altered status.
+struct RedactWhenArmed(AtomicBool);
+#[async_trait::async_trait]
+impl waygate_mcp::inspection::Inspector for RedactWhenArmed {
+    fn name(&self) -> &'static str {
+        "redact-when-armed"
+    }
+    async fn inspect(
+        &self,
+        _: &waygate_mcp::inspection::InspectionContext<'_>,
+        result: &CallToolResult,
+    ) -> waygate_mcp::inspection::Decision {
+        if !self.0.load(Ordering::SeqCst) {
+            return waygate_mcp::inspection::Decision::Pass;
+        }
+        let mut redacted = result.clone();
+        redacted.structured_content = Some(json!({"redacted": true}));
+        waygate_mcp::inspection::Decision::Redact {
+            redacted,
+            findings_count: 1,
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_refused_status_read_still_leaves_its_lifecycle_row() {
+    let store = Arc::new(InMemoryTaskRouteStore::default());
+    let upstream = Backend::new("report", false);
+    let (url, upstream_worker) = backend(upstream.clone()).await;
+    let manifests = BTreeMap::from([("service".into(), manifest("service", &url))]);
+    let redact = Arc::new(RedactWhenArmed(AtomicBool::new(false)));
+    let evidence = Arc::new(RecordingEvidence::default());
+    let (gateway, worker) = gateway_with_service(store, manifests, {
+        let (redact, evidence) = (redact.clone(), evidence.clone());
+        |pool| {
+            DefaultInvocationService::new(pool, Arc::new(AllowAllGate), evidence)
+                .with_inspectors(vec![redact as waygate_mcp::inspection::SharedInspector])
+        }
+    })
+    .await;
+    let created = rpc(
+        &gateway,
+        "tools/call",
+        json!({"name":"service.work"}),
+        "alice",
+        true,
+    )
+    .await;
+    let id = created["result"]["taskId"].as_str().unwrap();
+
+    redact.0.store(true, Ordering::SeqCst);
+    let refused = rpc(&gateway, "tasks/get", json!({"taskId":id}), "alice", true).await;
+    assert!(refused.get("error").is_some(), "{refused}");
+    // The refused read is recorded; the redaction is not, because nothing
+    // redacted was forwarded.
+    assert_eq!(evidence.outcomes("TaskGet"), ["execution_error"]);
     worker.abort();
     upstream_worker.abort();
 }

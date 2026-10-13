@@ -54,6 +54,7 @@ path = "src/bin/classify.rs"
 [dev-dependencies]
 sqlx.workspace = true
 waygate-test-support.workspace = true
+waygate-quota.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
 jsonwebtoken.workspace = true
