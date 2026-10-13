@@ -248,6 +248,100 @@ pub struct Execution {
     pub retention_until: OffsetDateTime,
 }
 
+/// What a status check needs about one execution: ownership, lifecycle and
+/// timing, whether a result exists, and a paused run's checkpoint. It carries
+/// no program source or input, tool snapshot, or stored result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionStatusRecord {
+    pub id: Uuid,
+    pub tenant_id: String,
+    pub principal_sub: String,
+    /// `None` marks a pre-upgrade row, which owner-gated surfaces refuse.
+    pub principal_issuer: Option<String>,
+    pub source_digest: String,
+    pub execution_profile: Value,
+    pub status: ExecutionStatus,
+    pub terminal_reason_code: Option<String>,
+    pub result_available: bool,
+    /// The checkpoint of a run waiting for resume, the only state that
+    /// reports one.
+    pub checkpoint: Option<Value>,
+    pub claim_owner: Option<Uuid>,
+    pub claim_expires_at: Option<OffsetDateTime>,
+    pub cancellation_requested_at: Option<OffsetDateTime>,
+    pub submitted_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    pub completed_at: Option<OffsetDateTime>,
+    pub retention_until: OffsetDateTime,
+    /// When the record was read, by the clock of the store that holds it, so
+    /// time checks agree with the store's own reconciliation.
+    pub observed_at: OffsetDateTime,
+}
+
+impl ExecutionStatusRecord {
+    /// Whether the run may have lost its worker, so abandonment
+    /// reconciliation is worth attempting. Mirrors that reconciliation's
+    /// eligibility, which re-checks it inside its own update.
+    pub fn may_be_abandoned(&self, submission_grace: Duration) -> bool {
+        let now = self.observed_at;
+        if self.completed_at.is_some() {
+            return false;
+        }
+        match self.status {
+            ExecutionStatus::Submitted => {
+                self.claim_owner.is_none() && self.submitted_at + submission_grace <= now
+            }
+            ExecutionStatus::Running => {
+                self.claim_owner.is_some()
+                    && self.claim_expires_at.is_some_and(|expires| expires <= now)
+            }
+            ExecutionStatus::WaitingForApproval | ExecutionStatus::WaitingForResume => {
+                self.claim_owner.is_none() && self.retention_until <= now
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a finished run has passed its retention and is no longer
+    /// reported.
+    pub fn retention_expired(&self) -> bool {
+        self.status.is_terminal() && self.retention_until <= self.observed_at
+    }
+}
+
+impl From<&Execution> for ExecutionStatusRecord {
+    fn from(execution: &Execution) -> Self {
+        Self {
+            id: execution.id,
+            tenant_id: execution.tenant_id.clone(),
+            principal_sub: execution.principal_sub.clone(),
+            principal_issuer: execution.principal_issuer.clone(),
+            source_digest: execution.source_digest.clone(),
+            execution_profile: execution.execution_profile.clone(),
+            status: execution.status,
+            terminal_reason_code: execution.terminal_reason_code.clone(),
+            result_available: execution.result_payload.is_some(),
+            checkpoint: (execution.status == ExecutionStatus::WaitingForResume)
+                .then(|| {
+                    execution
+                        .resume_context
+                        .as_ref()
+                        .and_then(|context| context.get("checkpoint"))
+                        .cloned()
+                })
+                .flatten(),
+            claim_owner: execution.claim_owner,
+            claim_expires_at: execution.claim_expires_at,
+            cancellation_requested_at: execution.cancellation_requested_at,
+            submitted_at: execution.submitted_at,
+            updated_at: execution.updated_at,
+            completed_at: execution.completed_at,
+            retention_until: execution.retention_until,
+            observed_at: OffsetDateTime::now_utc(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NewExecution {
     pub id: Uuid,
@@ -535,6 +629,19 @@ pub trait ExecutionStore: Send + Sync + 'static {
 
     async fn get(&self, tenant_id: &str, id: Uuid) -> Result<Option<Execution>, StoreError>;
 
+    /// [`Self::get`] narrowed to what a status check needs.
+    async fn get_status(
+        &self,
+        tenant_id: &str,
+        id: Uuid,
+    ) -> Result<Option<ExecutionStatusRecord>, StoreError> {
+        Ok(self
+            .get(tenant_id, id)
+            .await?
+            .as_ref()
+            .map(ExecutionStatusRecord::from))
+    }
+
     async fn list_waiting_approvals(
         &self,
         tenant_id: &str,
@@ -787,5 +894,92 @@ mod tests {
             "f58b7c3af621b52a2bb7dc67d4491f9ab6c6d16e3cfa1e46e670ff4f9a301fdc"
         );
         assert_ne!(source_digest("return 1;"), source_digest("return 2;"));
+    }
+
+    #[test]
+    fn only_a_run_that_may_have_lost_its_worker_is_worth_reconciling() {
+        let now = OffsetDateTime::now_utc();
+        let grace = Duration::from_secs(60);
+        let record = |status, claimed: bool, claim_expires_at, submitted_at, retention_until| {
+            ExecutionStatusRecord {
+                id: Uuid::nil(),
+                tenant_id: "t".to_owned(),
+                principal_sub: "s".to_owned(),
+                principal_issuer: Some("i".to_owned()),
+                source_digest: String::new(),
+                execution_profile: Value::Null,
+                status,
+                terminal_reason_code: None,
+                result_available: false,
+                checkpoint: None,
+                claim_owner: claimed.then(Uuid::nil),
+                claim_expires_at,
+                cancellation_requested_at: None,
+                submitted_at,
+                updated_at: now,
+                completed_at: None,
+                retention_until,
+                observed_at: now,
+            }
+        };
+        let later = now + time::Duration::minutes(5);
+        let earlier = now - time::Duration::minutes(5);
+        for (case, record, expected) in [
+            (
+                "live claim",
+                record(ExecutionStatus::Running, true, Some(later), earlier, later),
+                false,
+            ),
+            (
+                "lapsed claim",
+                record(
+                    ExecutionStatus::Running,
+                    true,
+                    Some(earlier),
+                    earlier,
+                    later,
+                ),
+                true,
+            ),
+            (
+                "fresh submission",
+                record(ExecutionStatus::Submitted, false, None, now, later),
+                false,
+            ),
+            (
+                "stale submission",
+                record(ExecutionStatus::Submitted, false, None, earlier, later),
+                true,
+            ),
+            (
+                "paused in retention",
+                record(
+                    ExecutionStatus::WaitingForResume,
+                    false,
+                    None,
+                    earlier,
+                    later,
+                ),
+                false,
+            ),
+            (
+                "paused past retention",
+                record(
+                    ExecutionStatus::WaitingForResume,
+                    false,
+                    None,
+                    earlier,
+                    earlier,
+                ),
+                true,
+            ),
+            (
+                "finished",
+                record(ExecutionStatus::Succeeded, false, None, earlier, later),
+                false,
+            ),
+        ] {
+            assert_eq!(record.may_be_abandoned(grace), expected, "{case}");
+        }
     }
 }

@@ -25,9 +25,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use waygate_codemode::DetachedExecutionSlot;
 use waygate_codemode::{
     source_digest, ExecutionArtifact, ExecutionArtifactContent, ExecutionClaim, ExecutionEventKind,
-    ExecutionStatus, ExecutionTransition, NewExecution, NewExecutionEvent, ResumeExecution,
-    RetryEquivalence, SharedExecutionStore, SharedSourceArtifactStore, SourceArtifactOwner,
-    StartExecution, StartExecutionResult, MAX_SOURCE_LOCATORS_PER_OWNER,
+    ExecutionStatus, ExecutionStatusRecord, ExecutionTransition, NewExecution, NewExecutionEvent,
+    ResumeExecution, RetryEquivalence, SharedExecutionStore, SharedSourceArtifactStore,
+    SourceArtifactOwner, StartExecution, StartExecutionResult, MAX_SOURCE_LOCATORS_PER_OWNER,
     MAX_SOURCE_LOCATORS_PER_TENANT,
 };
 use waygate_invocation::{
@@ -957,7 +957,7 @@ impl CodeModeTools {
     async fn execution_status_response(
         &self,
         principal: &Principal,
-        execution: &waygate_codemode::Execution,
+        execution: &ExecutionStatusRecord,
     ) -> ExecutionStatusResponse {
         let mut response = execution_status_projection(execution);
         response.source_ref = Some(
@@ -1601,7 +1601,9 @@ impl CodeModeTools {
         self.check_execution_quota(principal, "start_resume")
             .await?;
         let execution = self.resume_detached(principal, params).await?;
-        let response = self.execution_status_response(principal, &execution).await;
+        let response = self
+            .execution_status_response(principal, &ExecutionStatusRecord::from(&execution))
+            .await;
         Ok(structured(&response))
     }
 
@@ -1627,7 +1629,9 @@ impl CodeModeTools {
             return Err(detached_execution_withheld("start"));
         }
         let execution = self.start_detached(principal, "start", params).await?;
-        let response = self.execution_status_response(principal, &execution).await;
+        let response = self
+            .execution_status_response(principal, &ExecutionStatusRecord::from(&execution))
+            .await;
         Ok(structured(&response))
     }
 
@@ -1646,7 +1650,7 @@ impl CodeModeTools {
             return Err(execution_poll_unavailable());
         }
         let execution = self
-            .task_execution(&params.execution_id, Some(principal))
+            .task_status(&params.execution_id, Some(principal))
             .await?
             .ok_or_else(execution_status_unavailable)?;
         let response = self.execution_status_response(principal, &execution).await;
@@ -1728,7 +1732,9 @@ impl CodeModeTools {
             .ok_or_else(execution_status_unavailable)?;
         let id = execution.id;
         if execution.status.is_terminal() {
-            let response = self.execution_status_response(principal, &execution).await;
+            let response = self
+                .execution_status_response(principal, &ExecutionStatusRecord::from(&execution))
+                .await;
             return Ok(structured(&response));
         }
         let store = self
@@ -1761,11 +1767,17 @@ impl CodeModeTools {
                     execution_unavailable()
                 })?
                 .ok_or_else(execution_status_unavailable)?;
-            if !execution_owned_by(&execution, principal) {
+            if !owned_by(
+                &execution.principal_sub,
+                execution.principal_issuer.as_deref(),
+                principal,
+            ) {
                 return Err(execution_status_unavailable());
             }
         }
-        let response = self.execution_status_response(principal, &execution).await;
+        let response = self
+            .execution_status_response(principal, &ExecutionStatusRecord::from(&execution))
+            .await;
         Ok(structured(&response))
     }
 
@@ -4075,7 +4087,9 @@ impl BuiltinTools for CodeModeTools {
             let params: ResumeParams = parse_args(&arguments, "resume")?;
             narrowed.check_execution_quota(principal, "resume").await?;
             let execution = narrowed.resume_detached(principal, params).await?;
-            return Ok(Some(task_projection(&execution)));
+            return Ok(Some(task_projection(&ExecutionStatusRecord::from(
+                &execution,
+            ))));
         }
         // Task augmentation is the detached shape of `execute`, so it takes
         // the start surface's parameters: retries converge and `repeat_after`
@@ -4085,7 +4099,9 @@ impl BuiltinTools for CodeModeTools {
         let execution = narrowed
             .start_detached(principal, "execute", params)
             .await?;
-        Ok(Some(task_projection(&execution)))
+        Ok(Some(task_projection(&ExecutionStatusRecord::from(
+            &execution,
+        ))))
     }
 
     async fn get_task(
@@ -4096,7 +4112,7 @@ impl BuiltinTools for CodeModeTools {
         if !self.supports_tasks() {
             return Ok(None);
         }
-        let Some(execution) = self.task_execution(task_id, principal).await? else {
+        let Some(execution) = self.task_status(task_id, principal).await? else {
             return Ok(None);
         };
         Ok(Some(task_projection(&execution)))
@@ -4203,11 +4219,17 @@ impl BuiltinTools for CodeModeTools {
                     execution_unavailable()
                 })?
                 .ok_or_else(execution_unavailable)?;
-            if !execution_owned_by(&execution, principal) {
+            if !owned_by(
+                &execution.principal_sub,
+                execution.principal_issuer.as_deref(),
+                principal,
+            ) {
                 return Ok(None);
             }
         }
-        Ok(Some(task_projection(&execution)))
+        Ok(Some(task_projection(&ExecutionStatusRecord::from(
+            &execution,
+        ))))
     }
 
     async fn update_task_continuation(
@@ -4325,11 +4347,37 @@ impl BuiltinTools for CodeModeTools {
 }
 
 impl CodeModeTools {
+    /// The caller's own execution in full, for paths that return its result
+    /// or continue it. Authorization and reconciliation are
+    /// [`Self::task_status`]'s; ownership and profile are fixed at submission,
+    /// so the full read needs no second check.
     async fn task_execution(
         &self,
         task_id: &str,
         principal: Option<&Principal>,
     ) -> Result<Option<waygate_codemode::Execution>, McpError> {
+        let Some(record) = self.task_status(task_id, principal).await? else {
+            return Ok(None);
+        };
+        self.execution_store
+            .as_ref()
+            .ok_or_else(execution_unavailable)?
+            .get(&record.tenant_id, record.id)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, id = %record.id, "could not read Code Mode task");
+                execution_unavailable()
+            })
+    }
+
+    /// What a status check needs about the caller's own execution. A run
+    /// that may have lost its worker is reconciled first; a healthy one is
+    /// answered from one narrow read.
+    async fn task_status(
+        &self,
+        task_id: &str,
+        principal: Option<&Principal>,
+    ) -> Result<Option<ExecutionStatusRecord>, McpError> {
         let principal = principal.ok_or_else(|| insufficient_scope(Scope::McpInvoke.as_str()))?;
         if !may_invoke(principal) {
             return Err(insufficient_scope(Scope::McpInvoke.as_str()));
@@ -4342,8 +4390,8 @@ impl CodeModeTools {
             .execution_store
             .as_ref()
             .ok_or_else(execution_unavailable)?;
-        let Some(execution) = store
-            .get(principal.tenant.as_str(), id)
+        let Some(record) = store
+            .get_status(principal.tenant.as_str(), id)
             .await
             .map_err(|error| {
                 tracing::error!(%error, %id, "could not read Code Mode task");
@@ -4352,16 +4400,21 @@ impl CodeModeTools {
         else {
             return Ok(None);
         };
-        if !execution_owned_by(&execution, principal)
-            || execution.execution_profile.get("profile_confinement")
-                != Some(&task_profile_confinement(principal))
+        if !owned_by(
+            &record.principal_sub,
+            record.principal_issuer.as_deref(),
+            principal,
+        ) || record.execution_profile.get("profile_confinement")
+            != Some(&task_profile_confinement(principal))
         {
             return Ok(None);
         }
-        if execution.status.is_terminal()
-            && execution.retention_until <= time::OffsetDateTime::now_utc()
-        {
+        if record.retention_expired() {
             return Ok(None);
+        }
+        // A healthy run needs no reconciliation transaction.
+        if !record.may_be_abandoned(self.claim_lease()) {
+            return Ok(Some(record));
         }
         let reconciled = store
             .reconcile_abandoned(
@@ -4376,10 +4429,13 @@ impl CodeModeTools {
                 tracing::error!(%error, %id, "could not reconcile abandoned Code Mode task");
                 execution_unavailable()
             })?;
-        Ok(reconciled.filter(|execution| {
-            !execution.status.is_terminal()
-                || execution.retention_until > time::OffsetDateTime::now_utc()
-        }))
+        Ok(reconciled
+            .filter(|execution| {
+                !execution.status.is_terminal()
+                    || execution.retention_until > time::OffsetDateTime::now_utc()
+            })
+            .as_ref()
+            .map(ExecutionStatusRecord::from))
     }
 }
 
@@ -4407,9 +4463,8 @@ fn task_profile_confinement(principal: &Principal) -> Value {
 /// read; here subject AND issuer must both match, and a pre-upgrade row
 /// with no recorded issuer is owned by no one (fail closed) — two issuers
 /// may mint the same `sub` for different people.
-fn execution_owned_by(execution: &waygate_codemode::Execution, principal: &Principal) -> bool {
-    execution.principal_sub == principal.sub
-        && execution.principal_issuer.as_deref() == Some(principal.issuer.as_str())
+fn owned_by(principal_sub: &str, principal_issuer: Option<&str>, principal: &Principal) -> bool {
+    principal_sub == principal.sub && principal_issuer == Some(principal.issuer.as_str())
 }
 
 /// Map a journal status onto the lifecycle status a caller observes.
@@ -4446,7 +4501,7 @@ fn lifecycle_status_str(status: TaskStatus) -> String {
         .unwrap_or_else(|| "working".to_owned())
 }
 
-fn task_projection(execution: &waygate_codemode::Execution) -> Task {
+fn task_projection(execution: &ExecutionStatusRecord) -> Task {
     let status = lifecycle_status(execution.status);
     let mut task = Task::new(
         execution.id.to_string(),
@@ -4464,9 +4519,8 @@ fn task_projection(execution: &waygate_codemode::Execution) -> Task {
             Some("Cancellation requested".to_owned())
         } else if execution.status == ExecutionStatus::WaitingForResume {
             execution
-                .resume_context
+                .checkpoint
                 .as_ref()
-                .and_then(|context| context.get("checkpoint"))
                 .and_then(|checkpoint| checkpoint.get("prompt"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)
@@ -6879,18 +6933,14 @@ struct ExecutionStatusResponse {
 /// redacted on its own surface. Selecting the state first, then the one key,
 /// keeps that binding out of a poll response by construction rather than by a
 /// reader's care.
-fn reportable_checkpoint(execution: &waygate_codemode::Execution) -> Option<Value> {
+fn reportable_checkpoint(execution: &ExecutionStatusRecord) -> Option<Value> {
     if execution.status != ExecutionStatus::WaitingForResume {
         return None;
     }
-    execution
-        .resume_context
-        .as_ref()
-        .and_then(|context| context.get("checkpoint"))
-        .cloned()
+    execution.checkpoint.clone()
 }
 
-fn execution_status_projection(execution: &waygate_codemode::Execution) -> ExecutionStatusResponse {
+fn execution_status_projection(execution: &ExecutionStatusRecord) -> ExecutionStatusResponse {
     ExecutionStatusResponse {
         contract_version: ContractVersion::V1,
         execution_id: execution.id,
@@ -6902,7 +6952,7 @@ fn execution_status_projection(execution: &waygate_codemode::Execution) -> Execu
         status: lifecycle_status_str(lifecycle_status(execution.status)),
         terminal: execution.status.is_terminal(),
         terminal_reason_code: execution.terminal_reason_code.clone(),
-        result_available: execution.result_payload.is_some(),
+        result_available: execution.result_available,
         cancellation_requested: execution.cancellation_requested_at.is_some(),
         submitted_at: waygate_core::fmt::format_ts_rfc3339(execution.submitted_at),
         updated_at: waygate_core::fmt::format_ts_rfc3339(execution.updated_at),
@@ -8386,6 +8436,8 @@ mod tests {
         renewals: tokio::sync::Mutex<Vec<Duration>>,
         /// Claims recorded as interrupted when a drain window ended.
         interrupted: tokio::sync::Mutex<Vec<ExecutionClaim>>,
+        /// Abandonment reconciliations attempted on owner reads.
+        reconcile_calls: std::sync::atomic::AtomicUsize,
         detached_slots: tokio::sync::Mutex<HashMap<(String, String, String), uuid::Uuid>>,
         /// Detached-slot lease renewals observed while runner work was held.
         slot_renewals: tokio::sync::Mutex<Vec<Duration>>,
@@ -8944,6 +8996,8 @@ mod tests {
             id: Uuid,
             _submission_grace: Duration,
         ) -> Result<Option<Execution>, StoreError> {
+            self.reconcile_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut current = self.current.lock().await;
             let Some(execution) = current.as_mut().filter(|execution| {
                 execution.tenant_id == tenant_id
@@ -14863,7 +14917,7 @@ mod tests {
             retention_until: now + EXECUTION_RETENTION,
         };
 
-        let projection = execution_status_projection(&execution);
+        let projection = execution_status_projection(&ExecutionStatusRecord::from(&execution));
         let encoded = serde_json::to_string(&projection).expect("status projection serializes");
         assert!(
             !encoded.contains("sensitive-and-large"),
@@ -14932,8 +14986,9 @@ mod tests {
                 status,
                 ..base.clone()
             };
-            let polled = execution_status_projection(&execution).status;
-            let task = task_projection(&execution);
+            let polled =
+                execution_status_projection(&ExecutionStatusRecord::from(&execution)).status;
+            let task = task_projection(&ExecutionStatusRecord::from(&execution));
             let via_task = serde_json::to_value(task.status)
                 .expect("task status serializes")
                 .as_str()
@@ -14990,7 +15045,7 @@ mod tests {
             ..base.clone()
         };
         assert_eq!(
-            execution_status_projection(&paused).checkpoint,
+            execution_status_projection(&ExecutionStatusRecord::from(&paused)).checkpoint,
             Some(checkpoint),
             "a paused execution must report the checkpoint a resume input answers"
         );
@@ -15005,7 +15060,8 @@ mod tests {
             })),
             ..base.clone()
         };
-        let projected = execution_status_projection(&awaiting_approval);
+        let projected =
+            execution_status_projection(&ExecutionStatusRecord::from(&awaiting_approval));
         assert_eq!(projected.checkpoint, None);
         let rendered = serde_json::to_string(&projected).expect("status serializes");
         assert!(
@@ -15028,7 +15084,7 @@ mod tests {
                 ..base.clone()
             };
             assert_eq!(
-                execution_status_projection(&execution).checkpoint,
+                execution_status_projection(&ExecutionStatusRecord::from(&execution)).checkpoint,
                 None,
                 "{status:?} is not a state a caller resumes from"
             );
@@ -17321,6 +17377,49 @@ mod tests {
             "the refusal must teach the valid keys: {}",
             error.message,
         );
+    }
+
+    #[tokio::test]
+    async fn a_status_check_reconciles_only_a_run_that_may_have_lost_its_worker() {
+        let catalog: SharedCatalog = Arc::new(FakeCatalog::with_tools(&[]));
+        let authz: SharedAuthz = Arc::new(SelectiveAuthz);
+        let store = Arc::new(RecordingExecutionStore::default());
+        let tools = code_mode_tools(catalog, authz)
+            .with_execution_store(store.clone())
+            .with_result_persistence_allowed(true);
+        let mut principal = reader();
+        principal.scopes.push(Scope::McpInvoke.as_str().to_owned());
+        principal.issuer = "test".to_owned();
+        let id = waiting_execution(&store, &principal, ExecutionStatus::Running).await;
+        let set_claim_expiry = |expires: time::OffsetDateTime| {
+            let store = store.clone();
+            async move {
+                let mut current = store.current.lock().await;
+                let execution = current.as_mut().expect("planted execution");
+                execution.claim_owner = Some(Uuid::now_v7());
+                execution.claim_expires_at = Some(expires);
+            }
+        };
+        let reconciliations = || {
+            store
+                .reconcile_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+
+        set_claim_expiry(time::OffsetDateTime::now_utc() + time::Duration::minutes(5)).await;
+        assert!(tools
+            .get_task(&id.to_string(), Some(&principal))
+            .await
+            .expect("healthy status")
+            .is_some());
+        assert_eq!(reconciliations(), 0, "a live claim needs no reconciliation");
+
+        set_claim_expiry(time::OffsetDateTime::now_utc() - time::Duration::seconds(1)).await;
+        tools
+            .get_task(&id.to_string(), Some(&principal))
+            .await
+            .expect("status after the lease lapsed");
+        assert_eq!(reconciliations(), 1, "a lapsed claim is reconciled on read");
     }
 
     /// Ownership binds tenant + issuer + subject: a caller whose issuer

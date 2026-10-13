@@ -10,11 +10,11 @@ use time::OffsetDateTime;
 
 use crate::{
     AbandonedExecution, DetachedExecutionSlot, Execution, ExecutionArtifact,
-    ExecutionArtifactContent, ExecutionClaim, ExecutionEvent, ExecutionStatus, ExecutionStore,
-    ExecutionTransition, InFlightExecution, NewExecution, NewExecutionEvent,
-    OperatorInFlightExecution, OwnedInFlight, ResumeExecution, RetainedSource, RetryEquivalence,
-    SourceArtifactOwner, SourceArtifactStore, StartExecution, StartExecutionResult,
-    MAX_RETAINED_SOURCES_PER_OWNER, MAX_RETAINED_SOURCES_PER_TENANT,
+    ExecutionArtifactContent, ExecutionClaim, ExecutionEvent, ExecutionStatus,
+    ExecutionStatusRecord, ExecutionStore, ExecutionTransition, InFlightExecution, NewExecution,
+    NewExecutionEvent, OperatorInFlightExecution, OwnedInFlight, ResumeExecution, RetainedSource,
+    RetryEquivalence, SourceArtifactOwner, SourceArtifactStore, StartExecution,
+    StartExecutionResult, MAX_RETAINED_SOURCES_PER_OWNER, MAX_RETAINED_SOURCES_PER_TENANT,
     MAX_RETAINED_SOURCE_BYTES_PER_OWNER, MAX_RETAINED_SOURCE_BYTES_PER_TENANT,
     MAX_SOURCE_LOCATORS_PER_OWNER, MAX_SOURCE_LOCATORS_PER_TENANT,
 };
@@ -802,6 +802,56 @@ impl ExecutionStore for PgExecutionStore {
         bind_source_locator_row(&mut tx, owner, source_locator, source_digest, expires_at).await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    async fn get_status(
+        &self,
+        tenant_id: &str,
+        id: Uuid,
+    ) -> Result<Option<ExecutionStatusRecord>, StoreError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, tenant_id, principal_sub, principal_issuer, source_digest,
+                   execution_profile, status, terminal_reason_code,
+                   result_payload IS NOT NULL AS result_available,
+                   CASE WHEN status = 'waiting_for_resume'
+                        THEN resume_context -> 'checkpoint'
+                   END AS checkpoint,
+                   claim_owner, claim_expires_at, cancellation_requested_at,
+                   submitted_at, updated_at, completed_at, retention_until,
+                   now() AS observed_at
+              FROM codemode_executions
+             WHERE tenant_id = $1 AND id = $2
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| {
+            let status: String = row.get("status");
+            ExecutionStatusRecord {
+                id: row.get("id"),
+                tenant_id: row.get("tenant_id"),
+                principal_sub: row.get("principal_sub"),
+                principal_issuer: row.get("principal_issuer"),
+                source_digest: row.get("source_digest"),
+                execution_profile: row.get("execution_profile"),
+                status: ExecutionStatus::parse(&status)
+                    .expect("codemode_executions status CHECK admits only known states"),
+                terminal_reason_code: row.get("terminal_reason_code"),
+                result_available: row.get("result_available"),
+                checkpoint: row.get("checkpoint"),
+                claim_owner: row.get("claim_owner"),
+                claim_expires_at: row.get("claim_expires_at"),
+                cancellation_requested_at: row.get("cancellation_requested_at"),
+                submitted_at: row.get("submitted_at"),
+                updated_at: row.get("updated_at"),
+                completed_at: row.get("completed_at"),
+                retention_until: row.get("retention_until"),
+                observed_at: row.get("observed_at"),
+            }
+        }))
     }
 
     async fn get(&self, tenant_id: &str, id: Uuid) -> Result<Option<Execution>, StoreError> {
