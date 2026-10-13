@@ -111,8 +111,9 @@ Review this policy at each of these points:
 
 ### Restarts and `2025-11-25` sessions
 
-A restart, or a request routed to another replica, ends every `2025-11-25`
-session on that process. The gateway then answers the old session ID with HTTP
+A restart ends every `2025-11-25` session held by that process, and a request
+routed to another replica finds no session there, because each process keeps
+its own sessions. In both cases the gateway answers the session ID with HTTP
 404 Not Found, which the specification defines as the signal to start a new
 session. Claude Code does this automatically since the fix recorded in
 [claude-code#55970](https://github.com/anthropics/claude-code/issues/55970)
