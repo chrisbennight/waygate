@@ -20,6 +20,7 @@ mod mcp_builtin;
 mod mcp_codemode;
 mod mcp_control;
 mod mcp_discovery;
+mod mcp_drain;
 mod mcp_factory;
 mod mcp_files;
 mod mcp_http_promote;
@@ -1022,10 +1023,18 @@ async fn gateway_main() -> anyhow::Result<()> {
         ct.clone(),
     );
     let codemode_execution_limit = mcp_codemode::execution_limit_from_env()?;
+    let codemode_store = mcp_codemode::shared_execution_store(db_pool.clone());
     mcp_codemode::spawn_abandoned_reconciler(
-        mcp_codemode::shared_execution_store(db_pool.clone()),
+        codemode_store.clone(),
         codemode_execution_limit,
         ct.clone(),
+    );
+    // In-flight MCP requests and detached Code Mode runs that shutdown lets
+    // finish before closing the MCP transport.
+    let inflight_work = tokio_util::task::TaskTracker::new();
+    let codemode_capacity = mcp_codemode::CodeModeExecutionCapacity::shared(
+        cfg.codemode_capacity,
+        inflight_work.clone(),
     );
     let mcp_factory = Arc::new(mcp_factory::McpServerFactory {
         catalog: catalog.clone(),
@@ -1037,7 +1046,7 @@ async fn gateway_main() -> anyhow::Result<()> {
         audit_mode: cfg.audit_mode,
         result_storage: cfg.codemode_result_storage,
         execution_limit: codemode_execution_limit,
-        execution_capacity: mcp_codemode::CodeModeExecutionCapacity::shared(cfg.codemode_capacity),
+        execution_capacity: codemode_capacity.clone(),
         quota: quota_service.clone(),
         hitl_hub: hitl_hub.clone(),
         inspectors: inspectors.clone(),
@@ -1073,10 +1082,17 @@ async fn gateway_main() -> anyhow::Result<()> {
         idjag_advertise_ema,
         mcp_ping_interval,
     });
+    let mcp_transport_ct = CancellationToken::new();
     let mcp_service = StreamableHttpService::new(
         move || mcp_factory.build(),
         session_manager,
-        streamable_http_server_config(cfg.sse_keepalive, ct.child_token(), mcp_allowed_hosts),
+        // Its own token, not a child of the shutdown token: shutdown closes the
+        // MCP transport only after in-flight work has finished.
+        streamable_http_server_config(
+            cfg.sse_keepalive,
+            mcp_transport_ct.child_token(),
+            mcp_allowed_hosts,
+        ),
     );
 
     // Pass the peer JWKS cache so the bearer
@@ -1850,7 +1866,16 @@ async fn gateway_main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn_with_state(
             cfg.mcp_allowed_origins.clone(),
             mcp_origin::guard,
-        ));
+        ))
+        // Outermost, so a request still authenticating when shutdown begins
+        // already counts as in flight.
+        .layer(axum::middleware::from_fn({
+            let work = inflight_work.clone();
+            move |req, next| {
+                let work = work.clone();
+                async move { mcp_drain::track_request(work, req, next).await }
+            }
+        }));
 
     let dashboard_auth = build_dashboard_auth(&cfg, oidc_http.as_ref()).await?;
     // Attach the same SCIM
@@ -2459,12 +2484,43 @@ async fn gateway_main() -> anyhow::Result<()> {
     );
 
     let cleanup = async {
-        // Wait for axum to finish draining in-flight HTTP
-        // connections.
-        match server_task.await {
-            Ok(Ok(())) => tracing::info!("axum drained cleanly"),
-            Ok(Err(e)) => tracing::warn!(error = %e, "axum returned error during drain"),
-            Err(e) => tracing::warn!(error = %e, "axum task join failed"),
+        // Refuse new Code Mode runs, then let in-flight requests and detached
+        // runs finish before the MCP transport closes its streams. Waiting for
+        // work and for the HTTP server's own drain both end at one deadline
+        // that leaves the evidence queues their flush budget inside the drain
+        // timeout.
+        codemode_capacity.begin_drain();
+        let work_deadline = tokio::time::Instant::now()
+            + drain_timeout.saturating_sub(waygate_mcp::audit::EVIDENCE_QUEUE_DRAIN_TIMEOUT);
+        inflight_work.close();
+        if tokio::time::timeout_at(work_deadline, inflight_work.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                in_flight = inflight_work.len(),
+                "in-flight MCP work did not finish within the drain window; closing the MCP transport"
+            );
+        }
+        // Runs still going have had their window. Recording them as
+        // interrupted proceeds alongside closing the transport and flushing
+        // evidence, so it takes nothing from either budget.
+        let interrupting = tokio::spawn({
+            let capacity = codemode_capacity.clone();
+            let store = codemode_store.clone();
+            async move { capacity.interrupt_remaining(store.as_ref()).await }
+        });
+        mcp_transport_ct.cancel();
+        // Wait for axum to finish draining in-flight HTTP connections. A
+        // response still streaming at the deadline, such as an inference
+        // stream, closes when the process exits.
+        match tokio::time::timeout_at(work_deadline, server_task).await {
+            Ok(Ok(Ok(()))) => tracing::info!("axum drained cleanly"),
+            Ok(Ok(Err(e))) => tracing::warn!(error = %e, "axum returned error during drain"),
+            Ok(Err(e)) => tracing::warn!(error = %e, "axum task join failed"),
+            Err(_) => {
+                tracing::warn!("HTTP connections were still open at the end of the drain window")
+            }
         }
         // Stop accepting best-effort evidence only after HTTP handlers have
         // drained, then give the fixed-capacity queues up to five seconds
@@ -2487,6 +2543,9 @@ async fn gateway_main() -> anyhow::Result<()> {
             } else {
                 tracing::info!("bounded evidence queues drained cleanly");
             }
+        }
+        if let Err(error) = interrupting.await {
+            tracing::warn!(%error, "recording interrupted Code Mode runs did not complete");
         }
         // Then close every isolated workload pool so connections are returned
         // to Postgres before the process exits.

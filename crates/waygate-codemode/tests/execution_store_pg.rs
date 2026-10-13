@@ -4,10 +4,11 @@ use serde_json::json;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use waygate_codemode::{
-    source_digest, DetachedExecutionSlot, ExecutionEventKind, ExecutionStatus, ExecutionStore,
-    ExecutionTransition, NewExecution, NewExecutionEvent, OwnedInFlight, PgExecutionStore,
-    ResumeExecution, RetryEquivalence, SourceArtifactOwner, SourceArtifactStore, StartExecution,
-    StartExecutionResult, MAX_RETAINED_SOURCES_PER_OWNER, MAX_SOURCE_LOCATORS_PER_OWNER,
+    source_digest, DetachedExecutionSlot, ExecutionClaim, ExecutionEventKind, ExecutionStatus,
+    ExecutionStore, ExecutionTransition, NewExecution, NewExecutionEvent, OwnedInFlight,
+    PgExecutionStore, ResumeExecution, RetryEquivalence, SourceArtifactOwner, SourceArtifactStore,
+    StartExecution, StartExecutionResult, MAX_RETAINED_SOURCES_PER_OWNER,
+    MAX_SOURCE_LOCATORS_PER_OWNER,
 };
 use waygate_tenants::{PgTenantStore, TenantStore};
 
@@ -2650,6 +2651,111 @@ async fn abandoned_worker_reports_unknown_outcome_only_for_unjournaled_effects()
         assert_eq!(last.kind.as_str(), "expired", "{case}");
         assert_eq!(last.detail["reason_code"], expected_reason, "{case}");
     }
+
+    cleanup(&pool, &tenant).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopping_worker_records_its_live_runs_as_interrupted() {
+    let Some(pool) = connect().await else {
+        eprintln!("skipping Code Mode interruption Pg contract: AUDIT_DATABASE_URL not set");
+        return;
+    };
+    let tenant = seed_tenant(&pool, &Uuid::new_v4().to_string()).await;
+    let store = PgExecutionStore::new(pool.clone());
+
+    // Each case holds a live claim, journals what its run had started, and is
+    // interrupted by its own worker before the lease runs out.
+    for (case, effect_started, expected_reason) in [
+        ("effect in flight", true, "effect_outcome_unknown"),
+        ("nothing in flight", false, "worker_interrupted"),
+    ] {
+        let id = Uuid::now_v7();
+        store
+            .submit(new_execution(&tenant, id))
+            .await
+            .expect("submit execution");
+        let (_, claim) = store
+            .claim(
+                &tenant,
+                id,
+                Uuid::now_v7(),
+                Duration::from_secs(300),
+                execution_source().to_owned(),
+                json!({"snapshot": 1}),
+            )
+            .await
+            .expect("claim execution")
+            .expect("claim succeeds");
+        if effect_started {
+            assert!(store
+                .append_event(
+                    &claim,
+                    NewExecutionEvent {
+                        kind: ExecutionEventKind::ConnectorCallStarted,
+                        step_number: Some(1),
+                        call_id: Some(Uuid::now_v7()),
+                        attempt: Some(1),
+                        detail: json!({"server": "s", "tool": "t", "side_effects": true}),
+                    },
+                )
+                .await
+                .expect("journal effect start"));
+        }
+
+        let interrupted = store
+            .interrupt_claimed(&claim, "alice", "https://issuer.test")
+            .await
+            .expect("interrupt run")
+            .expect("the held claim is interrupted");
+        assert_eq!(interrupted.status, ExecutionStatus::Expired, "{case}");
+        assert_eq!(
+            interrupted.terminal_reason_code.as_deref(),
+            Some(expected_reason),
+            "{case}"
+        );
+        assert!(
+            !store
+                .renew_effect_lease(&claim, Duration::from_secs(300))
+                .await
+                .expect("renew after interruption"),
+            "{case}: the stopping worker can no longer extend its claim"
+        );
+    }
+
+    // A claim this worker no longer holds is left alone.
+    let id = Uuid::now_v7();
+    store
+        .submit(new_execution(&tenant, id))
+        .await
+        .expect("submit execution");
+    let (_, claim) = store
+        .claim(
+            &tenant,
+            id,
+            Uuid::now_v7(),
+            Duration::from_secs(300),
+            execution_source().to_owned(),
+            json!({"snapshot": 1}),
+        )
+        .await
+        .expect("claim execution")
+        .expect("claim succeeds");
+    let stale = ExecutionClaim {
+        epoch: claim.epoch + 1,
+        ..claim.clone()
+    };
+    assert!(store
+        .interrupt_claimed(&stale, "alice", "https://issuer.test")
+        .await
+        .expect("interrupt with a stale claim")
+        .is_none());
+    let current = store
+        .get(&tenant, id)
+        .await
+        .expect("read execution")
+        .expect("execution exists");
+    assert_eq!(current.status, ExecutionStatus::Running);
 
     cleanup(&pool, &tenant).await;
 }

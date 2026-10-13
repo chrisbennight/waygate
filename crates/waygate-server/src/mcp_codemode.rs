@@ -158,6 +158,31 @@ pub struct CodeModeExecutionCapacity {
     detached: Arc<Semaphore>,
     tenants: Mutex<HashMap<String, Weak<Semaphore>>>,
     detached_starts: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    /// Work a rolling restart lets finish before the MCP transport closes:
+    /// detached runs here, and in-flight requests through the same tracker.
+    work: tokio_util::task::TaskTracker,
+    /// Claims held by runs in this process, so runs still going when the
+    /// drain window ends can be recorded as interrupted.
+    live_claims: Mutex<LiveClaims>,
+    /// Set once shutdown begins; new runs are refused from then on.
+    draining: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Default)]
+struct LiveClaims {
+    claims: HashMap<(uuid::Uuid, uuid::Uuid), HeldClaim>,
+    /// Set when the drain window has ended and the held claims were taken
+    /// for interruption.
+    interrupted: bool,
+}
+
+/// A claim held by a run in this process, with the owner identity its
+/// interruption is recorded under.
+#[derive(Clone)]
+struct HeldClaim {
+    claim: ExecutionClaim,
+    principal_sub: String,
+    principal_issuer: String,
 }
 
 impl CodeModeExecutionCapacity {
@@ -168,11 +193,84 @@ impl CodeModeExecutionCapacity {
             detached: Arc::new(Semaphore::new(limits.detached)),
             tenants: Mutex::new(HashMap::new()),
             detached_starts: Mutex::new(HashMap::new()),
+            work: tokio_util::task::TaskTracker::new(),
+            live_claims: Mutex::new(LiveClaims::default()),
+            draining: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
-    pub(crate) fn shared(limits: CodeModeCapacityLimits) -> Arc<Self> {
-        Arc::new(Self::new(limits))
+    pub(crate) fn shared(
+        limits: CodeModeCapacityLimits,
+        work: tokio_util::task::TaskTracker,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            work,
+            ..Self::new(limits)
+        })
+    }
+
+    /// Refuse new runs from now on.
+    pub(crate) fn begin_drain(&self) {
+        self.draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Record every run still holding a claim as interrupted. Called when the
+    /// drain window ends; a run that registers afterwards records itself.
+    pub(crate) async fn interrupt_remaining(&self, store: Option<&SharedExecutionStore>) {
+        let held: Vec<HeldClaim> = {
+            let mut live = self
+                .live_claims
+                .lock()
+                .expect("live claim registry poisoned");
+            live.interrupted = true;
+            live.claims.values().cloned().collect()
+        };
+        let Some(store) = store else {
+            return;
+        };
+        // Concurrent, so a row held by another transaction delays only its
+        // own record.
+        futures::future::join_all(held.iter().map(|held| interrupt_held_claim(store, held))).await;
+    }
+
+    fn spawn_detached<F>(&self, run: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.work.spawn(run);
+    }
+
+    /// Register a claim held by a run in this process. Interruption marks the
+    /// registry under the same lock it reads the claims with, so a claim
+    /// registered after that pass sees the mark here and records itself.
+    async fn hold_claim(
+        self: &Arc<Self>,
+        store: Option<&SharedExecutionStore>,
+        claim: &ExecutionClaim,
+        principal: &Principal,
+    ) -> LiveClaim {
+        let key = (claim.execution_id, claim.owner);
+        let held = HeldClaim {
+            claim: claim.clone(),
+            principal_sub: principal.sub.clone(),
+            principal_issuer: principal.issuer.clone(),
+        };
+        let interrupted = {
+            let mut live = self
+                .live_claims
+                .lock()
+                .expect("live claim registry poisoned");
+            live.claims.insert(key, held.clone());
+            live.interrupted
+        };
+        if let (true, Some(store)) = (interrupted, store) {
+            interrupt_held_claim(store, &held).await;
+        }
+        LiveClaim {
+            capacity: self.clone(),
+            key,
+        }
     }
 
     fn tenant(&self, tenant: &str) -> Arc<Semaphore> {
@@ -193,6 +291,9 @@ impl CodeModeExecutionCapacity {
         &self,
         principal: &Principal,
     ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), McpError> {
+        if self.draining.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(gateway_draining());
+        }
         let tenant = self
             .tenant(principal.tenant.as_str())
             .try_acquire_owned()
@@ -226,6 +327,37 @@ impl CodeModeExecutionCapacity {
         start
     }
 }
+
+/// Registration of a claim held by a run in this process; released on drop.
+struct LiveClaim {
+    capacity: Arc<CodeModeExecutionCapacity>,
+    key: (uuid::Uuid, uuid::Uuid),
+}
+
+impl Drop for LiveClaim {
+    fn drop(&mut self) {
+        self.capacity
+            .live_claims
+            .lock()
+            .expect("live claim registry poisoned")
+            .claims
+            .remove(&self.key);
+    }
+}
+
+async fn interrupt_held_claim(store: &SharedExecutionStore, held: &HeldClaim) {
+    if let Err(error) = store
+        .interrupt_claimed(&held.claim, &held.principal_sub, &held.principal_issuer)
+        .await
+    {
+        tracing::warn!(
+            %error,
+            execution_id = %held.claim.execution_id,
+            "could not record an interrupted Code Mode run at shutdown"
+        );
+    }
+}
+
 #[cfg(test)]
 #[derive(Default)]
 struct AttemptBarrier {
@@ -1397,7 +1529,7 @@ impl CodeModeTools {
         let execution_id = execution.id;
         let tools = self.clone();
         let principal = principal.clone();
-        tokio::spawn(async move {
+        self.execution_capacity.spawn_detached(async move {
             if let Err(error) = tools.run_claimed_program(&principal, claimed).await {
                 // There is no caller left to return this to, and the terminal
                 // state is journaled regardless. This is for an operator
@@ -1437,7 +1569,7 @@ impl CodeModeTools {
 
         let tools = self.clone();
         let principal = principal.clone();
-        tokio::spawn(async move {
+        self.execution_capacity.spawn_detached(async move {
             if let Err(error) = tools.run_claimed_program(&principal, claimed).await {
                 tracing::debug!(
                     %execution_id,
@@ -1947,6 +2079,10 @@ impl CodeModeTools {
             _capacity_permit,
             ..
         } = claimed;
+        let _live_claim = self
+            .execution_capacity
+            .hold_claim(self.execution_store.as_ref(), &claim, principal)
+            .await;
         let work = async {
             #[cfg(test)]
             if let Some(barrier) = self.attempt_barrier.as_ref() {
@@ -4175,7 +4311,7 @@ impl BuiltinTools for CodeModeTools {
         let execution_id = claimed.execution.id;
         let tools = self.clone();
         let principal = principal.clone();
-        tokio::spawn(async move {
+        self.execution_capacity.spawn_detached(async move {
             if let Err(error) = tools.run_claimed_program(&principal, claimed).await {
                 tracing::debug!(
                     %execution_id,
@@ -5582,6 +5718,13 @@ fn execution_capacity() -> McpError {
     McpError::invalid_request(
         "Code Mode execution capacity is currently exhausted",
         Some(serde_json::json!({"error": "execution_capacity"})),
+    )
+}
+
+fn gateway_draining() -> McpError {
+    McpError::invalid_request(
+        "The gateway is shutting down and admits no new Code Mode executions; retry shortly",
+        Some(serde_json::json!({"error": "gateway_draining"})),
     )
 }
 
@@ -8241,6 +8384,8 @@ mod tests {
         cancel_on_first_append: std::sync::atomic::AtomicBool,
         /// Lease renewals observed while an effect dispatch was in flight.
         renewals: tokio::sync::Mutex<Vec<Duration>>,
+        /// Claims recorded as interrupted when a drain window ended.
+        interrupted: tokio::sync::Mutex<Vec<ExecutionClaim>>,
         detached_slots: tokio::sync::Mutex<HashMap<(String, String, String), uuid::Uuid>>,
         /// Detached-slot lease renewals observed while runner work was held.
         slot_renewals: tokio::sync::Mutex<Vec<Duration>>,
@@ -8660,6 +8805,16 @@ mod tests {
             }
             self.renewals.lock().await.push(lease);
             Ok(true)
+        }
+
+        async fn interrupt_claimed(
+            &self,
+            claim: &ExecutionClaim,
+            _principal_sub: &str,
+            _principal_issuer: &str,
+        ) -> Result<Option<Execution>, StoreError> {
+            self.interrupted.lock().await.push(claim.clone());
+            Ok(None)
         }
 
         async fn renew_effect_lease(
@@ -13880,6 +14035,59 @@ mod tests {
                 .unwrap()["error"],
             "execution_capacity"
         );
+    }
+
+    #[tokio::test]
+    async fn drain_refuses_new_runs_and_records_unfinished_runs_as_interrupted() {
+        let capacity = Arc::new(CodeModeExecutionCapacity::new(CodeModeCapacityLimits {
+            global: 2,
+            per_tenant: 2,
+            detached: 1,
+        }));
+        let store = Arc::new(RecordingExecutionStore::default());
+        let shared: SharedExecutionStore = store.clone();
+        let claim = ExecutionClaim {
+            execution_id: Uuid::now_v7(),
+            tenant_id: "drain".to_owned(),
+            owner: Uuid::now_v7(),
+            epoch: 1,
+        };
+        let live = capacity.hold_claim(Some(&shared), &claim, &reader()).await;
+
+        capacity.begin_drain();
+        assert_eq!(
+            capacity
+                .acquire_execution(&reader())
+                .unwrap_err()
+                .data
+                .unwrap()["error"],
+            "gateway_draining"
+        );
+        assert!(
+            store.interrupted.lock().await.is_empty(),
+            "a run keeps its claim while the window is open"
+        );
+
+        capacity.interrupt_remaining(Some(&shared)).await;
+        assert_eq!(*store.interrupted.lock().await, vec![claim.clone()]);
+
+        // A run that registers after the window ended records itself.
+        let late_claim = ExecutionClaim {
+            execution_id: Uuid::now_v7(),
+            ..claim.clone()
+        };
+        let late = capacity
+            .hold_claim(Some(&shared), &late_claim, &reader())
+            .await;
+        assert_eq!(*store.interrupted.lock().await, vec![claim, late_claim]);
+
+        drop((live, late));
+        assert!(capacity
+            .live_claims
+            .lock()
+            .expect("live claim registry")
+            .claims
+            .is_empty());
     }
 
     #[tokio::test]

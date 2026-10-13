@@ -710,6 +710,22 @@ pub trait ExecutionStore: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    /// Record a run whose worker is stopping before it can finish, such as at
+    /// gateway shutdown. Fenced by the claim's owner and epoch, it ends the
+    /// claim now and terminalizes the run with the same reasons as abandonment
+    /// reconciliation, reporting `worker_interrupted` where that reports an
+    /// expired lease. A later write by the stopping worker fails its fence.
+    /// Returns `None` when the claim is no longer held.
+    async fn interrupt_claimed(
+        &self,
+        claim: &ExecutionClaim,
+        principal_sub: &str,
+        principal_issuer: &str,
+    ) -> Result<Option<Execution>, StoreError> {
+        let _ = (claim, principal_sub, principal_issuer);
+        Ok(None)
+    }
+
     async fn events(&self, tenant_id: &str, id: Uuid) -> Result<Vec<ExecutionEvent>, StoreError>;
 
     async fn list_artifacts(
