@@ -96,6 +96,18 @@ require a fresh grant bound to `{taskId, inputResponses}`. Reads and cancellatio
 do not consume a new execution grant. Lifecycle evidence is named `TaskGet`,
 `TaskUpdate`, or `TaskCancel`.
 
+Only an update is charged against the caller's rate limits, because input
+advances the work, and an update or cancellation writes the same required
+pre-call evidence as a side-effecting call in fail-closed audit mode. A status
+read and a cancellation start no new execution, so neither consumes a
+rate-limit token: an exhausted execution budget must never stop a caller from
+following or stopping its own work. A status read changes nothing upstream,
+so its `TaskGet` outcome row is its only evidence. There is no separate limit
+for status reads. Each read still authenticates the caller and rechecks
+ownership and current policy. Polling faster than the upstream's
+`pollIntervalMs` adds load without returning fresher state; the gateway does
+not throttle it.
+
 The shared database and unchanged upstream configuration make routing portable
 across gateway restarts and replicas. Database errors refuse routing; there is
 no process-local or encrypted-handle fallback. If saving a mapping fails after

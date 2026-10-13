@@ -201,11 +201,21 @@ impl DefaultInvocationService {
                     .map_err(InvocationError::Upstream)?;
             }
         }
-        self.check_quota(&mut ctx).await?;
+        // Input advances the work, so it is charged and approved like the
+        // original operation. A status read or a cancellation starts no new
+        // execution: neither consumes a rate-limit token, so an exhausted
+        // execution budget can never stop a caller from following or stopping
+        // its own work.
         if matches!(&action, TaskAction::Update(_)) {
+            self.check_quota(&mut ctx).await?;
             self.check_approval(&mut ctx).await?;
         }
-        self.record_pre_call(&mut ctx).await?;
+        // Pre-call evidence precedes a request that can change upstream state.
+        // A status read changes nothing, so its outcome row, recorded under
+        // its lifecycle action, is its evidence.
+        if !matches!(&action, TaskAction::Get) {
+            self.record_pre_call(&mut ctx).await?;
+        }
         let processor = retained_response::RetainedResponseProcessor::new(self, &ctx);
         let result = self
             .catalog
