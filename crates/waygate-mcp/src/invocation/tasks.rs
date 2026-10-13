@@ -244,40 +244,12 @@ impl DefaultInvocationService {
             }
         };
         if let TaskResponse::Status(status) = &mut response {
-            if status.task.task.task_id != route.upstream_id
-                || status.task.task.created_at != route.created_at
-            {
-                return Err(invalid("upstream returned a different task identity"));
-            }
-            let metadata = if matches!(status.task.payload, TaskPayload::Completed { .. }) {
-                serde_json::to_value(&status.task.task)
-            } else {
-                serde_json::to_value(&*status)
-            }
-            .map_err(|_| invalid("invalid task metadata"))?;
-            self.inspect_task_metadata(&mut ctx, metadata, status.meta.clone())
-                .await?;
-            if let TaskPayload::Completed { result } = &mut status.task.payload {
-                let completed: CallToolResult = serde_json::from_value(Value::Object(
-                    std::mem::take(result),
-                ))
-                .map_err(|_| invalid("upstream terminal task result is not a tool result"))?;
-                let completed = self.inspect_response(&mut ctx, Ok(completed)).await;
-                let completed = self
-                    .prepare_files_and_validate_output(&mut ctx, completed)
-                    .await?;
-                self.record_outcome(&mut ctx, &completed).await;
-                let completed = completed?;
-                let Value::Object(completed) = serde_json::to_value(completed)
-                    .map_err(|_| invalid("could not encode task result"))?
-                else {
-                    return Err(invalid("invalid task result"));
-                };
-                *result = completed;
-            } else {
-                self.record_outcome(&mut ctx, &Ok(CallToolResult::success(vec![])))
-                    .await;
-            }
+            let outcome = self
+                .admit_task_status(&mut ctx, &route.upstream_id, &route.created_at, status)
+                .await;
+            self.record_outcome(&mut ctx, &outcome).await;
+            self.flush_pending_redactions(&mut ctx).await;
+            outcome?;
             // Preserve the stable client handle; polling never extends its lifetime.
             status.task.task.task_id = handle.to_owned();
             status.task.task.ttl_ms = Some(
@@ -288,12 +260,53 @@ impl DefaultInvocationService {
                     .unwrap_or(u64::MAX)
                     .min(route.ttl_ms),
             );
-            self.flush_pending_redactions(&mut ctx).await;
         } else {
             self.record_outcome(&mut ctx, &Ok(CallToolResult::success(vec![])))
                 .await;
         }
         Ok(response)
+    }
+
+    /// Check a status the upstream returned and inspect what it carries,
+    /// producing the outcome the caller records. A refusal is an outcome
+    /// too, so a status the gateway will not relay still leaves its
+    /// lifecycle row. A completed result is replaced in `status` by its
+    /// inspected and validated form.
+    async fn admit_task_status(
+        &self,
+        ctx: &mut InvocationContext<'_>,
+        upstream_id: &str,
+        created_at: &str,
+        status: &mut rmcp::model::GetTaskResult,
+    ) -> Result<CallToolResult, InvocationError> {
+        if status.task.task.task_id != upstream_id || status.task.task.created_at != created_at {
+            return Err(invalid("upstream returned a different task identity"));
+        }
+        let metadata = if matches!(status.task.payload, TaskPayload::Completed { .. }) {
+            serde_json::to_value(&status.task.task)
+        } else {
+            serde_json::to_value(&*status)
+        }
+        .map_err(|_| invalid("invalid task metadata"))?;
+        self.inspect_task_metadata(ctx, metadata, status.meta.clone())
+            .await?;
+        let TaskPayload::Completed { result } = &mut status.task.payload else {
+            return Ok(CallToolResult::success(vec![]));
+        };
+        let completed: CallToolResult =
+            serde_json::from_value(Value::Object(std::mem::take(result)))
+                .map_err(|_| invalid("upstream terminal task result is not a tool result"))?;
+        let completed = self.inspect_response(ctx, Ok(completed)).await;
+        let completed = self
+            .prepare_files_and_validate_output(ctx, completed)
+            .await??;
+        let Value::Object(encoded) = serde_json::to_value(&completed)
+            .map_err(|_| invalid("could not encode task result"))?
+        else {
+            return Err(invalid("invalid task result"));
+        };
+        *result = encoded;
+        Ok(completed)
     }
 }
 fn invalid(message: &'static str) -> InvocationError {

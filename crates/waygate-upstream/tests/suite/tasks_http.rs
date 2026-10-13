@@ -753,9 +753,10 @@ impl waygate_quota::QuotaService for CountingQuota {
     }
 }
 
-/// Keeps each evidence row's action and whether it was a required write.
+/// Keeps each evidence row's action, whether it was a required write, and
+/// its outcome.
 #[derive(Default)]
-struct RecordingEvidence(Mutex<Vec<(String, bool)>>);
+struct RecordingEvidence(Mutex<Vec<(String, bool, &'static str)>>);
 impl RecordingEvidence {
     fn required(&self, action: &str) -> usize {
         self.count(action, true)
@@ -765,8 +766,17 @@ impl RecordingEvidence {
             .lock()
             .unwrap()
             .iter()
-            .filter(|(recorded, was_required)| recorded == action && *was_required == required)
+            .filter(|(recorded, was_required, _)| recorded == action && *was_required == required)
             .count()
+    }
+    fn outcomes(&self, action: &str) -> Vec<&'static str> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(recorded, _, _)| recorded == action)
+            .map(|(_, _, outcome)| *outcome)
+            .collect()
     }
 }
 #[async_trait::async_trait]
@@ -775,14 +785,19 @@ impl waygate_mcp::EvidenceRecorder for RecordingEvidence {
         &self,
         event: waygate_mcp::AuditEvent,
     ) -> Result<uuid::Uuid, waygate_mcp::EvidenceError> {
-        self.0.lock().unwrap().push((event.action.clone(), true));
+        self.0
+            .lock()
+            .unwrap()
+            .push((event.action.clone(), true, event.outcome.as_str()));
         Ok(event.id)
     }
     async fn record_chained_best_effort(&self, event: waygate_mcp::AuditEvent) {
-        self.0.lock().unwrap().push((event.action, false));
+        let outcome = event.outcome.as_str();
+        self.0.lock().unwrap().push((event.action, false, outcome));
     }
     async fn record_best_effort(&self, event: waygate_mcp::AuditEvent) {
-        self.0.lock().unwrap().push((event.action, false));
+        let outcome = event.outcome.as_str();
+        self.0.lock().unwrap().push((event.action, false, outcome));
     }
 }
 
@@ -860,6 +875,68 @@ async fn status_reads_and_cancellation_consume_no_execution_quota() {
         "cancellation is not charged"
     );
     assert_eq!(evidence.required("TaskCancel"), 1);
+    worker.abort();
+    upstream_worker.abort();
+}
+
+/// Redacts every response once armed, which the gateway must refuse for task
+/// metadata rather than relay altered status.
+struct RedactWhenArmed(AtomicBool);
+#[async_trait::async_trait]
+impl waygate_mcp::inspection::Inspector for RedactWhenArmed {
+    fn name(&self) -> &'static str {
+        "redact-when-armed"
+    }
+    async fn inspect(
+        &self,
+        _: &waygate_mcp::inspection::InspectionContext<'_>,
+        result: &CallToolResult,
+    ) -> waygate_mcp::inspection::Decision {
+        if !self.0.load(Ordering::SeqCst) {
+            return waygate_mcp::inspection::Decision::Pass;
+        }
+        let mut redacted = result.clone();
+        redacted.structured_content = Some(json!({"redacted": true}));
+        waygate_mcp::inspection::Decision::Redact {
+            redacted,
+            findings_count: 1,
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_refused_status_read_still_leaves_its_lifecycle_row() {
+    let store = Arc::new(InMemoryTaskRouteStore::default());
+    let upstream = Backend::new("report", false);
+    let (url, upstream_worker) = backend(upstream.clone()).await;
+    let manifests = BTreeMap::from([("service".into(), manifest("service", &url))]);
+    let redact = Arc::new(RedactWhenArmed(AtomicBool::new(false)));
+    let evidence = Arc::new(RecordingEvidence::default());
+    let (gateway, worker) = gateway_with_service(store, manifests, {
+        let (redact, evidence) = (redact.clone(), evidence.clone());
+        |pool| {
+            DefaultInvocationService::new(pool, Arc::new(AllowAllGate), evidence)
+                .with_inspectors(vec![redact as waygate_mcp::inspection::SharedInspector])
+        }
+    })
+    .await;
+    let created = rpc(
+        &gateway,
+        "tools/call",
+        json!({"name":"service.work"}),
+        "alice",
+        true,
+    )
+    .await;
+    let id = created["result"]["taskId"].as_str().unwrap();
+
+    redact.0.store(true, Ordering::SeqCst);
+    let refused = rpc(&gateway, "tasks/get", json!({"taskId":id}), "alice", true).await;
+    assert!(refused.get("error").is_some(), "{refused}");
+    // One row records the refused read, the other the inspector's finding.
+    let mut outcomes = evidence.outcomes("TaskGet");
+    outcomes.sort_unstable();
+    assert_eq!(outcomes, ["execution_error", "success"], "{outcomes:?}");
     worker.abort();
     upstream_worker.abort();
 }

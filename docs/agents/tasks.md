@@ -97,12 +97,14 @@ do not consume a new execution grant. Lifecycle evidence is named `TaskGet`,
 `TaskUpdate`, or `TaskCancel`.
 
 Only an update is charged against the caller's rate limits, because input
-advances the work, and an update or cancellation writes the same required
-pre-call evidence as a side-effecting call in fail-closed audit mode. A status
-read and a cancellation start no new execution, so neither consumes a
-rate-limit token: an exhausted execution budget must never stop a caller from
-following or stopping its own work. A status read changes nothing upstream,
-so its `TaskGet` outcome row is its only evidence. There is no separate limit
+advances the work. In fail-closed audit mode, an update or cancellation of a
+side-effecting operation writes the required pre-call evidence, as the call
+that started it did. A status read and a cancellation start no new execution,
+so neither consumes a rate-limit token: an exhausted execution budget must
+never stop a caller from following or stopping its own work. A status read
+changes nothing upstream, so its `TaskGet` outcome row is its evidence; a
+status the gateway refuses to relay, such as metadata that inspection would
+have to redact, is recorded the same way. There is no separate limit
 for status reads. Each read still authenticates the caller and rechecks
 ownership and current policy. Polling faster than the upstream's
 `pollIntervalMs` adds load without returning fresher state; the gateway does
