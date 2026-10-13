@@ -273,8 +273,15 @@ pub(crate) async fn fleet_doorbell_forwarder(
                 _ = poll.tick() => {
                     observe_catalog_generation(&pool, &epoch, &mut observed_generation).await;
                 }
-                notification = listener.recv() => match notification {
-                    Ok(notification) => match FleetDoorbell::from_channel(notification.channel()) {
+                notification = listener.try_recv() => match notification {
+                    // The listener lost its connection and has already
+                    // reconnected and restored every LISTEN; anything announced
+                    // in between is caught the same way as after setup.
+                    Ok(None) => {
+                        observe_catalog_generation(&pool, &epoch, &mut observed_generation).await;
+                        cancellations.wake_all();
+                    }
+                    Ok(Some(notification)) => match FleetDoorbell::from_channel(notification.channel()) {
                         Some(FleetDoorbell::Manifest) => {
                             let _ = manifest_tx.try_send(());
                         }
