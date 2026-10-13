@@ -48,6 +48,7 @@ mod discovery_scale;
 mod identity_over_http;
 mod listen_fanin_http;
 mod manifests_parse;
+mod mcp_apps_http;
 mod mrtr_passthrough_http;
 mod pool_observed_contracts;
 mod pool_reconnect;
