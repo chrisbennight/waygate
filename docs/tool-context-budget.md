@@ -117,29 +117,21 @@ deployments often do. Its server names use the `demo-*` form that
 `scripts/check-synthetic-policy-fixtures.sh` enforces; real deployment details
 belong in operators' repositories.
 
-CI measures two views of it, each against its own budget:
-
-- the full list, which MCP 2026 clients and eager legacy sessions receive,
-  against `realistic-full-budget.json`; and
-- the progressive list a new legacy session receives before it discloses any
-  tool, one `searchTools` adapter per upstream, against
-  `realistic-progressive-budget.json`.
-
-The Code Mode-only view lists built-in tools alone, which the built-in budget
-already covers. To reproduce a view locally:
+CI measures the full list every client receives against
+`realistic-full-budget.json`. The Code Mode-only view lists built-in tools
+alone, which the built-in budget already covers. To reproduce the measurement
+locally:
 
 ```sh
 cargo run --quiet -p waygate-mcp --example tool_context_projection -- \
-  --catalog scripts/fixtures/tool-context/realistic-catalog.json \
-  --projection full |
+  --catalog scripts/fixtures/tool-context/realistic-catalog.json |
   node scripts/report-tool-context.mjs \
     --budget scripts/fixtures/tool-context/realistic-full-budget.json -
 ```
 
-Use `--projection progressive` and `realistic-progressive-budget.json` for the
-other view. A change to what the gateway adds to every tool or every upstream
-should quote the reports for both views before and after the change. The same
-ratchet rule applies to both budgets.
+A change to what the gateway adds to every tool or every upstream should quote
+the report before and after the change. The same ratchet rule applies to this
+budget.
 
 The checked-in fixture at
 `scripts/fixtures/tool-context/standard-tools-list.json` is intentionally a
@@ -169,12 +161,6 @@ dashboard charts their 95th percentiles.
   cannot be added up across pages. To compare a whole catalog with the
   realistic full view, capture every page as described under
   [reproducible report](#reproducible-report).
-- A legacy `progressive` series covers every list a progressive session
-  receives: the per-upstream adapters alone at first, then the adapters plus
-  the tools the session has disclosed. To measure the adapter-only cost, which
-  grows with the number of upstreams, capture a new session's first list. If
-  that capture is close to the full list for the same authorization view,
-  progressive disclosure is no longer saving context.
 - For a breakdown by field or by tool, or to find repeated content, capture
   `tools/list` for one authorization view and run the reporter on it.
 
@@ -183,7 +169,7 @@ dashboard charts their 95th percentiles.
 The downstream contract stays standard MCP. A client or host may defer the
 gateway server and search its catalog, but an upstream must not need to know
 that it is behind this gateway or emit host-specific metadata. The gateway can
-offer compatibility projections separately; it must preserve downstream tool
+offer a compact projection separately; it must preserve downstream tool
 descriptions, schema validation meaning, titles, annotations, and extension
 metadata when it projects directly callable tools.
 
@@ -195,11 +181,6 @@ metadata. The callable name gains the `<server>.` namespace, and legal schema
 spellings that shipping MCP clients handle unevenly receive the
 validation-equivalent portability projection documented in
 `docs/agents/mcp-tool-docs.md`.
-Synthetic legacy `searchTools` descriptions likewise carry only the upstream
-name and purpose; their shared discovery and invocation guidance stays in the
-server instructions instead of repeating once per visible upstream. Those
-adapters appear only in a legacy session's progressive list, whose
-instructions carry that guidance; a full list omits them.
 
 Some hosts may choose to render server instructions beside every tool in their
 own model prompt. That rendering is outside the MCP wire contract. To verify

@@ -2,8 +2,8 @@
 //!
 //! The suite is split into "light" and "heavy" tiers. `light` is meant to
 //! run in ~5 seconds on a live gateway and gates PR merges; `heavy` adds
-//! pagination, error-shape, and refresh-token round-trip checks useful
-//! before cutting a release.
+//! unsupported-version refusal, unknown-tool error-shape, and refresh-token
+//! round-trip checks useful before cutting a release.
 
 pub mod heavy;
 pub mod light;

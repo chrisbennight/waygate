@@ -1,7 +1,7 @@
-//! End-to-end test for the `GatewayServer` legacy compatibility surface. Drives the
-//! inherent `dispatch_tool_call` / `list_meta_tools` helpers against a fake
-//! upstream catalog so we don't have to stand up a real rmcp transport just
-//! to assert the meta-tool shape.
+//! End-to-end tests for the `GatewayServer` tool and resource surface. Drives
+//! the inherent `dispatch_tool_call`, `list_visible_tools`, and resource
+//! helpers against a fake upstream catalog so the tests need no real rmcp
+//! transport.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -460,50 +460,6 @@ impl UpstreamCatalog for FakeCatalog {
     }
 }
 
-struct GenerationFlipCatalog {
-    index: waygate_mcp::SearchIndex,
-    calls: AtomicUsize,
-    before: Vec<Tool>,
-    after: Vec<Tool>,
-}
-
-#[async_trait]
-impl UpstreamCatalog for GenerationFlipCatalog {
-    async fn list_servers(&self) -> Vec<String> {
-        vec!["example-messages".to_owned()]
-    }
-
-    async fn list_tools(&self, server: &str) -> Result<Vec<Tool>, McpError> {
-        if server != "example-messages" {
-            return Err(McpError::invalid_params(
-                format!("unknown server {server}"),
-                None,
-            ));
-        }
-        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            self.index
-                .replace_server("example-messages", &self.after)
-                .expect("flip index generation");
-            Ok(self.before.clone())
-        } else {
-            Ok(self.after.clone())
-        }
-    }
-
-    async fn call_tool(
-        &self,
-        server: &str,
-        tool_name: &str,
-        _args: Option<Map<String, Value>>,
-        _principal: Option<&Principal>,
-        _admitted: Option<&waygate_mcp::catalog::InvocationContractIdentity>,
-    ) -> Result<CallToolResult, McpError> {
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "called {server}.{tool_name}"
-        ))]))
-    }
-}
-
 fn tool(name: &str, description: &str) -> Tool {
     let schema = json!({"type": "object", "properties": {}})
         .as_object()
@@ -534,34 +490,20 @@ fn obj(v: Value) -> Map<String, Value> {
 }
 
 #[test]
-fn server_instructions_are_concise_and_projection_specific() {
-    let catalog: SharedCatalog = FakeCatalog::new(Vec::new());
-    let legacy = GatewayServer::new(catalog.clone()).get_info();
-    let full = GatewayServer::new(catalog)
-        .with_eager_tools_list(true)
-        .get_info();
+fn server_instructions_are_concise_and_point_to_the_full_catalog() {
+    let info = GatewayServer::new(FakeCatalog::new(Vec::new())).get_info();
 
-    for info in [&legacy, &full] {
-        assert_eq!(info.server_info.name, "mcp-tool-search-gateway");
-        assert_eq!(info.server_info.title.as_deref(), Some("Waygate"));
-    }
-
+    assert_eq!(info.server_info.name, "mcp-tool-search-gateway");
+    assert_eq!(info.server_info.title.as_deref(), Some("Waygate"));
+    let instructions = info.instructions.expect("server instructions");
     assert_eq!(
-        legacy.instructions.as_deref(),
-        Some(
-            "Use `<server>.searchTools` to discover tools or schemas; call results as `<server>.<toolName>`."
-        ),
+        instructions,
+        "Call tools as `<server>.<toolName>`; the authorized catalog is in `tools/list`.",
     );
-    assert_eq!(
-        full.instructions.as_deref(),
-        Some("Call tools as `<server>.<toolName>`; the authorized catalog is in `tools/list`."),
+    assert!(
+        instructions.len() < 100,
+        "server instructions should be concise enough to present once at namespace level",
     );
-    for instructions in [legacy.instructions, full.instructions] {
-        assert!(
-            instructions.expect("server instructions").len() < 100,
-            "server instructions should be concise enough to present once at namespace level",
-        );
-    }
 }
 
 #[tokio::test]
@@ -2088,196 +2030,7 @@ async fn a_mixed_refusal_reports_the_condition_the_caller_could_still_satisfy() 
 }
 
 #[tokio::test]
-async fn list_meta_tools_emits_one_per_upstream() {
-    let catalog: SharedCatalog = FakeCatalog::new(vec![
-        (
-            "example-messages".into(),
-            vec![tool("send", "send a message")],
-        ),
-        (
-            "example-observability".into(),
-            vec![tool("query", "run a query")],
-        ),
-    ]);
-    let server = GatewayServer::new(catalog);
-
-    let metas = server.list_meta_tools(None).await;
-    let names: Vec<&str> = metas.iter().map(|t| t.name.as_ref()).collect();
-    assert_eq!(
-        names,
-        vec![
-            "example-messages.searchTools",
-            "example-observability.searchTools"
-        ]
-    );
-    // Shared discovery and invocation guidance belongs to server instructions,
-    // not every synthetic declaration. The schema teaches the request and
-    // response contract while the description carries only per-server context.
-    assert_eq!(
-        metas[0].title.as_deref(),
-        Some("example-messages — search tools")
-    );
-    assert_eq!(
-        metas[0].description.as_deref(),
-        Some("Search callable operations and type schemas on the `example-messages` upstream."),
-    );
-    assert_eq!(
-        metas[1].description.as_deref(),
-        Some(
-            "Search callable operations and type schemas on the `example-observability` upstream."
-        ),
-    );
-    assert!(metas[0].input_schema.contains_key("properties"));
-    assert_eq!(metas[0].output_schema.as_ref().unwrap()["type"], "object");
-    let annotations = metas[0].annotations.as_ref().expect("annotations");
-    assert_eq!(annotations.read_only_hint, Some(true));
-    assert_eq!(annotations.destructive_hint, Some(false));
-    assert_eq!(annotations.idempotent_hint, Some(true));
-    assert_eq!(annotations.open_world_hint, Some(false));
-}
-
-#[tokio::test]
-async fn legacy_visible_search_tools_collision_fails_with_recovery_guidance() {
-    let catalog: SharedCatalog = FakeCatalog::new(vec![(
-        "example-messages".into(),
-        vec![tool("searchTools", "ordinary upstream tool")],
-    )]);
-    let server = GatewayServer::new(catalog);
-
-    let error = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools")
-                .with_arguments(obj(json!({"mode": "operations"}))),
-            None,
-        )
-        .await
-        .expect_err("a legacy peer cannot disambiguate the shared tool name");
-
-    assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-    assert!(error.message.contains("use MCP 2026"));
-    let data = error.data.expect("stable collision data");
-    assert_eq!(data["error"], "legacy_search_tools_name_collision");
-    assert_eq!(data["adapter"]["id"], "gateway.search-tools.compat");
-    assert_eq!(data["adapter"]["version"], "1");
-    assert_eq!(data["tool"], "example-messages.searchTools");
-}
-
-#[tokio::test]
-async fn legacy_withheld_search_tools_collision_keeps_adapter_callable() {
-    let catalog: SharedCatalog = FakeCatalog::new(vec![(
-        "example-messages".into(),
-        vec![
-            tool("send", "send a message"),
-            tool_without_mcp_object_root("searchTools", "withheld upstream tool"),
-        ],
-    )]);
-    let server = GatewayServer::new(catalog);
-
-    let result = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools")
-                .with_arguments(obj(json!({"mode": "operations"}))),
-            None,
-        )
-        .await
-        .expect("a withheld collision cannot shadow the visible adapter");
-    let operations = result.structured_content.unwrap()["operations"]
-        .as_array()
-        .cloned()
-        .expect("operations array");
-    assert_eq!(operations.len(), 1);
-    assert_eq!(operations[0]["name"], "example-messages.send");
-}
-
-#[tokio::test]
-async fn admitted_schema_withheld_search_tools_collision_keeps_adapter_callable() {
-    struct AdmittedSchemaWithheldCollisionCatalog;
-
-    #[async_trait]
-    impl UpstreamCatalog for AdmittedSchemaWithheldCollisionCatalog {
-        async fn list_servers(&self) -> Vec<String> {
-            vec!["example-messages".to_owned()]
-        }
-
-        async fn list_tools(&self, _server: &str) -> Result<Vec<Tool>, McpError> {
-            Ok(vec![
-                tool("send", "send a message"),
-                tool("searchTools", "raw definition is publishable"),
-            ])
-        }
-
-        async fn call_tool(
-            &self,
-            _server: &str,
-            _tool_name: &str,
-            _args: Option<Map<String, Value>>,
-            _principal: Option<&Principal>,
-            _admitted: Option<&waygate_mcp::catalog::InvocationContractIdentity>,
-        ) -> Result<CallToolResult, McpError> {
-            panic!("the withheld direct collision must not dispatch")
-        }
-
-        async fn resolve_invocation_tool(
-            &self,
-            _tenant: &str,
-            server: &str,
-            tool_name: &str,
-        ) -> waygate_mcp::catalog::ResolvedInvocationTool {
-            let facts = ToolFacts {
-                server: server.to_owned(),
-                name: tool_name.to_owned(),
-                risk: RiskTier::Low,
-                side_effects: false,
-                pii: false,
-                requires_approval: false,
-                requires_approval_known: true,
-            };
-            let definition = tool(tool_name, "definition captured with admitted facts");
-            if tool_name == "searchTools" {
-                let unavailable_input = json!({
-                    "type": "object",
-                    "properties": {
-                        "value": {"$ref": "https://schemas.example/unavailable.json"}
-                    }
-                });
-                waygate_mcp::catalog::ResolvedInvocationTool::Ready(
-                    waygate_mcp::catalog::InvocationToolSnapshot::catalog(
-                        facts,
-                        uuid::Uuid::nil(),
-                        "unpublishable-admission".to_owned(),
-                        Some(unavailable_input),
-                        None,
-                    )
-                    .with_published_definition(Some(definition)),
-                )
-            } else {
-                waygate_mcp::catalog::ResolvedInvocationTool::Ready(
-                    waygate_mcp::catalog::InvocationToolSnapshot::manifest_fallback(facts, true)
-                        .with_published_definition(Some(definition)),
-                )
-            }
-        }
-    }
-
-    let server = GatewayServer::new(Arc::new(AdmittedSchemaWithheldCollisionCatalog));
-    let result = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools")
-                .with_arguments(obj(json!({"mode": "operations"}))),
-            None,
-        )
-        .await
-        .expect("an unpublishable admitted collision cannot shadow the adapter");
-    let operations = result.structured_content.unwrap()["operations"]
-        .as_array()
-        .cloned()
-        .expect("operations array");
-    assert_eq!(operations.len(), 1);
-    assert_eq!(operations[0]["name"], "example-messages.send");
-}
-
-#[tokio::test]
-async fn search_tools_probe_hides_server_denied_by_discovery_policy() {
+async fn server_discovery_denial_hides_the_server_from_tools_list() {
     struct ServerDiscoveryDenied;
 
     #[async_trait]
@@ -2293,58 +2046,24 @@ async fn search_tools_probe_hides_server_denied_by_discovery_policy() {
 
     let catalog: SharedCatalog = FakeCatalog::new(vec![(
         "example-messages".into(),
-        vec![
-            tool("send", "send a message"),
-            tool("searchTools", "ordinary upstream tool"),
-        ],
+        vec![tool("send", "send a message")],
     )]);
     let server = GatewayServer::with_authz(catalog, Arc::new(ServerDiscoveryDenied));
 
-    let error = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools")
-                .with_arguments(obj(json!({"mode": "operations"}))),
-            Some(&maker()),
-        )
+    // The tool-level verdict allows the call, so only the server-level
+    // discovery decision can remove the upstream from the catalog.
+    let listed: Vec<String> = server
+        .list_visible_tools(Some(&maker()))
         .await
-        .expect_err("server discovery denial must hide both meanings of the shared name");
-
-    assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-    assert_eq!(error.message, "unknown upstream: example-messages");
-    assert!(error.data.is_none());
-}
-
-#[tokio::test]
-async fn search_tools_operations_returns_upstream_tools() {
-    let catalog: SharedCatalog = FakeCatalog::new(vec![(
-        "example-messages".into(),
-        vec![
-            tool("send_message", "send a message"),
-            tool("list_contacts", "list contacts"),
-        ],
-    )]);
-    let server = GatewayServer::new(catalog);
-
-    let result = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools")
-                .with_arguments(obj(json!({"mode": "operations"}))),
-            None,
-        )
-        .await
-        .expect("dispatch");
-
-    let structured = result.structured_content.expect("structured_content");
-    let ops = structured
-        .get("operations")
-        .and_then(|v| v.as_array())
-        .expect("operations array");
-    let names: Vec<&str> = ops
-        .iter()
-        .map(|o| o.get("name").and_then(|v| v.as_str()).unwrap())
+        .into_iter()
+        .map(|tool| tool.name.to_string())
         .collect();
-    assert!(names.contains(&"example-messages.send_message"));
-    assert!(names.contains(&"example-messages.list_contacts"));
+    assert!(
+        !listed
+            .iter()
+            .any(|name| name.starts_with("example-messages.")),
+        "a server denied by discovery policy must contribute no tools: {listed:?}"
+    );
 }
 
 #[tokio::test]
@@ -2356,7 +2075,7 @@ async fn malformed_upstream_input_schema_isolated_from_catalog() {
             tool_without_mcp_object_root("send_message", "send a message"),
         ],
     )]);
-    let server = GatewayServer::new(catalog).with_eager_tools_list(true);
+    let server = GatewayServer::new(catalog);
 
     let visible_tools = server.list_visible_tools(None).await;
     let listed: Vec<String> = visible_tools
@@ -2373,31 +2092,10 @@ async fn malformed_upstream_input_schema_isolated_from_catalog() {
         .expect("tools/list tools array")
         .iter()
         .all(|tool| tool["inputSchema"]["type"] == "object"));
-
-    let searched = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools")
-                .with_arguments(obj(json!({"mode": "operations"}))),
-            None,
-        )
-        .await
-        .expect("valid tools remain discoverable");
-    let operations = searched
-        .structured_content
-        .as_ref()
-        .and_then(|value| value.get("operations"))
-        .and_then(Value::as_array)
-        .expect("operations");
-    assert_eq!(operations.len(), 1);
-    assert_eq!(operations[0]["name"], "example-messages.list_contacts");
-
-    assert!(types_call(&server, "example-messages.send_message")
-        .await
-        .is_err());
 }
 
 #[tokio::test]
-async fn tools_list_and_type_lookup_apply_the_final_portability_projection() {
+async fn tools_list_applies_the_final_portability_projection() {
     let input = Arc::new(
         json!({
             "type": "object",
@@ -2424,7 +2122,7 @@ async fn tools_list_and_type_lookup_apply_the_final_portability_projection() {
         Tool::new("portable_at_boundary", "test tool", input).with_raw_output_schema(output);
     let catalog: SharedCatalog =
         FakeCatalog::new(vec![("example-messages".into(), vec![upstream])]);
-    let server = GatewayServer::new(catalog).with_eager_tools_list(true);
+    let server = GatewayServer::new(catalog);
 
     let tools = server.list_visible_tools(None).await;
     let listed = tools
@@ -2437,133 +2135,14 @@ async fn tools_list_and_type_lookup_apply_the_final_portability_projection() {
     assert!(waygate_mcp::tool_schema::inspector_portable_schema(
         &Value::Object(listed.output_schema.as_ref().unwrap().as_ref().clone()),
     ));
-
-    let resolved = types_call(&server, "example-messages.portable_at_boundary#output")
-        .await
-        .expect("portable output type resolves");
-    assert!(waygate_mcp::tool_schema::inspector_portable_schema(
-        &resolved.structured_content.unwrap()["jsonSchema"],
-    ));
 }
 
 #[tokio::test]
-async fn search_tools_operations_filters_by_query() {
-    let catalog: SharedCatalog = FakeCatalog::new(vec![(
-        "example-messages".into(),
-        vec![
-            tool("send_message", "send a message"),
-            tool("list_contacts", "enumerate contacts"),
-        ],
-    )]);
-    let server = GatewayServer::new(catalog);
-
-    let result = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools").with_arguments(obj(
-                json!({"mode": "operations", "filters": {"query": "contact"}}),
-            )),
-            None,
-        )
-        .await
-        .expect("dispatch");
-
-    let ops = result
-        .structured_content
-        .as_ref()
-        .and_then(|v| v.get("operations"))
-        .and_then(|v| v.as_array())
-        .unwrap();
-    let names: Vec<&str> = ops
-        .iter()
-        .map(|o| o.get("name").and_then(|v| v.as_str()).unwrap())
-        .collect();
-    assert_eq!(names, vec!["example-messages.list_contacts"]);
-}
-
-#[tokio::test]
-async fn search_tools_defaults_and_aliases_return_the_canonical_result() {
-    let catalog: SharedCatalog = FakeCatalog::new(vec![(
-        "example-messages".into(),
-        vec![
-            tool("send_message", "send a message"),
-            tool("list_contacts", "enumerate contacts"),
-        ],
-    )]);
-    let server = GatewayServer::new(catalog);
-    for (canonical, alternate) in [
-        (json!({"mode": "operations"}), json!({})),
-        (
-            json!({"mode": "operations", "filters": {"query": "contact"}}),
-            json!({"query": "contact"}),
-        ),
-        (
-            json!({"mode": "operations", "filters": {"query": "contact"}, "detail": "nameDescription"}),
-            json!({"mode": "search", "query": "contact", "detail": "summary"}),
-        ),
-        (
-            json!({"mode": "operations", "detail": "nameOnly"}),
-            json!({"detail": "names"}),
-        ),
-        (
-            json!({"mode": "types", "name": "example-messages.send_message#input"}),
-            json!({"name": "example-messages.send_message#input"}),
-        ),
-        (
-            json!({"mode": "types", "name": "example-messages.send_message#input"}),
-            json!({"mode": "describe", "name": "example-messages.send_message#input"}),
-        ),
-    ] {
-        let mut results = Vec::new();
-        for arguments in [canonical, alternate] {
-            results.push(
-                server
-                    .dispatch_tool_call(
-                        CallToolRequestParams::new("example-messages.searchTools")
-                            .with_arguments(obj(arguments)),
-                        None,
-                    )
-                    .await
-                    .expect("search succeeds")
-                    .structured_content,
-            );
-        }
-        assert_eq!(results[0], results[1]);
-        assert!(results[0].is_some());
-    }
-}
-
-#[tokio::test]
-async fn search_tools_types_returns_input_schema() {
-    let catalog: SharedCatalog = FakeCatalog::new(vec![(
-        "example-messages".into(),
-        vec![tool("send_message", "send")],
-    )]);
-    let server = GatewayServer::new(catalog);
-
-    let result = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools").with_arguments(obj(
-                json!({"mode": "types", "name": "example-messages.send_message"}),
-            )),
-            None,
-        )
-        .await
-        .expect("dispatch");
-
-    let structured = result.structured_content.expect("structured_content");
-    assert_eq!(
-        structured.get("name").and_then(|v| v.as_str()),
-        Some("example-messages.send_message")
-    );
-    assert!(structured.get("jsonSchema").is_some());
-}
-
-#[tokio::test]
-async fn search_tools_types_refuses_quarantined_tool_without_principal() {
-    struct QuarantinedTypeCatalog;
+async fn quarantined_tool_stays_hidden_and_uncallable_without_principal() {
+    struct QuarantinedToolCatalog;
 
     #[async_trait]
-    impl UpstreamCatalog for QuarantinedTypeCatalog {
+    impl UpstreamCatalog for QuarantinedToolCatalog {
         async fn list_servers(&self) -> Vec<String> {
             vec!["example-messages".to_owned()]
         }
@@ -2603,28 +2182,27 @@ async fn search_tools_types_refuses_quarantined_tool_without_principal() {
         }
     }
 
-    let server = GatewayServer::new(Arc::new(QuarantinedTypeCatalog));
-    for arguments in [
-        json!({"mode": "types", "name": "example-messages.quarantined#input"}),
-        json!({"mode": "describe", "name": "example-messages.quarantined#input"}),
-        json!({"name": "example-messages.quarantined#input"}),
-    ] {
-        let error = server
-            .dispatch_tool_call(
-                CallToolRequestParams::new("example-messages.searchTools")
-                    .with_arguments(obj(arguments)),
-                None,
-            )
-            .await
-            .expect_err("auth-disabled dispatch must still enforce runtime quarantine");
+    // No principal is the auth-disabled mode; runtime quarantine still
+    // applies to both discovery and invocation.
+    let server = GatewayServer::new(Arc::new(QuarantinedToolCatalog));
+    let listed: Vec<String> = server
+        .list_visible_tools(None)
+        .await
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert!(
+        !listed.contains(&"example-messages.quarantined".to_owned()),
+        "a quarantined tool must not be listed: {listed:?}"
+    );
 
-        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-        assert_eq!(
-            error.message,
-            "unknown type: example-messages.quarantined#input"
-        );
-        assert!(error.data.is_none());
-    }
+    server
+        .dispatch_tool_call(
+            CallToolRequestParams::new("example-messages.quarantined"),
+            None,
+        )
+        .await
+        .expect_err("auth-disabled dispatch must still enforce runtime quarantine");
 }
 
 /// An upstream tool declaring the FULL self-documenting surface — title, output
@@ -2667,17 +2245,6 @@ fn rich_tool(name: &str) -> Tool {
     tool
 }
 
-/// Drive `example-messages.searchTools` in `mode=types` for one type name.
-async fn types_call(server: &GatewayServer, name: &str) -> Result<CallToolResult, McpError> {
-    server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools")
-                .with_arguments(obj(json!({"mode": "types", "name": name}))),
-            None,
-        )
-        .await
-}
-
 #[tokio::test]
 async fn upstream_tools_list_preserves_title_output_schema_and_annotations() {
     // tools/list must preserve an upstream tool's self-documentation — title,
@@ -2687,7 +2254,7 @@ async fn upstream_tools_list_preserves_title_output_schema_and_annotations() {
         "example-messages".into(),
         vec![rich_tool("send_message")],
     )]);
-    let server = GatewayServer::new(catalog).with_eager_tools_list(true);
+    let server = GatewayServer::new(catalog);
 
     let tools = server.list_visible_tools(None).await;
     let t = tools
@@ -2738,105 +2305,6 @@ async fn upstream_tools_list_preserves_title_output_schema_and_annotations() {
 }
 
 #[tokio::test]
-async fn search_tools_types_resolves_input_and_output_schema() {
-    // The operation descriptor advertises input_type `…#input` and output_type
-    // `…#output`; mode=types must resolve BOTH — including the upstream's output
-    // schema plus gateway delivery envelopes — or those handles are dead.
-    let catalog: SharedCatalog = FakeCatalog::new(vec![(
-        "example-messages".into(),
-        vec![
-            rich_tool("send_message"),
-            tool("list_contacts", "list contacts"),
-        ],
-    )]);
-    let server = GatewayServer::new(catalog);
-
-    // #output → the upstream's OUTPUT schema with its meaning preserved.
-    let out = types_call(&server, "example-messages.send_message#output")
-        .await
-        .expect("output type resolves");
-    let body = out.structured_content.expect("structured");
-    assert_eq!(body["name"], "example-messages.send_message#output");
-    assert_eq!(
-        body["jsonSchema"]["anyOf"][0]["properties"]["message_id"]["type"], "string",
-        "output schema surfaced verbatim",
-    );
-
-    // #input → the input schema.
-    let inp = types_call(&server, "example-messages.send_message#input")
-        .await
-        .expect("input type resolves");
-    assert_eq!(
-        inp.structured_content.unwrap()["jsonSchema"]["properties"]["to"]["type"],
-        "string",
-    );
-
-    // Bare name still resolves to the input schema (backward compatible).
-    let bare = types_call(&server, "example-messages.send_message")
-        .await
-        .expect("bare type resolves");
-    let bare_body = bare.structured_content.unwrap();
-    assert_eq!(bare_body["name"], "example-messages.send_message");
-    assert_eq!(
-        bare_body["jsonSchema"]["properties"]["to"]["type"],
-        "string"
-    );
-
-    // #output on a tool that declares NO output schema → a faithful error, never
-    // a fabricated empty schema.
-    assert!(
-        types_call(&server, "example-messages.list_contacts#output")
-            .await
-            .is_err(),
-        "a tool with no output schema must error, not fabricate one",
-    );
-}
-
-#[tokio::test]
-async fn search_tools_operations_advertises_output_type_iff_output_schema() {
-    // output_type is the handle to a tool's result schema; advertise it exactly
-    // when the upstream actually declares one — present for a documented tool,
-    // null for one without (so a client never chases a dead handle).
-    let catalog: SharedCatalog = FakeCatalog::new(vec![(
-        "example-messages".into(),
-        vec![
-            rich_tool("send_message"),
-            tool("list_contacts", "list contacts"),
-        ],
-    )]);
-    let server = GatewayServer::new(catalog);
-
-    let result = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools")
-                .with_arguments(obj(json!({"mode": "operations"}))),
-            None,
-        )
-        .await
-        .expect("dispatch");
-    let ops = result
-        .structured_content
-        .as_ref()
-        .and_then(|v| v.get("operations"))
-        .and_then(|v| v.as_array())
-        .unwrap();
-    let find = |name: &str| {
-        ops.iter()
-            .find(|o| o.get("name").and_then(|v| v.as_str()) == Some(name))
-            .unwrap_or_else(|| panic!("no operation {name}"))
-    };
-    assert_eq!(
-        find("example-messages.send_message")["outputType"],
-        "example-messages.send_message#output",
-        "documented tool advertises its output_type",
-    );
-    assert!(
-        find("example-messages.list_contacts")["outputType"].is_null(),
-        "tool with no output schema advertises no output_type",
-    );
-}
-
-#[tokio::test]
 async fn call_tool_proxies_fully_qualified_names() {
     let fake = FakeCatalog::new(vec![(
         "example-messages".into(),
@@ -2863,230 +2331,6 @@ async fn call_tool_proxies_fully_qualified_names() {
     );
 }
 
-struct ClassifiedCatalog {
-    tools: Vec<Tool>,
-    facts: Vec<(String, RiskTier, bool)>,
-}
-
-#[async_trait]
-impl UpstreamCatalog for ClassifiedCatalog {
-    async fn list_servers(&self) -> Vec<String> {
-        vec!["example-messages".into()]
-    }
-    async fn list_tools(&self, _server: &str) -> Result<Vec<Tool>, McpError> {
-        Ok(self.tools.clone())
-    }
-    async fn call_tool(
-        &self,
-        _server: &str,
-        _tool_name: &str,
-        _args: Option<Map<String, Value>>,
-        _principal: Option<&Principal>,
-        _admitted: Option<&waygate_mcp::catalog::InvocationContractIdentity>,
-    ) -> Result<CallToolResult, McpError> {
-        Ok(CallToolResult::success(vec![Content::text("ok")]))
-    }
-    fn tool_facts(&self, server: &str, tool_name: &str) -> ToolFacts {
-        let (risk, side) = self
-            .facts
-            .iter()
-            .find(|(n, _, _)| n == tool_name)
-            .map(|(_, r, s)| (*r, *s))
-            .unwrap_or((RiskTier::Low, false));
-        ToolFacts {
-            server: server.into(),
-            name: tool_name.into(),
-            risk,
-            side_effects: side,
-            pii: false,
-            requires_approval: false,
-            requires_approval_known: true,
-        }
-    }
-}
-
-#[tokio::test]
-async fn descriptor_carries_classification_from_catalog() {
-    let catalog: SharedCatalog = Arc::new(ClassifiedCatalog {
-        tools: vec![
-            tool("send_message", "send a message"),
-            tool("list_contacts", "list contacts"),
-        ],
-        facts: vec![
-            ("send_message".into(), RiskTier::High, true),
-            ("list_contacts".into(), RiskTier::Low, false),
-        ],
-    });
-    let server = GatewayServer::new(catalog);
-
-    let result = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools")
-                .with_arguments(obj(json!({"mode": "operations"}))),
-            None,
-        )
-        .await
-        .expect("dispatch");
-
-    let ops = result
-        .structured_content
-        .as_ref()
-        .and_then(|v| v.get("operations"))
-        .and_then(|v| v.as_array())
-        .expect("operations");
-
-    let send = ops
-        .iter()
-        .find(|o| o.get("name").and_then(|v| v.as_str()) == Some("example-messages.send_message"))
-        .unwrap();
-    assert_eq!(send.get("riskLevel").and_then(|v| v.as_str()), Some("high"));
-    assert_eq!(
-        send.get("sideEffects").and_then(|v| v.as_bool()),
-        Some(true)
-    );
-
-    let list = ops
-        .iter()
-        .find(|o| o.get("name").and_then(|v| v.as_str()) == Some("example-messages.list_contacts"))
-        .unwrap();
-    assert_eq!(list.get("riskLevel").and_then(|v| v.as_str()), Some("low"));
-    assert_eq!(
-        list.get("sideEffects").and_then(|v| v.as_bool()),
-        Some(false)
-    );
-}
-
-#[tokio::test]
-async fn risk_level_filter_selects_matching_tools() {
-    let catalog: SharedCatalog = Arc::new(ClassifiedCatalog {
-        tools: vec![tool("send_message", "send"), tool("list_contacts", "list")],
-        facts: vec![
-            ("send_message".into(), RiskTier::High, true),
-            ("list_contacts".into(), RiskTier::Low, false),
-        ],
-    });
-    let server = GatewayServer::new(catalog);
-
-    let result = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools").with_arguments(obj(
-                json!({"mode": "operations", "filters": {"riskLevel": "high"}}),
-            )),
-            None,
-        )
-        .await
-        .expect("dispatch");
-
-    let names: Vec<String> = result
-        .structured_content
-        .as_ref()
-        .and_then(|v| v.get("operations"))
-        .and_then(|v| v.as_array())
-        .unwrap()
-        .iter()
-        .map(|o| o.get("name").and_then(|v| v.as_str()).unwrap().to_string())
-        .collect();
-    assert_eq!(names, vec!["example-messages.send_message"]);
-}
-
-#[tokio::test]
-async fn scope_filter_selects_tools_by_required_scope() {
-    // send_message is High ⇒ requires `mcp:invoke:high`; list_contacts is Low
-    // ⇒ no required scope. Filtering by `scope: "mcp:invoke:high"` must return
-    // only the high-risk tool, and that descriptor must expose the same scope
-    // (so the value a client filters by is the value it sees and the call is
-    // gated on).
-    let catalog: SharedCatalog = Arc::new(ClassifiedCatalog {
-        tools: vec![tool("send_message", "send"), tool("list_contacts", "list")],
-        facts: vec![
-            ("send_message".into(), RiskTier::High, true),
-            ("list_contacts".into(), RiskTier::Low, false),
-        ],
-    });
-    let server = GatewayServer::new(catalog);
-
-    let result = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools").with_arguments(obj(
-                json!({"mode": "operations", "filters": {"scope": "mcp:invoke:high"}}),
-            )),
-            None,
-        )
-        .await
-        .expect("dispatch");
-
-    let ops = result
-        .structured_content
-        .as_ref()
-        .and_then(|v| v.get("operations"))
-        .and_then(|v| v.as_array())
-        .unwrap();
-    let names: Vec<String> = ops
-        .iter()
-        .map(|o| o.get("name").and_then(|v| v.as_str()).unwrap().to_string())
-        .collect();
-    assert_eq!(names, vec!["example-messages.send_message"]);
-    // The descriptor exposes the derived scope.
-    assert_eq!(
-        ops[0].get("scope").and_then(|v| v.as_str()),
-        Some("mcp:invoke:high"),
-    );
-}
-
-#[tokio::test]
-async fn low_risk_tool_omits_scope_and_is_excluded_by_scope_filter() {
-    // A low-risk tool has no required scope: its descriptor omits `scope`, and
-    // a `scope` filter (which only matches a concrete required scope) excludes
-    // it. Filtering by a concrete scope (`mcp:invoke:high`) returns nothing here.
-    let catalog: SharedCatalog = Arc::new(ClassifiedCatalog {
-        tools: vec![tool("list_contacts", "list")],
-        facts: vec![("list_contacts".into(), RiskTier::Low, false)],
-    });
-    let server = GatewayServer::new(catalog);
-
-    // Unfiltered: the low-risk descriptor must NOT carry a scope field.
-    let all = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools")
-                .with_arguments(obj(json!({"mode": "operations"}))),
-            None,
-        )
-        .await
-        .expect("dispatch");
-    let ops = all
-        .structured_content
-        .as_ref()
-        .and_then(|v| v.get("operations"))
-        .and_then(|v| v.as_array())
-        .unwrap();
-    assert_eq!(ops.len(), 1);
-    assert!(
-        ops[0].get("scope").is_none(),
-        "low-risk tool must omit the scope field"
-    );
-
-    // Filtered by a concrete scope: the low-risk tool is excluded.
-    let filtered = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools").with_arguments(obj(
-                json!({"mode": "operations", "filters": {"scope": "mcp:invoke:high"}}),
-            )),
-            None,
-        )
-        .await
-        .expect("dispatch");
-    let filtered_ops = filtered
-        .structured_content
-        .as_ref()
-        .and_then(|v| v.get("operations"))
-        .and_then(|v| v.as_array())
-        .unwrap();
-    assert!(
-        filtered_ops.is_empty(),
-        "a concrete scope filter must exclude low-risk (no-scope) tools"
-    );
-}
-
 #[tokio::test]
 async fn bare_tool_name_is_rejected() {
     let catalog: SharedCatalog = FakeCatalog::new(vec![]);
@@ -3100,245 +2344,9 @@ async fn bare_tool_name_is_rejected() {
 }
 
 #[tokio::test]
-async fn search_tools_keeps_eligible_hits_after_filtering_indexed_tools() {
-    let eligible = tool(
-        "list_contacts",
-        "enumerate contacts and pick a message target",
-    );
-    let withheld = tool("send_message", "send a message to a contact");
-    let index = waygate_mcp::SearchIndex::new().expect("search index init");
-    index
-        .replace_server("example-messages", &[eligible.clone(), withheld])
-        .unwrap();
-    assert_eq!(
-        index
-            .search("example-messages", "message", 1)
-            .unwrap()
-            .unwrap(),
-        vec!["send_message"]
-    );
-    let catalog: SharedCatalog =
-        FakeCatalog::new(vec![("example-messages".into(), vec![eligible])]);
-    let server = GatewayServer::new(catalog).with_index(index);
-    let result = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools").with_arguments(obj(json!({
-                "mode":"operations", "filters":{"query":"message"}, "limit":usize::MAX
-            }))),
-            None,
-        )
-        .await
-        .unwrap();
-    let content = result.structured_content.unwrap();
-    assert_eq!(content["operations"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        content["operations"][0]["name"],
-        "example-messages.list_contacts"
-    );
-    assert!(content["next_cursor"].is_null());
-}
-
-#[tokio::test]
-async fn search_tools_uses_bm25_index_when_query_present() {
-    // Two tools where the query word appears in *both* name and description,
-    // but the BM25 signal should still prefer the one whose name is a direct
-    // match. This pins that we're actually asking the index rather than
-    // falling back to substring (substring would keep the source order).
-    let catalog: SharedCatalog = FakeCatalog::new(vec![(
-        "example-messages".into(),
-        vec![
-            tool(
-                "list_contacts",
-                "enumerate contacts and pick a message target",
-            ),
-            tool("send_message", "send a message to a contact"),
-        ],
-    )]);
-
-    let index = waygate_mcp::SearchIndex::new().expect("search index init");
-    // Mirror what the pool would have indexed.
-    let seeded = vec![
-        tool(
-            "list_contacts",
-            "enumerate contacts and pick a message target",
-        ),
-        tool("send_message", "send a message to a contact"),
-    ];
-    index
-        .replace_server("example-messages", &seeded)
-        .expect("index seed");
-
-    let server = GatewayServer::new(catalog).with_index(index);
-
-    let result = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools").with_arguments(obj(
-                json!({"mode": "operations", "filters": {"query": "message"}}),
-            )),
-            None,
-        )
-        .await
-        .expect("dispatch");
-
-    let names: Vec<String> = result
-        .structured_content
-        .as_ref()
-        .and_then(|v| v.get("operations"))
-        .and_then(|v| v.as_array())
-        .unwrap()
-        .iter()
-        .map(|o| o.get("name").and_then(|v| v.as_str()).unwrap().to_string())
-        .collect();
-
-    // BM25 should surface the tool whose *name* contains "message" ahead of
-    // the one that only mentions it in a descriptive phrase. If substring
-    // fallback fires instead, names stay in catalog-declaration order and
-    // this assertion flips.
-    assert_eq!(
-        names.first().map(String::as_str),
-        Some("example-messages.send_message"),
-        "BM25 should rank name-hit first, got {names:?}"
-    );
-}
-
-#[tokio::test]
-async fn search_tools_retries_when_catalog_and_index_generations_cross() {
-    let index = waygate_mcp::SearchIndex::new().expect("search index init");
-    let before = vec![tool("legacy_search", "legacy message search")];
-    let after = vec![tool("send_message", "send a message")];
-    index
-        .replace_server("example-messages", &before)
-        .expect("seed old index generation");
-    let catalog = Arc::new(GenerationFlipCatalog {
-        index: index.clone(),
-        calls: AtomicUsize::new(0),
-        before,
-        after,
-    });
-    let server = GatewayServer::new(catalog.clone()).with_index(index);
-
-    let result = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools").with_arguments(obj(
-                json!({"mode": "operations", "filters": {"query": "message"}}),
-            )),
-            None,
-        )
-        .await
-        .expect("dispatch");
-
-    let names: Vec<&str> = result
-        .structured_content
-        .as_ref()
-        .and_then(|value| value.get("operations"))
-        .and_then(|value| value.as_array())
-        .expect("operations")
-        .iter()
-        .map(|operation| operation["name"].as_str().expect("operation name"))
-        .collect();
-    assert_eq!(names, vec!["example-messages.send_message"]);
-    assert_eq!(
-        catalog.calls.load(Ordering::SeqCst),
-        3,
-        "two generation-stabilizing reads plus the static-catalog definition capture",
-    );
-}
-
-#[tokio::test]
-async fn list_visible_tools_initially_returns_only_meta_tools() {
-    // Freshly-initialized session: nothing has been revealed via searchTools
-    // yet, so `tools/list` must contain only the meta-tool entry.
-    let catalog: SharedCatalog = FakeCatalog::new(vec![(
-        "example-messages".into(),
-        vec![tool("send_message", "send")],
-    )]);
-    let server = GatewayServer::new(catalog);
-
-    let names: Vec<String> = server
-        .list_visible_tools(None)
-        .await
-        .into_iter()
-        .map(|t| t.name.to_string())
-        .collect();
-    assert_eq!(names, vec!["example-messages.searchTools"]);
-}
-
-#[tokio::test]
-async fn search_tools_operations_reveals_tools_to_tools_list() {
-    // After a `searchTools` call returns a set of operations, those tool
-    // names must appear in subsequent `tools/list` responses so strict
-    // clients (Claude Code today) can invoke them.
-    let catalog: SharedCatalog = FakeCatalog::new(vec![(
-        "example-messages".into(),
-        vec![
-            tool("send_message", "send a message"),
-            tool("list_contacts", "list contacts"),
-        ],
-    )]);
-    let server = GatewayServer::new(catalog);
-
-    server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools").with_arguments(obj(
-                json!({"mode": "operations", "filters": {"query": "message"}}),
-            )),
-            None,
-        )
-        .await
-        .expect("dispatch");
-
-    let mut names: Vec<String> = server
-        .list_visible_tools(None)
-        .await
-        .into_iter()
-        .map(|t| t.name.to_string())
-        .collect();
-    names.sort();
-    assert!(names.contains(&"example-messages.searchTools".to_string()));
-    assert!(
-        names.contains(&"example-messages.send_message".to_string()),
-        "expected revealed tool in tools/list, got {names:?}"
-    );
-    // The disclosure must arm `pending_notify` exactly once per new reveal.
-    assert!(
-        server.disclosed().take_pending_notify(),
-        "first searchTools call should arm tools/list_changed",
-    );
-}
-
-#[tokio::test]
-async fn pending_notify_does_not_rearm_on_repeat_search() {
-    // Calling searchTools again with the same filter re-reveals the same
-    // tools — the set does not grow, so no new `tools/list_changed` is
-    // warranted. This keeps notification traffic proportional to actual
-    // changes even if clients re-query aggressively.
-    let catalog: SharedCatalog = FakeCatalog::new(vec![(
-        "example-messages".into(),
-        vec![tool("send_message", "send")],
-    )]);
-    let server = GatewayServer::new(catalog);
-
-    for _ in 0..2 {
-        server
-            .dispatch_tool_call(
-                CallToolRequestParams::new("example-messages.searchTools")
-                    .with_arguments(obj(json!({"mode": "operations"}))),
-                None,
-            )
-            .await
-            .expect("dispatch");
-    }
-    // Take once (arms from the first call), second take should be false.
-    assert!(server.disclosed().take_pending_notify());
-    assert!(!server.disclosed().take_pending_notify());
-}
-
-#[tokio::test]
-async fn eager_tools_list_returns_full_catalog_without_search() {
-    // Operator escape hatch for clients that ignore tools/list_changed
-    // (claude-code#13646): the full upstream catalog shows up in
-    // `tools/list` immediately, with no `searchTools` call required. A full
-    // list repeats no per-server search adapter.
+async fn list_visible_tools_returns_the_full_catalog_in_canonical_order() {
+    // A fresh session lists every admitted upstream tool directly, sorted by
+    // qualified name so client caches see a stable array.
     let catalog: SharedCatalog = FakeCatalog::new(vec![
         (
             "example-messages".into(),
@@ -3352,7 +2360,7 @@ async fn eager_tools_list_returns_full_catalog_without_search() {
             vec![tool("query", "run a query")],
         ),
     ]);
-    let server = GatewayServer::new(catalog).with_eager_tools_list(true);
+    let server = GatewayServer::new(catalog);
 
     let names: Vec<String> = server
         .list_visible_tools(None)
@@ -3367,32 +2375,12 @@ async fn eager_tools_list_returns_full_catalog_without_search() {
             "example-messages.send_message",
             "example-observability.query",
         ],
-        "eager compatibility projections must be canonical for stable client caches",
+        "the full catalog must be canonical for stable client caches",
     );
 }
 
 #[tokio::test]
-async fn eager_tools_list_default_is_off() {
-    // Belt-and-suspenders: a plain `::new` must not eagerly dump the
-    // catalog. Covers accidental-default regressions if the flag's
-    // storage type changes.
-    let catalog: SharedCatalog = FakeCatalog::new(vec![(
-        "example-messages".into(),
-        vec![tool("send_message", "send")],
-    )]);
-    let server = GatewayServer::new(catalog);
-
-    let names: Vec<String> = server
-        .list_visible_tools(None)
-        .await
-        .into_iter()
-        .map(|t| t.name.to_string())
-        .collect();
-    assert_eq!(names, vec!["example-messages.searchTools"]);
-}
-
-#[tokio::test]
-async fn eager_projection_rechecks_authorization_on_every_list() {
+async fn tools_list_rechecks_authorization_on_every_list() {
     struct MutableToolAuthz(Arc<AtomicBool>);
 
     #[async_trait]
@@ -3419,8 +2407,7 @@ async fn eager_projection_rechecks_authorization_on_every_list() {
         "example-messages".into(),
         vec![tool("send_message", "send")],
     )]);
-    let server = GatewayServer::with_authz(catalog, Arc::new(MutableToolAuthz(allowed.clone())))
-        .with_eager_tools_list(true);
+    let server = GatewayServer::with_authz(catalog, Arc::new(MutableToolAuthz(allowed.clone())));
     let principal = maker();
 
     let before: Vec<String> = server
@@ -3440,12 +2427,12 @@ async fn eager_projection_rechecks_authorization_on_every_list() {
         .collect();
     assert!(
         !after.contains(&"example-messages.send_message".to_owned()),
-        "eager compatibility changes projection size, never authorization: {after:?}",
+        "a revoked tool must drop out of the next tools/list: {after:?}",
     );
 }
 
 #[tokio::test]
-async fn eager_projection_uses_definition_captured_with_governance_snapshot() {
+async fn tools_list_uses_definition_captured_with_governance_snapshot() {
     struct SnapshotDefinitionCatalog;
 
     #[async_trait]
@@ -3497,8 +2484,7 @@ async fn eager_projection_uses_definition_captured_with_governance_snapshot() {
         }
     }
 
-    let server =
-        GatewayServer::new(Arc::new(SnapshotDefinitionCatalog)).with_eager_tools_list(true);
+    let server = GatewayServer::new(Arc::new(SnapshotDefinitionCatalog));
     let listed = server.list_visible_tools(None).await;
     let definition = listed
         .iter()
@@ -3512,7 +2498,7 @@ async fn eager_projection_uses_definition_captured_with_governance_snapshot() {
 }
 
 #[tokio::test]
-async fn search_tools_uses_the_schemas_admitted_for_invocation() {
+async fn tools_list_publishes_the_schemas_admitted_for_invocation() {
     struct DivergentSchemaCatalog;
 
     impl DivergentSchemaCatalog {
@@ -3590,42 +2576,33 @@ async fn search_tools_uses_the_schemas_admitted_for_invocation() {
     }
 
     let server = GatewayServer::new(Arc::new(DivergentSchemaCatalog));
-    let operations = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools")
-                .with_arguments(obj(json!({"mode": "operations"}))),
-            None,
-        )
-        .await
-        .expect("operation discovery succeeds")
-        .structured_content
-        .expect("structured operation response");
-    assert_eq!(
-        operations["operations"][0]["outputType"], "example-messages.send_message#output",
-        "operation discovery advertises the admitted output contract",
-    );
+    let listed = server.list_visible_tools(None).await;
+    let definition = listed
+        .iter()
+        .find(|tool| tool.name.as_ref() == "example-messages.send_message")
+        .expect("the admitted tool is listed");
 
-    let input = types_call(&server, "example-messages.send_message#input")
-        .await
-        .expect("admitted input type resolves")
-        .structured_content
-        .expect("structured input type response");
     assert_eq!(
-        input["jsonSchema"]["properties"]["admitted_input"]["type"],
-        "string",
+        definition.description.as_deref(),
+        Some("definition captured with admitted facts"),
     );
-    assert!(input["jsonSchema"]["properties"]
-        .get("stale_input")
-        .is_none());
-
-    let output = types_call(&server, "example-messages.send_message#output")
-        .await
-        .expect("admitted output type resolves")
-        .structured_content
-        .expect("structured output type response");
     assert_eq!(
-        output["jsonSchema"]["anyOf"][0]["properties"]["admitted_output"]["type"],
-        "string",
+        definition.input_schema["properties"]["admitted_input"]["type"], "string",
+        "tools/list publishes the input contract admitted for invocation",
+    );
+    assert!(
+        definition.input_schema["properties"]
+            .get("stale_input")
+            .is_none(),
+        "the live definition's input schema must not replace the admitted one",
+    );
+    let output = definition
+        .output_schema
+        .as_ref()
+        .expect("the admitted output contract is published");
+    assert_eq!(
+        output["anyOf"][0]["properties"]["admitted_output"]["type"], "string",
+        "tools/list publishes the output contract admitted for invocation",
     );
 }
 
@@ -3837,17 +2814,16 @@ async fn builtin_tools_appear_in_tools_list_only_when_scoped() {
     )]);
     let server = GatewayServer::new(catalog).with_builtin_tools(Arc::new(StubBuiltin));
 
-    // No principal / unscoped: only the upstream meta-tool, no built-ins.
+    // No principal / unscoped: only the upstream tool, no built-ins.
     let anon: Vec<String> = server
         .list_visible_tools(None)
         .await
         .into_iter()
         .map(|t| t.name.to_string())
         .collect();
-    assert_eq!(anon, vec!["example-messages.searchTools"]);
+    assert_eq!(anon, vec!["example-messages.send"]);
 
-    // A maker holding `mcp:propose` additionally sees the built-in tool,
-    // listed directly (not behind a searchTools meta-tool).
+    // A maker holding `mcp:propose` additionally sees the built-in tool.
     let p = maker();
     let scoped: Vec<String> = server
         .list_visible_tools(Some(&p))

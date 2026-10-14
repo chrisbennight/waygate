@@ -54,7 +54,6 @@ rmcp = { workspace = true, features = [
     # send the present operator straight to a queued change's approval page.
     "elicitation",
 ] }
-tantivy.workspace = true
 
 [dev-dependencies]
 waygate-test-support.workspace = true

@@ -5,8 +5,8 @@
 //! migration, mirroring [`crate::routing`]. It is consumed by:
 //!
 //! - the boot-time seeder that upserts the env-configured
-//!   models ([`upsert_llm_model`]) and the `searchTools` surface that
-//!   lists them ([`list_llm_models`]);
+//!   models ([`upsert_llm_model`]) and the dashboard pages that list
+//!   them ([`list_llm_models`]);
 //! - the Cedar `Model` resource, which reads [`LlmModelRow::risk`];
 //! - token/cost budgets, which read the (optional) costing
 //!   columns on the projected row.

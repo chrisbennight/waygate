@@ -301,15 +301,11 @@ async fn a_catalog_change_during_a_batch_refuses_the_stale_projection() {
 }
 
 #[tokio::test]
-async fn http_pages_and_search_use_batches_instead_of_individual_catalog_reads() {
+async fn http_pages_use_batches_instead_of_individual_catalog_reads() {
     let (pool, catalog, _upstream, names) = fixture(TOOL_RESOLUTION_BATCH_SIZE + 3).await;
     let epoch = pool.tool_catalog_epoch();
-    let gateway = serve(
-        waygate_mcp::GatewayServer::new(pool)
-            .with_eager_tools_list(true)
-            .with_tool_catalog_epoch(&epoch),
-    )
-    .await;
+    let gateway =
+        serve(waygate_mcp::GatewayServer::new(pool).with_tool_catalog_epoch(&epoch)).await;
     let client = reqwest::Client::new();
     let first = request(&client, &gateway.url, "tools/list", json!({})).await;
     assert_eq!(first.http_status, 200);
@@ -321,27 +317,25 @@ async fn http_pages_and_search_use_batches_instead_of_individual_catalog_reads()
     let cursor = first.result["nextCursor"]
         .as_str()
         .expect("catalog needs multiple pages");
-    for (method, params) in [
-        ("tools/list", json!({"cursor":cursor})),
-        (
-            "tools/call",
-            json!({"name":"scale.searchTools", "arguments":{"mode":"operations", "filters":{"query":"discovery"}, "limit":20}}),
-        ),
-    ] {
-        catalog.batches.lock().unwrap().clear();
-        let result = request(&client, &gateway.url, method, params).await;
-        assert_eq!(result.http_status, 200);
-        assert!(result.error.is_none(), "{:?}", result.error);
-        assert!(!result.result.is_null());
-        assert!(
-            catalog.batches.lock().unwrap().len()
-                <= 3 * names.len().div_ceil(TOOL_RESOLUTION_BATCH_SIZE)
-        );
-    }
+    catalog.batches.lock().unwrap().clear();
+    let second = request(
+        &client,
+        &gateway.url,
+        "tools/list",
+        json!({"cursor":cursor}),
+    )
+    .await;
+    assert_eq!(second.http_status, 200);
+    assert!(second.error.is_none(), "{:?}", second.error);
+    assert!(!second.result.is_null());
+    assert!(
+        catalog.batches.lock().unwrap().len()
+            <= 3 * names.len().div_ceil(TOOL_RESOLUTION_BATCH_SIZE)
+    );
     assert_eq!(
         catalog.singles.load(Ordering::Relaxed),
         0,
-        "every page and search must use the bulk storage boundary"
+        "every page must use the bulk storage boundary"
     );
 }
 
@@ -349,7 +343,7 @@ async fn http_pages_and_search_use_batches_instead_of_individual_catalog_reads()
 async fn repeated_bulk_discovery_rechecks_each_callers_profile() {
     use waygate_oidc::{ApiKeyProfileRestrictions, AuthMethod, Principal};
     let (pool, catalog, _upstream, names) = fixture(3).await;
-    let gateway = waygate_mcp::GatewayServer::new(pool).with_eager_tools_list(true);
+    let gateway = waygate_mcp::GatewayServer::new(pool);
     for (tenant, sub, index) in [
         ("tenant-a", "alice", 0),
         ("tenant-b", "bob", 2),
@@ -376,11 +370,7 @@ async fn repeated_bulk_discovery_rechecks_each_callers_profile() {
             }),
         };
         let visible = gateway.list_visible_tools(Some(&principal)).await;
-        let direct: Vec<_> = visible
-            .iter()
-            .filter(|tool| tool.name != "scale.searchTools")
-            .map(|tool| tool.name.to_string())
-            .collect();
+        let direct: Vec<_> = visible.iter().map(|tool| tool.name.to_string()).collect();
         assert_eq!(direct, vec![allowed]);
     }
     let tenants = catalog

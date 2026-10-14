@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "CLI test client for OAuth-protected MCP gateways (CIMD login, SEP #1888 discovery, conformance suite)"
+description = "CLI test client for OAuth-protected MCP gateways (CIMD login, tool calls, conformance suite)"
 
 [[bin]]
 name = "mcp-test-client"

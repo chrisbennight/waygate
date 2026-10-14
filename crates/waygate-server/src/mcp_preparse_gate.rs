@@ -128,21 +128,10 @@ pub(crate) async fn evaluate(
     server: &str,
     tool: &str,
 ) -> GateDecision {
-    // The MCP handler routes several surfaces BEFORE the
-    // `<server>.<tool>` upstream split: the built-in namespaces, the
-    // per-server `searchTools` name, and the LLM plane's reserved namespace.
-    // The `searchTools` name normally selects the compatibility adapter; on
-    // MCP 2026 an actual upstream tool with that name takes precedence and
-    // reaches the ordinary invocation pipeline. Pass either shape through
-    // here: adapter calls have no catalog contract, while direct collisions
-    // are fully re-authorized by the inner pipeline after route selection.
-    // (`tools/call` names split at the FIRST dot, so a name ending in
-    // `.searchTools` always leaves the suffix — bare or dotted — on the
-    // tool side of the split.)
+    // The MCP handler routes the built-in namespaces and the LLM plane's
+    // reserved namespace BEFORE the `<server>.<tool>` upstream split.
     if waygate_core::RESERVED_BUILTIN_NAMESPACES.contains(&server)
         || server == waygate_core::LLM_RESERVED_NAMESPACE
-        || tool == "searchTools"
-        || tool.ends_with(".searchTools")
     {
         return GateDecision::Pass;
     }
@@ -912,8 +901,6 @@ mod tests {
             "gateway-control.reload_config",
             "codemode.execute",
             "llm.some-model",
-            "sig.searchTools",
-            "a.b.searchTools",
         ] {
             let h = harness(deny_verdict(), ready(base_facts("x", "y")), None);
             let resp = app(&h)

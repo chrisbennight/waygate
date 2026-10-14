@@ -97,7 +97,7 @@ fn builtin_catalogs() -> Vec<BuiltinCatalog> {
 }
 
 async fn builtin_tools_list() -> Value {
-    let mut server = GatewayServer::new(Arc::new(NoUpstreams)).with_eager_tools_list(true);
+    let mut server = GatewayServer::new(Arc::new(NoUpstreams));
     for catalog in builtin_catalogs() {
         server = server.with_builtin_tools(Arc::new(CatalogOnly(catalog)));
     }

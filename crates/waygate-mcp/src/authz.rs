@@ -153,7 +153,7 @@ impl AuthzVerdict {
     }
 
     /// Whether the tool should appear in discovery results (`tools/list` and
-    /// `searchTools`). Allow obviously yes; StepUpRequired yes as well so
+    /// the discovery tools). Allow obviously yes; StepUpRequired yes as well so
     /// that clients can surface "call this tool after you re-authorize with
     /// scope X" rather than hiding the tool entirely — otherwise the user
     /// never learns step-up is available. Deny hides the tool.
@@ -210,9 +210,9 @@ pub enum BuiltinAuthz {
 
 #[async_trait]
 pub trait AuthzGate: Send + Sync + 'static {
-    /// Decide whether `principal` can see `server` in the meta-tool list.
-    /// Used for `tools/list` and as the pre-filter for `searchTools`
-    /// operations. Deny → server is hidden.
+    /// Decide whether `principal` can see `server`'s tools at all. Used as
+    /// the server-level pre-filter for `tools/list` and the discovery tools.
+    /// Deny → server is hidden.
     async fn may_discover_server(&self, principal: &Principal, server: &str) -> bool;
 
     /// Decide whether `principal` may list resources exposed by `server`.
@@ -327,7 +327,7 @@ pub trait AuthzGate: Send + Sync + 'static {
     /// classification. Provided default: assemble [`Facts`] from
     /// `(principal, facts)` and delegate to
     /// [`authorize_tool_call`](AuthzGate::authorize_tool_call). The
-    /// discovery filter (`tools/list` / `searchTools`) uses this; the
+    /// discovery filter (`tools/list` and the discovery tools) uses this; the
     /// invocation pipeline calls `authorize_tool_call` directly with
     /// the richer `Facts` it already built.
     async fn may_call_tool(&self, principal: &Principal, facts: &ToolFacts) -> AuthzVerdict {
@@ -421,10 +421,9 @@ pub trait AuthzGate: Send + Sync + 'static {
 /// The OAuth scope a tool's risk tier requires for a call to proceed —
 /// `None` for low-risk (no step-up). This is the single source of truth for
 /// the risk→scope mapping: the invocation pipeline's `build_call_facts`
-/// enforces it (step-up), and `searchTools` exposes it on each
-/// `OperationDescriptor.scope` and filters discovery by it (SEP #1888's
-/// `scope` facet). Keeping one function means the scope a client *sees* and
-/// *filters by* is exactly the scope the call will be *gated on*.
+/// enforces it (step-up), and anything that shows a client the scope a tool
+/// needs must use the same function, so the scope a client *sees* is exactly
+/// the scope the call will be *gated on*.
 pub fn required_scope_for(risk: RiskTier) -> Option<&'static str> {
     match risk {
         // `medium` is retired for authz (no step-up); treated as low. The

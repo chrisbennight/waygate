@@ -608,9 +608,7 @@ impl UpstreamPool {
         // Annotation mode requires the COMPLETE published contract. An
         // admitted live descriptor always publishes at least its input
         // schema, so an empty published contract means the entry's manifest
-        // and its published inventory have diverged — e.g. a classification
-        // reload committed a new manifest but its index publication failed
-        // and the stale inventory was retained. A snapshot built from
+        // and its published inventory have diverged. A snapshot built from
         // nothing would dispatch with no schemas or metadata bound; fail
         // closed until publication converges with the manifest.
         // Bind the separately read published view to THIS resolution's

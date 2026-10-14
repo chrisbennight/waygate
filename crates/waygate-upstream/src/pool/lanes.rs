@@ -119,7 +119,6 @@ pub(super) async fn dial_slots(
     manifest: &UpstreamManifest,
     issuer: Option<&SharedIdentityIssuer>,
     exchange: Option<&ExchangeBundle>,
-    index: Option<&SearchIndex>,
     pool_size: usize,
     dial_timeout: Duration,
 ) -> (ConnectionSlots, Option<health::UpstreamErrorClass>) {
@@ -154,7 +153,7 @@ pub(super) async fn dial_slots(
         connections.push(conn);
     }
 
-    if let Some(publish_index) = connections.iter().position(Option::is_some) {
+    if connections.iter().any(Option::is_some) {
         let common_live_tools = {
             let catalogs: Vec<&[Tool]> = connections
                 .iter()
@@ -163,54 +162,33 @@ pub(super) async fn dial_slots(
                 .collect();
             super::reload::common_tool_catalog(&catalogs, manifest.classification_mode)
         };
-        let publication = publish_classified_tools(
+        let published_tools = publish_classified_tools(
             name,
             &manifest.tools,
             manifest.classification_mode,
             &common_live_tools,
             "boot",
-            |tools| {
-                index
-                    .map(|idx| idx.replace_server(name, tools))
-                    .transpose()
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
-            },
         );
-        match publication {
-            Ok(published_tools) => {
-                super::reload::synchronize_published_catalogs(
-                    connections
-                        .iter_mut()
-                        .filter_map(Option::as_mut)
-                        .map(|connection| &mut connection.tools),
-                    &published_tools,
-                );
-                for connection in connections.iter_mut().filter_map(Option::as_mut) {
-                    tool_listing::normalize_connection(name, connection);
-                }
-                if connections
-                    .iter()
-                    .filter_map(Option::as_ref)
-                    .any(|connection| connection.live_tools != common_live_tools)
-                {
-                    tracing::warn!(
-                        server = %name,
-                        common_tools = common_live_tools.len(),
-                        "boot lanes advertised different tool catalogs — publishing only their exact intersection",
-                    );
-                }
-            }
-            Err(error) => {
-                last_error_class = Some(health::UpstreamErrorClass::Catalog);
-                tracing::warn!(
-                    server = %name,
-                    slot = publish_index,
-                    error = %error,
-                    "search index populate failed — keeping upstream disconnected",
-                );
-                connections.fill_with(|| None);
-            }
+        super::reload::synchronize_published_catalogs(
+            connections
+                .iter_mut()
+                .filter_map(Option::as_mut)
+                .map(|connection| &mut connection.tools),
+            &published_tools,
+        );
+        for connection in connections.iter_mut().filter_map(Option::as_mut) {
+            tool_listing::normalize_connection(name, connection);
+        }
+        if connections
+            .iter()
+            .filter_map(Option::as_ref)
+            .any(|connection| connection.live_tools != common_live_tools)
+        {
+            tracing::warn!(
+                server = %name,
+                common_tools = common_live_tools.len(),
+                "boot lanes advertised different tool catalogs — publishing only their exact intersection",
+            );
         }
     }
 

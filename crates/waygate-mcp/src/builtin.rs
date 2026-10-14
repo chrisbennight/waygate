@@ -253,11 +253,9 @@ pub enum BuiltinProfileScope {
 ///
 /// Tool calls of the form `<namespace>.<tool>` are dispatched to [`call`]
 /// instead of the upstream pool, and the namespace's tools are surfaced
-/// **directly** in `tools/list` (gated by whatever scope the impl enforces)
-/// rather than behind a `searchTools` meta-tool. The built-in set is small
-/// and fixed, so SEP #1888 progressive disclosure — which exists to bound
-/// large *upstream* catalogs — doesn't apply; a maker that holds the gating
-/// scope should be able to call the tool without a discovery round-trip.
+/// **directly** in `tools/list` (gated by whatever scope the impl enforces),
+/// so a maker that holds the gating scope can call the tool without a
+/// discovery round-trip.
 ///
 /// [`call`]: BuiltinTools::call
 #[async_trait::async_trait]

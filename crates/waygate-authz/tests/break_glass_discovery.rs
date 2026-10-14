@@ -4,7 +4,7 @@
 //! The trait default for `may_call_tool` delegates to
 //! `authorize_tool_call`. If `BreakGlassGate` inherits
 //! that default, then EVERY discovery hop —
-//! `tools/list`, `searchTools`, `mode=types` — would
+//! `tools/list` and the discovery tools — would
 //! burn a single-use token via the override path,
 //! consuming the operator's emergency token on a
 //! routine catalog refresh and leaving the actual

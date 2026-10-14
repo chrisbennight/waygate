@@ -15,10 +15,6 @@ pub struct AppState {
     #[allow(dead_code)]
     pub config: Config,
     pub upstreams: Arc<UpstreamPool>,
-    /// Process-local BM25 accelerator used only by the legacy searchTools
-    /// compatibility surface. The authoritative gateway discovery paths rank
-    /// their current authorization-filtered catalog directly.
-    pub search_index: Option<waygate_mcp::SearchIndex>,
     /// `None` when auth is disabled (no Cedar engine in that mode).
     pub cedar: Option<Arc<ReloadableCedar>>,
     /// Complete verified external skill snapshot. Acquisition and validation
@@ -40,7 +36,6 @@ impl AppState {
     ) -> Self {
         Self {
             config,
-            search_index: upstreams.search_index().cloned(),
             upstreams,
             cedar,
             skills,

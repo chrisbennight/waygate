@@ -478,7 +478,7 @@ This document covers:
 - Reload semantics: SIGHUP (or the Postgres doorbell / dashboard **Reload
   manifests**) triggers a manifest re-read with atomic swap; **adding or
   removing a server applies live** — a newly-listed server is dialed and
-  published into the registry + search index, a delisted one is drained and
+  published into the registry, a delisted one is drained and
   dropped — with no restart.
 - Reconnect / circuit-breaker behaviour: how failed upstreams come back and
   how `/api/v1/servers/{name}/reconnect` targets recovery. A healthy session is
@@ -488,8 +488,8 @@ This document covers:
   unhealthy session, run a fresh MCP initialization, traverse up to 50
   paginated `tools/list` pages, and atomically republish the classified
   inventory. A longer or non-terminating cursor stream fails the replacement.
-  If every replacement dial or the search-index publication fails, the prior
-  session and inventory keep serving. The Servers dashboard exposes the same
+  If every replacement dial fails, the prior session and inventory keep
+  serving. The Servers dashboard exposes the same
   admin-only action in each server's Overview panel and renders the structured
   added / removed / behavior-contract-changed result. Its table, the dashboard
   Overview, and the REST server list share the pool's runtime snapshot: breaker state,
@@ -748,12 +748,9 @@ hot-applies tool classifications, `exchange`, and tier on SIGHUP / Reload.
 `ArcSwap`, and the structural commit is generation-fenced (the newest reload
 wins; a stale reload delayed in a slow dial is superseded and applies nothing).
 A reload builds and dials a newly-listed server, splices it into a fresh map
-under the reload lock, stores that map, and *then* publishes its tools into the
-BM25 index — store-before-index, so a superseded add never pollutes the index
-and a map-present entry is dispatchable by name with search catching up a moment
-later (reported `added`). A delisted server is tombstoned, drained (each slot's
-conn write lock), dropped from the registry map, and pulled from the search
-index (reported `removed`); an in-flight caller holds its own `Arc` to the entry
+under the reload lock, and stores that map (reported `added`). A delisted
+server is tombstoned, drained (each slot's conn write lock), and dropped from
+the registry map (reported `removed`); an in-flight caller holds its own `Arc` to the entry
 and finishes its current calls, while a dispatch that raced the removal and
 observes the tombstone (`entry.removed`) is refused, and new lookups miss
 immediately. The dispatch hot path reads the map lock-free and clones out the

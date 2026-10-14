@@ -6,8 +6,8 @@ handling, data-flow enforcement, and nested tool-call context.
 
 ## Status
 
-Code Mode is under active development. Direct MCP tools and SEP #1888
-progressive discovery remain supported alongside the initial Code Mode surface.
+Code Mode is under active development. Direct MCP tools and the gateway's
+discovery tools remain supported alongside the initial Code Mode surface.
 `codemode.search`, `codemode.describe`, and direct-authority
 `codemode.execute` are available. Client-authored programs can call every
 operation the same principal can call directly, except recursive Code Mode
@@ -42,7 +42,7 @@ proposals from implemented execution behavior.
 Code Mode is an additional client of the governed data plane:
 
 - Upstream servers remain ordinary typed MCP servers.
-- Clients retain direct tool calls and progressive discovery.
+- Clients retain direct tool calls and the gateway's discovery tools.
 - A bounded runner receives generated APIs, never credentials or ambient host
   authority.
 - Every nested tool call uses `InvocationService`; the outer Code Mode

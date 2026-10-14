@@ -658,13 +658,6 @@ async fn forced_catalog_refresh_exhausts_paginated_tools_list() {
         .map(|tool| tool.name.to_string())
         .collect();
     assert_eq!(names, vec!["reddit_search", "twitter_search"]);
-    let indexed = pool
-        .search_index()
-        .expect("connected pool has an index")
-        .search("mock", "twitter", 10)
-        .expect("index search")
-        .expect("non-empty query");
-    assert_eq!(indexed, vec!["twitter_search"]);
 }
 
 #[tokio::test]
@@ -1638,16 +1631,6 @@ async fn boot_publishes_only_the_catalog_common_to_every_connected_lane() {
             .is_empty(),
         "every connected lane must carry the same conservative boot catalog",
     );
-    let indexed = pool
-        .search_index()
-        .expect("connected pool has an index")
-        .search("mock", "reddit", 10)
-        .expect("index search")
-        .expect("non-empty query");
-    assert!(
-        indexed.is_empty(),
-        "search must expose the same conservative boot catalog as tools/list",
-    );
 }
 
 #[tokio::test]
@@ -1679,13 +1662,6 @@ async fn multi_lane_refresh_publishes_only_exact_catalog_intersection() {
         .await
         .expect("published inventory")
         .is_empty());
-    let indexed = pool
-        .search_index()
-        .expect("connected pool has an index")
-        .search("mock", "reddit", 10)
-        .expect("index search")
-        .expect("non-empty query");
-    assert!(indexed.is_empty());
     let refreshed_health = pool.health_snapshot().await;
     assert!(refreshed_health[0].connected);
     assert_eq!(refreshed_health[0].connected_lanes, 2);
@@ -1765,19 +1741,12 @@ async fn healed_lane_preserves_the_published_catalog_intersection() {
             "every serving lane must expose the exact catalog intersection"
         );
     }
-    let indexed = pool
-        .search_index()
-        .expect("connected pool has an index")
-        .search("mock", "reddit", 10)
-        .expect("index search")
-        .expect("non-empty query");
-    assert!(indexed.is_empty());
 }
 
 /// A classification-only reload republishes the catalog without re-dialing.
 /// When a partial heal has left the lanes on different upstream generations,
 /// that republication must retain their common catalog rather than widening
-/// discovery to whichever lane happens to publish the search index.
+/// discovery to the catalog of whichever lane performs the publication.
 #[tokio::test]
 async fn classification_reload_preserves_the_published_catalog_intersection() {
     let (addr, control) = spawn_dynamic_catalog().await;
@@ -1825,16 +1794,6 @@ async fn classification_reload_preserves_the_published_catalog_intersection() {
             "every serving lane must retain the exact common catalog",
         );
     }
-    let indexed = pool
-        .search_index()
-        .expect("connected pool has an index")
-        .search("mock", "twitter", 10)
-        .expect("index search")
-        .expect("non-empty query");
-    assert!(
-        indexed.is_empty(),
-        "the retrieval index must not advertise a tool absent from one serving lane",
-    );
 }
 
 #[tokio::test]
@@ -2063,17 +2022,14 @@ async fn catalog_refresh_cannot_publish_after_slot_resize_replaces_its_entry() {
         1,
         "the superseded refresh must not advance beyond the winning rebuild",
     );
-    assert_eq!(
-        pool.list_tools("mock").await.expect("live inventory").len(),
-        2
-    );
-    let indexed = pool
-        .search_index()
-        .expect("connected pool has an index")
-        .search("mock", "twitter", 10)
-        .expect("index search")
-        .expect("non-empty query");
-    assert_eq!(indexed, vec!["twitter_search"]);
+    let names: Vec<String> = pool
+        .list_tools("mock")
+        .await
+        .expect("live inventory")
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert_eq!(names, vec!["reddit_search", "twitter_search"]);
 }
 
 async fn failed_catalog_refresh_racing_reload(
@@ -2137,7 +2093,7 @@ async fn failed_catalog_refresh_reports_removed_when_reload_removes_its_entry() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelled_catalog_refresh_keeps_search_and_serving_session_consistent() {
+async fn cancelled_catalog_refresh_keeps_the_prior_serving_session() {
     let (addr, control) = spawn_dynamic_catalog().await;
     let mut map = BTreeMap::new();
     map.insert("mock".into(), dynamic_manifest_at(addr));
@@ -2156,34 +2112,18 @@ async fn cancelled_catalog_refresh_keeps_search_and_serving_session_consistent()
 
     let serving = pool.list_tools("mock").await.expect("serving inventory");
     assert_eq!(serving.len(), 1, "cancelled dial keeps the prior session");
-    let indexed = pool
-        .search_index()
-        .expect("connected pool has an index")
-        .search("mock", "twitter", 10)
-        .expect("index search")
-        .expect("non-empty query");
-    assert!(
-        indexed.is_empty(),
-        "cancelled dial must not publish a catalog its serving session lacks",
-    );
 
     control.delay_list.store(false, Ordering::SeqCst);
     let completed = refresh_catalog(&pool).await.expect("known upstream");
     assert_eq!(completed.outcome, CatalogRefreshOutcome::Updated);
-    assert_eq!(
-        pool.list_tools("mock")
-            .await
-            .expect("fresh inventory")
-            .len(),
-        2
-    );
-    let indexed = pool
-        .search_index()
-        .expect("connected pool has an index")
-        .search("mock", "twitter", 10)
-        .expect("index search")
-        .expect("non-empty query");
-    assert_eq!(indexed, vec!["twitter_search"]);
+    let names: Vec<String> = pool
+        .list_tools("mock")
+        .await
+        .expect("fresh inventory")
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert_eq!(names, vec!["reddit_search", "twitter_search"]);
 }
 
 #[tokio::test]

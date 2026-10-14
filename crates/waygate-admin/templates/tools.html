@@ -7,9 +7,8 @@
 
 <p class="muted" style="margin: 0 0 16px; max-width: 70ch">
     Every tool advertised by every connected upstream, with its manifest-declared
-    risk tier. The gateway serves one <code>searchTools</code> meta-tool per
-    server on the MCP surface — this catalog is what <code>searchTools</code>
-    is drawn from. <strong>Select any row</strong> to inspect a tool's input schema.
+    risk tier. MCP clients see the subset of this catalog they are authorized to
+    call. <strong>Select any row</strong> to inspect a tool's input schema.
 </p>
 
 <form class="tools-filter" method="get" action="{{ self.chrome.nav_url("/tools") }}" role="search" aria-label="Filter tools">

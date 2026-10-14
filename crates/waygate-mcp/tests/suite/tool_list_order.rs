@@ -2,12 +2,11 @@
 //!
 //! Hosts key prompt caches and client-side list caches on the exact tool
 //! array, so the gateway promises the order rather than leaving it to
-//! upstream or publication order. The canonical projections (MCP 2026, legacy
-//! eager, and Code Mode-only) present one name-sorted order across built-in
-//! and upstream tools. The legacy progressive projection presents tools in the
-//! session's disclosure order. Neither depends on the order in which upstreams,
-//! lanes, or reloads publish their tools, and an authorization filter removes
-//! tools without moving the rest.
+//! upstream or publication order. Every projection (MCP 2026, legacy, and
+//! Code Mode-only) presents one name-sorted order across built-in and upstream
+//! tools. That order does not depend on the order in which upstreams, lanes,
+//! or reloads publish their tools, and an authorization filter removes tools
+//! without moving the rest.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -213,9 +212,7 @@ fn fixture_catalog() -> Arc<ReorderingCatalog> {
 
 #[tokio::test]
 async fn canonical_projection_orders_builtin_and_upstream_tools_globally() {
-    let server = GatewayServer::new(fixture_catalog())
-        .with_builtin_tools(Arc::new(MiddleBuiltin))
-        .with_eager_tools_list(true);
+    let server = GatewayServer::new(fixture_catalog()).with_builtin_tools(Arc::new(MiddleBuiltin));
 
     let listed = names(&server.list_visible_tools(None).await);
 
@@ -235,9 +232,7 @@ async fn canonical_projection_orders_builtin_and_upstream_tools_globally() {
 #[tokio::test]
 async fn canonical_projection_ignores_the_order_upstreams_publish_in() {
     let catalog = fixture_catalog();
-    let server = GatewayServer::new(catalog.clone())
-        .with_builtin_tools(Arc::new(MiddleBuiltin))
-        .with_eager_tools_list(true);
+    let server = GatewayServer::new(catalog.clone()).with_builtin_tools(Arc::new(MiddleBuiltin));
 
     let before = server.list_visible_tools(None).await;
     catalog.republish_reversed().await;
@@ -259,8 +254,7 @@ async fn authorization_filtering_removes_tools_without_reordering_the_rest() {
         fixture_catalog(),
         Arc::new(HideFromRestricted(hidden.clone())),
     )
-    .with_builtin_tools(Arc::new(MiddleBuiltin))
-    .with_eager_tools_list(true);
+    .with_builtin_tools(Arc::new(MiddleBuiltin));
 
     let full = names(&server.list_visible_tools(Some(&principal("full"))).await);
     let restricted = names(
@@ -290,34 +284,5 @@ async fn authorization_filtering_removes_tools_without_reordering_the_rest() {
                 .await
         ),
         "each principal's view is stable across listings"
-    );
-}
-
-#[tokio::test]
-async fn disclosure_order_projection_ignores_the_order_upstreams_publish_in() {
-    let catalog = fixture_catalog();
-    let server = GatewayServer::new(catalog.clone()).with_builtin_tools(Arc::new(MiddleBuiltin));
-    server
-        .disclosed()
-        .record(["zulu-srv.mike", "alpha-srv.echo", "zulu-srv.bravo"]);
-
-    let before = names(&server.list_visible_tools(None).await);
-    catalog.republish_reversed().await;
-    let after = names(&server.list_visible_tools(None).await);
-
-    assert_eq!(before, after, "upstream publication order must not leak in");
-    assert_eq!(
-        before,
-        [
-            "alpha-srv.searchTools",
-            "zulu-srv.searchTools",
-            "middle-ns.zeta",
-            "middle-ns.alpha",
-            "alpha-srv.echo",
-            "zulu-srv.mike",
-            "zulu-srv.bravo",
-        ],
-        "meta-tools by server name, built-ins in declaration order, then disclosed \
-         tools grouped by server name in disclosure order"
     );
 }

@@ -215,7 +215,7 @@ async fn discovery_latency_and_database_queries() {
             .with_tool_reviews(store.clone())
             .await
             .with_authoritative_catalog(store);
-        let gateway = serve(GatewayServer::new(Arc::new(pool)).with_eager_tools_list(true)).await;
+        let gateway = serve(GatewayServer::new(Arc::new(pool))).await;
         for sample in 0..samples {
             queries.store(0, Ordering::Relaxed);
             let start = Instant::now();
@@ -250,13 +250,6 @@ async fn discovery_latency_and_database_queries() {
                     .as_array()
                     .is_some_and(|tools| !tools.is_empty()));
             }
-            queries.store(0, Ordering::Relaxed);
-            let start = Instant::now();
-            let search = request(&client, &gateway.url, "tools/call", json!({"name":format!("{name}.searchTools"),"arguments":{"mode":"operations","filters":{"query":"Representative"},"limit":20}})).await;
-            println!(
-                "DISCOVERY_MEASUREMENT {}",
-                json!({"tools":count,"request":"search","sample":sample,"elapsed_ms":start.elapsed().as_secs_f64()*1000.0,"database_queries":queries.load(Ordering::Relaxed),"http_status":search.http_status,"error":search.error})
-            );
         }
         drop(gateway);
         sqlx::query("DELETE FROM mcp_servers WHERE tenant_id='default' AND name=$1")

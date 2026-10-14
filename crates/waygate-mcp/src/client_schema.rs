@@ -12,8 +12,8 @@ const ROOT_APPLICATORS: &[&str] = &["allOf", "anyOf", "oneOf", "not", "if", "the
 
 pub const GUIDANCE: &str = "Root-composition compatibility is enabled. tools/list may present \
     simplified input schemas; the gateway still enforces the full constraints. \
-    gateway-discovery.inspect, legacy searchTools types, and codemode.describe return the \
-    authoritative schemas as data. If a tool cannot be registered, use the existing \
+    gateway-discovery.inspect and codemode.describe return the authoritative schemas as \
+    data. If a tool cannot be registered, use the existing \
     codemode.search, codemode.describe, and codemode.execute route when available.";
 
 /// Result of adapting a client-facing copy, not the admitted tool definition.

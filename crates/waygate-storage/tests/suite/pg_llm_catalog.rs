@@ -529,7 +529,7 @@ async fn reconciliation_soft_disables_then_reappear_re_enables() {
     assert!(get_llm_model(&pool, &tenant, "b").await.unwrap().is_some());
     assert!(!provenance(&pool, &tenant, "b").await.1);
 
-    // The catalog view (searchTools / I7) honors the same effective-live filter.
+    // The catalog view (I7) honors the same effective-live filter.
     let view_aliases: Vec<String> = sqlx::query_scalar(
         "SELECT tool_name FROM llm_models_catalog WHERE tenant_id = $1 ORDER BY tool_name",
     )

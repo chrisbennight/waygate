@@ -283,15 +283,14 @@ Metric semantics and operational uses:
   is charted on the dashboard's "Downstream requests by protocol version and
   client" panel.
 - `mcp_tools_list_requests_total{protocol_generation,discovery_mode,client_class}` —
-  downstream catalog requests split across `legacy` progressive,
-  process-wide eager, and per-client eager modes plus the MCP `2026-07-28`
-  stable-full projection. All labels come from one closed enum; `client_class`
-  distinguishes stateless, allowlisted legacy, other legacy, and the global
-  override without recording the self-asserted client name. Credentials,
-  tool names, and payloads are never labels, and the bounded `client` label on
-  `mcp_requests_total` is the only place a client name appears. This is the
-  rollout/rollback signal for the legacy projection and is charted on the
-  dashboard's "Downstream tools/list projection rate" panel.
+  downstream catalog requests split by protocol generation into the stable
+  full projection and the Code Mode-only projection. All labels come from one
+  closed enum; `client_class` distinguishes stateless, Code Mode-only
+  allowlisted, and other legacy clients without recording the self-asserted
+  client name. Credentials, tool names, and payloads are never labels, and the
+  bounded `client` label on `mcp_requests_total` is the only place a client
+  name appears. It is charted on the dashboard's "Downstream tools/list
+  projection rate" panel.
 - `mcp_tools_list_returned_tools{protocol_generation,discovery_mode,client_class}`
   and `mcp_tools_list_serialized_bytes{...}` — response-shape histograms for
   each closed projection class. Serialized bytes cover compact
@@ -306,26 +305,12 @@ Metric semantics and operational uses:
 - `mcp_discovery_cursor_total{surface,outcome}` — accepted and rejected
   continuation attempts for gateway and Code Mode search. Cursor values and
   queries are deliberately absent.
-- `mcp_discovery_index_publications_total{mode,outcome}` and
-  `mcp_discovery_index_fallback_total{reason}` — legacy compatibility-index
-  publication outcomes and bounded reasons that `searchTools` scanned the
-  authoritative catalog instead.
-- `mcp_discovery_catalog_sources{plane}`,
-  `mcp_discovery_catalog_tools{plane}`,
-  `mcp_discovery_retrieval_index_state{state}`,
-  `mcp_discovery_retrieval_index_generation`, and
-  `mcp_discovery_retrieval_index_skew_tools` — the current authoritative
-  upstream scope compared with the legacy index. Gateway-local tools use the
-  canonical ranker and are intentionally outside this comparison. The state is
-  one-hot and all vector labels are closed product vocabularies.
 - `mcp_discovery_catalog_reconciliation_duration_seconds{outcome}` — duration
   of the atomic manifest-to-catalog reconciliation keyed only by success or
   error.
 
-These families drive the dashboard panels “Discovery catalog and compatibility
-index,” “Discovery compatibility-index state,” “Governed discovery latency
-p95,” “Discovery continuation outcomes,” “Discovery index publication and
-fallback,” and “Catalog reconciliation latency p95.” Queries, credentials,
+These families drive the dashboard panels “Governed discovery latency p95,”
+“Discovery continuation outcomes,” and “Catalog reconciliation latency p95.” Queries, credentials,
 tenant identifiers, client identities, tool names, and cursor values stay out
 of every discovery metric label.
 - `mcp_database_pool_connections{role,state}` — one-second snapshots of the

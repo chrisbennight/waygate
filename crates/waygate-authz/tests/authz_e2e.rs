@@ -301,77 +301,30 @@ async fn user_can_call_low_risk_tool() {
 }
 
 #[tokio::test]
-async fn search_tools_filters_high_risk_for_non_admins() {
+async fn tools_list_filters_high_risk_for_non_admins() {
     let server = build_server();
     let user = principal("carol", &["mcp-users"]);
 
-    let result = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools")
-                .with_arguments(obj(json!({"mode": "operations"}))),
-            Some(&user),
-        )
-        .await
-        .expect("searchTools must not itself be blocked");
-
-    let ops = result
-        .structured_content
-        .as_ref()
-        .and_then(|v| v.get("operations"))
-        .and_then(|v| v.as_array())
-        .expect("operations array");
-    let names: Vec<&str> = ops
-        .iter()
-        .map(|o| o.get("name").and_then(|v| v.as_str()).unwrap())
-        .collect();
+    let tools = server.list_visible_tools(Some(&user)).await;
+    let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
 
     // Non-admin only sees the low-risk tool; the high-risk one is filtered out
     // because Cedar denies CallTool for resource.risk != "low".
     assert!(names.contains(&"example-messages.contacts.list"));
     assert!(
         !names.contains(&"example-messages.messages.send"),
-        "non-admin should not see high-risk tool in search results: {names:?}"
+        "non-admin should not see high-risk tool in tools/list: {names:?}"
     );
 }
 
 #[tokio::test]
-async fn search_tools_shows_everything_for_admin() {
+async fn tools_list_shows_everything_for_admin() {
     let server = build_server();
     let admin = principal("alice", &["mcp-admins"]);
 
-    let result = server
-        .dispatch_tool_call(
-            CallToolRequestParams::new("example-messages.searchTools")
-                .with_arguments(obj(json!({"mode": "operations"}))),
-            Some(&admin),
-        )
-        .await
-        .expect("admin searchTools");
-
-    let ops = result
-        .structured_content
-        .as_ref()
-        .and_then(|v| v.get("operations"))
-        .and_then(|v| v.as_array())
-        .unwrap();
-    let names: Vec<&str> = ops
-        .iter()
-        .map(|o| o.get("name").and_then(|v| v.as_str()).unwrap())
-        .collect();
+    let tools = server.list_visible_tools(Some(&admin)).await;
+    let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
 
     assert!(names.contains(&"example-messages.contacts.list"));
     assert!(names.contains(&"example-messages.messages.send"));
-}
-
-#[tokio::test]
-async fn list_meta_tools_hides_servers_no_one_can_discover() {
-    // Baseline forbid + role-allow both permit SearchTools for any principal,
-    // so every authenticated caller sees the meta-tool. This test pins that
-    // expectation so a future policy change can't silently hide servers.
-    let server = build_server();
-    let user = principal("carol", &["mcp-users"]);
-
-    let metas = server.list_meta_tools(Some(&user)).await;
-    let names: Vec<&str> = metas.iter().map(|t| t.name.as_ref()).collect();
-    assert_eq!(names, vec!["example-messages.searchTools"]);
 }

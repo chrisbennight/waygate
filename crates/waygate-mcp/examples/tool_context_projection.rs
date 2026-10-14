@@ -3,9 +3,7 @@
 //!
 //! With no arguments it projects a small built-in representative catalog as
 //! the full list. `--catalog <file>` projects a synthetic catalog file
-//! instead, shaped `{"servers": [{"name": ..., "tools": [...]}]}`, and
-//! `--projection progressive` emits what a new legacy session lists before it
-//! discloses any tool, rather than the full list.
+//! instead, shaped `{"servers": [{"name": ..., "tools": [...]}]}`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -167,26 +165,15 @@ fn catalog_file(path: &PathBuf) -> Result<SharedCatalog, Box<dyn std::error::Err
 
 struct Options {
     catalog: Option<PathBuf>,
-    progressive: bool,
 }
 
 fn options() -> Result<Options, Box<dyn std::error::Error>> {
-    let mut options = Options {
-        catalog: None,
-        progressive: false,
-    };
+    let mut options = Options { catalog: None };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--catalog" => {
                 options.catalog = Some(args.next().ok_or("--catalog requires a file path")?.into());
-            }
-            "--projection" => {
-                options.progressive = match args.next().as_deref() {
-                    Some("full") => false,
-                    Some("progressive") => true,
-                    _ => return Err("--projection must be full or progressive".into()),
-                };
             }
             other => return Err(format!("unknown argument {other}").into()),
         }
@@ -201,7 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(path) => catalog_file(path)?,
         None => representative_catalog(),
     };
-    let server = GatewayServer::new(catalog).with_eager_tools_list(!options.progressive);
+    let server = GatewayServer::new(catalog);
     let result = ListToolsResult::with_all_items(server.list_visible_tools(None).await);
     let capture = json!({"jsonrpc": "2.0", "id": 7, "result": result});
     serde_json::to_writer_pretty(std::io::stdout().lock(), &capture)?;

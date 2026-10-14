@@ -374,8 +374,8 @@ impl DefaultInvocationService {
 /// The service holds only `Arc` handles and carries no per-call mutable
 /// state, so a single instance is safely shared across sessions and
 /// across the admin surface; it is built per-session in `main.rs` only
-/// because `GatewayServer` is (per-session `DisclosedTools`), not
-/// because the service itself is session-scoped.
+/// because `GatewayServer` carries per-session client state, not because
+/// the service itself is session-scoped.
 #[allow(clippy::too_many_arguments)]
 pub fn build_default_invocation_service(
     catalog: SharedCatalog,

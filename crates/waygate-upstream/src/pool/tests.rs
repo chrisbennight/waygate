@@ -1428,7 +1428,6 @@ async fn build_entry_stamps_the_adding_generation() {
         named_manifest("b"),
         None,
         None,
-        None,
         1,
         Duration::from_millis(20),
         7,
@@ -1453,7 +1452,6 @@ async fn inherit_drift_state_carries_quarantine_and_baseline() {
         named_manifest("s"),
         None,
         None,
-        None,
         1,
         Duration::from_millis(20),
         0,
@@ -1464,7 +1462,6 @@ async fn inherit_drift_state_carries_quarantine_and_baseline() {
     let new = UpstreamPool::build_entry(
         "s",
         named_manifest("s"),
-        None,
         None,
         None,
         2,
@@ -1799,25 +1796,6 @@ fn partition_keeps_only_classified_tools() {
     assert_eq!(kept_names, vec!["ok_a", "ok_b"]);
     assert_eq!(unclassified, vec!["rogue".to_owned()]);
     assert!(ghosts.is_empty());
-}
-
-#[test]
-fn classified_tool_publication_propagates_index_failure() {
-    let classifications = vec![classification("ok")];
-    let live_tools = vec![live("ok")];
-    let result = publish_classified_tools(
-        "mock",
-        &classifications,
-        crate::ClassificationMode::Manifest,
-        &live_tools,
-        "test",
-        |_tools| Err::<(), _>("injected index failure"),
-    );
-
-    assert_eq!(
-        result.expect_err("index failure must abort publication"),
-        "injected index failure"
-    );
 }
 
 #[test]
@@ -2335,16 +2313,8 @@ async fn boot_dial_timeout_bounds_a_hung_upstream() {
         tier_c_peer: None,
         session: None,
     };
-    let (slots, error_class) = dial_slots(
-        "hung",
-        &manifest,
-        None,
-        None,
-        None,
-        4,
-        Duration::from_millis(300),
-    )
-    .await;
+    let (slots, error_class) =
+        dial_slots("hung", &manifest, None, None, 4, Duration::from_millis(300)).await;
     assert_eq!(error_class, Some(health::UpstreamErrorClass::Timeout));
     // The wedged upstream is Disconnected: stdio yields one slot, with no
     // live connection.
@@ -3940,9 +3910,8 @@ async fn manifest_fallback_snapshot_keeps_its_reviewed_operation_set() {
 /// Annotation mode must never resolve `Ready` from an EMPTY published
 /// contract: an admitted live descriptor always publishes at least its
 /// input schema, so emptiness means the manifest and the published
-/// inventory diverged (a classification reload whose index publication
-/// failed retains the stale inventory) — and a snapshot built from nothing
-/// would dispatch with no schemas or metadata bound.
+/// inventory diverged — and a snapshot built from nothing would dispatch
+/// with no schemas or metadata bound.
 #[tokio::test]
 async fn annotation_empty_published_contract_fails_closed() {
     fn facts() -> ToolFacts {

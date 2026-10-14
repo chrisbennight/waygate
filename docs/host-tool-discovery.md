@@ -25,10 +25,6 @@ runtime admission, direct routing, and faithful MCP projection. Downstream
 servers remain unaware of both layers: they publish ordinary MCP tools and do
 not add host-specific fields.
 
-The gateway's versioned `searchTools` compatibility adapter is a separate
-legacy projection. It is not required by this contract and hosts must not
-teach downstream servers to emit it.
-
 This division matches the MCP project's
 [client guidance](https://modelcontextprotocol.io/docs/develop/clients/client-best-practices):
 the client fetches the ordinary catalog, keeps large definitions outside the
@@ -69,17 +65,12 @@ and quarantine can therefore remove a previously selected tool, and the host
 must accept a later direct call refusal rather than cache access as a grant.
 
 The order of that projection is promised, not incidental, so a host can key a
-prompt cache or a client-side list cache on the exact tool array. The MCP 2026
-projection, legacy eager sessions, and Code Mode-only clients receive one
-order sorted by qualified tool name across built-in and upstream tools. The
-pages of one MCP 2026 traversal concatenate to one such order and never mix
-pages from different views; see the
-[pagination contract](sep-1888.md#standard-mcp-path). Legacy progressive
-sessions receive the per-server `searchTools` entries in server-name order,
-then built-in tools in their fixed declaration order, then disclosed tools
-grouped by server name and, within a server, in the session's disclosure
-order.
-In every projection the order does not depend on the order in which upstreams,
+prompt cache or a client-side list cache on the exact tool array. Every client,
+including Code Mode-only clients, receives one order sorted by qualified tool
+name across built-in and upstream tools. The pages of one MCP 2026 traversal
+concatenate to one such order and never mix pages from different views; see
+the [pagination contract](tools-list.md#pagination).
+The order does not depend on the order in which upstreams,
 connection lanes, or reloads publish their tools, so republishing the same
 catalog leaves the array unchanged. An authorization filter only removes
 tools: two principals with different visibility each see a stable array, and
@@ -104,13 +95,7 @@ tool by discovering or caching its declaration.
 `mcp-test-client host-contract` uses stateless MCP 2026 discovery and checks
 the two interoperability properties a deferred host depends on: the named
 ordinary tool appears in standard `tools/list`, then succeeds through a direct
-`tools/call`. It does not consult the compatibility adapter and it never sends
-host-specific metadata. A visible upstream `<server>.searchTools` remains a
-valid ordinary direct tool on the gateway's MCP 2026 contract, but it shares
-its wire name with the compatibility adapter when no such upstream tool is
-publishable. Because standard MCP carries no guaranteed discriminator between
-those two declarations, the proof refuses that ambiguous target and requires
-the operator to select a different ordinary tool.
+`tools/call`. It never sends host-specific metadata.
 
 Against the repository's modern smoke upstream:
 
@@ -133,6 +118,4 @@ Failure is non-zero and identifies which contract failed:
 
 - absent from `tools/list` means the host cannot select the tool through the
   portable catalog;
-- a JSON-RPC error or `isError=true` means direct invocation did not complete;
-- a `.searchTools` target is refused because a passing call could exercise the
-  gateway adapter rather than prove an ordinary downstream path.
+- a JSON-RPC error or `isError=true` means direct invocation did not complete.

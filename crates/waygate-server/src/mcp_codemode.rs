@@ -12808,8 +12808,8 @@ mod tests {
         assert!(visible.contains(&"codemode.search".to_owned()));
         assert!(visible.contains(&"codemode.describe".to_owned()));
         assert!(!visible.contains(&"codemode.execute".to_owned()));
-        assert!(visible.contains(&"email.searchTools".to_owned()));
-        assert!(!visible.contains(&"weather.searchTools".to_owned()));
+        assert!(visible.contains(&"email.read".to_owned()));
+        assert!(!visible.iter().any(|name| name.starts_with("weather.")));
 
         let result = server
             .dispatch_tool_call(call("codemode.search", json!({})), Some(&principal))

@@ -11,7 +11,7 @@ pub const DEFAULT_GATEWAY_URL: &str = "http://localhost:8080";
 #[derive(Debug, Parser)]
 #[command(
     name = "mcp-test-client",
-    about = "Waygate test client for OAuth-protected MCP gateways (CIMD login + SEP #1888)",
+    about = "Waygate test client for OAuth-protected MCP gateways (CIMD login, tool calls, conformance)",
     version,
     long_about = None,
 )]
@@ -91,57 +91,19 @@ pub enum Command {
 pub enum ToolsCommand {
     /// `tools/list` — the flat MCP tool inventory the gateway exposes.
     List,
-    /// SEP #1888 `searchTools` invocation.
-    Search(SearchArgs),
-    /// SEP #1888 `searchTools` in `mode=types` for a single operation.
+    /// Print one tool's definition, including its JSON Schemas, from
+    /// `tools/list`.
+    ///
+    /// For the gateway's authoritative contract and governance facts, call
+    /// `gateway-discovery.inspect` with `tools call`.
     Describe(DescribeArgs),
     /// Invoke a tool by its fully-qualified name.
     Call(CallArgs),
 }
 
 #[derive(Debug, Args)]
-pub struct SearchArgs {
-    /// Upstream server name. When omitted, searches every upstream that
-    /// exposes a `.searchTools` meta-tool.
-    #[arg(long)]
-    pub server: Option<String>,
-
-    /// Free-text query passed to the gateway's BM25 index.
-    #[arg(long)]
-    pub query: Option<String>,
-
-    /// Filter by resource type (SEP #1888 `filters.resourceType`).
-    #[arg(long)]
-    pub resource_type: Option<String>,
-
-    /// Filter by action (SEP #1888 `filters.action`).
-    #[arg(long)]
-    pub action: Option<String>,
-
-    /// Filter by scope (SEP #1888 `filters.scope`).
-    #[arg(long)]
-    pub scope: Option<String>,
-
-    /// Filter by risk level.
-    #[arg(long)]
-    pub risk_level: Option<String>,
-
-    /// Positive page size; omit to use the server default.
-    #[arg(long)]
-    pub limit: Option<usize>,
-
-    /// Cursor token returned by a previous call.
-    #[arg(long)]
-    pub cursor: Option<String>,
-
-    /// Automatically follow `nextCursor` until exhausted.
-    #[arg(long)]
-    pub all: bool,
-}
-
-#[derive(Debug, Args)]
 pub struct DescribeArgs {
-    /// Fully-qualified operation name (`<server>.<tool>`).
+    /// Fully-qualified tool name (`<server>.<tool>`).
     pub name: String,
 }
 
@@ -161,8 +123,8 @@ pub struct CallArgs {
 
 #[derive(Debug, Args)]
 pub struct ConformanceArgs {
-    /// Run the heavy suite (cursor paging, error shapes, filter matrix,
-    /// refresh-token round-trip). Implies `--light`.
+    /// Also run the heavy suite (unsupported-version refusal, unknown-tool
+    /// routing, refresh-token round-trip) after the light suite.
     #[arg(long)]
     pub heavy: bool,
 }

@@ -121,7 +121,7 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
     echo "--- policy / authz / fail-closed lines ---"
     sudo docker logs gw-smoke 2>&1 | grep -iE 'polic|authz|cedar|deny-all|fail|panic|error|refus' | tail -30 || true
     echo "--- full tail ---"
-    sudo docker logs --tail 80 gw-smoke 2>&1 | grep -ivE 'tantivy|managed_directory' | tail -50 || true
+    sudo docker logs --tail 80 gw-smoke 2>&1 | tail -50 || true
     echo "--- policies baked into the smoke image (${SMOKE_IMG}) ---"
     sudo docker image inspect "$SMOKE_IMG" --format '{{json .RootFS.Layers}}' 2>&1 | tail -c 200 || true
     echo "(smoke image was built from ${SRC_COUNT} policies/*.cedar; see 'boot-smoke: built …' above)"
@@ -262,7 +262,7 @@ for boot in $(seq 1 "$ATTEMPTS"); do
   if [ "$stayed_up" = "1" ]; then break; fi
   echo "--- reachability boot attempt $boot/$ATTEMPTS: the gateway did not stay up ---"
   sudo docker inspect gw-smoke-reach --format 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} err={{.State.Error}}' 2>&1 || true
-  sudo docker logs --tail 30 gw-smoke-reach 2>&1 | grep -ivE 'tantivy|managed_directory' | tail -20 || true
+  sudo docker logs --tail 30 gw-smoke-reach 2>&1 | tail -20 || true
   # Settle past RECONCILE_GRACE before re-booting. A boot failure is
   # detected in under a second, so an immediate retry re-asks inside
   # the window that refused the first one and gets the same answer.
@@ -285,7 +285,7 @@ if [ "$ok" != "1" ]; then
   # told an operator the gate had tried three times when it had not.
   echo "REACHABILITY SMOKE FAILED: no upstream reached connected state after ${boot} boot(s) — not publishing."
   sudo docker inspect gw-smoke-reach --format 'status={{.State.Status}} exit={{.State.ExitCode}}' 2>&1 || true
-  sudo docker logs --tail 60 gw-smoke-reach 2>&1 | grep -ivE 'tantivy|managed_directory' | tail -40 || true
+  sudo docker logs --tail 60 gw-smoke-reach 2>&1 | tail -40 || true
   echo "--- upstream logs ---"
   sudo docker logs --tail 20 gw-smoke-upstream 2>&1 || true
   sudo docker logs --tail 20 gw-smoke-upstream-2026 2>&1 || true

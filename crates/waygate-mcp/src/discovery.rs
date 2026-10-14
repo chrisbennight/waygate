@@ -693,7 +693,6 @@ pub fn operation_description(mut description: &str) -> &str {
         for guidance in [
             crate::server::skill_tools::GUIDANCE,
             crate::server::FULL_CATALOG_INSTRUCTIONS,
-            crate::server::LEGACY_SEARCH_INSTRUCTIONS,
             crate::server::CODEMODE_ONLY_INSTRUCTIONS,
             crate::client_schema::GUIDANCE,
         ] {
@@ -795,7 +794,6 @@ mod tests {
         let fixtures = fixtures.as_array().unwrap();
         for instructions in [
             crate::server::FULL_CATALOG_INSTRUCTIONS,
-            crate::server::LEGACY_SEARCH_INSTRUCTIONS,
             crate::server::CODEMODE_ONLY_INSTRUCTIONS,
             crate::client_schema::GUIDANCE,
         ] {

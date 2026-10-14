@@ -103,7 +103,8 @@ impl AuditMode {
 /// Variants:
 ///
 /// - `Invocation` — `<server>.<tool>` call (Allow / Deny / StepUp / ExecutionError).
-/// - `Discovery` — `tools/list` / `searchTools` observation.
+/// - `Discovery` — catalog discovery observation. No current surface records
+///   it; the variant stays so stored rows keep decoding.
 /// - `AdminMutation` — operator changed configuration via `/admin` or `/api/v1`.
 /// - `AuthAttempt` — bearer validation outcome (issued tokens, refused, etc).
 /// - `PolicyReload` — Cedar policy set re-loaded (SIGHUP / runtime CRUD).

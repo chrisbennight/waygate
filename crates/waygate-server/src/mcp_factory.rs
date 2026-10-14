@@ -23,7 +23,6 @@ pub(crate) struct McpServerFactory {
     pub catalog_store: Option<waygate_catalog::SharedCatalogStore>,
     pub authz: waygate_mcp::SharedAuthz,
     pub audit: waygate_mcp::SharedEvidence,
-    pub index: Option<waygate_mcp::SearchIndex>,
     pub tool_catalog_epoch: waygate_mcp::ToolCatalogEpoch,
     pub audit_mode: waygate_mcp::AuditMode,
     pub result_storage: CodeModeResultStorage,
@@ -71,12 +70,9 @@ pub(crate) struct McpServerFactory {
     /// `ObserveTools` / `ControlTools` shares the one handle the
     /// composition root fills after building `AdminState`.
     pub admin_state_cell: Arc<OnceLock<Arc<waygate_admin::AdminState>>>,
-    pub eager_tools_list: bool,
-    pub eager_tools_clients: Vec<String>,
     pub codemode_only_tools_clients: Vec<String>,
     pub tools_list_cache_ttl: Option<Duration>,
     pub root_composition_clients: Vec<String>,
-    pub audit_discovery: bool,
     pub idjag_advertise_ema: bool,
     pub mcp_ping_interval: Option<Duration>,
 }
@@ -113,12 +109,9 @@ impl McpServerFactory {
         );
         let mut server =
             GatewayServer::with_deps(self.catalog.clone(), self.authz.clone(), self.audit.clone())
-                .with_eager_tools_list(self.eager_tools_list)
-                .with_eager_tools_clients(self.eager_tools_clients.clone())
                 .with_codemode_only_tools_clients(self.codemode_only_tools_clients.clone())
                 .with_tools_list_cache_ttl(self.tools_list_cache_ttl)
                 .with_root_composition_clients(self.root_composition_clients.clone())
-                .with_audit_discovery(self.audit_discovery)
                 .with_ema_capability_advert(self.idjag_advertise_ema)
                 .with_client_ping_interval(self.mcp_ping_interval)
                 .with_tool_catalog_epoch(&self.tool_catalog_epoch)
@@ -131,9 +124,6 @@ impl McpServerFactory {
                 .with_resource_response_max_bytes(self.resource_response_max_bytes)
                 .with_resource_inspectors(self.inspectors.clone())
                 .with_invocation_service(invocation.clone());
-        if let Some(idx) = self.index.as_ref() {
-            server = server.with_index(idx.clone());
-        }
         let registry = waygate_mcp::BuiltinRegistry::default();
         let mut builtins: Vec<waygate_mcp::SharedBuiltinTools> = Vec::new();
         if self.skills.is_some() {

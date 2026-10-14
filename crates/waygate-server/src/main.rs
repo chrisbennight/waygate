@@ -556,7 +556,6 @@ async fn gateway_main() -> anyhow::Result<()> {
     let _database_pool_pressure_task = database_pools
         .as_ref()
         .map(|pools| pools.spawn_pressure_monitor(ct.clone()));
-    let search_index = pool.search_index().cloned();
     let mcp_allowed_hosts =
         resolve_mcp_allowed_hosts(&cfg.public_url, cfg.mcp_allowed_hosts.as_deref())?;
     tracing::info!(
@@ -564,10 +563,7 @@ async fn gateway_main() -> anyhow::Result<()> {
         source = if cfg.mcp_allowed_hosts.is_some() { "env" } else { "public_url" },
         "configured rmcp host allowlist"
     );
-    let eager_tools_list = cfg.eager_tools_list;
-    let eager_tools_clients = cfg.eager_tools_clients.clone();
     let codemode_only_tools_clients = cfg.codemode_only_tools_clients.clone();
-    let audit_discovery = cfg.audit_discovery;
     let mcp_ping_interval = cfg.mcp_ping_interval;
     // Advertise the `io.modelcontextprotocol/enterprise-managed-authorization`
     // capability in `ServerCapabilities.extensions` only when the operator opted
@@ -579,11 +575,7 @@ async fn gateway_main() -> anyhow::Result<()> {
     let idjag_advertise_ema = cfg.as_server.is_some()
         && waygate_core::env::bool_default_off("GATEWAY_AS_IDJAG_ENABLED")
         && waygate_core::env::bool_default_off("GATEWAY_AS_IDJAG_ADVERTISE");
-    client_tool_projection::log_selection(
-        eager_tools_list,
-        &eager_tools_clients,
-        &codemode_only_tools_clients,
-    );
+    client_tool_projection::log_selection(&codemode_only_tools_clients);
     // Stretch the streamable-HTTP idle session timeout past an interactive
     // client's idle gap. rmcp's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5
     // minutes; a session that idles past that gets a stale Mcp-Session-Id,
@@ -1046,7 +1038,6 @@ async fn gateway_main() -> anyhow::Result<()> {
         catalog_store: catalog_store.clone(),
         authz: authz_gate.clone(),
         audit: audit_sink.clone(),
-        index: search_index.clone(),
         tool_catalog_epoch: tool_catalog_epoch.clone(),
         audit_mode: cfg.audit_mode,
         result_storage: cfg.codemode_result_storage,
@@ -1079,12 +1070,9 @@ async fn gateway_main() -> anyhow::Result<()> {
         change_notifier: change_notifier.clone(),
         public_url: cfg.public_url.clone(),
         admin_state_cell: admin_state_cell.clone(),
-        eager_tools_list,
-        eager_tools_clients: eager_tools_clients.clone(),
         codemode_only_tools_clients: codemode_only_tools_clients.clone(),
         tools_list_cache_ttl: cfg.tools_list_cache_ttl,
         root_composition_clients: cfg.root_composition_clients.clone(),
-        audit_discovery,
         idjag_advertise_ema,
         mcp_ping_interval,
     });

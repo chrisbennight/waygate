@@ -1,19 +1,19 @@
-//! Interactive REPL: list upstream servers, pick one, list its operations,
-//! pick an operation, enter JSON args, invoke, repeat. Aimed at humans
-//! exploring a gateway; for scripting use `tools call`.
+//! Interactive REPL: list the tool sources (upstream servers and gateway
+//! namespaces) from `tools/list`, pick one, list its tools, pick a tool,
+//! enter JSON args, invoke, repeat. Aimed at humans exploring a gateway; for
+//! scripting use `tools call`.
+
+use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result};
 use dialoguer::{theme::ColorfulTheme, Input, Select};
-use rmcp::model::CallToolRequestParams;
+use rmcp::model::{CallToolRequestParams, Tool};
 use serde_json::{Map, Value};
 
 use crate::auth::resolve_bearer;
 use crate::cli::Context;
 use crate::gateway::rpc::{self, Client};
 use crate::output;
-use crate::sep1888::{
-    server_from_search_tool, Mode, OperationsResponse, SearchToolsRequest, SEARCH_TOOLS_SUFFIX,
-};
 
 pub async fn run(ctx: &Context) -> Result<()> {
     let auth = resolve_bearer(ctx).await?;
@@ -25,25 +25,22 @@ pub async fn run(ctx: &Context) -> Result<()> {
 }
 
 async fn loop_body(ctx: &Context, client: &Client) -> Result<()> {
-    let listed = client
-        .list_tools(Default::default())
+    let tools = client
+        .list_all_tools()
         .await
         .context("initial listTools for REPL")?;
-    let servers: Vec<String> = listed
-        .tools
-        .iter()
-        .filter_map(|t| server_from_search_tool(t.name.as_ref()).map(str::to_owned))
-        .collect();
+    let by_server = group_by_server(&tools);
 
-    if servers.is_empty() {
-        println!("(gateway returned no `.searchTools` meta-tools — nothing to explore)");
+    if by_server.is_empty() {
+        println!("(gateway returned no tools — nothing to explore)");
         return Ok(());
     }
 
+    let servers: Vec<&str> = by_server.keys().copied().collect();
     let theme = ColorfulTheme::default();
     loop {
         let mut menu = servers.clone();
-        menu.push("(quit)".to_owned());
+        menu.push("(quit)");
         let pick = Select::with_theme(&theme)
             .with_prompt("server")
             .items(&menu)
@@ -53,30 +50,34 @@ async fn loop_body(ctx: &Context, client: &Client) -> Result<()> {
         if pick == menu.len() - 1 {
             return Ok(());
         }
-        let server = &menu[pick];
+        let server = menu[pick];
 
-        if let Err(e) = operations_loop(ctx, client, server).await {
+        if let Err(e) = tools_loop(ctx, client, server, &by_server[server]).await {
             eprintln!("error: {:#}", e);
         }
     }
 }
 
-async fn operations_loop(ctx: &Context, client: &Client, server: &str) -> Result<()> {
-    let ops = fetch_all_operations(client, server).await?;
-    if ops.operations.is_empty() {
-        println!("(no operations exposed by {server})");
-        return Ok(());
+/// Group tools by the source before the first dot of the fully-qualified
+/// `<server>.<tool>` name; a name without a dot forms its own group.
+fn group_by_server(tools: &[Tool]) -> BTreeMap<&str, Vec<&Tool>> {
+    let mut by_server: BTreeMap<&str, Vec<&Tool>> = BTreeMap::new();
+    for tool in tools {
+        let name = tool.name.as_ref();
+        let server = name.split_once('.').map_or(name, |(server, _)| server);
+        by_server.entry(server).or_default().push(tool);
     }
+    by_server
+}
 
-    let labels: Vec<String> = ops
-        .operations
+async fn tools_loop(ctx: &Context, client: &Client, server: &str, tools: &[&Tool]) -> Result<()> {
+    let labels: Vec<String> = tools
         .iter()
-        .map(|op| {
+        .map(|tool| {
             format!(
-                "{} [{}]{}",
-                op.name,
-                op.risk_level.as_str(),
-                match op.description.as_deref().unwrap_or("").lines().next() {
+                "{}{}",
+                tool.name,
+                match tool.description.as_deref().unwrap_or("").lines().next() {
                     Some(l) if !l.is_empty() => format!(" — {l}"),
                     _ => String::new(),
                 }
@@ -89,31 +90,34 @@ async fn operations_loop(ctx: &Context, client: &Client, server: &str) -> Result
         let mut menu = labels.clone();
         menu.push("(back)".to_owned());
         let pick = Select::with_theme(&theme)
-            .with_prompt(format!("{server} operation"))
+            .with_prompt(format!("{server} tool"))
             .items(&menu)
             .default(0)
             .interact()
-            .context("select operation")?;
+            .context("select tool")?;
         if pick == menu.len() - 1 {
             return Ok(());
         }
-        let op = &ops.operations[pick];
+        let tool = tools[pick];
 
         let args: String = Input::with_theme(&theme)
-            .with_prompt(format!("args for {} (JSON object, empty = {{}})", op.name))
+            .with_prompt(format!(
+                "args for {} (JSON object, empty = {{}})",
+                tool.name
+            ))
             .allow_empty(true)
             .interact_text()
             .context("read args")?;
         let arguments = parse_args(&args)?;
 
-        let mut params = CallToolRequestParams::new(op.name.clone());
+        let mut params = CallToolRequestParams::new(tool.name.clone());
         if let Some(obj) = arguments {
             params = params.with_arguments(obj);
         }
         let res = client
             .call_tool(params)
             .await
-            .with_context(|| format!("call {}", op.name))?;
+            .with_context(|| format!("call {}", tool.name))?;
 
         if ctx.json {
             println!("{}", serde_json::to_string_pretty(&res)?);
@@ -137,52 +141,6 @@ async fn operations_loop(ctx: &Context, client: &Client, server: &str) -> Result
     }
 }
 
-async fn fetch_all_operations(client: &Client, server: &str) -> Result<OperationsResponse> {
-    let tool_name = format!("{server}{SEARCH_TOOLS_SUFFIX}");
-    let mut cursor: Option<String> = None;
-    let mut merged = OperationsResponse {
-        operations: Vec::new(),
-        next_cursor: None,
-    };
-    loop {
-        let req = SearchToolsRequest {
-            mode: Mode::Operations,
-            filters: None,
-            name: None,
-            cursor: cursor.clone(),
-            limit: None,
-        };
-        let params = CallToolRequestParams::new(tool_name.clone()).with_arguments(to_object(&req)?);
-        let res = client
-            .call_tool(params)
-            .await
-            .with_context(|| format!("call {tool_name}"))?;
-        if res.is_error.unwrap_or(false) {
-            anyhow::bail!("{tool_name} returned isError=true");
-        }
-        let parsed: OperationsResponse = if let Some(sc) = &res.structured_content {
-            serde_json::from_value(sc.clone()).context("parse structuredContent")?
-        } else if let Some(text) = res
-            .content
-            .iter()
-            .find_map(|c| c.as_text().map(|t| &t.text))
-        {
-            serde_json::from_str(text).context("parse text content")?
-        } else {
-            anyhow::bail!("{tool_name} returned no structuredContent or text");
-        };
-        merged.operations.extend(parsed.operations);
-        match parsed.next_cursor {
-            Some(next) if !next.is_empty() => cursor = Some(next),
-            _ => {
-                merged.next_cursor = None;
-                break;
-            }
-        }
-    }
-    Ok(merged)
-}
-
 fn parse_args(raw: &str) -> Result<Option<Map<String, Value>>> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -195,9 +153,51 @@ fn parse_args(raw: &str) -> Result<Option<Map<String, Value>>> {
     }
 }
 
-fn to_object(req: &SearchToolsRequest) -> Result<Map<String, Value>> {
-    match serde_json::to_value(req)? {
-        Value::Object(m) => Ok(m),
-        other => anyhow::bail!("SearchToolsRequest did not serialize as object: {other:?}"),
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use rmcp::model::Tool;
+    use serde_json::json;
+
+    use super::group_by_server;
+
+    fn tool(name: &str) -> Tool {
+        Tool::new(
+            name.to_owned(),
+            "fixture",
+            Arc::new(
+                json!({"type": "object"})
+                    .as_object()
+                    .cloned()
+                    .expect("object schema"),
+            ),
+        )
+    }
+
+    #[test]
+    fn tools_group_by_the_source_before_the_first_dot() {
+        let tools = vec![
+            tool("example-messages.send"),
+            tool("codemode.search"),
+            tool("example-messages.read.thread"),
+            tool("bare"),
+        ];
+        let grouped = group_by_server(&tools);
+        let names = |server: &str| -> Vec<&str> {
+            grouped[server]
+                .iter()
+                .map(|tool| tool.name.as_ref())
+                .collect()
+        };
+        assert_eq!(
+            grouped.keys().copied().collect::<Vec<_>>(),
+            ["bare", "codemode", "example-messages"]
+        );
+        assert_eq!(
+            names("example-messages"),
+            ["example-messages.send", "example-messages.read.thread"]
+        );
+        assert_eq!(names("bare"), ["bare"]);
     }
 }
