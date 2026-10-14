@@ -284,6 +284,16 @@ without reconnecting, while admitted calls retain their manifest snapshot.
 See [large structured responses](../file-transfer.md#large-structured-tool-responses)
 for the byte measurement and file-delivery conditions.
 
+`long_running_tools` is an optional list of tool names at the server level.
+Each must also appear in `tools`, once. When a client declares the MCP tasks
+extension on a call to a listed tool and the upstream has no native task
+binding, the gateway runs the call in the background and answers with a task;
+see [gateway-run tasks](tasks.md#gateway-run-tasks-for-long-running-calls).
+Edit it in Servers → server configuration → Responses. Manifest reload applies
+it without reconnecting. It has no effect on an upstream that runs tasks
+itself, and editing it there, like any manifest edit, stops that upstream's
+outstanding native task IDs from resolving.
+
 This document covers:
 
 - The `UpstreamManifest` schema: `name`, `transport` (HTTP / SSE / stdio),

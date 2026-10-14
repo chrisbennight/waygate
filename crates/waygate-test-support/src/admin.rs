@@ -17,6 +17,7 @@ pub fn example_messages_manifest() -> UpstreamManifest {
         classification_mode: Default::default(),
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
+        long_running_tools: Vec::new(),
         name: "example-messages".into(),
         transport: Transport::Http,
         protocol: Default::default(),

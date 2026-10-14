@@ -595,6 +595,9 @@ pub struct GatewayServer {
     file_output_processor: Option<crate::files::SharedFileOutputProcessor>,
     resource_response_max_bytes: usize,
     resource_inspectors: Vec<crate::inspection::SharedInspector>,
+    /// Durable executor for long-running upstream tool calls a tasks-declaring
+    /// client asked for. `None` runs every upstream call synchronously.
+    call_tasks: Option<crate::call_tasks::SharedGatewayCallTasks>,
 }
 
 /// Existing skill resource authorization and decision audit shared by resource
@@ -835,7 +838,20 @@ impl GatewayServer {
             file_output_processor: None,
             resource_response_max_bytes: DEFAULT_RESOURCE_RESPONSE_MAX_BYTES,
             resource_inspectors: Vec::new(),
+            call_tasks: None,
         }
+    }
+
+    /// Run long-running upstream tool calls in the background for clients
+    /// that declared the tasks extension. The composition root installs this
+    /// only when durable execution storage and result storage are available.
+    #[must_use]
+    pub fn with_call_tasks(
+        mut self,
+        call_tasks: crate::call_tasks::SharedGatewayCallTasks,
+    ) -> Self {
+        self.call_tasks = Some(call_tasks);
+        self
     }
 
     /// Swap in a different `InvocationService` implementation. Used by
@@ -1232,350 +1248,8 @@ impl GatewayServer {
             .with_mrtr_retry(input_responses, request_state)
             .with_caller_capabilities(caller.capabilities.clone())
             .with_cancellation(cancellation);
-        match self.invocation.invoke(principal, invocation_request).await {
-            // The MCP tool-call path is unary and MCP-shaped. The streaming and
-            // raw-JSON (LLM) response shapes come only from the inference plane,
-            // which has its own HTTP egress and never routes through this
-            // adapter, so either here is a wiring bug — surface it as an
-            // internal error, not a panic.
-            Ok(crate::InvocationResponse::Task(task)) => Ok(CallToolResponse::Task(task)),
-            Ok(crate::InvocationResponse::Unary(result)) => Ok(result.into()),
-            // An upstream MRTR pause the pipeline already verified the caller
-            // can answer — relayed verbatim, opaque `requestState` included.
-            Ok(crate::InvocationResponse::InputRequired(pause)) => {
-                Ok(CallToolResponse::InputRequired(pause))
-            }
-            Ok(crate::InvocationResponse::Stream(_)) => Err(McpError::internal_error(
-                "streaming invocation response is not supported on the MCP tool-call path",
-                None,
-            )),
-            Ok(crate::InvocationResponse::UnaryValue(_)) => Err(McpError::internal_error(
-                "raw-JSON (LLM) invocation response is not supported on the MCP tool-call path",
-                None,
-            )),
-            Err(InvocationError::Forbidden {
-                reason,
-                policy_ids,
-                reasons,
-            }) => {
-                // "Explain this denial":
-                // surface Cedar's `policy_ids` + per-policy
-                // `reasons` in the JSON-RPC `data` envelope
-                // so an operator looking at a denied call
-                // (e.g. via the admin audit deep-link) can
-                // see *which* forbid policies fired and
-                // their human-readable reason without
-                // re-running the gate offline. The
-                // human-readable `message` stays unchanged
-                // for clients that don't parse `data`.
-                let data = serde_json::json!({
-                    "error": "forbidden",
-                    "reason": reason,
-                    "policy_ids": policy_ids,
-                    "reasons": reasons,
-                });
-                Err(McpError::new(
-                    rmcp::model::ErrorCode::INVALID_REQUEST,
-                    format!("forbidden: {server}.{tool_name} — {reason}"),
-                    Some(data),
-                ))
-            }
-            Err(InvocationError::StepUpRequired {
-                required_scope,
-                reason,
-            }) => {
-                // Structured `data` so MCP clients can programmatically
-                // detect insufficient_scope and re-authorize via OAuth
-                // without parsing the human-readable message. The shape
-                // mirrors OAuth 2.0's `error` / `scope` conventions.
-                let data = serde_json::json!({
-                    "error": "insufficient_scope",
-                    "required_scope": required_scope,
-                    "reason": reason,
-                });
-                Err(McpError::new(
-                    rmcp::model::ErrorCode::INVALID_REQUEST,
-                    format!("step-up required (scope `{required_scope}`): {reason}"),
-                    Some(data),
-                ))
-            }
-            Err(InvocationError::Upstream(err)) => {
-                // The typed `McpError` flows through unchanged — same
-                // JSON-RPC code, message, and `data` envelope the
-                // catalog raised. Regression guard: previously
-                // the catalog's invalid-params guard returned
-                // `invalid_params` to the client; stringifying via
-                // Upstream(String) had collapsed every variant to
-                // `internal_error`. The typed carry preserves the
-                // pre-refactor contract.
-                Err(err)
-            }
-            Err(InvocationError::InvalidArguments(detail)) => {
-                Err(McpError::invalid_params(detail, None))
-            }
-            Err(InvocationError::InputSchemaViolation { tool, reason }) => {
-                let data = serde_json::json!({
-                    "error": "input_schema_violation",
-                    "tool": tool,
-                    "reason": reason,
-                });
-                Err(McpError::new(
-                    rmcp::model::ErrorCode::INVALID_PARAMS,
-                    format!("input schema violation on `{tool}`: {reason}"),
-                    Some(data),
-                ))
-            }
-            Err(InvocationError::InputSchemaInvalid { tool }) => {
-                let data = serde_json::json!({
-                    "error": "input_schema_invalid",
-                    "tool": tool,
-                });
-                Err(McpError::new(
-                    rmcp::model::ErrorCode::INTERNAL_ERROR,
-                    format!("input schema for `{tool}` is unavailable or invalid"),
-                    Some(data),
-                ))
-            }
-            Err(InvocationError::ReadOnlyRequired { tool }) => Err(McpError::new(
-                rmcp::model::ErrorCode::INVALID_REQUEST,
-                format!("operation `{tool}` is not admitted for read-only execution"),
-                Some(serde_json::json!({
-                    "error": "read_only_required",
-                    "tool": tool,
-                })),
-            )),
-            // Names the discriminator and the value so the caller can tell this
-            // apart from the whole tool being excluded: the remedy is a
-            // reviewed classification for this operation, not a different tool.
-            Err(InvocationError::ReadOnlyOperationRequired {
-                tool,
-                discriminator,
-                operation,
-            }) => Err(McpError::new(
-                rmcp::model::ErrorCode::INVALID_REQUEST,
-                format!(
-                    "`{tool}` dispatches by `{discriminator}` and `{operation}` is not an \
-                     operation it reviewed for read-only execution"
-                ),
-                Some(serde_json::json!({
-                    "error": "read_only_operation_required",
-                    "tool": tool,
-                    "discriminator": discriminator,
-                    "operation": operation,
-                })),
-            )),
-            Err(InvocationError::AuditUnavailable(detail)) => {
-                // Emitted by the `record_pre_call` stage when
-                // `GATEWAY_AUDIT_MODE=fail_closed` and the side-effecting
-                // call's pre-call required-record write failed. The
-                // upstream dispatch never ran — a "fail_closed for
-                // compliance" deployment must surface this as a 5xx so
-                // the client retries (or the operator investigates)
-                // rather than silently proceeding without evidence.
-                Err(McpError::internal_error(
-                    format!("audit unavailable: {detail}"),
-                    None,
-                ))
-            }
-            Err(InvocationError::ApprovalRequired {
-                tool,
-                reason,
-                satisfiable,
-            }) => {
-                // MRTR projection (SEP-2322): when the refusal is the one a
-                // granted approval + identical retry can cure AND the caller
-                // declared it can answer elicitation, return an
-                // `input_required` pause carrying the approval ask instead of
-                // a terminal error. No gateway `requestState` — the grant
-                // claim authorizes the retry (the plan's locked decision) —
-                // and the reserved-key answer is stripped on that retry
-                // above. Legacy-generation and non-elicitation callers keep
-                // the structured error byte-for-byte.
-                if satisfiable && caller.elicitation_capable() {
-                    return Ok(CallToolResponse::InputRequired(approval_input_required(
-                        &tool, &reason,
-                    )));
-                }
-                // Structured MCP error so clients can
-                // surface the human-in-the-loop UX (prompt for
-                // approval, wait, retry) rather than parsing a
-                // human-readable string. Shape mirrors the step-up
-                // error envelope so clients that already handle
-                // OAuth-style structured errors can reuse the same
-                // detection branch.
-                let data = serde_json::json!({
-                    "error": "approval_required",
-                    "tool": tool,
-                    "reason": reason,
-                });
-                Err(McpError::new(
-                    rmcp::model::ErrorCode::INVALID_REQUEST,
-                    format!("approval required for `{tool}`: {reason}"),
-                    Some(data),
-                ))
-            }
-            Err(InvocationError::RateLimited {
-                policy_id,
-                policy_name,
-                retry_after_seconds,
-            }) => {
-                // Structured MCP error so clients
-                // can detect rate-limit responses and back off
-                // without parsing the human-readable message.
-                // `retry_after_seconds` mirrors HTTP 429's
-                // `Retry-After` header per RFC 6585 §4 — this
-                // path can't set the HTTP header directly
-                // (the rmcp adapter returns a JSON-RPC error,
-                // not an HTTP response), but the body field
-                // carries the same hint for client backoff
-                // logic. A future HTTP-layer adapter (the
-                // step-up 403 work will do similar
-                // for status codes) can promote this to the
-                // header when an HTTP transport is in use.
-                let data = serde_json::json!({
-                    "error": "rate_limited",
-                    "policy_id": policy_id.to_string(),
-                    "policy_name": policy_name,
-                    "retry_after_seconds": retry_after_seconds,
-                });
-                Err(McpError::new(
-                    rmcp::model::ErrorCode::INVALID_REQUEST,
-                    format!(
-                        "rate-limited by policy `{policy_name}`; retry after {retry_after_seconds}s"
-                    ),
-                    Some(data),
-                ))
-            }
-            Err(InvocationError::ProfileServerNotAllowed {
-                profile_id,
-                profile_name,
-                server,
-            }) => {
-                // Structured MCP error so
-                // clients can distinguish profile-driven server
-                // denial from a Cedar-policy deny. The
-                // mcp_http_promote middleware does NOT promote
-                // this to HTTP 403 today (the classifier targets
-                // insufficient_scope/rate_limited specifically);
-                // a follow-up can add this kind to the
-                // promotion list if operators want OAuth-style
-                // signalling here too.
-                let data = serde_json::json!({
-                    "error": "profile_restricts_server",
-                    "profile_id": profile_id,
-                    "profile_name": profile_name,
-                    "server": server,
-                });
-                Err(McpError::new(
-                    rmcp::model::ErrorCode::INVALID_REQUEST,
-                    format!("api-key profile `{profile_name}` does not permit server `{server}`"),
-                    Some(data),
-                ))
-            }
-            Err(InvocationError::ProfileToolNotAllowed {
-                profile_id,
-                profile_name,
-                tool,
-            }) => {
-                let data = serde_json::json!({
-                    "error": "profile_restricts_tool",
-                    "profile_id": profile_id,
-                    "profile_name": profile_name,
-                    "tool": tool,
-                });
-                Err(McpError::new(
-                    rmcp::model::ErrorCode::INVALID_REQUEST,
-                    format!("api-key profile `{profile_name}` does not permit tool `{tool}`"),
-                    Some(data),
-                ))
-            }
-            Err(InvocationError::OutputSchemaViolation { tool, reason }) => {
-                // The upstream returned a payload
-                // that didn't match the approved JSON Schema.
-                // INTERNAL_ERROR rather than INVALID_REQUEST —
-                // the caller's request was fine; the failure is
-                // server-side (upstream out-of-contract). The
-                // sanitized `reason` (validator message + JSON
-                // pointer) is safe to surface — never the full
-                // payload, which could leak PII/secrets.
-                let data = serde_json::json!({
-                    "error": "output_schema_violation",
-                    "tool": tool,
-                    "reason": reason,
-                });
-                Err(McpError::new(
-                    rmcp::model::ErrorCode::INTERNAL_ERROR,
-                    format!("output schema violation on `{tool}`: {reason}"),
-                    Some(data),
-                ))
-            }
-            Err(InvocationError::ToolSchemaInvalid { tool }) => {
-                let data = serde_json::json!({
-                    "error": "tool_schema_invalid",
-                    "tool": tool,
-                });
-                Err(McpError::new(
-                    rmcp::model::ErrorCode::INTERNAL_ERROR,
-                    format!("approved output schema for `{tool}` is invalid"),
-                    Some(data),
-                ))
-            }
-            Err(InvocationError::ResponseInspectionBlocked {
-                tool,
-                inspector_name,
-                reason,
-            }) => {
-                // A response inspector (PII /
-                // secret / poisoning marker) refused the
-                // upstream payload. INTERNAL_ERROR mirrors the
-                // c1 schema-violation shape: the caller's
-                // request was fine; the gateway refused to
-                // forward the upstream's response. The
-                // sanitized `reason` carries only the rule
-                // label (e.g. "matched PII rule `US_SSN`") —
-                // never the matched payload, per the same
-                // discipline c1 applies to schema messages.
-                let data = serde_json::json!({
-                    "error": "response_inspection_blocked",
-                    "tool": tool,
-                    "inspector_name": inspector_name,
-                    "reason": reason,
-                });
-                Err(McpError::new(
-                    rmcp::model::ErrorCode::INTERNAL_ERROR,
-                    format!(
-                        "response blocked by inspector `{inspector_name}` on `{tool}`: {reason}"
-                    ),
-                    Some(data),
-                ))
-            }
-            Err(InvocationError::ResponseMaterializationLimit {
-                tool,
-                minimum_response_bytes,
-                limit_bytes,
-            }) => Err(McpError::new(
-                rmcp::model::ErrorCode::INTERNAL_ERROR,
-                format!(
-                    "retained response for `{tool}` exceeds this caller's materialization budget"
-                ),
-                Some(serde_json::json!({
-                    "error": "connector_result_too_large",
-                    "tool": tool,
-                    "minimum_response_bytes": minimum_response_bytes,
-                    "limit_bytes": limit_bytes,
-                })),
-            )),
-            // The LLM budget gate runs only on the inference fast
-            // path (`invoke_llm`), whose calls return via the `/v1` egress, not
-            // this MCP tool-call adapter — so a budget rejection cannot reach
-            // here. Handled for exhaustiveness; if it ever does, surface it as
-            // an internal error rather than silently mapping to success.
-            Err(InvocationError::BudgetExceeded { dimension, reason }) => Err(McpError::new(
-                rmcp::model::ErrorCode::INTERNAL_ERROR,
-                format!("llm budget exhausted ({dimension}): {reason}"),
-                None,
-            )),
-        }
+        let outcome = self.invocation.invoke(principal, invocation_request).await;
+        tool_call_response(outcome, server, tool_name, caller)
     }
 
     /// Resolve one built-in name through the same profile confinement and
@@ -3411,6 +3085,358 @@ impl MrtrCaller {
     }
 }
 
+/// Map an invocation outcome onto the MCP `tools/call` response a direct
+/// caller receives. Shared by synchronous dispatch and by call-task
+/// submission, so a refusal reaches the caller in the same shape either way.
+fn tool_call_response(
+    outcome: Result<crate::InvocationResponse, InvocationError>,
+    server: &str,
+    tool_name: &str,
+    caller: &MrtrCaller,
+) -> Result<CallToolResponse, McpError> {
+    match outcome {
+        // The MCP tool-call path is unary and MCP-shaped. The streaming and
+        // raw-JSON (LLM) response shapes come only from the inference plane,
+        // which has its own HTTP egress and never routes through this
+        // adapter, so either here is a wiring bug — surface it as an
+        // internal error, not a panic.
+        Ok(crate::InvocationResponse::Task(task)) => Ok(CallToolResponse::Task(task)),
+        Ok(crate::InvocationResponse::Unary(result)) => Ok(result.into()),
+        // An upstream MRTR pause the pipeline already verified the caller
+        // can answer — relayed verbatim, opaque `requestState` included.
+        Ok(crate::InvocationResponse::InputRequired(pause)) => {
+            Ok(CallToolResponse::InputRequired(pause))
+        }
+        Ok(crate::InvocationResponse::Stream(_)) => Err(McpError::internal_error(
+            "streaming invocation response is not supported on the MCP tool-call path",
+            None,
+        )),
+        Ok(crate::InvocationResponse::UnaryValue(_)) => Err(McpError::internal_error(
+            "raw-JSON (LLM) invocation response is not supported on the MCP tool-call path",
+            None,
+        )),
+        // MRTR projection (SEP-2322): when the refusal is the one a granted
+        // approval and an identical retry can cure, and the caller declared
+        // it can answer elicitation, return an `input_required` pause
+        // carrying the approval ask instead of a terminal error. The gateway
+        // mints no `requestState`: the grant claim authorizes the retry, and
+        // dispatch strips the reserved-key answer from it. Legacy-generation
+        // and non-elicitation callers keep the structured error unchanged.
+        Err(InvocationError::ApprovalRequired {
+            tool,
+            reason,
+            satisfiable: true,
+        }) if caller.elicitation_capable() => Ok(CallToolResponse::InputRequired(
+            approval_input_required(&tool, &reason),
+        )),
+        Err(error) => Err(tool_call_error(error, server, tool_name)),
+    }
+}
+
+/// The MCP error a direct `tools/call` returns for `error` on
+/// `server.tool_name`, without the approval `input_required` projection that
+/// only a connected caller can answer. Background executors use it to record
+/// a refusal exactly as a direct caller would have seen it.
+pub fn tool_call_error(error: InvocationError, server: &str, tool_name: &str) -> McpError {
+    match error {
+        InvocationError::Forbidden {
+            reason,
+            policy_ids,
+            reasons,
+        } => {
+            // "Explain this denial":
+            // surface Cedar's `policy_ids` + per-policy
+            // `reasons` in the JSON-RPC `data` envelope
+            // so an operator looking at a denied call
+            // (e.g. via the admin audit deep-link) can
+            // see *which* forbid policies fired and
+            // their human-readable reason without
+            // re-running the gate offline. The
+            // human-readable `message` stays unchanged
+            // for clients that don't parse `data`.
+            let data = serde_json::json!({
+                "error": "forbidden",
+                "reason": reason,
+                "policy_ids": policy_ids,
+                "reasons": reasons,
+            });
+            McpError::new(
+                rmcp::model::ErrorCode::INVALID_REQUEST,
+                format!("forbidden: {server}.{tool_name} — {reason}"),
+                Some(data),
+            )
+        }
+        InvocationError::StepUpRequired {
+            required_scope,
+            reason,
+        } => {
+            // Structured `data` so MCP clients can programmatically
+            // detect insufficient_scope and re-authorize via OAuth
+            // without parsing the human-readable message. The shape
+            // mirrors OAuth 2.0's `error` / `scope` conventions.
+            let data = serde_json::json!({
+                "error": "insufficient_scope",
+                "required_scope": required_scope,
+                "reason": reason,
+            });
+            McpError::new(
+                rmcp::model::ErrorCode::INVALID_REQUEST,
+                format!("step-up required (scope `{required_scope}`): {reason}"),
+                Some(data),
+            )
+        }
+        InvocationError::Upstream(err) => {
+            // The typed `McpError` flows through unchanged — same
+            // JSON-RPC code, message, and `data` envelope the
+            // catalog raised. Regression guard: previously
+            // the catalog's invalid-params guard returned
+            // `invalid_params` to the client; stringifying via
+            // Upstream(String) had collapsed every variant to
+            // `internal_error`. The typed carry preserves the
+            // pre-refactor contract.
+            err
+        }
+        InvocationError::InvalidArguments(detail) => McpError::invalid_params(detail, None),
+        InvocationError::InputSchemaViolation { tool, reason } => {
+            let data = serde_json::json!({
+                "error": "input_schema_violation",
+                "tool": tool,
+                "reason": reason,
+            });
+            McpError::new(
+                rmcp::model::ErrorCode::INVALID_PARAMS,
+                format!("input schema violation on `{tool}`: {reason}"),
+                Some(data),
+            )
+        }
+        InvocationError::InputSchemaInvalid { tool } => {
+            let data = serde_json::json!({
+                "error": "input_schema_invalid",
+                "tool": tool,
+            });
+            McpError::new(
+                rmcp::model::ErrorCode::INTERNAL_ERROR,
+                format!("input schema for `{tool}` is unavailable or invalid"),
+                Some(data),
+            )
+        }
+        InvocationError::ReadOnlyRequired { tool } => McpError::new(
+            rmcp::model::ErrorCode::INVALID_REQUEST,
+            format!("operation `{tool}` is not admitted for read-only execution"),
+            Some(serde_json::json!({
+                "error": "read_only_required",
+                "tool": tool,
+            })),
+        ),
+        // Names the discriminator and the value so the caller can tell this
+        // apart from the whole tool being excluded: the remedy is a
+        // reviewed classification for this operation, not a different tool.
+        InvocationError::ReadOnlyOperationRequired {
+            tool,
+            discriminator,
+            operation,
+        } => McpError::new(
+            rmcp::model::ErrorCode::INVALID_REQUEST,
+            format!(
+                "`{tool}` dispatches by `{discriminator}` and `{operation}` is not an \
+                 operation it reviewed for read-only execution"
+            ),
+            Some(serde_json::json!({
+                "error": "read_only_operation_required",
+                "tool": tool,
+                "discriminator": discriminator,
+                "operation": operation,
+            })),
+        ),
+        InvocationError::AuditUnavailable(detail) => {
+            // Emitted by the `record_pre_call` stage when
+            // `GATEWAY_AUDIT_MODE=fail_closed` and the side-effecting
+            // call's pre-call required-record write failed. The
+            // upstream dispatch never ran — a "fail_closed for
+            // compliance" deployment must surface this as a 5xx so
+            // the client retries (or the operator investigates)
+            // rather than silently proceeding without evidence.
+            McpError::internal_error(format!("audit unavailable: {detail}"), None)
+        }
+        InvocationError::ApprovalRequired { tool, reason, .. } => {
+            // Structured MCP error so clients can
+            // surface the human-in-the-loop UX (prompt for
+            // approval, wait, retry) rather than parsing a
+            // human-readable string. Shape mirrors the step-up
+            // error envelope so clients that already handle
+            // OAuth-style structured errors can reuse the same
+            // detection branch.
+            let data = serde_json::json!({
+                "error": "approval_required",
+                "tool": tool,
+                "reason": reason,
+            });
+            McpError::new(
+                rmcp::model::ErrorCode::INVALID_REQUEST,
+                format!("approval required for `{tool}`: {reason}"),
+                Some(data),
+            )
+        }
+        InvocationError::RateLimited {
+            policy_id,
+            policy_name,
+            retry_after_seconds,
+        } => {
+            // Structured MCP error so clients
+            // can detect rate-limit responses and back off
+            // without parsing the human-readable message.
+            // `retry_after_seconds` mirrors HTTP 429's
+            // `Retry-After` header per RFC 6585 §4 — this
+            // path can't set the HTTP header directly
+            // (the rmcp adapter returns a JSON-RPC error,
+            // not an HTTP response), but the body field
+            // carries the same hint for client backoff
+            // logic. A future HTTP-layer adapter (the
+            // step-up 403 work will do similar
+            // for status codes) can promote this to the
+            // header when an HTTP transport is in use.
+            let data = serde_json::json!({
+                "error": "rate_limited",
+                "policy_id": policy_id.to_string(),
+                "policy_name": policy_name,
+                "retry_after_seconds": retry_after_seconds,
+            });
+            McpError::new(
+                rmcp::model::ErrorCode::INVALID_REQUEST,
+                format!(
+                    "rate-limited by policy `{policy_name}`; retry after {retry_after_seconds}s"
+                ),
+                Some(data),
+            )
+        }
+        InvocationError::ProfileServerNotAllowed {
+            profile_id,
+            profile_name,
+            server,
+        } => {
+            // Structured MCP error so
+            // clients can distinguish profile-driven server
+            // denial from a Cedar-policy deny. The
+            // mcp_http_promote middleware does NOT promote
+            // this to HTTP 403 today (the classifier targets
+            // insufficient_scope/rate_limited specifically);
+            // a follow-up can add this kind to the
+            // promotion list if operators want OAuth-style
+            // signalling here too.
+            let data = serde_json::json!({
+                "error": "profile_restricts_server",
+                "profile_id": profile_id,
+                "profile_name": profile_name,
+                "server": server,
+            });
+            McpError::new(
+                rmcp::model::ErrorCode::INVALID_REQUEST,
+                format!("api-key profile `{profile_name}` does not permit server `{server}`"),
+                Some(data),
+            )
+        }
+        InvocationError::ProfileToolNotAllowed {
+            profile_id,
+            profile_name,
+            tool,
+        } => {
+            let data = serde_json::json!({
+                "error": "profile_restricts_tool",
+                "profile_id": profile_id,
+                "profile_name": profile_name,
+                "tool": tool,
+            });
+            McpError::new(
+                rmcp::model::ErrorCode::INVALID_REQUEST,
+                format!("api-key profile `{profile_name}` does not permit tool `{tool}`"),
+                Some(data),
+            )
+        }
+        InvocationError::OutputSchemaViolation { tool, reason } => {
+            // The upstream returned a payload
+            // that didn't match the approved JSON Schema.
+            // INTERNAL_ERROR rather than INVALID_REQUEST —
+            // the caller's request was fine; the failure is
+            // server-side (upstream out-of-contract). The
+            // sanitized `reason` (validator message + JSON
+            // pointer) is safe to surface — never the full
+            // payload, which could leak PII/secrets.
+            let data = serde_json::json!({
+                "error": "output_schema_violation",
+                "tool": tool,
+                "reason": reason,
+            });
+            McpError::new(
+                rmcp::model::ErrorCode::INTERNAL_ERROR,
+                format!("output schema violation on `{tool}`: {reason}"),
+                Some(data),
+            )
+        }
+        InvocationError::ToolSchemaInvalid { tool } => {
+            let data = serde_json::json!({
+                "error": "tool_schema_invalid",
+                "tool": tool,
+            });
+            McpError::new(
+                rmcp::model::ErrorCode::INTERNAL_ERROR,
+                format!("approved output schema for `{tool}` is invalid"),
+                Some(data),
+            )
+        }
+        InvocationError::ResponseInspectionBlocked {
+            tool,
+            inspector_name,
+            reason,
+        } => {
+            // A response inspector (PII /
+            // secret / poisoning marker) refused the
+            // upstream payload. INTERNAL_ERROR mirrors the
+            // c1 schema-violation shape: the caller's
+            // request was fine; the gateway refused to
+            // forward the upstream's response. The
+            // sanitized `reason` carries only the rule
+            // label (e.g. "matched PII rule `US_SSN`") —
+            // never the matched payload, per the same
+            // discipline c1 applies to schema messages.
+            let data = serde_json::json!({
+                "error": "response_inspection_blocked",
+                "tool": tool,
+                "inspector_name": inspector_name,
+                "reason": reason,
+            });
+            McpError::new(
+                rmcp::model::ErrorCode::INTERNAL_ERROR,
+                format!("response blocked by inspector `{inspector_name}` on `{tool}`: {reason}"),
+                Some(data),
+            )
+        }
+        InvocationError::ResponseMaterializationLimit {
+            tool,
+            minimum_response_bytes,
+            limit_bytes,
+        } => McpError::new(
+            rmcp::model::ErrorCode::INTERNAL_ERROR,
+            format!("retained response for `{tool}` exceeds this caller's materialization budget"),
+            Some(serde_json::json!({
+                "error": "connector_result_too_large",
+                "tool": tool,
+                "minimum_response_bytes": minimum_response_bytes,
+                "limit_bytes": limit_bytes,
+            })),
+        ),
+        // The LLM budget gate runs only on the inference fast
+        // path (`invoke_llm`), whose calls return via the `/v1` egress, not
+        // this MCP tool-call adapter — so a budget rejection cannot reach
+        // here. Handled for exhaustiveness; if it ever does, surface it as
+        // an internal error rather than silently mapping to success.
+        InvocationError::BudgetExceeded { dimension, reason } => McpError::new(
+            rmcp::model::ErrorCode::INTERNAL_ERROR,
+            format!("llm budget exhausted ({dimension}): {reason}"),
+            None,
+        ),
+    }
+}
+
 /// Build the MRTR pause for a satisfiable approval refusal: one form-mode
 /// elicitation under the reserved gateway key, no `requestState` (the
 /// approval grant is the durable anchor; the retry is an ordinary call the
@@ -3483,6 +3509,12 @@ fn approval_elicitation(
         url,
         elicitation_id: id,
     })
+}
+
+/// The answer for a task identifier this caller cannot see, whether it never
+/// existed, expired, or belongs to someone else.
+fn task_not_found() -> McpError {
+    McpError::resource_not_found("Task not found", None)
 }
 
 /// Pull the `Principal` out of a rmcp `RequestContext`, which carries the
@@ -3783,6 +3815,15 @@ impl ServerHandler for GatewayServer {
     ) -> Result<GetTaskResult, McpError> {
         let _client = self.client_context(&ctx);
         let principal = principal_from_ctx(&ctx);
+        if crate::call_tasks::is_call_task(&request.task_id) {
+            let (Some(call_tasks), Some(principal)) = (&self.call_tasks, principal.as_ref()) else {
+                return Err(task_not_found());
+            };
+            return call_tasks
+                .get(principal, &request.task_id)
+                .await?
+                .ok_or_else(task_not_found);
+        }
         if crate::tasks::is_upstream_task(&request.task_id) {
             let result = self
                 .invocation
@@ -3879,6 +3920,16 @@ impl ServerHandler for GatewayServer {
     ) -> Result<(), McpError> {
         let _client = self.client_context(&ctx);
         let principal = principal_from_ctx(&ctx);
+        if crate::call_tasks::is_call_task(&request.task_id) {
+            let (Some(call_tasks), Some(principal)) = (&self.call_tasks, principal.as_ref()) else {
+                return Err(task_not_found());
+            };
+            return if call_tasks.cancel(principal, &request.task_id).await? {
+                Ok(())
+            } else {
+                Err(task_not_found())
+            };
+        }
         if crate::tasks::is_upstream_task(&request.task_id) {
             let result = self
                 .invocation
@@ -3930,6 +3981,14 @@ impl ServerHandler for GatewayServer {
     ) -> Result<(), McpError> {
         let _client = self.client_context(&ctx);
         let principal = principal_from_ctx(&ctx);
+        if crate::call_tasks::is_call_task(&request.task_id) {
+            // The background call runs with no caller to answer an input
+            // request, so it never pauses for input.
+            return Err(McpError::invalid_request(
+                "a gateway call task never requests input; poll tasks/get for its status",
+                None,
+            ));
+        }
         if crate::tasks::is_upstream_task(&request.task_id) {
             let result = self
                 .invocation
@@ -4150,9 +4209,11 @@ impl ServerHandler for GatewayServer {
         let mut capabilities = caps.build();
         // Tasks are the SEP-2663 extension: advertised in the extensions
         // capability map (the pre-extension `tasks` capability field no
-        // longer exists on the wire), when native upstream routing is enabled
-        // or a built-in serves a durable task tool.
+        // longer exists on the wire), when native upstream routing is enabled,
+        // gateway call tasks are installed, or a built-in serves a durable
+        // task tool.
         let tasks_enabled = self.invocation.supports_upstream_tasks()
+            || self.call_tasks.is_some()
             || self
                 .builtins
                 .iter()
@@ -4623,7 +4684,8 @@ impl ServerHandler for GatewayServer {
         // and `record_server_operation` tail below, or that exit class
         // vanishes from tools/call outcome/duration metrics and the span's
         // `error.type`.
-        let mut task_enqueue_error: Option<McpError> = None;
+        let caller = MrtrCaller::from_client(&client);
+        let mut task_outcome: Option<Result<CallToolResponse, McpError>> = None;
         if client_declares_tasks {
             match self
                 .try_enqueue_task(&tool_name, &request, principal.as_ref())
@@ -4638,23 +4700,23 @@ impl ServerHandler for GatewayServer {
                     );
                     return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
                 }
-                // Not task-eligible: run synchronously, as for any client.
-                Ok(None) => {}
+                // Not a built-in task: a long-running upstream call may still
+                // run in the background; anything else runs synchronously.
+                Ok(None) => {
+                    task_outcome = self
+                        .try_start_call_task(&request, principal.as_ref(), &caller)
+                        .await;
+                }
                 // Authorization/validation/storage failures take the same
                 // tail as synchronous dispatch errors.
-                Err(error) => task_enqueue_error = Some(error),
+                Err(error) => task_outcome = Some(Err(error)),
             }
         }
-        let result = match task_enqueue_error {
-            Some(error) => Err(error),
+        let result = match task_outcome {
+            Some(outcome) => outcome,
             None => {
-                self.dispatch_tool_call_with(
-                    request,
-                    principal.as_ref(),
-                    &MrtrCaller::from_client(&client),
-                    ctx.ct.clone(),
-                )
-                .await
+                self.dispatch_tool_call_with(request, principal.as_ref(), &caller, ctx.ct.clone())
+                    .await
             }
         };
         // When a propose_change just queued a change and the client
@@ -4721,6 +4783,60 @@ impl GatewayServer {
         builtin
             .enqueue_task(tool, request.arguments.clone(), principal)
             .await
+    }
+
+    /// Run a long-running upstream call in the background for a client that
+    /// declared the tasks extension. `None` means the call does not qualify,
+    /// or the executor declined it before any governance ran, so it runs
+    /// synchronously. `Some` is the complete `tools/call` answer: the task
+    /// handle, or exactly the refusal a direct call would have returned.
+    async fn try_start_call_task(
+        &self,
+        request: &CallToolRequestParams,
+        principal: Option<&Principal>,
+        caller: &MrtrCaller,
+    ) -> Option<Result<CallToolResponse, McpError>> {
+        let call_tasks = self.call_tasks.as_ref()?;
+        let principal = principal?;
+        // Continuation fields reach the upstream only for a 2026 caller, and
+        // the answer to the gateway's own approval ask is never forwarded, so
+        // a retry carrying only that answer is still a first-round call.
+        let continues_upstream_round = caller.capabilities.is_some()
+            && (request.request_state.is_some()
+                || request.input_responses.as_ref().is_some_and(|responses| {
+                    responses
+                        .keys()
+                        .any(|key| key != APPROVAL_INPUT_REQUEST_KEY)
+                }));
+        if continues_upstream_round {
+            return None;
+        }
+        let name = request.name.as_ref();
+        if self.builtins.iter().any(|builtin| {
+            name.strip_prefix(builtin.namespace())
+                .is_some_and(|rest| rest.starts_with('.'))
+        }) {
+            return None;
+        }
+        let (server, tool) = name.split_once('.')?;
+        if !self.catalog.long_running_tool(server, tool) {
+            return None;
+        }
+        // An upstream that runs calls as tasks itself keeps that decision;
+        // the invocation pipeline relays its native task instead.
+        if self.catalog.task_binding(server).await.is_some() {
+            return None;
+        }
+        let call = crate::call_tasks::QualifiedCall {
+            server: server.to_owned(),
+            tool: tool.to_owned(),
+            arguments: request.arguments.clone(),
+        };
+        match call_tasks.start(principal, call).await {
+            Ok(Some(task)) => Some(Ok(CallToolResponse::Task(CreateTaskResult::new(task)))),
+            Ok(None) => None,
+            Err(error) => Some(tool_call_response(Err(error), server, tool, caller)),
+        }
     }
 }
 

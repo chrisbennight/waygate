@@ -185,6 +185,7 @@ pub(crate) fn bundle_content_with_stdio() -> String {
         classification_mode: Default::default(),
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
+        long_running_tools: Vec::new(),
         name: "local-stdio".into(),
         transport: Transport::Stdio,
         protocol: Default::default(),
@@ -1023,6 +1024,49 @@ pub(crate) async fn response_save_updates_server_override_and_blank_restores_inh
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+pub(crate) async fn response_save_publishes_long_running_tools_through_manifest_validation() {
+    let store = InMemoryManifestStore::seeded(&example_messages_bundle_content());
+    let shared: waygate_manifest_store::SharedManifestStore = store.clone();
+    let state = state_with_manifests_and_store(Some(shared)).await;
+    let app = dashboard_router(state.clone(), DashboardAuth::Disabled);
+    let (_, panel) = body_of(
+        app.clone(),
+        "/servers/config?server=example-messages&tab=responses",
+    )
+    .await;
+    assert!(panel.contains("name=\"long_running_tools\""), "{panel}");
+    let hash = state.read_manifest_set_from_disk().unwrap().unwrap().1;
+    let form = format!(
+        "csrf=dev-csrf&server=example-messages&base_hash={hash}&inline_response_threshold_bytes=&long_running_tools=send_msg%0D%0A%0D%0A+list_contacts+"
+    );
+    let (status, body) = post_body(app.clone(), "/servers/config/responses", &form).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Published v"), "{body}");
+    let saved = waygate_upstream::parse_manifest_set(&store.active_content()).unwrap();
+    assert_eq!(
+        saved["example-messages"].long_running_tools,
+        ["send_msg", "list_contacts"]
+    );
+    let (_, panel) = body_of(
+        app.clone(),
+        "/servers/config?server=example-messages&tab=responses",
+    )
+    .await;
+    assert!(panel.contains("send_msg\nlist_contacts"), "{panel}");
+
+    let hash = state.read_manifest_set_from_disk().unwrap().unwrap().1;
+    let original = store.active_content();
+    let (_, body) = post_body(
+        app,
+        "/servers/config/responses",
+        &format!("csrf=dev-csrf&server=example-messages&base_hash={hash}&inline_response_threshold_bytes=&long_running_tools=unknown_tool"),
+    )
+    .await;
+    assert!(body.contains("not classified"), "{body}");
+    assert_eq!(store.active_content(), original);
 }
 
 #[tokio::test]

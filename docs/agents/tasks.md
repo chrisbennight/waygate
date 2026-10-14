@@ -1,6 +1,7 @@
 # MCP Tasks and durable execution
 
-MCP task augmentation supports upstream-owned work and projects the Code Mode execution journal. Load this
+MCP task augmentation supports upstream-owned work, runs long upstream calls
+in the background, and projects the Code Mode execution journal. Load this
 reference when changing task dispatch in `crates/waygate-mcp/src/server.rs` or
 execution ownership, polling, cancellation, and continuation in
 `crates/waygate-codemode/`.
@@ -25,6 +26,49 @@ events, and results. `codemode.result`, `codemode.artifacts`, and
 profile, current authorization, and retention checks. `codemode.executions`
 lists the caller's executions, allowing recovery of a lost handle.
 
+## Gateway-run tasks for long-running calls
+
+An operator can list upstream tools that run long in the manifest field
+`long_running_tools`; see [upstream manifests](upstreams.md#scope). A
+`tools/call` to one of them becomes a task the gateway runs itself when all of
+these hold:
+
+- the client declared the tasks extension on that request;
+- the upstream has no native task binding, so it is not deciding for itself
+  whether to run the call as a task; and
+- the deployment has a database and `GATEWAY_CODEMODE_RESULT_STORAGE=allow`.
+
+Otherwise the call runs synchronously, exactly as before. The gateway may also
+run it synchronously when Code Mode's background capacity is full, because
+the server decides per request.
+
+The call runs through the ordinary invocation pipeline under the caller's
+principal. Validation, authorization, profile confinement, quota, approval and
+pre-call evidence all complete before the gateway creates the task, so a
+refusal is returned as the same error a direct call gets, an approval pause
+included, and leaves no task behind. The task is a row in the Code Mode
+execution journal with the profile name `tool_call`. It records the call's
+server, tool and side-effect classification, never its arguments or a
+program, and its claim is renewed while the upstream call is in flight.
+
+`tasks/get` returns the call's exact `CallToolResult`, after the same
+inspection, output validation and file delivery as a direct call, including a
+result with `isError: true`. A protocol error ends the task `failed` with that
+error. A result larger than `GATEWAY_CODEMODE_RESULT_MAX_BYTES` fails a read;
+for a side-effecting call the task completes with an envelope reporting that
+the result could not be delivered, so nobody repeats the effect to recover it.
+`tasks/cancel` cancels the upstream request the way a disconnecting MCP
+2026-07-28 client would; an effect that already applied stays applied.
+Gateway-run task IDs start with `wgc_`.
+
+Status and cancellation require the original subject, issuer and effective
+credential profile plus `mcp:invoke`, like Code Mode status; they do not
+re-evaluate Cedar for the original tool. Code Mode surfaces such as
+`codemode.status` and `codemode.executions` do not serve these rows, while the
+operator executions API lists them. The background call cannot answer an
+upstream request for input, so a tool that asks for input mid-call ends the
+task `failed`; do not list such tools.
+
 ## What survives restarts, disconnects, and replica changes
 
 Each kind of work has a different owner, so each survives differently. A
@@ -38,6 +82,7 @@ reconciled once their claim lease lapses, with `worker_lease_expired` or
 | Detached Code Mode run (`codemode.start`, or a task-augmented `execute` or `resume`) | Finishes if it can within the drain window. Otherwise it is recorded at shutdown as `expired` with `worker_interrupted`, or `effect_outcome_unknown` when a side effect may have applied. It is never replayed. | No effect. The run does not depend on the request that started it. | Status, results, and cancellation work from any replica. |
 | Paused Code Mode run (`waiting_for_resume`) | Survives. It holds no worker and expires only at retention. | No effect. | Resumes on any replica. |
 | Blocking `codemode.execute` | Finishes if it can within the drain window. Otherwise its response is lost, and with a database the run is recorded at shutdown as interrupted, like a detached run. | The program runs to completion. A 2025-11-25 client can resume the response stream with `Last-Event-ID` on the same replica while its session lives. | A repeated call runs the program again. |
+| Gateway-run task for a long-running call | Finishes if it can within the drain window. Otherwise it is recorded as `expired` with `worker_interrupted`, or `effect_outcome_unknown` when the tool can change state. It is never replayed. | No effect. The call does not depend on the request that started it. | Status, results, and cancellation work from any replica. |
 | Upstream-owned task | The route survives and the work stays with the upstream. A local-process upstream's tasks end with the gateway unless its task store outlives the process. | Does not cancel the upstream work. A task ID the client never received cannot be recovered. | Works on any replica with the same upstream configuration. |
 | Ordinary tool call | Finishes if it can within the drain window. Otherwise it is cancelled upstream and its outcome is unknown. | A 2026-07-28 disconnect cancels it upstream. A 2025-11-25 call keeps running, and its response stream can be resumed on the same replica while the session lives. | A 2026-07-28 request is served by any replica. A 2025-11-25 session lives on one replica and must re-initialize elsewhere. |
 

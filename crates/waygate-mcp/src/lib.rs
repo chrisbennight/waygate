@@ -14,6 +14,7 @@ pub use waygate_evidence::{audit, budget, cache, usage};
 
 pub mod authz;
 pub mod builtin;
+pub mod call_tasks;
 pub mod catalog;
 pub mod catalog_changes;
 pub mod client_schema;

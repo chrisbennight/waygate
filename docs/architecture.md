@@ -188,7 +188,7 @@ The hot path for one tool call:
 | 6 | `prepare_output_validation` | `active` | Compile the admitted output schema only after Cedar and profile authorization succeed; refuse invalid schemas before quota, approval, evidence, or dispatch. |
 | 7 | `check_quota` | `active` | Check and consume invocation quota when a quota service is configured. |
 | 8 | `check_approval` | `active` | Enforce governed human-approval requirements before pre-call evidence or dispatch. |
-| 9 | `record_pre_call` | `active` | Record required pre-call evidence for side-effecting calls in fail-closed audit mode. |
+| 9 | `record_pre_call` | `active` | Record required pre-call evidence for side-effecting calls in fail-closed audit mode, then let a caller-supplied dispatch admission (a gateway-run task's durable claim) accept the call. |
 | 10 | `prepare_file_inputs` | `active` | Stream annotated gateway files to the selected upstream and replace their gateway URIs with upstream-private references. |
 | 11 | `dispatch` | `active` | Dispatch the call and resolve recognized retained responses within the originating upstream session for reads and mutations. Bound retrieval by the selected runtime or file-storage delivery budget independently of caller authorization. |
 | 12 | `inspect_response` | `active` | Inspect the response and redact or block before it can be forwarded. |

@@ -8,7 +8,7 @@ use waygate_codemode::{
     ExecutionStatusRecord, ExecutionStore, ExecutionTransition, NewExecution, NewExecutionEvent,
     OwnedInFlight, PgExecutionStore, ResumeExecution, RetryEquivalence, SourceArtifactOwner,
     SourceArtifactStore, StartExecution, StartExecutionResult, MAX_RETAINED_SOURCES_PER_OWNER,
-    MAX_SOURCE_LOCATORS_PER_OWNER,
+    MAX_SOURCE_LOCATORS_PER_OWNER, TOOL_CALL_EXECUTION_PROFILE,
 };
 use waygate_tenants::{PgTenantStore, TenantStore};
 
@@ -921,6 +921,16 @@ async fn owned_in_flight_listing_is_identity_scoped_and_keyset_bounded() {
         .submit(new_execution(&tenant, Uuid::now_v7()))
         .await
         .expect("submit keyless-profile row");
+
+    // A background tool call shares the journal but is served only through
+    // the Tasks lifecycle, so the Code Mode listing skips it.
+    let mut tool_call = new_execution(&tenant, Uuid::now_v7());
+    tool_call.execution_profile = confined_profile(json!(null));
+    tool_call.execution_profile["name"] = json!(TOOL_CALL_EXECUTION_PROFILE);
+    store
+        .submit(tool_call)
+        .await
+        .expect("submit background tool-call row");
 
     let restriction = json!({"allowed_servers": ["docs"], "allowed_tools": []});
     let mut restricted = new_execution(&tenant, Uuid::now_v7());

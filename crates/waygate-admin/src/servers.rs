@@ -564,6 +564,7 @@ mod tests {
             classification_mode: Default::default(),
             approval_mode: Default::default(),
             inline_response_threshold_bytes: None,
+            long_running_tools: Vec::new(),
             name: "fetchlayer".to_owned(),
             transport: Transport::Http,
             protocol: Default::default(),

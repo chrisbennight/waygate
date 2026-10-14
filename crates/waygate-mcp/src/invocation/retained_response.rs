@@ -164,20 +164,7 @@ fn resource_bytes(resource: &ReadResourceResult) -> Result<Vec<u8>, RetainedResp
     }
 }
 
-pub(super) fn delivery_failure(mut result: CallToolResult, reason: &str) -> CallToolResult {
-    crate::retained_delivery::attach(
-        &mut result,
-        crate::retained_delivery::Delivery::Unavailable {
-            operation_status: crate::retained_delivery::OperationStatus::Succeeded,
-            error: reason.to_owned(),
-            retry_operation: false,
-        },
-    );
-    result.content.push(rmcp::model::ContentBlock::text(format!(
-        "The operation succeeded, but its response attachment is unavailable ({reason}). Do not repeat the operation to retrieve its attachment."
-    )));
-    result
-}
+pub(super) use crate::retained_delivery::delivery_failure;
 
 pub(super) fn is_recovery_failure(error: &ErrorData) -> bool {
     error.data.as_ref().is_some_and(|data| {

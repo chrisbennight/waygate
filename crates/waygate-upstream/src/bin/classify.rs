@@ -105,6 +105,7 @@ fn starter_manifest(
         classification_mode: Default::default(),
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
+        long_running_tools: Vec::new(),
         name: name.to_owned(),
         transport: endpoint.transport(),
         protocol: Default::default(),

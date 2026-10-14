@@ -36,6 +36,7 @@ use waygate_oidc::Principal;
 
 const ALLOWED_HOST: &str = "127.0.0.1";
 
+mod call_tasks;
 mod client_schema_compat;
 
 #[derive(Default)]
@@ -53,6 +54,11 @@ struct DemoCatalog {
     high_risk_tool_names: Vec<String>,
     /// Optional dispatch witness for routing-integrity regressions.
     list_tools_calls: Option<Arc<AtomicUsize>>,
+    /// Tool names the operator listed as long-running.
+    long_running_tools: Vec<String>,
+    /// Native task routing identity, as for an upstream that runs calls as
+    /// tasks itself.
+    task_binding: Option<String>,
 }
 
 #[async_trait]
@@ -98,6 +104,14 @@ impl UpstreamCatalog for DemoCatalog {
     }
     async fn list_servers(&self) -> Vec<String> {
         vec!["demo".into()]
+    }
+
+    fn long_running_tool(&self, server: &str, tool: &str) -> bool {
+        server == "demo" && self.long_running_tools.iter().any(|name| name == tool)
+    }
+
+    async fn task_binding(&self, _server: &str) -> Option<String> {
+        self.task_binding.clone()
     }
 
     async fn list_tools(&self, server: &str) -> Result<Vec<Tool>, McpError> {

@@ -12,7 +12,9 @@ use rmcp::model::{CallToolResult, ContentBlock as Content, Tool};
 use rmcp::ErrorData as McpError;
 use serde_json::{json, Value};
 use uuid::Uuid;
-use waygate_invocation::{InvocationError, InvocationRequest, InvocationService};
+use waygate_invocation::{
+    AdmittedDispatch, DispatchAdmission, InvocationError, InvocationRequest, InvocationService,
+};
 use waygate_mcp::audit::{AuditOutcome, InMemorySink};
 use waygate_mcp::authz::{AuthzGate, AuthzVerdict, ToolFacts};
 use waygate_mcp::catalog::{
@@ -61,6 +63,9 @@ struct FakeCatalog {
     /// Values a reviewer classified. Each inherits the tool's own flags, which
     /// keeps every entry within the ceiling a real resolver enforces.
     operations: Vec<String>,
+    /// Values a reviewer classified as changing nothing, below the tool's
+    /// own flags.
+    read_only_operations: Vec<String>,
 }
 
 #[async_trait]
@@ -125,16 +130,24 @@ impl UpstreamCatalog for FakeCatalog {
             }
             (input_schema, output_schema) => {
                 let facts = self.tool_facts(server, tool);
-                let operations = self
-                    .operations
-                    .iter()
-                    .map(|value| OperationClassification {
-                        value: value.clone(),
-                        risk: facts.risk,
-                        side_effects: facts.side_effects,
-                        pii: facts.pii,
-                    })
-                    .collect();
+                let operations =
+                    self.operations
+                        .iter()
+                        .map(|value| OperationClassification {
+                            value: value.clone(),
+                            risk: facts.risk,
+                            side_effects: facts.side_effects,
+                            pii: facts.pii,
+                        })
+                        .chain(self.read_only_operations.iter().map(|value| {
+                            OperationClassification {
+                                value: value.clone(),
+                                risk: facts.risk,
+                                side_effects: false,
+                                pii: facts.pii,
+                            }
+                        }))
+                        .collect();
                 ResolvedInvocationTool::Ready(
                     InvocationToolSnapshot::catalog(
                         facts,
@@ -337,6 +350,7 @@ fn harness_with_schemas_and_file_processor(
             requires_approval_known: true,
             discriminator: None,
             operations: Vec::new(),
+            read_only_operations: Vec::new(),
         }),
         Arc::new(FixedAuthz(authz)),
         audit.clone(),
@@ -399,6 +413,7 @@ fn read_only_harness_with_lane(
             requires_approval_known,
             discriminator: discriminator.map(str::to_owned),
             operations: values.iter().map(|value| (*value).to_owned()).collect(),
+            read_only_operations: Vec::new(),
         }),
         Arc::new(FixedAuthz(AuthzMode::Allow)),
         audit.clone(),
@@ -984,4 +999,169 @@ async fn dispatch_failure_still_enters_inspection_validation_and_final_outcome()
     assert!(matches!(error, InvocationError::Upstream(_)));
     assert_eq!(harness.observer.snapshot(), InvocationStage::ALL);
     assert!(harness.dispatched.load(Ordering::SeqCst));
+}
+
+/// Records what the pipeline had done when it asked for dispatch admission.
+struct RecordingAdmission {
+    observer: Arc<RecordingObserver>,
+    audit: Arc<InMemorySink>,
+    refuse: bool,
+    /// Stages entered, the admitted `side_effects`, and the required
+    /// pre-call evidence rows already written, per admission.
+    seen: Mutex<Vec<(Vec<InvocationStage>, bool, usize)>>,
+}
+
+impl RecordingAdmission {
+    fn new(harness: &Harness, refuse: bool) -> Arc<Self> {
+        Arc::new(Self {
+            observer: harness.observer.clone(),
+            audit: harness.audit.clone(),
+            refuse,
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl DispatchAdmission for RecordingAdmission {
+    async fn admit(&self, dispatch: AdmittedDispatch) -> Result<(), InvocationError> {
+        let pre_call_rows = self
+            .audit
+            .snapshot()
+            .await
+            .iter()
+            .filter(|event| event.reason.as_deref() == Some("pre_call"))
+            .count();
+        self.seen.lock().unwrap().push((
+            self.observer.snapshot(),
+            dispatch.side_effects,
+            pre_call_rows,
+        ));
+        if self.refuse {
+            Err(InvocationError::Upstream(McpError::internal_error(
+                "admission refused",
+                None,
+            )))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// A side-effecting tool that dispatches by `operation`: `write` keeps the
+/// tool's effects and `read` was reviewed as changing nothing. Fail-closed
+/// audit makes required pre-call evidence observable.
+fn admission_harness(authz: AuthzMode) -> Harness {
+    let observer = Arc::new(RecordingObserver::default());
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let quota = Arc::new(FixedQuota {
+        mode: QuotaMode::Allow,
+        calls: AtomicUsize::new(0),
+    });
+    let audit = Arc::new(InMemorySink::new());
+    let service = DefaultInvocationService::new(
+        Arc::new(FakeCatalog {
+            dispatched: dispatched.clone(),
+            fail_dispatch: false,
+            manifest_fallback: false,
+            input_schema: Some(json!({"type": "object"})),
+            output_schema: None,
+            side_effects: true,
+            requires_approval: false,
+            requires_approval_known: true,
+            discriminator: Some("operation".to_owned()),
+            operations: vec!["write".to_owned()],
+            read_only_operations: vec!["read".to_owned()],
+        }),
+        Arc::new(FixedAuthz(authz)),
+        audit.clone(),
+    )
+    .with_quota(Some(quota.clone()))
+    .with_audit_mode(waygate_mcp::AuditMode::FailClosed)
+    .with_stage_observer(observer.clone());
+    Harness {
+        service,
+        observer,
+        quota,
+        dispatched,
+        audit,
+    }
+}
+
+async fn invoke_admitted(
+    harness: &Harness,
+    operation: &str,
+    admission: Arc<RecordingAdmission>,
+) -> Result<waygate_invocation::InvocationResponse, InvocationError> {
+    let mut request = InvocationRequest::new("test", "tool").with_dispatch_admission(admission);
+    request.arguments = selects(operation);
+    harness
+        .service
+        .invoke(Some(&principal(None)), request)
+        .await
+}
+
+#[tokio::test]
+async fn dispatch_admission_follows_pre_call_evidence_with_the_selected_operations_effects() {
+    for (operation, side_effects, pre_call_rows) in [("write", true, 1), ("read", false, 0)] {
+        let harness = admission_harness(AuthzMode::Allow);
+        let admission = RecordingAdmission::new(&harness, false);
+
+        invoke_admitted(&harness, operation, admission.clone())
+            .await
+            .expect("an admitted call dispatches");
+
+        let seen = admission.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![(
+                InvocationStage::ALL[..9].to_vec(),
+                side_effects,
+                pre_call_rows
+            )],
+            "{operation}: admission runs once, right after record_pre_call"
+        );
+        assert_eq!(harness.observer.snapshot(), InvocationStage::ALL);
+        assert!(harness.dispatched.load(Ordering::SeqCst));
+    }
+}
+
+#[tokio::test]
+async fn dispatch_admission_refusal_records_an_outcome_without_dispatching() {
+    let harness = admission_harness(AuthzMode::Allow);
+    let admission = RecordingAdmission::new(&harness, true);
+
+    let error = invoke_admitted(&harness, "write", admission.clone())
+        .await
+        .expect_err("a refused admission ends the call");
+
+    assert!(
+        matches!(error, InvocationError::Upstream(ref err) if err.message == "admission refused")
+    );
+    assert_eq!(admission.seen.lock().unwrap().len(), 1);
+    assert!(!harness.dispatched.load(Ordering::SeqCst));
+    let mut expected = InvocationStage::ALL[..9].to_vec();
+    expected.push(InvocationStage::RecordOutcome);
+    assert_eq!(harness.observer.snapshot(), expected);
+    let events = harness.audit.snapshot().await;
+    assert!(
+        events.iter().any(
+            |event| event.action == "CallTool" && event.outcome == AuditOutcome::ExecutionError
+        ),
+        "the refusal leaves an outcome row: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn authorization_denial_never_reaches_the_dispatch_admission() {
+    let harness = admission_harness(AuthzMode::Deny);
+    let admission = RecordingAdmission::new(&harness, false);
+
+    let error = invoke_admitted(&harness, "write", admission.clone())
+        .await
+        .expect_err("Cedar denies the call");
+
+    assert!(matches!(error, InvocationError::Forbidden { .. }));
+    assert!(admission.seen.lock().unwrap().is_empty());
+    assert!(!harness.dispatched.load(Ordering::SeqCst));
 }

@@ -692,7 +692,9 @@ persist non-content outcome metadata.
 Synchronous calls return the bounded result directly. When the operator
 explicitly allows result storage, task-augmented calls additionally persist that
 bounded result for repeated retrieval via `tasks/get` during the retention
-window. An attempt that loses its worker is never replayed, because a program
+window. Gateway-run tasks for long-running upstream calls share this journal
+and its retention, and exist only under the same `allow` decision; see
+[gateway-run tasks](agents/tasks.md#gateway-run-tasks-for-long-running-calls). An attempt that loses its worker is never replayed, because a program
 with direct authority must not repeat effects. Once its claim lease has passed,
 the abandoned work is terminalized as `expired` and its stale claim released,
 either by an owner read or by background reconciliation, which every replica

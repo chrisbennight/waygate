@@ -133,6 +133,22 @@ impl UpstreamPool {
         None
     }
 
+    /// Reads the live manifest, so a reload that edits the list applies to
+    /// the next call without reconnecting.
+    pub(super) fn long_running_tool_inner(&self, server: &str, tool: &str) -> bool {
+        let Some(entry) = self.entries.load().get(server).cloned() else {
+            return false;
+        };
+        if entry.removed.load(Ordering::Acquire) {
+            return false;
+        }
+        let manifest = entry.manifest.read().expect("manifest lock poisoned");
+        manifest
+            .long_running_tools
+            .iter()
+            .any(|candidate| candidate == tool)
+    }
+
     pub(super) async fn task_request_inner(
         &self,
         server: &str,

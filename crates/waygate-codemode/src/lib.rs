@@ -252,6 +252,13 @@ pub struct Execution {
 /// with a live claim is announced. The payload is the execution id.
 pub const CANCELLATION_CHANNEL: &str = "codemode_cancellation";
 
+/// `execution_profile.name` of a journal row that runs one upstream tool call
+/// in the background for a tasks-declaring client, rather than a Code Mode
+/// program. Such rows carry no program source or input and are never resumed;
+/// they are served only through the MCP Tasks lifecycle, so the caller's
+/// Code Mode listing excludes them.
+pub const TOOL_CALL_EXECUTION_PROFILE: &str = "tool_call";
+
 /// What a status check needs about one execution: ownership, lifecycle and
 /// timing, whether a result exists, and a paused run's checkpoint. It carries
 /// no program source or input, tool snapshot, or stored result.
@@ -655,7 +662,9 @@ pub trait ExecutionStore: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
-    /// List the owner's in-flight executions, newest submission first.
+    /// List the owner's in-flight Code Mode executions, newest submission
+    /// first. Rows whose profile is [`TOOL_CALL_EXECUTION_PROFILE`] are not
+    /// Code Mode programs and are never listed.
     ///
     /// In-flight is the store's own invariant — `completed_at` is set exactly
     /// when a transition is terminal — and rows past retention are excluded,

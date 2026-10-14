@@ -707,6 +707,7 @@ impl InvocationService for DefaultInvocationService {
         let mode = req.mode;
         let expected_contract = req.expected_contract.take();
         let approval_binding = req.approval_binding.take();
+        let dispatch_admission = req.dispatch_admission.take();
         if let Some(binding) = approval_binding.as_ref() {
             let Some(hierarchy) = req.hierarchy else {
                 return Err(InvocationError::InvalidArguments(
@@ -861,6 +862,22 @@ impl InvocationService for DefaultInvocationService {
         self.check_approval(&mut ctx).await?;
         self.enter_stage(InvocationStage::RecordPreCall);
         self.record_pre_call(&mut ctx).await?;
+        // A caller-owned admission runs only once every governance gate and
+        // the required pre-call evidence have passed, so it never observes a
+        // call this pipeline would refuse, and its refusal still leaves the
+        // outcome row an attempted dispatch would.
+        if let Some(admission) = dispatch_admission {
+            let admitted = waygate_invocation::AdmittedDispatch {
+                side_effects: ctx.facts().side_effects,
+                contract: ctx.tool_snapshot().contract_identity(),
+            };
+            if let Err(error) = admission.0.admit(admitted).await {
+                let result = Err(error);
+                self.enter_stage(InvocationStage::RecordOutcome);
+                self.record_outcome(&mut ctx, &result).await;
+                return result.map(InvocationResponse::Unary);
+            }
+        }
         self.enter_stage(InvocationStage::PrepareFileInputs);
         if let Err(error) = self.prepare_and_validate_file_inputs(&mut ctx).await {
             let result = Err(error);

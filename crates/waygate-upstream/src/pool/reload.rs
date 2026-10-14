@@ -27,7 +27,8 @@ pub struct ReloadReport {
     /// connection replacement. Kept separate from connection shape so a
     /// policy-only reload is observable and never misreported as a no-op.
     pub session_policy_updated: Vec<String>,
-    /// Upstreams whose response-file threshold changed without replacing sessions.
+    /// Upstreams whose response-file threshold or long-running tool list
+    /// changed without replacing sessions.
     pub response_policy_updated: Vec<String>,
     /// Upstreams whose connection-shape changed (transport / url / command /
     /// auth / mtls / session) and were re-dialed or REBUILT live (no restart),
@@ -2552,10 +2553,12 @@ impl UpstreamPool {
                     let from_shape = needs_redial.then(|| guard.clone());
                     if guard.inline_response_threshold_bytes
                         != new_manifest.inline_response_threshold_bytes
+                        || guard.long_running_tools != new_manifest.long_running_tools
                     {
                         report.response_policy_updated.push(name.clone());
                         guard.inline_response_threshold_bytes =
                             new_manifest.inline_response_threshold_bytes;
+                        guard.long_running_tools = new_manifest.long_running_tools.clone();
                     }
                     // Apply the tool classification in place for ALL paths,
                     // including a resize. Classification is a

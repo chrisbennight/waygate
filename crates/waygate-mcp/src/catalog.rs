@@ -290,6 +290,13 @@ pub trait UpstreamCatalog: Send + Sync + 'static {
         None
     }
 
+    /// Whether the operator listed this upstream tool as long-running, so a
+    /// client that declared the tasks extension may have the gateway run the
+    /// call in the background.
+    fn long_running_tool(&self, _server: &str, _tool: &str) -> bool {
+        false
+    }
+
     /// Dispatch a lifecycle request on the originating upstream under its tool contract.
     async fn task_request(
         &self,
