@@ -1408,6 +1408,10 @@ impl UpstreamCatalog for UpstreamPool {
         self.task_binding_inner(server).await
     }
 
+    fn long_running_tool(&self, server: &str, tool: &str) -> bool {
+        self.long_running_tool_inner(server, tool)
+    }
+
     async fn task_request(
         &self,
         server: &str,

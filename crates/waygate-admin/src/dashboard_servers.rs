@@ -1241,6 +1241,8 @@ struct ServerResponsesFragment {
     base_hash: String,
     threshold: String,
     global_threshold: String,
+    /// `long_running_tools`, one tool name per line.
+    long_running_tools: String,
 }
 
 async fn render_responses_tab(
@@ -1251,19 +1253,24 @@ async fn render_responses_tab(
     config_url: String,
     manifest: &waygate_upstream::UpstreamManifest,
 ) -> Response {
-    let (editable, readonly_note, base_hash, threshold) =
+    let (editable, readonly_note, base_hash, threshold, long_running_tools) =
         match editable_disk_base(state, is_admin, &manifest.name) {
-            Ok((set, hash)) => (
-                true,
-                "",
-                hash,
-                set[&manifest.name].inline_response_threshold_bytes,
-            ),
+            Ok((set, hash)) => {
+                let saved = &set[&manifest.name];
+                (
+                    true,
+                    "",
+                    hash,
+                    saved.inline_response_threshold_bytes,
+                    saved.long_running_tools.join("\n"),
+                )
+            }
             Err((note, _)) => (
                 false,
                 note,
                 String::new(),
                 manifest.inline_response_threshold_bytes,
+                manifest.long_running_tools.join("\n"),
             ),
         };
     let global_threshold = match state.response_settings.effective_threshold().await {
@@ -1285,6 +1292,7 @@ async fn render_responses_tab(
             .map(|value| value.get().to_string())
             .unwrap_or_default(),
         global_threshold,
+        long_running_tools,
     })
 }
 
@@ -1321,8 +1329,22 @@ pub(crate) async fn server_responses_save(
             Err(_) => return save_banner_err("Enter a positive whole byte count, or leave blank to inherit the global threshold."),
         },
     };
+    // One tool name per line; blank lines are ignored. A form without the
+    // field leaves the saved list unchanged. Manifest validation refuses
+    // duplicates and names this server does not classify.
+    let long_running_tools = form.get("long_running_tools").map(|value| {
+        value
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    });
     match patch_and_publish(&state, store, principal, server, form.get("base_hash").map(String::as_str).unwrap_or(""), "dashboard.server.responses", |manifest| {
         manifest.inline_response_threshold_bytes = threshold;
+        if let Some(tools) = long_running_tools {
+            manifest.long_running_tools = tools;
+        }
         Ok(())
     }).await {
         Ok(version) => save_banner_ok(version, "Applies to every tool on this upstream server. Click Reload manifests to apply immediately; no restart or reconnect is needed."),

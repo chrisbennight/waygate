@@ -38,7 +38,8 @@
 //! 9. `record_pre_call` — `EvidenceRecorder::record_required` when
 //!    `GATEWAY_AUDIT_MODE=fail_closed` and the call is side-effecting
 //!    (`facts.side_effects`); ensures the intent-to-call row is durable before
-//!    the side-effecting dispatch.
+//!    the side-effecting dispatch. A request carrying a [`DispatchAdmission`]
+//!    then has it accept the call before anything is sent upstream.
 //! 10. `dispatch` — call into the catalog's per-upstream client.
 //! 11. `inspect_response` — configured DLP / secret / poisoning inspection.
 //! 12. `validate_output` — schema-check the inspected/redacted result when an
@@ -56,6 +57,7 @@
 //! `DefaultInvocationService` for each gate's failure posture.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -307,6 +309,11 @@ pub struct InvocationRequest {
     /// do not supply one.
     #[serde(skip)]
     pub cancellation: tokio_util::sync::CancellationToken,
+    /// Caller-supplied admission awaited once, after every governance gate and
+    /// the required pre-call evidence and before file inputs or dispatch. A
+    /// refusal ends the call without dispatching it. Absent for ordinary calls.
+    #[serde(skip)]
+    pub dispatch_admission: Option<DispatchAdmissionHandle>,
 }
 
 impl InvocationRequest {
@@ -331,6 +338,7 @@ impl InvocationRequest {
             request_state: None,
             caller_capabilities: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
+            dispatch_admission: None,
         }
     }
 
@@ -366,6 +374,13 @@ impl InvocationRequest {
     /// Tie upstream dispatch to the downstream request's cancellation.
     pub fn with_cancellation(mut self, cancellation: tokio_util::sync::CancellationToken) -> Self {
         self.cancellation = cancellation;
+        self
+    }
+
+    /// Require `admission` to accept the call after governance and before
+    /// dispatch. See [`DispatchAdmission`].
+    pub fn with_dispatch_admission(mut self, admission: Arc<dyn DispatchAdmission>) -> Self {
+        self.dispatch_admission = Some(DispatchAdmissionHandle(admission));
         self
     }
 
@@ -460,6 +475,40 @@ fn is_unrestricted(mode: &InvocationMode) -> bool {
 
 fn is_direct(channel: &InvocationChannel) -> bool {
     *channel == InvocationChannel::Direct
+}
+
+/// What the invocation pipeline has admitted when it asks a
+/// [`DispatchAdmission`] to accept the call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedDispatch {
+    /// Whether the operation this call selected can change state, after any
+    /// per-operation classification.
+    pub side_effects: bool,
+    /// The immutable tool contract every earlier stage evaluated.
+    pub contract: InvocationContractIdentity,
+}
+
+/// A last admission step owned by the caller of the invocation pipeline.
+///
+/// The pipeline awaits it once, after validation, authorization, profile,
+/// quota, approval, and the required pre-call evidence, and before file
+/// inputs or dispatch. Every governance refusal therefore reaches the caller
+/// before this runs. A refusal ends the call: the pipeline records the
+/// outcome and returns the error without dispatching.
+#[async_trait]
+pub trait DispatchAdmission: Send + Sync + 'static {
+    async fn admit(&self, dispatch: AdmittedDispatch) -> Result<(), InvocationError>;
+}
+
+/// Shareable handle to a [`DispatchAdmission`] carried on an
+/// [`InvocationRequest`].
+#[derive(Clone)]
+pub struct DispatchAdmissionHandle(pub Arc<dyn DispatchAdmission>);
+
+impl std::fmt::Debug for DispatchAdmissionHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DispatchAdmissionHandle(..)")
+    }
 }
 
 /// Typed failure modes the gateway distinguishes pre-dispatch. The

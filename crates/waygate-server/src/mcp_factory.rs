@@ -180,7 +180,7 @@ impl McpServerFactory {
             .with_cursor_sealer(self.discovery_cursor_sealer.clone()),
         ) as waygate_mcp::SharedBuiltinTools;
         builtins.push(discovery);
-        builtins.push(mcp_codemode::configured_tools(
+        let codemode = mcp_codemode::configured_tools(
             self.catalog.clone(),
             self.authz.clone(),
             invocation,
@@ -202,7 +202,13 @@ impl McpServerFactory {
                 search_cursor_sealer: self.discovery_cursor_sealer.clone(),
                 cancellation_watch: self.codemode_cancellation_watch.clone(),
             },
-        ));
+        );
+        // Long-running upstream calls run on the same durable journal, so a
+        // client is offered them only where that journal can store results.
+        if codemode.call_tasks_available() {
+            server = server.with_call_tasks(codemode.clone());
+        }
+        builtins.push(codemode);
         // Discovery observes every live built-in through weak handles. The
         // server takes strong ownership of the complete set; Code Mode retains
         // its sibling handlers independently for detached work.

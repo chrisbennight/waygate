@@ -68,6 +68,7 @@ fn shape_manifest(transport: Transport, concurrency: Option<usize>) -> UpstreamM
         classification_mode: Default::default(),
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
+        long_running_tools: Vec::new(),
         name: "x".into(),
         transport,
         protocol: Default::default(),
@@ -340,6 +341,7 @@ fn pool_with_manifest_tool() -> UpstreamPool {
             classification_mode: Default::default(),
             approval_mode: Default::default(),
             inline_response_threshold_bytes: None,
+            long_running_tools: Vec::new(),
             name: "example-messages".into(),
             transport: Transport::Http,
             protocol: Default::default(),
@@ -367,6 +369,7 @@ fn annotation_native_tool_facts_stay_conservative_until_policy_enforcement() {
             classification_mode: crate::ClassificationMode::McpAnnotations,
             approval_mode: Default::default(),
             inline_response_threshold_bytes: None,
+            long_running_tools: Vec::new(),
             name: "komodo".into(),
             transport: Transport::Http,
             protocol: Default::default(),
@@ -458,6 +461,33 @@ async fn admission_reuses_catalog_reads_only_within_one_generation() {
     assert_eq!(resolves(), 4, "the overlapped read was not kept");
     expect_snapshot(admit().await);
     assert_eq!(resolves(), 4);
+}
+
+#[tokio::test]
+async fn long_running_tools_follow_the_live_manifest_without_reconnecting() {
+    let pool = pool_with_manifest_tool();
+    assert!(!pool.long_running_tool("example-messages", "send"));
+    let mut manifests: BTreeMap<_, _> = pool
+        .manifests()
+        .into_iter()
+        .map(|manifest| (manifest.name.clone(), manifest))
+        .collect();
+    for (listed, expected) in [(vec!["send".to_owned()], true), (Vec::new(), false)] {
+        manifests
+            .get_mut("example-messages")
+            .expect("configured server")
+            .long_running_tools = listed;
+        let report = pool.reload_manifests(&manifests).await;
+        assert_eq!(report.response_policy_updated, ["example-messages"]);
+        assert!(
+            report.redialed.is_empty() && report.redial_failed.is_empty(),
+            "the list is request-path policy, not connection shape: {report:?}"
+        );
+        assert!(!report.requires_restart());
+        assert_eq!(pool.long_running_tool("example-messages", "send"), expected);
+    }
+    assert!(!pool.long_running_tool("example-messages", "unlisted"));
+    assert!(!pool.long_running_tool("unknown-server", "send"));
 }
 
 #[tokio::test]
@@ -572,6 +602,7 @@ async fn catalog_transition_fence_tracks_generation_without_erasing_catalog_over
                 classification_mode: Default::default(),
                 approval_mode: Default::default(),
                 inline_response_threshold_bytes: None,
+                long_running_tools: Vec::new(),
                 name: "example-messages".into(),
                 transport: Transport::Http,
                 protocol: Default::default(),
@@ -1072,6 +1103,7 @@ fn manifest_with(tier_a_required: bool) -> UpstreamManifest {
         classification_mode: Default::default(),
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
+        long_running_tools: Vec::new(),
         name: "example-messages".into(),
         transport: Transport::Http,
         protocol: Default::default(),
@@ -2296,6 +2328,7 @@ async fn boot_dial_timeout_bounds_a_hung_upstream() {
         classification_mode: Default::default(),
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
+        long_running_tools: Vec::new(),
         name: "hung".into(),
         transport: Transport::Stdio,
         protocol: Default::default(),

@@ -252,6 +252,13 @@ pub struct UpstreamManifest {
     /// Omission inherits the gateway-wide default. Must be positive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_response_threshold_bytes: Option<NonZeroUsize>,
+    /// Tools on this upstream that the operator expects to run long. When a
+    /// client declares the MCP tasks extension on a call to one of them and
+    /// the upstream does not run the call as a task itself, the gateway runs
+    /// the call in the background and answers with a task handle. Every name
+    /// must also appear in `tools`. Applied on reload without reconnecting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub long_running_tools: Vec<String>,
     /// Opt-in RFC 8693 token exchange. When set, the gateway swaps the
     /// caller's access token for a downscoped one audienced at this upstream
     /// (Tier A identity chaining). Absence = Tier B (gateway-minted identity
@@ -1386,6 +1393,29 @@ pub fn validate_manifest_invariants(m: &UpstreamManifest) -> Result<(), Upstream
             )));
         }
     }
+    let mut long_running = HashSet::with_capacity(m.long_running_tools.len());
+    for tool in &m.long_running_tools {
+        if tool.is_empty() || tool.trim() != tool {
+            return Err(UpstreamError::InvalidManifest(format!(
+                "upstream `{}`: every `long_running_tools` entry must be a non-empty tool name \
+                 without surrounding whitespace",
+                m.name,
+            )));
+        }
+        if !long_running.insert(tool.as_str()) {
+            return Err(UpstreamError::InvalidManifest(format!(
+                "upstream `{}`: `long_running_tools` repeats `{tool}`",
+                m.name,
+            )));
+        }
+        if !tool_names.contains(tool.as_str()) {
+            return Err(UpstreamError::InvalidManifest(format!(
+                "upstream `{}`: `long_running_tools` names `{tool}`, which is not classified in \
+                 this manifest's `tools`",
+                m.name,
+            )));
+        }
+    }
     let singleton = BTreeMap::from([(m.name.clone(), m.clone())]);
     validate_resource_claim_set(&singleton)?;
     validate_operation_classifications(m)?;
@@ -2118,6 +2148,7 @@ tools:
             classification_mode: ClassificationMode::Manifest,
             approval_mode: ApprovalMode::PerCall,
             inline_response_threshold_bytes: None,
+            long_running_tools: Vec::new(),
             exchange: None,
             auth: None,
             mtls: None,
@@ -2199,6 +2230,35 @@ tools:
                 parse_manifest_set(&candidate).is_err(),
                 "accepted {invalid}"
             );
+        }
+    }
+
+    #[test]
+    fn long_running_tools_are_optional_and_name_classified_tools_once() {
+        let yaml = "- name: example-search\n  transport: http\n  url: http://example-search.test/mcp\n  tools:\n    - name: index\n      risk: low\n    - name: lookup\n      risk: low\n";
+        let defaults = parse_manifest_set(yaml).unwrap();
+        assert!(defaults["example-search"].long_running_tools.is_empty());
+        assert!(
+            !serialize_manifest_set(&defaults)
+                .unwrap()
+                .contains("long_running_tools"),
+            "an empty list must not add noise to existing manifests"
+        );
+        let configured = format!("{yaml}  long_running_tools:\n    - index\n");
+        let manifests = parse_manifest_set(&configured).unwrap();
+        assert_eq!(manifests["example-search"].long_running_tools, ["index"]);
+        let reparsed = parse_manifest_set(&serialize_manifest_set(&manifests).unwrap()).unwrap();
+        assert_eq!(reparsed["example-search"].long_running_tools, ["index"]);
+
+        for (entries, expected) in [
+            ("    - \"\"\n", "non-empty"),
+            ("    - \" index\"\n", "non-empty"),
+            ("    - index\n    - index\n", "repeats `index`"),
+            ("    - unknown\n", "not classified"),
+        ] {
+            let candidate = format!("{yaml}  long_running_tools:\n{entries}");
+            let error = parse_manifest_set(&candidate).unwrap_err().to_string();
+            assert!(error.contains(expected), "{entries:?}: {error}");
         }
     }
 

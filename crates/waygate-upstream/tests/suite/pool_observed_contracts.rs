@@ -534,6 +534,7 @@ fn manifest_at(addr: std::net::SocketAddr, mode: ClassificationMode) -> Upstream
         classification_mode: mode,
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
+        long_running_tools: Vec::new(),
         name: "mock".into(),
         transport: Transport::Http,
         protocol: Default::default(),

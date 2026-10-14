@@ -127,6 +127,23 @@ pub(crate) fn attach_preview(result: &mut CallToolResult, preview: String) {
     }
 }
 
+/// Mark `result` as a succeeded operation whose response could not be
+/// delivered, so a caller never repeats the operation to recover it.
+pub fn delivery_failure(mut result: CallToolResult, reason: &str) -> CallToolResult {
+    attach(
+        &mut result,
+        Delivery::Unavailable {
+            operation_status: OperationStatus::Succeeded,
+            error: reason.to_owned(),
+            retry_operation: false,
+        },
+    );
+    result.content.push(ContentBlock::text(format!(
+        "The operation succeeded, but its response attachment is unavailable ({reason}). Do not repeat the operation to retrieve its attachment."
+    )));
+    result
+}
+
 pub(crate) fn attach(result: &mut CallToolResult, delivery: Delivery) {
     let delivery = serde_json::to_value(delivery).expect("delivery is serializable");
     result

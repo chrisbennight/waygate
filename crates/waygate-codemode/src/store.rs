@@ -927,6 +927,10 @@ impl ExecutionStore for PgExecutionStore {
         // (an issuer-less pre-upgrade row, a profile without the key) nulls
         // the digest and matches no caller, preserving fail-closed reads.
         //
+        // Background tool-call rows share the journal but are not Code Mode
+        // programs; the Tasks lifecycle serves them, so this listing skips
+        // them.
+        //
         // The select list is the decision-shaped subset on purpose: source,
         // checkpoints, results, and tool snapshots are caller-controlled and
         // each may be large, so a page that materialized full rows would
@@ -946,6 +950,7 @@ impl ExecutionStore for PgExecutionStore {
                        || (execution_profile -> 'profile_confinement')::text) =
                    md5($2 || chr(31) || $3 || chr(31) || $4::text)
                AND execution_profile -> 'profile_confinement' = $4
+               AND execution_profile ->> 'name' IS DISTINCT FROM $8
                AND completed_at IS NULL
                AND retention_until > now()
                AND ($5::timestamptz IS NULL OR (submitted_at, id) < ($5, $6))
@@ -960,6 +965,7 @@ impl ExecutionStore for PgExecutionStore {
         .bind(before.map(|(submitted_at, _)| submitted_at))
         .bind(before.map(|(_, id)| id))
         .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .bind(crate::TOOL_CALL_EXECUTION_PROFILE)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows

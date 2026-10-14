@@ -58,6 +58,8 @@ use crate::process_mode::codemode_protocol::{
     RUNNER_SPOOL_FLAG,
 };
 
+mod call_tasks;
+
 pub const NAMESPACE: &str = waygate_core::CODEMODE_BUILTIN_NAMESPACE;
 const DEFAULT_SEARCH_LIMIT: usize = waygate_mcp::discovery::DEFAULT_SEARCH_RESULTS;
 const DEFAULT_ARTIFACT_LIMIT: usize = 50;
@@ -3860,7 +3862,7 @@ pub fn configured_tools(
     sources: CodeModeSourceProviders,
     quota: Option<Arc<dyn waygate_quota::QuotaService>>,
     settings: CodeModeSettings,
-) -> SharedBuiltinTools {
+) -> Arc<CodeModeTools> {
     // The grant store shares the pool: revoke-on-replace must reach the same
     // approval_grants rows the invocation pipeline claims from.
     let grant_store = db_pool.clone().map(|pool| {
@@ -4437,21 +4439,39 @@ impl CodeModeTools {
             })
     }
 
-    /// What a status check needs about the caller's own execution. A run
-    /// that may have lost its worker is reconciled first; a healthy one is
-    /// answered from one narrow read.
+    /// What a status check needs about the caller's own Code Mode execution.
+    /// See [`Self::owned_status`].
     async fn task_status(
         &self,
         task_id: &str,
         principal: Option<&Principal>,
     ) -> Result<Option<ExecutionStatusRecord>, McpError> {
         let principal = principal.ok_or_else(|| insufficient_scope(Scope::McpInvoke.as_str()))?;
+        self.owned_status(
+            principal,
+            uuid::Uuid::parse_str(task_id).ok(),
+            OwnedProfile::Program,
+        )
+        .await
+    }
+
+    /// What a status check needs about one execution `principal` owns, when
+    /// its profile is the kind the asking surface serves. Ownership binds the
+    /// tenant, subject, issuer, and exact profile confinement; anything else,
+    /// and anything past retention, reads as absent. A run that may have lost
+    /// its worker is reconciled first; a healthy one is answered from one
+    /// narrow read.
+    async fn owned_status(
+        &self,
+        principal: &Principal,
+        id: Option<uuid::Uuid>,
+        profile: OwnedProfile,
+    ) -> Result<Option<ExecutionStatusRecord>, McpError> {
         if !may_invoke(principal) {
             return Err(insufficient_scope(Scope::McpInvoke.as_str()));
         }
-        let id = match uuid::Uuid::parse_str(task_id) {
-            Ok(id) => id,
-            Err(_) => return Ok(None),
+        let Some(id) = id else {
+            return Ok(None);
         };
         let store = self
             .execution_store
@@ -4473,6 +4493,7 @@ impl CodeModeTools {
             principal,
         ) || record.execution_profile.get("profile_confinement")
             != Some(&task_profile_confinement(principal))
+            || !profile.admits(&record.execution_profile)
         {
             return Ok(None);
         }
@@ -4503,6 +4524,28 @@ impl CodeModeTools {
             })
             .as_ref()
             .map(ExecutionStatusRecord::from))
+    }
+}
+
+/// Which journal rows an owner-scoped surface serves. Code Mode programs and
+/// background tool calls share the execution journal, but each surface reads
+/// only its own kind, so neither can project, continue, or cancel the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnedProfile {
+    /// Code Mode programs: every profile except a background tool call.
+    Program,
+    /// A background tool call run for a tasks-declaring client.
+    ToolCall,
+}
+
+impl OwnedProfile {
+    fn admits(self, execution_profile: &Value) -> bool {
+        let tool_call = execution_profile.get("name").and_then(Value::as_str)
+            == Some(waygate_codemode::TOOL_CALL_EXECUTION_PROFILE);
+        match self {
+            Self::Program => !tool_call,
+            Self::ToolCall => tool_call,
+        }
     }
 }
 
@@ -8414,6 +8457,9 @@ mod tests {
         /// Owner identities each listing call was scoped by, so a test can
         /// assert what the handler passed down.
         list_owners: tokio::sync::Mutex<Vec<OwnedInFlight>>,
+        /// When set, claimed `Succeeded` and `Failed` transitions are applied
+        /// with their result payload, as a background tool call writes them.
+        accepts_terminal_results: std::sync::atomic::AtomicBool,
     }
 
     impl RecordingExecutionStore {
@@ -8909,12 +8955,21 @@ mod tests {
             claim: &ExecutionClaim,
             transition: ExecutionTransition,
         ) -> Result<Option<Execution>, StoreError> {
-            if !matches!(
-                transition.to,
-                ExecutionStatus::WaitingForResume
-                    | ExecutionStatus::WaitingForApproval
-                    | ExecutionStatus::Cancelled
-            ) {
+            let terminal_result = self
+                .accepts_terminal_results
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && matches!(
+                    transition.to,
+                    ExecutionStatus::Succeeded | ExecutionStatus::Failed
+                );
+            if !terminal_result
+                && !matches!(
+                    transition.to,
+                    ExecutionStatus::WaitingForResume
+                        | ExecutionStatus::WaitingForApproval
+                        | ExecutionStatus::Cancelled
+                )
+            {
                 return Ok(None);
             }
             let mut current = self.current.lock().await;
@@ -8928,6 +8983,9 @@ mod tests {
                 return Ok(None);
             };
             execution.status = transition.to;
+            if terminal_result {
+                execution.result_payload = transition.result_payload;
+            }
             execution.result_metadata = transition.result_metadata;
             execution.resume_context = transition.resume_context;
             execution.terminal_reason_code = transition.terminal_reason_code;
@@ -17522,5 +17580,252 @@ mod tests {
                 .is_none(),
             "an issuer-less pre-upgrade execution fails closed",
         );
+    }
+
+    fn call_task_principal() -> Principal {
+        let mut principal = reader();
+        principal.scopes.push(Scope::McpInvoke.as_str().to_owned());
+        principal
+    }
+
+    fn call_task_store() -> Arc<RecordingExecutionStore> {
+        let store = Arc::new(RecordingExecutionStore::default());
+        store
+            .accepts_terminal_results
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        store
+    }
+
+    fn qualified_call(server: &str, tool: &str) -> waygate_mcp::call_tasks::QualifiedCall {
+        waygate_mcp::call_tasks::QualifiedCall {
+            server: server.to_owned(),
+            tool: tool.to_owned(),
+            arguments: json!({"value": "x"}).as_object().cloned(),
+        }
+    }
+
+    /// Poll a call task until it leaves `working`, as a client would.
+    async fn settled_call_task(
+        tools: &CodeModeTools,
+        principal: &Principal,
+        task_id: &str,
+    ) -> Value {
+        use waygate_mcp::call_tasks::GatewayCallTasks;
+        for _ in 0..200 {
+            let projected = tools
+                .get(principal, task_id)
+                .await
+                .expect("call-task lookup")
+                .expect("the owner sees its call task");
+            let projected = serde_json::to_value(projected).expect("task projection");
+            if projected["status"] != "working" {
+                return projected;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the background call did not settle");
+    }
+
+    #[tokio::test]
+    async fn call_task_result_is_exactly_the_direct_call_result() {
+        use waygate_mcp::call_tasks::GatewayCallTasks;
+        let catalog: SharedCatalog = Arc::new(FakeCatalog::with_tools(&[("email", "read", false)]));
+        let authz: SharedAuthz = Arc::new(SelectiveAuthz);
+        let store = call_task_store();
+        let tools = code_mode_tools(catalog.clone(), authz.clone())
+            .with_execution_store(store.clone())
+            .with_result_persistence_allowed(true);
+        let principal = call_task_principal();
+
+        let direct = waygate_invocation::InvocationService::invoke(
+            &DefaultInvocationService::new(catalog, authz, Arc::new(NullSink)),
+            Some(&principal),
+            InvocationRequest::new("email", "read")
+                .with_arguments(json!({"value": "x"}).as_object().cloned()),
+        )
+        .await
+        .expect("direct call");
+        let InvocationResponse::Unary(direct) = direct else {
+            panic!("a tool call returns one result");
+        };
+
+        let task = tools
+            .start(&principal, qualified_call("email", "read"))
+            .await
+            .expect("the call passes governance")
+            .expect("capacity is available");
+        assert!(waygate_mcp::call_tasks::is_call_task(&task.task_id));
+        let settled = settled_call_task(&tools, &principal, &task.task_id).await;
+        assert_eq!(settled["status"], "completed", "{settled}");
+        assert_eq!(
+            settled["result"],
+            serde_json::to_value(&direct).expect("direct result"),
+            "the task carries the direct call's exact result"
+        );
+
+        let submitted = store.submitted.lock().await.clone().expect("journaled");
+        assert_eq!(
+            submitted.execution_profile["name"],
+            waygate_codemode::TOOL_CALL_EXECUTION_PROFILE
+        );
+        assert!(submitted.source.is_none() && submitted.program_input.is_none());
+        let kinds: Vec<ExecutionEventKind> = store
+            .events
+            .lock()
+            .await
+            .iter()
+            .map(|event| event.kind)
+            .collect();
+        assert_eq!(kinds, vec![ExecutionEventKind::ConnectorCallStarted]);
+    }
+
+    #[tokio::test]
+    async fn call_task_refused_by_policy_returns_the_direct_refusal_and_writes_no_row() {
+        use waygate_mcp::call_tasks::GatewayCallTasks;
+        let store = call_task_store();
+        let tools = code_mode_tools(
+            Arc::new(FakeCatalog::with_tools(&[("email", "hidden", false)])),
+            Arc::new(SelectiveAuthz),
+        )
+        .with_execution_store(store.clone())
+        .with_result_persistence_allowed(true);
+
+        let refused = tools
+            .start(&call_task_principal(), qualified_call("email", "hidden"))
+            .await
+            .expect_err("policy denies the tool");
+        assert!(
+            matches!(
+                refused,
+                waygate_invocation::InvocationError::Forbidden { .. }
+            ),
+            "{refused:?}"
+        );
+        assert!(store.submitted.lock().await.is_none(), "no journal row");
+    }
+
+    #[tokio::test]
+    async fn call_tasks_are_owner_bound_and_hidden_from_code_mode_surfaces() {
+        use waygate_mcp::call_tasks::GatewayCallTasks;
+        let store = call_task_store();
+        let tools = code_mode_tools(
+            Arc::new(FakeCatalog::with_tools(&[("email", "read", false)])),
+            Arc::new(SelectiveAuthz),
+        )
+        .with_execution_store(store.clone())
+        .with_result_persistence_allowed(true);
+        let principal = call_task_principal();
+        let task = tools
+            .start(&principal, qualified_call("email", "read"))
+            .await
+            .expect("admitted")
+            .expect("capacity is available");
+        settled_call_task(&tools, &principal, &task.task_id).await;
+
+        let mut other_subject = principal.clone();
+        other_subject.sub = "someone-else".to_owned();
+        let mut other_issuer = principal.clone();
+        other_issuer.issuer = "https://other-issuer.test".to_owned();
+        let mut confined = principal.clone();
+        confined.api_key_profile_restrictions = Some(ApiKeyProfileRestrictions {
+            profile_id: "email-only".to_owned(),
+            profile_name: "Email only".to_owned(),
+            allowed_servers: Some(vec!["email".to_owned()]),
+            allowed_tools: None,
+        });
+        for stranger in [&other_subject, &other_issuer, &confined] {
+            assert!(tools
+                .get(stranger, &task.task_id)
+                .await
+                .expect("lookup")
+                .is_none());
+            assert!(!tools
+                .cancel(stranger, &task.task_id)
+                .await
+                .expect("cancel lookup"));
+        }
+
+        let execution_id =
+            waygate_mcp::call_tasks::execution_id(&task.task_id).expect("call-task id");
+        assert!(
+            tools
+                .get_task(&execution_id.to_string(), Some(&principal))
+                .await
+                .expect("Code Mode lookup")
+                .is_none(),
+            "Code Mode task surfaces do not serve background tool calls"
+        );
+    }
+
+    /// Admits the call, then waits for the request's cancellation as an
+    /// upstream request in flight would.
+    struct CancellableInvocation {
+        contract: InvocationContractIdentity,
+        cancelled: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl waygate_invocation::InvocationService for CancellableInvocation {
+        async fn invoke(
+            &self,
+            _principal: Option<&Principal>,
+            mut request: InvocationRequest,
+        ) -> Result<InvocationResponse, waygate_invocation::InvocationError> {
+            let admission = request
+                .dispatch_admission
+                .take()
+                .expect("a call task carries an admission");
+            admission
+                .0
+                .admit(waygate_invocation::AdmittedDispatch {
+                    side_effects: true,
+                    contract: self.contract.clone(),
+                })
+                .await?;
+            request.cancellation.cancelled().await;
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Err(waygate_invocation::InvocationError::Upstream(
+                McpError::internal_error("upstream request cancelled", None),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_call_task_cancels_its_upstream_request() {
+        use waygate_mcp::call_tasks::GatewayCallTasks;
+        let fake = FakeCatalog::with_tools(&[("email", "send", true)]);
+        let invocation = Arc::new(CancellableInvocation {
+            contract: fake.contract_identity("email", "send"),
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+        });
+        let store = call_task_store();
+        let tools =
+            CodeModeTools::new(Arc::new(fake), Arc::new(SelectiveAuthz), invocation.clone())
+                .with_execution_store(store.clone())
+                .with_result_persistence_allowed(true);
+        let principal = call_task_principal();
+        let task = tools
+            .start(&principal, qualified_call("email", "send"))
+            .await
+            .expect("admitted")
+            .expect("capacity is available");
+
+        assert!(tools
+            .cancel(&principal, &task.task_id)
+            .await
+            .expect("owner cancel"));
+        let settled = settled_call_task(&tools, &principal, &task.task_id).await;
+        assert_eq!(settled["status"], "cancelled", "{settled}");
+        for _ in 0..200 {
+            if invocation
+                .cancelled
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("cancelling the task did not cancel the upstream request");
     }
 }
