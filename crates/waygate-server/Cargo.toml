@@ -20,6 +20,7 @@ waygate-llm-providers.workspace = true
 waygate-llm-translate.workspace = true
 waygate-upstream.workspace = true
 waygate-oidc.workspace = true
+arc-swap.workspace = true
 futures.workspace = true
 waygate-authz.workspace = true
 waygate-admin.workspace = true

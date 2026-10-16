@@ -24,6 +24,8 @@ pub struct AppState {
     /// Feeds `/readyz` — a gateway configured for Postgres audit but running
     /// on NullSink is a misconfiguration we want to flag.
     pub audit_enabled: bool,
+    /// Latest readiness report, rebuilt off the request path for `/readyz`.
+    pub readiness: crate::health::Readiness,
 }
 
 impl AppState {
@@ -40,6 +42,7 @@ impl AppState {
             cedar,
             skills,
             audit_enabled,
+            readiness: crate::health::Readiness::default(),
         }
     }
 }
