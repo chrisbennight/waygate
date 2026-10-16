@@ -25,7 +25,9 @@ pub use identity_client::{
     ExchangeSettings, IdentityAugmenter, IdentityCell, IdentityContext, IdentityForwardingClient,
     IDENTITY_HEADER,
 };
-pub use pool::health::{CandidateObservation, UpstreamErrorClass, UpstreamRuntimeState};
+pub use pool::health::{
+    CandidateObservation, UpstreamErrorClass, UpstreamObservation, UpstreamRuntimeState,
+};
 pub use pool::reload::resource_shape_change_requires_restart;
 pub use pool::{
     list_all_tools, CatalogFreshnessTrigger, CatalogRefreshOutcome, CatalogRefreshReport,

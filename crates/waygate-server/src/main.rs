@@ -2406,6 +2406,10 @@ async fn gateway_main() -> anyhow::Result<()> {
         tokio::spawn(reconnect_scheduler::run(pool, shutdown))
     };
 
+    // `/readyz` returns the latest report this task publishes, so the
+    // container health check never waits on a lock or a busy upstream.
+    let _readiness_task = tokio::spawn(health::run_readiness(state.clone(), ct.clone()));
+
     // Scheduled catalog refreshes: an upstream's `tools/list` ttlMs hint may
     // shorten the deadline within the floor/ceiling bounds; without a hint,
     // the freshness task uses the ceiling as its fallback interval.

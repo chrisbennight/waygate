@@ -79,7 +79,11 @@ their configuration. Runtime catalogs and policies have separate update paths.
 | Production profile refuses startup | Read the named missing requirement; configure it rather than lowering the deployment profile. |
 | Database migration failure | Check database reachability and release compatibility. Never edit an already applied migration. |
 
-Use `gateway-server --healthcheck` for the process's `/readyz` probe. A healthy
+Use `gateway-server --healthcheck` for the process's `/readyz` probe. `/readyz`
+returns a report the gateway rebuilds every few seconds, so a long tool call
+never delays it: `observed_seconds_ago` gives the report's age, and
+`checks.upstreams.busy` lists upstreams whose connections were held by
+in-flight work during the rebuild, with their last observed health. A healthy
 process does not prove upstream tool calls or an OAuth login work; validate
 those with a real client and the intended identity. Avoid dumping the complete
 process environment or container configuration when collecting diagnostics.

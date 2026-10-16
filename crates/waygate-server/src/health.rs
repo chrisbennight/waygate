@@ -3,13 +3,21 @@
 //! is unhealthy or a non-empty upstream set has no usable member. Individual
 //! upstream outages stay visible as degraded without taking healthy routes out
 //! of rotation.
+//!
+//! `/readyz` is the container health check, and a failed check takes the whole
+//! gateway out of the reverse proxy. Its handler therefore never takes a lock
+//! or waits on an upstream: a background task builds the readiness report and
+//! the handler returns the latest one.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
-use waygate_upstream::{UpstreamHealth, UpstreamRuntimeState};
+use waygate_upstream::{UpstreamHealth, UpstreamObservation, UpstreamRuntimeState};
 
 use crate::state::AppState;
 
@@ -24,32 +32,111 @@ async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({ "status": "ok" })))
 }
 
+/// How often the background task rebuilds the readiness report.
+const READINESS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long one rebuild waits for an upstream's lanes before reporting the
+/// upstream busy and keeping its last observed health.
+const READINESS_UPSTREAM_WAIT: Duration = Duration::from_secs(2);
+
+/// The latest readiness report, published by [`refresh_readiness`] and read
+/// by `/readyz` without locking.
+#[derive(Default)]
+pub struct Readiness(ArcSwap<ReadinessReport>);
+
+#[derive(Default)]
+struct ReadinessReport {
+    /// When the report was built; `None` until the first rebuild.
+    observed_at: Option<Instant>,
+    ok: bool,
+    checks: serde_json::Value,
+    /// Each upstream's last observed health, carried forward while it is busy.
+    upstreams: Vec<UpstreamHealth>,
+}
+
 /// Readyz composes several per-subsystem checks. The response body always
 /// includes the full check set (even on 200) so an operator hitting the
 /// endpoint can see everything that's healthy at a glance, not just the
-/// breakage.
+/// breakage. It returns the latest published report and never waits.
 async fn readyz(State(s): State<Arc<AppState>>) -> impl IntoResponse {
-    let policies = check_policies(&s);
-    let upstreams = summarize_upstreams(&s.upstreams.health_snapshot().await);
-    let audit = check_audit(&s);
-    let skills = check_skills(&s);
-
-    let all_ok = policies.ok && upstreams.ok && audit.ok && skills.ok;
-    let status = if all_ok {
+    let report = s.readiness.0.load();
+    let Some(observed_at) = report.observed_at else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "starting" })),
+        );
+    };
+    let status = if report.ok {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
     let body = json!({
-        "status": if all_ok { "ready" } else { "unready" },
-        "checks": {
+        "status": if report.ok { "ready" } else { "unready" },
+        "observed_seconds_ago": observed_at.elapsed().as_secs(),
+        "checks": report.checks,
+    });
+    (status, Json(body))
+}
+
+/// Rebuild the readiness report and publish it for `/readyz`.
+pub(crate) async fn refresh_readiness(s: &AppState) {
+    let observations = s
+        .upstreams
+        .health_snapshot_within(READINESS_UPSTREAM_WAIT)
+        .await;
+    let previous = s.readiness.0.load_full();
+    let report = build_readiness_report(s, &previous.upstreams, observations);
+    s.readiness.0.store(Arc::new(report));
+}
+
+/// Rebuild the readiness report every few seconds until shutdown.
+pub(crate) async fn run_readiness(s: Arc<AppState>, shutdown: CancellationToken) {
+    let mut ticks = tokio::time::interval(READINESS_REFRESH_INTERVAL);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => break,
+            _ = ticks.tick() => refresh_readiness(&s).await,
+        }
+    }
+}
+
+fn build_readiness_report(
+    s: &AppState,
+    previous: &[UpstreamHealth],
+    observations: Vec<UpstreamObservation>,
+) -> ReadinessReport {
+    let mut health = Vec::with_capacity(observations.len());
+    let mut busy = Vec::new();
+    for observation in observations {
+        match observation {
+            UpstreamObservation::Observed(observed) => health.push(observed),
+            UpstreamObservation::Busy { name } => {
+                if let Some(last) = previous.iter().find(|last| last.name == name) {
+                    health.push(last.clone());
+                }
+                busy.push(name);
+            }
+        }
+    }
+    let policies = check_policies(s);
+    let upstreams = summarize_upstreams(&health, &busy);
+    let audit = check_audit(s);
+    let skills = check_skills(s);
+    let ok = policies.ok && upstreams.ok && audit.ok && skills.ok;
+    ReadinessReport {
+        observed_at: Some(Instant::now()),
+        ok,
+        checks: json!({
             "policies": policies.body,
             "upstreams": upstreams.body,
             "audit": audit.body,
             "skills": skills.body,
-        }
-    });
-    (status, Json(body))
+        }),
+        upstreams: health,
+    }
 }
 
 struct Check {
@@ -81,8 +168,15 @@ fn check_policies(s: &AppState) -> Check {
     }
 }
 
-fn summarize_upstreams(health: &[UpstreamHealth]) -> Check {
-    if health.is_empty() {
+/// Summarize upstream health. `busy` names upstreams whose lanes stayed locked
+/// during the rebuild; `health` holds their last observed state when there is
+/// one, and a busy upstream never observed is not counted as down.
+fn summarize_upstreams(health: &[UpstreamHealth], busy: &[String]) -> Check {
+    let unobserved = busy
+        .iter()
+        .filter(|name| !health.iter().any(|h| &h.name == *name))
+        .count();
+    if health.is_empty() && unobserved == 0 {
         return Check {
             // No upstreams configured → gateway is trivially ready from an
             // upstream standpoint. This is the bootstrap / integration-test
@@ -92,7 +186,7 @@ fn summarize_upstreams(health: &[UpstreamHealth]) -> Check {
             body: json!({ "status": "skipped", "reason": "no upstreams configured" }),
         };
     }
-    let total = health.len();
+    let total = health.len() + unobserved;
     let connected = health.iter().filter(|h| h.connected).count();
     let open_breakers: Vec<&str> = health
         .iter()
@@ -102,7 +196,8 @@ fn summarize_upstreams(health: &[UpstreamHealth]) -> Check {
     let available = health
         .iter()
         .filter(|h| h.runtime_state != UpstreamRuntimeState::Disconnected)
-        .count();
+        .count()
+        + unobserved;
 
     // Each upstream is independently routable. Keep the gateway in rotation
     // while at least one can serve traffic; the detailed degraded state still
@@ -118,6 +213,7 @@ fn summarize_upstreams(health: &[UpstreamHealth]) -> Check {
             "total": total,
             "connected": connected,
             "open_breakers": open_breakers,
+            "busy": busy,
             "detail": health,
         }),
     }
@@ -375,7 +471,13 @@ mod tests {
         LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
+    /// Build the readiness report, as the background task does, then fetch it.
     async fn fetch_readyz(state: Arc<AppState>) -> (StatusCode, serde_json::Value) {
+        refresh_readiness(&state).await;
+        request_readyz(state).await
+    }
+
+    async fn request_readyz(state: Arc<AppState>) -> (StatusCode, serde_json::Value) {
         let app = router().with_state(state);
         let resp = app
             .oneshot(
@@ -648,14 +750,17 @@ mod tests {
 
     #[test]
     fn upstream_check_stays_ready_when_one_upstream_is_down() {
-        let check = summarize_upstreams(&[
-            upstream_health("gitea", false, waygate_upstream::BreakerState::Open),
-            upstream_health(
-                "example-messages",
-                true,
-                waygate_upstream::BreakerState::Closed,
-            ),
-        ]);
+        let check = summarize_upstreams(
+            &[
+                upstream_health("gitea", false, waygate_upstream::BreakerState::Open),
+                upstream_health(
+                    "example-messages",
+                    true,
+                    waygate_upstream::BreakerState::Closed,
+                ),
+            ],
+            &[],
+        );
 
         assert!(
             check.ok,
@@ -668,16 +773,85 @@ mod tests {
 
     #[test]
     fn upstream_check_reports_wholly_partial_fleet_as_degraded_but_routable() {
-        let check = summarize_upstreams(&[
-            upstream_health("gitea", true, waygate_upstream::BreakerState::HalfOpen),
-            upstream_health(
-                "example-messages",
-                true,
-                waygate_upstream::BreakerState::HalfOpen,
-            ),
-        ]);
+        let check = summarize_upstreams(
+            &[
+                upstream_health("gitea", true, waygate_upstream::BreakerState::HalfOpen),
+                upstream_health(
+                    "example-messages",
+                    true,
+                    waygate_upstream::BreakerState::HalfOpen,
+                ),
+            ],
+            &[],
+        );
 
         assert!(check.ok, "partial capacity remains routable");
         assert_eq!(check.body["status"], "degraded");
+    }
+
+    #[tokio::test]
+    async fn readyz_reports_starting_until_the_first_report_is_built() {
+        let pool = Arc::new(UpstreamPool::from_manifests_disconnected(BTreeMap::new()));
+        let state = Arc::new(AppState::new(test_config(), pool, None, None, false));
+
+        let (status, body) = request_readyz(state.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "starting");
+
+        refresh_readiness(&state).await;
+        let (status, body) = request_readyz(state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "ready");
+    }
+
+    #[test]
+    fn a_busy_upstream_keeps_its_last_observed_health() {
+        let pool = Arc::new(UpstreamPool::from_manifests_disconnected(BTreeMap::new()));
+        let state = AppState::new(test_config(), pool, None, None, false);
+        let previous = [
+            upstream_health("printable", true, waygate_upstream::BreakerState::Closed),
+            upstream_health("gitea", false, waygate_upstream::BreakerState::Open),
+        ];
+
+        let report = build_readiness_report(
+            &state,
+            &previous,
+            vec![
+                UpstreamObservation::Observed(upstream_health(
+                    "gitea",
+                    false,
+                    waygate_upstream::BreakerState::Open,
+                )),
+                UpstreamObservation::Busy {
+                    name: "printable".into(),
+                },
+            ],
+        );
+
+        assert!(report.ok, "the busy upstream was last seen connected");
+        let upstreams = &report.checks["upstreams"];
+        assert_eq!(upstreams["busy"], json!(["printable"]));
+        assert_eq!(upstreams["total"], 2);
+        assert_eq!(upstreams["connected"], 1);
+        assert_eq!(report.upstreams.len(), 2);
+    }
+
+    #[test]
+    fn a_busy_upstream_never_observed_is_not_counted_down() {
+        let pool = Arc::new(UpstreamPool::from_manifests_disconnected(BTreeMap::new()));
+        let state = AppState::new(test_config(), pool, None, None, false);
+
+        let report = build_readiness_report(
+            &state,
+            &[],
+            vec![UpstreamObservation::Busy {
+                name: "printable".into(),
+            }],
+        );
+
+        assert!(report.ok);
+        assert_eq!(report.checks["upstreams"]["total"], 1);
+        assert_eq!(report.checks["upstreams"]["busy"], json!(["printable"]));
+        assert!(report.upstreams.is_empty());
     }
 }

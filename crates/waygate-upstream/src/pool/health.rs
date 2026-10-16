@@ -23,6 +23,17 @@ pub enum UpstreamRuntimeState {
     Disconnected,
 }
 
+/// One upstream's runtime health as observed within a bounded wait.
+#[derive(Debug, Clone)]
+pub enum UpstreamObservation {
+    /// Every lane was readable within the wait.
+    Observed(UpstreamHealth),
+    /// A lane stayed locked for the whole wait: a refresh or reconnect held
+    /// it, or was queued behind a call still in flight. The upstream is busy,
+    /// not known to be down.
+    Busy { name: String },
+}
+
 impl UpstreamRuntimeState {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -350,89 +361,12 @@ impl UpstreamPool {
         names.sort();
         let mut out = Vec::with_capacity(names.len());
         for name in names {
-            let entry = &map[name];
-            // Retain every lane read guard until the snapshot is assembled.
-            // Refresh/reconnect commits require every write lock in the same
-            // slot order, so the counts and representative published catalog
-            // cannot straddle two catalog generations.
-            let mut guards = Vec::with_capacity(entry.slots.len());
-            for slot in &entry.slots {
-                guards.push(slot.conn.read().await);
-            }
-            let connected_lanes = guards.iter().filter(|guard| guard.is_some()).count();
-            // Match the write-side order exactly: slots -> manifest ->
-            // quarantine. A redial publishes classifications and may update
-            // quarantine while holding the manifest write guard, so taking
-            // quarantine first here would create a lock cycle.
-            let manifest = entry.manifest.read().expect("manifest lock poisoned");
-            let quarantined = entry
-                .quarantined
-                .read()
-                .expect("upstream quarantine lock poisoned");
-            let published_tool_count = guards
-                .iter()
-                .find_map(|guard| guard.as_ref())
-                .map(|conn| {
-                    conn.tools
-                        .iter()
-                        .filter(|tool| !quarantined.contains(tool.name.as_ref()))
-                        .count()
-                })
-                .unwrap_or_default();
-            // Union across every connected lane, NOT the first lane's set.
-            // A partial heal re-dials only the down lanes, and lanes are
-            // allowed to diverge, so if the upstream started or stopped
-            // advertising a malformed schema between dials the lanes hold
-            // different sets. Reading one lane could then under-report a
-            // live refusal — and silently under-reporting is the one
-            // failure mode this whole surface exists to prevent.
-            let rejected_output_schemas = rejected_union(&guards, &quarantined).served;
-            let rejected_output_schema_count = rejected_output_schemas.len();
-            let mut protocol_versions: Vec<String> = guards
-                .iter()
-                .filter_map(|guard| guard.as_ref())
-                .filter_map(|conn| conn.negotiated_protocol.clone())
-                .collect();
-            protocol_versions.sort();
-            protocol_versions.dedup();
-            let breaker = entry.breaker.state();
-            let state = runtime_state(connected_lanes, guards.len(), breaker);
-            let (last_success_at, last_error_class) = entry
-                .recovery
-                .read()
-                .expect("upstream recovery lock poisoned")
-                .snapshot();
-            let next_retry_at = entry
-                .reconnect
-                .lock()
-                .expect("upstream reconnect lock poisoned")
-                .snapshot()
-                .1;
-            let health = UpstreamHealth {
-                name: name.clone(),
-                runtime_state: state,
-                last_success_at,
-                last_error_class,
-                next_retry_at,
-                connected: connected_lanes > 0,
-                breaker,
-                connected_lanes,
-                total_lanes: guards.len(),
-                published_tool_count,
-                quarantined_tool_count: quarantined.len(),
-                rejected_output_schema_count,
-                protocol_versions,
-            };
-            out.push(UpstreamStatus {
-                manifest: manifest.clone(),
-                health,
-                rejected_output_schemas,
-            });
+            out.push(entry_status(name, &map[name]).await);
         }
         out
     }
 
-    /// Runtime-only projection used by `/readyz` and health callers. See
+    /// Runtime-only projection for health callers. See
     /// [`Self::status_snapshot`] for the atomic metadata pairing.
     pub async fn health_snapshot(&self) -> Vec<UpstreamHealth> {
         self.status_snapshot()
@@ -440,6 +374,31 @@ impl UpstreamPool {
             .into_iter()
             .map(|status| status.health)
             .collect()
+    }
+
+    /// Runtime health of every upstream, giving up on any upstream whose
+    /// lanes stay locked for longer than `wait`.
+    ///
+    /// A call holds its lane's read lock until it returns, and a catalog
+    /// refresh queued behind that call makes every later reader wait too, so
+    /// one long call can hold an upstream unreadable for minutes. Upstreams
+    /// are observed concurrently: a busy one delays the result by at most
+    /// `wait` and never hides the others. Stable ordering matches
+    /// [`Self::status_snapshot`].
+    pub async fn health_snapshot_within(&self, wait: Duration) -> Vec<UpstreamObservation> {
+        let map = self.entries.load_full();
+        let mut names: Vec<&String> = map.keys().collect();
+        names.sort();
+        futures::future::join_all(names.into_iter().map(|name| {
+            let entry = &map[name];
+            async move {
+                match tokio::time::timeout(wait, entry_status(name, entry)).await {
+                    Ok(status) => UpstreamObservation::Observed(status.health),
+                    Err(_) => UpstreamObservation::Busy { name: name.clone() },
+                }
+            }
+        }))
+        .await
     }
 
     /// `UpstreamHealth`-category audit emission for reconnect outcomes.
@@ -503,6 +462,88 @@ impl UpstreamPool {
             evidence,
             None,
         ));
+    }
+}
+
+/// One upstream's manifest and runtime health, read under every lane's read
+/// guard.
+async fn entry_status(name: &str, entry: &UpstreamEntry) -> UpstreamStatus {
+    // Retain every lane read guard until the snapshot is assembled.
+    // Refresh/reconnect commits require every write lock in the same
+    // slot order, so the counts and representative published catalog
+    // cannot straddle two catalog generations.
+    let mut guards = Vec::with_capacity(entry.slots.len());
+    for slot in &entry.slots {
+        guards.push(slot.conn.read().await);
+    }
+    let connected_lanes = guards.iter().filter(|guard| guard.is_some()).count();
+    // Match the write-side order exactly: slots -> manifest ->
+    // quarantine. A redial publishes classifications and may update
+    // quarantine while holding the manifest write guard, so taking
+    // quarantine first here would create a lock cycle.
+    let manifest = entry.manifest.read().expect("manifest lock poisoned");
+    let quarantined = entry
+        .quarantined
+        .read()
+        .expect("upstream quarantine lock poisoned");
+    let published_tool_count = guards
+        .iter()
+        .find_map(|guard| guard.as_ref())
+        .map(|conn| {
+            conn.tools
+                .iter()
+                .filter(|tool| !quarantined.contains(tool.name.as_ref()))
+                .count()
+        })
+        .unwrap_or_default();
+    // Union across every connected lane, NOT the first lane's set.
+    // A partial heal re-dials only the down lanes, and lanes are
+    // allowed to diverge, so if the upstream started or stopped
+    // advertising a malformed schema between dials the lanes hold
+    // different sets. Reading one lane could then under-report a
+    // live refusal — and silently under-reporting is the one
+    // failure mode this whole surface exists to prevent.
+    let rejected_output_schemas = rejected_union(&guards, &quarantined).served;
+    let rejected_output_schema_count = rejected_output_schemas.len();
+    let mut protocol_versions: Vec<String> = guards
+        .iter()
+        .filter_map(|guard| guard.as_ref())
+        .filter_map(|conn| conn.negotiated_protocol.clone())
+        .collect();
+    protocol_versions.sort();
+    protocol_versions.dedup();
+    let breaker = entry.breaker.state();
+    let state = runtime_state(connected_lanes, guards.len(), breaker);
+    let (last_success_at, last_error_class) = entry
+        .recovery
+        .read()
+        .expect("upstream recovery lock poisoned")
+        .snapshot();
+    let next_retry_at = entry
+        .reconnect
+        .lock()
+        .expect("upstream reconnect lock poisoned")
+        .snapshot()
+        .1;
+    let health = UpstreamHealth {
+        name: name.to_owned(),
+        runtime_state: state,
+        last_success_at,
+        last_error_class,
+        next_retry_at,
+        connected: connected_lanes > 0,
+        breaker,
+        connected_lanes,
+        total_lanes: guards.len(),
+        published_tool_count,
+        quarantined_tool_count: quarantined.len(),
+        rejected_output_schema_count,
+        protocol_versions,
+    };
+    UpstreamStatus {
+        manifest: manifest.clone(),
+        health,
+        rejected_output_schemas,
     }
 }
 
@@ -1185,6 +1226,86 @@ mod runtime_state_tests {
         assert_eq!(
             runtime_state(4, 4, BreakerState::Closed),
             UpstreamRuntimeState::Connected,
+        );
+    }
+}
+
+#[cfg(test)]
+mod bounded_snapshot_tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    fn manifest(name: &str) -> UpstreamManifest {
+        UpstreamManifest {
+            classification_mode: Default::default(),
+            approval_mode: Default::default(),
+            inline_response_threshold_bytes: None,
+            long_running_tools: Vec::new(),
+            name: name.to_owned(),
+            transport: Transport::Stdio,
+            protocol: Default::default(),
+            url: None,
+            command: Some(vec!["/does-not-run".to_owned()]),
+            tools: Vec::new(),
+            resources: Vec::new(),
+            exchange: None,
+            auth: None,
+            mtls: None,
+            tier_a_required: false,
+            tier_c_peer: None,
+            session: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lane_held_by_a_call_with_a_refresh_queued_is_reported_busy_without_waiting() {
+        let pool = UpstreamPool::from_manifests_disconnected(BTreeMap::from([
+            ("busy".to_owned(), manifest("busy")),
+            ("idle".to_owned(), manifest("idle")),
+        ]));
+        let busy = Arc::clone(pool.entries.load().get("busy").expect("busy entry"));
+
+        // An in-flight call holds its lane's read lock until it returns, and a
+        // catalog refresh queues for the write lock behind it. From then on
+        // every new reader of that lane waits for the call to finish.
+        let call = busy.slots[0].conn.read().await;
+        let refresh = tokio::spawn({
+            let busy = Arc::clone(&busy);
+            async move { drop(busy.slots[0].conn.write().await) }
+        });
+        while busy.slots[0].conn.try_read().is_ok() {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(60), pool.health_snapshot())
+                .await
+                .is_err(),
+            "an unbounded snapshot waits for the call to finish",
+        );
+        let observed = tokio::time::timeout(
+            Duration::from_secs(60),
+            pool.health_snapshot_within(Duration::from_secs(2)),
+        )
+        .await
+        .expect("a bounded snapshot must not wait for the call");
+        match observed.as_slice() {
+            [UpstreamObservation::Busy { name }, UpstreamObservation::Observed(idle)] => {
+                assert_eq!(name, "busy");
+                assert_eq!(idle.name, "idle");
+            }
+            other => panic!("unexpected observations: {other:?}"),
+        }
+
+        drop(call);
+        refresh.await.expect("refresh task");
+        let observed = pool.health_snapshot_within(Duration::from_secs(2)).await;
+        assert!(
+            observed
+                .iter()
+                .all(|observation| matches!(observation, UpstreamObservation::Observed(_))),
+            "once the call returns the upstream is observed again: {observed:?}",
         );
     }
 }
