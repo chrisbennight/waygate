@@ -100,7 +100,7 @@ impl ToolCallFailurePhase {
     pub(super) fn from_dial_error(error: &crate::transport::DialError) -> Self {
         match error {
             crate::transport::DialError::Init(_)
-            | crate::transport::DialError::HandshakeTimeout(_) => Self::Initialize,
+            | crate::transport::DialError::HandshakeTimeout { .. } => Self::Initialize,
             _ => Self::Dial,
         }
     }

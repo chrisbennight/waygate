@@ -74,7 +74,7 @@ impl UpstreamErrorClass {
     pub(super) fn from_dial_error(error: &DialError) -> Self {
         match error {
             DialError::ResolveNetwork { .. } | DialError::NoNetworkAddresses { .. } => Self::Dns,
-            DialError::HandshakeTimeout(_) => Self::Timeout,
+            DialError::HandshakeTimeout { .. } => Self::Timeout,
             DialError::MissingAuthEnv { .. }
             | DialError::AuthFileRead { .. }
             | DialError::AuthFileTooLarge { .. }

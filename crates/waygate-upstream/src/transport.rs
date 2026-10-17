@@ -136,9 +136,13 @@ pub(crate) enum DialError {
     #[error("build upstream streaming HTTP client: {0}")]
     HttpClientBuild(String),
     /// The transport connected, but the MCP initialization handshake did not
-    /// complete before the production deadline.
-    #[error("upstream MCP handshake exceeded {0:?}")]
-    HandshakeTimeout(Duration),
+    /// complete before the production deadline. `exchanges` summarizes what a
+    /// streamable-HTTP dial was still waiting on, when the dial recorded any.
+    #[error("upstream MCP handshake exceeded {timeout:?}{}", exchange_suffix(.exchanges.as_deref()))]
+    HandshakeTimeout {
+        timeout: Duration,
+        exchanges: Option<String>,
+    },
     /// Security guard: `mtls:` is
     /// configured but the upstream URL is plaintext
     /// `http://`. mTLS only activates during a TLS
@@ -188,9 +192,29 @@ impl DialError {
             Self::Connect(detail) => Self::Connect(format!("{detail}; {summary}")),
             Self::Init(detail) => Self::Init(format!("{detail}; {summary}")),
             Self::ListTools(detail) => Self::ListTools(format!("{detail}; {summary}")),
+            Self::HandshakeTimeout {
+                timeout,
+                exchanges: None,
+            } => Self::HandshakeTimeout {
+                timeout,
+                exchanges: Some(summary),
+            },
             other => other,
         }
     }
+
+    pub(crate) fn handshake_timeout(timeout: Duration) -> Self {
+        Self::HandshakeTimeout {
+            timeout,
+            exchanges: None,
+        }
+    }
+}
+
+fn exchange_suffix(exchanges: Option<&str>) -> String {
+    exchanges
+        .map(|summary| format!("; {summary}"))
+        .unwrap_or_default()
 }
 
 fn map_client_initialize_error(error: ClientInitializeError, connection_failed: bool) -> DialError {
@@ -610,7 +634,7 @@ async fn dial_once(
                         info.serve_with_lifecycle(transport, lifecycle),
                     )
                     .await
-                    .map_err(|_| DialError::HandshakeTimeout(handshake_timeout))?
+                    .map_err(|_| DialError::handshake_timeout(handshake_timeout))?
                     .map_err(|error| {
                         map_client_initialize_error(error, connection_probe.connection_failed())
                     })
@@ -622,7 +646,7 @@ async fn dial_once(
                         info.serve_with_lifecycle(transport, lifecycle),
                     )
                     .await
-                    .map_err(|_| DialError::HandshakeTimeout(handshake_timeout))?
+                    .map_err(|_| DialError::handshake_timeout(handshake_timeout))?
                     .map_err(|error| {
                         map_client_initialize_error(error, connection_probe.connection_failed())
                     })
@@ -693,7 +717,7 @@ async fn dial_once(
             let (service, cleartext_control_plane) =
                 tokio::time::timeout(handshake_timeout, handshake)
                     .await
-                    .map_err(|_| DialError::HandshakeTimeout(handshake_timeout))??;
+                    .map_err(|_| DialError::handshake_timeout(handshake_timeout))??;
             Ok(ConnectedService {
                 service,
                 network_destination: Some(destination),
@@ -1223,7 +1247,10 @@ mod tests {
         server.abort();
 
         assert!(
-            matches!(result, Err(DialError::HandshakeTimeout(actual)) if actual == deadline),
+            matches!(
+                result,
+                Err(DialError::HandshakeTimeout { timeout, exchanges: None }) if timeout == deadline
+            ),
             "stalled MCP initialization returned {result:?}",
         );
     }
@@ -1262,9 +1289,20 @@ mod tests {
         .expect("the dial function must enforce its own handshake deadline");
         server.abort();
 
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("a stalled MCP initialization must not connect"),
+        };
         assert!(
-            matches!(result, Err(DialError::HandshakeTimeout(actual)) if actual == deadline),
-            "stalled MCP initialization returned {result:?}",
+            matches!(&error, DialError::HandshakeTimeout { timeout, .. } if *timeout == deadline),
+            "stalled MCP initialization returned {error:?}",
+        );
+        // The deadline alone would not say which request the upstream left
+        // waiting.
+        let text = error.to_string();
+        assert!(
+            text.contains("HTTP exchanges on this dial: POST server/discover -> "),
+            "{text}"
         );
     }
 

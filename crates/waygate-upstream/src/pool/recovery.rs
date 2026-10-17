@@ -449,7 +449,7 @@ async fn dial_per_call(setup: PerCallDial<'_>) -> Result<PerCallDialSuccess, Per
         let dial_result = match remaining(setup.deadline) {
             Some(remaining) => match tokio::time::timeout(remaining, dial).await {
                 Ok(result) => result,
-                Err(_) => Err(DialError::HandshakeTimeout(
+                Err(_) => Err(DialError::handshake_timeout(
                     setup.timeout.unwrap_or_default(),
                 )),
             },
