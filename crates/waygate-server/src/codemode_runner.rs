@@ -60,17 +60,23 @@ Object.defineProperty(globalThis, "console", {
     const render = (args) => {
       const parts = [];
       let length = 0;
+      // Every piece is cut to the room left before it is kept, so the
+      // joined text never passes the budget by more than one character.
+      const room = () => textLimit - length;
       const push = (text) => {
-        parts.push(text);
-        length += text.length;
-        if (length > textLimit) {
+        if (text.length > room()) {
+          parts.push(text.slice(0, room() + 1));
+          length = textLimit + 1;
           throw full;
         }
+        parts.push(text);
+        length += text.length;
       };
+      const quote = (text) => JSON.stringify(text.length > room() ? text.slice(0, room() + 1) : text);
       const inspect = (value, nested, seen) => {
         switch (typeof value) {
           case "string":
-            push(nested ? JSON.stringify(value) : value);
+            push(nested ? quote(value) : value);
             return;
           case "bigint":
             push(`${value}n`);
@@ -151,7 +157,7 @@ Object.defineProperty(globalThis, "console", {
             for (const key of Object.keys(value)) {
               if (!first) push(", ");
               first = false;
-              push(`${JSON.stringify(key)}: `);
+              push(`${quote(key)}: `);
               inspect(value[key], true, seen);
             }
             push("}");
@@ -176,14 +182,28 @@ Object.defineProperty(globalThis, "console", {
             else if (spec === "i") push(String(parseInt(arg, 10)));
             else push(String(parseFloat(arg)));
             return;
-          case "j":
+          case "j": {
+            // The replacer stops serialization once its running size passes
+            // the budget; the bounded formatter then prints what fits.
+            let size = 0;
+            let text;
             try {
-              push(String(JSON.stringify(arg)));
+              text = JSON.stringify(arg, (key, item) => {
+                size += key.length + (typeof item === "string" ? item.length : 8);
+                if (size > room()) throw full;
+                return item;
+              });
             } catch (error) {
-              if (error === full) throw error;
-              push("[Circular]");
+              if (error === full) {
+                inspect(arg, true, []);
+              } else {
+                push(/circular/i.test(String(error?.message)) ? "[Circular]" : "[could not serialize]");
+              }
+              return;
             }
+            push(String(text));
             return;
+          }
           case "o":
           case "O":
             inspect(arg, true, []);
@@ -212,6 +232,7 @@ Object.defineProperty(globalThis, "console", {
             } else {
               literal += template[index];
             }
+            if (literal.length > room()) push(literal);
           }
           push(literal);
         }
@@ -243,7 +264,7 @@ Object.defineProperty(globalThis, "console", {
     const timers = new Map();
     const label = (name) => (name === undefined ? "default" : String(name));
     const elapsed = (start) => `${(performance.now() - start).toFixed(3)}ms`;
-    return {
+    const methods = {
       log: (...args) => emit("log", args),
       info: (...args) => emit("info", args),
       debug: (...args) => emit("debug", args),
@@ -302,6 +323,19 @@ Object.defineProperty(globalThis, "console", {
         emit("log", [`${key}: ${elapsed(start)}`]);
       },
     };
+    // A method that fails, for example on a label that cannot become text,
+    // drops its output rather than ending the program.
+    for (const name of Object.keys(methods)) {
+      const method = methods[name];
+      methods[name] = (...args) => {
+        try {
+          method(...args);
+        } catch {
+          // Debugging output must never end a program.
+        }
+      };
+    }
+    return methods;
   })(),
   writable: true,
   enumerable: false,
@@ -639,22 +673,42 @@ fn runner_console() -> impl Fn(ConsoleLevel, &str) -> rquickjs::Result<()> {
         let mut capture = capture.lock().map_err(|_| {
             rquickjs::Error::new_from_js_message("console", "console output", "console lock failed")
         })?;
-        let Some(entry) = capture.admit(level, text) else {
-            return Ok(());
-        };
-        let frame = RunnerFrame::Console {
+        let stdout = std::io::stdout();
+        for frame in console_frames(&mut capture, level, text) {
+            write_runner_frame(&mut stdout.lock(), &frame).map_err(|_| {
+                rquickjs::Error::new_from_js_message(
+                    "console",
+                    "console output",
+                    "console transport failed",
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// The frames that deliver one console call: the entry as the budget keeps
+/// it, then a truncation notice the first time the budget cuts or drops
+/// output.
+fn console_frames(
+    capture: &mut ConsoleCapture,
+    level: ConsoleLevel,
+    text: &str,
+) -> Vec<RunnerFrame> {
+    if capture.is_truncated() {
+        return Vec::new();
+    }
+    let mut frames = Vec::new();
+    if let Some(entry) = capture.admit(level, text) {
+        frames.push(RunnerFrame::Console {
             level: entry.level,
             text: entry.text.clone(),
-        };
-        let stdout = std::io::stdout();
-        write_runner_frame(&mut stdout.lock(), &frame).map_err(|_| {
-            rquickjs::Error::new_from_js_message(
-                "console",
-                "console output",
-                "console transport failed",
-            )
-        })
+        });
     }
+    if capture.is_truncated() {
+        frames.push(RunnerFrame::ConsoleTruncated);
+    }
+    frames
 }
 
 #[cfg(test)]
@@ -1787,7 +1841,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::process_mode::codemode_protocol::{ConsoleEntry, MAX_FAILURE_MESSAGE_CHARS};
+    use crate::process_mode::codemode_protocol::{
+        ConsoleEntry, CONSOLE_ENTRY_OVERHEAD_BYTES, MAX_FAILURE_MESSAGE_CHARS,
+    };
 
     fn bindings(names: &[(&str, &str)]) -> Vec<RunnerBinding> {
         names
@@ -3107,6 +3163,83 @@ return null;
             lines[0].len()
         );
         assert!(lines[0].starts_with("[0, 1, 2, "));
+    }
+
+    /// The parent learns of truncation from the runner, because an entry the
+    /// runner cut to fit also fits the parent's identical budget exactly.
+    #[test]
+    fn console_frames_report_truncation_once() {
+        let mut exact = ConsoleCapture::new(CONSOLE_ENTRY_OVERHEAD_BYTES + 4);
+        let frames = console_frames(&mut exact, ConsoleLevel::Log, "abcd");
+        assert!(matches!(
+            frames.as_slice(),
+            [RunnerFrame::Console { text, .. }] if text == "abcd"
+        ));
+        assert!(matches!(
+            console_frames(&mut exact, ConsoleLevel::Log, "dropped").as_slice(),
+            [RunnerFrame::ConsoleTruncated]
+        ));
+        assert!(console_frames(&mut exact, ConsoleLevel::Log, "silent").is_empty());
+
+        let mut cut = ConsoleCapture::new(CONSOLE_ENTRY_OVERHEAD_BYTES + 2);
+        assert!(matches!(
+            console_frames(&mut cut, ConsoleLevel::Warn, "abcd").as_slice(),
+            [RunnerFrame::Console { text, .. }, RunnerFrame::ConsoleTruncated] if text == "ab"
+        ));
+    }
+
+    #[test]
+    fn console_methods_with_unprintable_labels_never_end_a_program() {
+        let (outcome, _) = execute_capturing_console(
+            r#"
+const bare = Object.create(null);
+const hostile = { toString() { throw new Error("no text"); } };
+console.count(bare);
+console.countReset(bare);
+console.time(hostile);
+console.timeLog(hostile);
+console.timeEnd(hostile);
+console.group(bare);
+console.groupEnd();
+return "finished";
+"#,
+        );
+        assert_eq!(
+            outcome.expect("console labels never end a program"),
+            Value::String("finished".to_owned())
+        );
+    }
+
+    /// Large strings, nested strings, long templates and `%j` all stop at the
+    /// console budget instead of formatting the whole input.
+    #[test]
+    fn console_formatting_is_bounded_for_every_large_input() {
+        let limit = limits().console_bytes;
+        let lines = printed_lines(&format!(
+            r#"
+const huge = "x".repeat({big});
+console.log(huge);
+console.log({{ nested: huge }});
+console.log("%s " + huge, "tail");
+console.log("%j", Array.from({{ length: 200000 }}, (_, index) => ({{ index }})));
+return null;
+"#,
+            big = limit * 4
+        ));
+        assert_eq!(lines.len(), 4);
+        for line in &lines {
+            assert!(line.len() <= limit + 1, "{}", line.len());
+        }
+        assert!(
+            lines[1].starts_with(r#"{"nested": "xxx"#),
+            "{}",
+            &lines[1][..40]
+        );
+        assert!(
+            lines[3].starts_with(r#"[{"index": 0}, {"index": 1}"#),
+            "{}",
+            &lines[3][..40]
+        );
     }
 
     #[test]

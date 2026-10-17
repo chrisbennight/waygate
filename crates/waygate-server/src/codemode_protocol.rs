@@ -121,6 +121,10 @@ pub enum RunnerFrame {
         level: ConsoleLevel,
         text: String,
     },
+    /// Output past the console budget was cut or dropped. Sent once, when the
+    /// runner's accounting first truncates, so the parent reports truncation
+    /// even when the shortened entry it received fits its own budget exactly.
+    ConsoleTruncated,
 }
 
 // The severity a `console` method reports, named as programs know them.
@@ -162,7 +166,7 @@ impl ConsoleOutput {
 
 /// Per-entry cost charged in addition to its text, so a flood of empty calls
 /// is bounded by the same budget as long ones.
-const CONSOLE_ENTRY_OVERHEAD_BYTES: usize = 16;
+pub const CONSOLE_ENTRY_OVERHEAD_BYTES: usize = 16;
 
 /// Console output admitted against a byte budget.
 ///
@@ -211,6 +215,16 @@ impl ConsoleCapture {
             text: kept.to_owned(),
         });
         self.output.entries.last()
+    }
+
+    pub fn is_truncated(&self) -> bool {
+        self.output.truncated
+    }
+
+    /// Record that output was lost before it could be offered here.
+    pub fn mark_truncated(&mut self) {
+        self.output.truncated = true;
+        self.remaining = 0;
     }
 
     pub fn into_output(self) -> ConsoleOutput {
