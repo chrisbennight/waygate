@@ -732,34 +732,36 @@ fn read_data_event(data: &str, request: &AwaitedResponse) -> DataEvent {
         Some(_) if answers => "for this request",
         Some(_) => "for another request",
     };
-    if let Some(error) = object.get("error") {
-        if answers {
-            // The SDK reports a routed error itself.
-            return DataEvent::Answer;
+    let kind = if let Some(error) = object.get("error") {
+        if !answers {
+            let code = error
+                .get("code")
+                .and_then(serde_json::Value::as_i64)
+                .map_or_else(|| "unknown".to_owned(), |code| code.to_string());
+            let message = error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            return DataEvent::Other(format!(
+                "error {whose}, code {code}: {}",
+                bounded_text(message, MAX_EXCHANGE_ERROR_BYTES)
+            ));
         }
-        let code = error
-            .get("code")
-            .and_then(serde_json::Value::as_i64)
-            .map_or_else(|| "unknown".to_owned(), |code| code.to_string());
-        let message = error
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        return DataEvent::Other(format!(
-            "error {whose}, code {code}: {}",
-            bounded_text(message, MAX_EXCHANGE_ERROR_BYTES)
-        ));
-    }
-    if !object.contains_key("result") {
+        "error"
+    } else if object.contains_key("result") {
+        if !answers {
+            return DataEvent::Other(format!("response {whose}"));
+        }
+        "response"
+    } else {
         return DataEvent::Other("JSON-RPC message without a method, result, or error".to_owned());
-    }
-    if !answers {
-        return DataEvent::Other(format!("response {whose}"));
-    }
+    };
+    // A routed answer completes the request only if the SDK can read it; the
+    // SDK reports a readable error itself.
     match serde_json::from_value::<ServerJsonRpcMessage>(value.clone()) {
         Ok(_) => DataEvent::Answer,
         Err(error) => DataEvent::Other(format!(
-            "response for this request that the SDK cannot read ({})",
+            "{kind} for this request that the SDK cannot read ({})",
             unreadable_envelope(&value, &error)
         )),
     }
@@ -778,14 +780,24 @@ fn id_matches(id: Option<&serde_json::Value>, expected: &RequestId) -> bool {
 }
 
 /// Why the SDK cannot read an answer. Its result type accepts any object, so
-/// an unreadable answer has a malformed envelope, most often its version
-/// marker; the SDK's own error names no field.
+/// an unreadable answer has a malformed envelope: its version marker or its
+/// error object. The SDK's own error names no member.
 fn unreadable_envelope(value: &serde_json::Value, error: &serde_json::Error) -> String {
     match value.get("jsonrpc") {
-        Some(serde_json::Value::String(version)) if version == "2.0" => decode_error(error),
-        Some(_) => "its jsonrpc member is not \"2.0\"".to_owned(),
-        None => "it has no jsonrpc member".to_owned(),
+        Some(serde_json::Value::String(version)) if version == "2.0" => {}
+        Some(_) => return "its jsonrpc member is not \"2.0\"".to_owned(),
+        None => return "it has no jsonrpc member".to_owned(),
     }
+    if let Some(member) = value.get("error") {
+        let is_error_object = member.get("code").is_some_and(serde_json::Value::is_i64)
+            && member
+                .get("message")
+                .is_some_and(serde_json::Value::is_string);
+        if !is_error_object {
+            return "its error member is not a JSON-RPC error object".to_owned();
+        }
+    }
+    decode_error(error)
 }
 
 fn decode_error(error: &serde_json::Error) -> String {
@@ -982,6 +994,12 @@ mod tests {
             read(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no"}}"#),
             "answer",
             "the SDK reports a routed error itself"
+        );
+        assert_eq!(
+            read(r#"{"jsonrpc":"2.0","id":1,"error":null}"#),
+            "error for this request that the SDK cannot read \
+             (its error member is not a JSON-RPC error object)",
+            "an error the SDK cannot read never completes the request"
         );
         assert_eq!(
             read(r#"{"jsonrpc":"2.0","id":7,"result":{"secret":"value"}}"#),
