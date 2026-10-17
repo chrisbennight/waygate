@@ -34,8 +34,10 @@ fail_env() {
 }
 
 version_of() {
-    # `cargo-about --version` prints "cargo-about <semver>".
-    "$1" --version 2>/dev/null | awk 'NR==1 {print $2}'
+    # `cargo-about --version` prints "cargo-about <semver>". A binary that
+    # cannot run yields an empty version, which the callers report through
+    # fail_env instead of letting set -e end the script without guidance.
+    { "$1" --version 2>/dev/null || true; } | awk 'NR==1 {print $2}'
 }
 
 if command -v cargo-about >/dev/null 2>&1; then
