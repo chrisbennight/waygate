@@ -6,18 +6,52 @@
 use super::*;
 
 /// An upstream's connection slots and the queue for checking one out. There
-/// is one permit per slot and only a checkout locks a slot's `in_use`, so a
-/// caller holding a permit is owed a free slot. Permits are granted in
-/// request order, so a waiting call takes whichever slot frees first.
+/// is one permit per slot and only a checkout locks a slot's `in_use`. A call
+/// that holds a permit without a slot never locks one, so a caller holding a
+/// permit is owed a free slot. Permits are granted in request order, so a
+/// waiting call takes whichever slot frees first.
 pub(super) struct ConnectionSlots {
     slots: Vec<super::ConnectionSlot>,
     permits: tokio::sync::Semaphore,
+    /// Whether every call holds a permit, so the slot count is the most calls
+    /// in flight to this upstream. Otherwise only a call that needs a slot
+    /// exclusively takes a permit, and one that finds none free runs on its
+    /// own session instead of waiting.
+    bounded: bool,
 }
 
 impl ConnectionSlots {
-    pub(super) fn new(slots: Vec<super::ConnectionSlot>) -> Self {
+    pub(super) fn new(slots: Vec<super::ConnectionSlot>, bounded: bool) -> Self {
         let permits = tokio::sync::Semaphore::new(slots.len());
-        Self { slots, permits }
+        Self {
+            slots,
+            permits,
+            bounded,
+        }
+    }
+
+    /// A slot for a call that only reads its connection: the first whose
+    /// connection is live and not being replaced, else the first slot. Such a
+    /// call holds the connection for reading, which a reconnect or re-dial
+    /// must wait out before replacing it.
+    fn shared(&self) -> &super::ConnectionSlot {
+        self.slots
+            .iter()
+            .find(|slot| slot.conn.try_read().is_ok_and(|conn| conn.is_some()))
+            .unwrap_or(&self.slots[0])
+    }
+}
+
+/// Whether `manifest` limits the calls in flight to its upstream. A stdio
+/// child process serves one call at a time. A network upstream is limited
+/// only by an explicit `session.concurrency`, which also sets its slot count.
+pub(super) fn calls_bounded(manifest: &UpstreamManifest) -> bool {
+    match manifest.transport {
+        Transport::Stdio => true,
+        Transport::Http | Transport::Sse => manifest
+            .session
+            .as_ref()
+            .is_some_and(|session| session.concurrency.is_some()),
     }
 }
 
@@ -47,6 +81,21 @@ pub(super) struct SlotCheckout<'a> {
     /// Declared after the guard so the slot is free before the next waiter
     /// is admitted.
     _permit: tokio::sync::SemaphorePermit<'a>,
+}
+
+/// One admitted call's hold on its upstream for the dispatch.
+pub(super) struct CallLane<'a> {
+    /// The slot whose connection the call reads. A `Reuse` call runs on it
+    /// and holds it exclusively; a `PerCall` call reads its tool view and
+    /// negotiated protocol and dials its own session.
+    pub(super) slot: &'a super::ConnectionSlot,
+    /// The isolation the call runs under. A `Reuse` call that found every
+    /// slot busy on an unbounded upstream runs `PerCall`.
+    pub(super) isolation: SessionIsolation,
+    /// Held by a call that runs on the slot's session.
+    _checkout: Option<SlotCheckout<'a>>,
+    /// Held by a call that shares the slot on a bounded upstream.
+    _permit: Option<tokio::sync::SemaphorePermit<'a>>,
 }
 
 impl super::UpstreamPool {
@@ -234,7 +283,10 @@ pub(super) async fn dial_slots(
             in_use: Mutex::new(()),
         })
         .collect();
-    (ConnectionSlots::new(slots), last_error_class)
+    (
+        ConnectionSlots::new(slots, calls_bounded(manifest)),
+        last_error_class,
+    )
 }
 
 impl super::UpstreamEntry {
@@ -264,6 +316,62 @@ impl super::UpstreamEntry {
             .clone()
     }
 
+    /// Admit one call configured with `isolation`.
+    ///
+    /// A `PerCall` call dials its own session and only reads a slot's
+    /// connection, so it shares a slot. A `Reuse` call runs on a slot's
+    /// session, so it checks one out exclusively. On a bounded upstream (see
+    /// [`calls_bounded`]) every call waits in request order for a permit,
+    /// which caps the calls in flight. On an unbounded one nothing waits: a
+    /// `Reuse` call that finds every slot busy runs on its own fresh session,
+    /// which no other call or caller has used.
+    pub(super) async fn admit(&self, isolation: SessionIsolation) -> CallLane<'_> {
+        match isolation {
+            SessionIsolation::Reuse => {
+                let checkout = if self.slots.bounded {
+                    Some(self.checkout().await)
+                } else if let Ok(permit) = self.slots.permits.try_acquire() {
+                    Some(self.claim_slot(permit).await)
+                } else {
+                    None
+                };
+                match checkout {
+                    Some(checkout) => CallLane {
+                        slot: checkout.slot,
+                        isolation,
+                        _checkout: Some(checkout),
+                        _permit: None,
+                    },
+                    None => CallLane {
+                        slot: self.slots.shared(),
+                        isolation: SessionIsolation::PerCall,
+                        _checkout: None,
+                        _permit: None,
+                    },
+                }
+            }
+            SessionIsolation::PerCall => {
+                let permit = if self.slots.bounded {
+                    Some(
+                        self.slots
+                            .permits
+                            .acquire()
+                            .await
+                            .expect("connection slot permits are never closed"),
+                    )
+                } else {
+                    None
+                };
+                CallLane {
+                    slot: self.slots.shared(),
+                    isolation,
+                    _checkout: None,
+                    _permit: permit,
+                }
+            }
+        }
+    }
+
     /// Check out a connection slot for exclusive use. Waits for a permit,
     /// then prefers a free *connected* slot, then any free slot (the caller
     /// gets a not-connected error if it's down, which feeds the breaker and
@@ -277,6 +385,14 @@ impl super::UpstreamEntry {
             .acquire()
             .await
             .expect("connection slot permits are never closed");
+        self.claim_slot(permit).await
+    }
+
+    /// Lock a free slot for the holder of `permit`, which is owed one.
+    async fn claim_slot<'a>(
+        &'a self,
+        permit: tokio::sync::SemaphorePermit<'a>,
+    ) -> SlotCheckout<'a> {
         loop {
             // Nothing in the scan waits. A busy slot is skipped before its
             // connection is read, since its call holds that lock for reading
@@ -312,16 +428,15 @@ impl super::UpstreamEntry {
 }
 
 /// Connection-slot count for an upstream: stdio is always a single child
-/// process; network transports get `pool_size` lanes so concurrent calls
-/// to one upstream parallelize.
+/// process; network transports get `pool_size` long-lived lanes, which
+/// `Reuse` calls run on and `PerCall` calls read their tool view from.
 ///
-/// A per-upstream `session.concurrency` overrides the global `pool_size`
-/// (the `GATEWAY_UPSTREAM_POOL_SIZE`-derived default) for HTTP/SSE — both
-/// directions: raise it for a hot upstream, or lower it (e.g. `1`) to
-/// throttle concurrent load onto a weak one. The override is clamped to
-/// ≥ 1, so an explicit `concurrency: 0` still yields a single live
-/// session rather than zero. Stdio ignores it entirely (a manifest can't
-/// fan one child process into multiple sessions).
+/// A per-upstream `session.concurrency` replaces the global `pool_size`
+/// (the `GATEWAY_UPSTREAM_POOL_SIZE`-derived default) for HTTP/SSE, and
+/// [`calls_bounded`] makes it the most calls in flight to that upstream. It
+/// is clamped to ≥ 1, so an explicit `concurrency: 0` still yields a single
+/// live session rather than zero. Stdio ignores it entirely (a manifest
+/// can't fan one child process into multiple sessions).
 pub(super) fn slot_count(manifest: &UpstreamManifest, pool_size: usize) -> usize {
     match manifest.transport {
         Transport::Stdio => 1,

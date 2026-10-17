@@ -2088,3 +2088,205 @@ async fn the_resolved_session_isolation_mode_is_published() {
         "the inactive mode must be published as zero, not left absent",
     );
 }
+
+/// An upstream whose `noop` call stays in flight until the test releases it,
+/// so a test can observe how many calls the gateway lets through at once.
+/// Session initializations are counted as in [`spawn_mock_upstream`].
+#[derive(Clone)]
+struct GatedCallRig {
+    in_flight: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+    release: Arc<tokio::sync::Semaphore>,
+    inits: Arc<AtomicUsize>,
+}
+
+impl GatedCallRig {
+    /// Wait until exactly `calls` are in flight at the upstream together.
+    async fn await_in_flight(&self, calls: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while self.in_flight.load(Ordering::SeqCst) < calls {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "expected {calls} calls in flight together; saw {}",
+                self.in_flight.load(Ordering::SeqCst)
+            )
+        });
+    }
+}
+
+impl ServerHandler for GatedCallRig {
+    fn get_info(&self) -> ServerConfig {
+        MockUpstream.get_info()
+    }
+
+    async fn list_tools(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        MockUpstream.list_tools(request, ctx).await
+    }
+
+    async fn call_tool(
+        &self,
+        _request: CallToolRequestParams,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        self.release
+            .acquire()
+            .await
+            .expect("release gate stays open")
+            .forget();
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        Ok(CallToolResult::success(vec![Content::text("ok")]).into())
+    }
+}
+
+async fn spawn_gated_call_upstream() -> (std::net::SocketAddr, GatedCallRig) {
+    let rig = GatedCallRig {
+        in_flight: Arc::default(),
+        peak: Arc::default(),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+        inits: Arc::default(),
+    };
+    let handler = rig.clone();
+    let svc = StreamableHttpService::new(
+        move || Ok(handler.clone()),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default().with_legacy_session_mode(true),
+    );
+    let counter = rig.inits.clone();
+    let app: Router<()> = Router::new()
+        .nest_service("/mcp", svc)
+        .layer(middleware::from_fn(move |req: Request, next: Next| {
+            let counter = counter.clone();
+            async move {
+                if req.method() == Method::POST && req.headers().get("mcp-session-id").is_none() {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+                next.run(req).await
+            }
+        }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (addr, rig)
+}
+
+fn spawn_calls(pool: &Arc<UpstreamPool>, calls: usize) -> Vec<tokio::task::JoinHandle<()>> {
+    (0..calls)
+        .map(|call| {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                pool.call_tool("mock", "noop", None, None, None)
+                    .await
+                    .unwrap_or_else(|error| panic!("call {call} failed: {error}"));
+            })
+        })
+        .collect()
+}
+
+async fn finish_calls(rig: &GatedCallRig, calls: Vec<tokio::task::JoinHandle<()>>) {
+    rig.release.add_permits(calls.len());
+    for call in calls {
+        tokio::time::timeout(std::time::Duration::from_secs(10), call)
+            .await
+            .expect("released calls finish")
+            .expect("call task");
+    }
+}
+
+/// Without `session.concurrency` the gateway puts no ceiling on calls in
+/// flight to a per-call upstream: more calls than it keeps pooled lanes all
+/// reach the upstream together.
+#[tokio::test]
+async fn per_call_upstream_without_concurrency_admits_every_call_at_once() {
+    // Well above the pooled lane count, so a lane-sized ceiling cannot pass.
+    const CALLS: usize = 16;
+    let (addr, rig) = spawn_gated_call_upstream().await;
+    let mut upstream = manifest(addr, None);
+    upstream.session = None;
+    let pool =
+        Arc::new(UpstreamPool::connect(BTreeMap::from([("mock".to_owned(), upstream)])).await);
+    assert!(pool.is_connected("mock").await, "boot dial must connect");
+
+    let calls = spawn_calls(&pool, CALLS);
+    rig.await_in_flight(CALLS).await;
+    finish_calls(&rig, calls).await;
+}
+
+/// An explicit `session.concurrency` is a ceiling on calls in flight to the
+/// upstream; calls beyond it wait and then all complete.
+#[tokio::test]
+async fn session_concurrency_caps_calls_in_flight() {
+    const LIMIT: usize = 2;
+    const CALLS: usize = 6;
+    let (addr, rig) = spawn_gated_call_upstream().await;
+    let mut upstream = manifest(addr, None);
+    upstream
+        .session
+        .as_mut()
+        .expect("session config")
+        .concurrency = Some(LIMIT);
+    let pool =
+        Arc::new(UpstreamPool::connect(BTreeMap::from([("mock".to_owned(), upstream)])).await);
+    assert!(pool.is_connected("mock").await, "boot dial must connect");
+
+    let calls = spawn_calls(&pool, CALLS);
+    rig.await_in_flight(LIMIT).await;
+    // Correct admission never depends on this pause; it only gives a gateway
+    // that over-admits time to deliver the excess calls before the release.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(rig.in_flight.load(Ordering::SeqCst), LIMIT);
+    finish_calls(&rig, calls).await;
+    assert_eq!(
+        rig.peak.load(Ordering::SeqCst),
+        LIMIT,
+        "no more than the configured concurrency may be in flight at once",
+    );
+}
+
+/// A reuse upstream without `session.concurrency` runs calls on its pooled
+/// sessions while one is free, and a call that finds every pooled session busy
+/// runs on its own fresh session instead of waiting.
+#[tokio::test]
+async fn busy_reuse_upstream_runs_extra_calls_on_fresh_sessions() {
+    const EXTRA: usize = 3;
+    let (addr, rig) = spawn_gated_call_upstream().await;
+    let mut upstream = legacy(manifest(addr, Some(SessionIsolation::Reuse)));
+    upstream
+        .session
+        .as_mut()
+        .expect("session config")
+        .concurrency = None;
+    let pool =
+        Arc::new(UpstreamPool::connect(BTreeMap::from([("mock".to_owned(), upstream)])).await);
+    assert!(pool.is_connected("mock").await, "boot dial must connect");
+    // Each pooled lane opened one session at boot.
+    let lanes = rig.inits.load(Ordering::SeqCst);
+    assert!(lanes > 0, "the pool keeps reusable sessions");
+
+    let calls = spawn_calls(&pool, lanes + EXTRA);
+    rig.await_in_flight(lanes + EXTRA).await;
+    assert_eq!(
+        rig.inits.load(Ordering::SeqCst),
+        lanes + EXTRA,
+        "each call beyond the pooled sessions opens exactly one fresh session",
+    );
+    finish_calls(&rig, calls).await;
+
+    // With every pooled session free again, a call reuses one.
+    rig.release.add_permits(1);
+    pool.call_tool("mock", "noop", None, None, None)
+        .await
+        .unwrap_or_else(|error| panic!("reuse call failed: {error}"));
+    assert_eq!(rig.inits.load(Ordering::SeqCst), lanes + EXTRA);
+}

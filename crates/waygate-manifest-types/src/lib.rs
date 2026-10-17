@@ -324,8 +324,8 @@ pub struct UpstreamManifest {
     pub tier_c_peer: Option<Uuid>,
     /// Per-upstream session / connection-pool policy. Absent ⇒ the
     /// gateway-wide defaults apply: pool size from
-    /// `GATEWAY_UPSTREAM_POOL_SIZE`, one in-flight request per session.
-    /// See [`SessionConfig`]. Connection-shape (read once at dial time,
+    /// `GATEWAY_UPSTREAM_POOL_SIZE`, one in-flight request per pooled
+    /// session, and no limit on calls in flight. See [`SessionConfig`]. Connection-shape (read once at dial time,
     /// like `transport`/`url`), applied live on Reload: a change that keeps
     /// the slot count is re-dialed in place, and a `concurrency` change that
     /// resizes the pool is rebuilt live (a fresh entry with the new slot count
@@ -352,20 +352,22 @@ pub struct ResourceClassification {
 /// Per-upstream session / connection-pool policy.
 ///
 /// The gateway dials a pool of independent upstream sessions per server
-/// and serves at most one in-flight request per session (see
+/// and serves at most one in-flight request per pooled session (see
 /// `waygate_upstream::pool`).
 /// This block tunes that pool per upstream; every field is optional and
 /// falls back to the gateway-wide default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionConfig {
-    /// Number of independent upstream sessions dialed for this server —
-    /// the per-upstream override of the global
-    /// `GATEWAY_UPSTREAM_POOL_SIZE`. Higher ⇒ more calls run in parallel
-    /// (each on its own session); lower throttles concurrent load on a
-    /// weak upstream. `None` inherits the global default. Clamped to
-    /// ≥ 1, and ignored for `stdio` (always one child process). Read at
-    /// dial time; a change resizes the pool and is rebuilt live on Reload
-    /// (restart-required only if every new-shape dial fails).
+    /// Most calls in flight to this server at once, for an upstream that
+    /// cannot manage its own load. Calls beyond it wait in arrival order.
+    /// `None` sets no limit: a per-call session is dialed for each call,
+    /// and a `reuse` call that finds every pooled session busy runs on its
+    /// own fresh session. Also the number of pooled sessions dialed for
+    /// this server, replacing the global `GATEWAY_UPSTREAM_POOL_SIZE`.
+    /// Clamped to ≥ 1, and ignored for `stdio` (always one child process,
+    /// one call at a time). Read at dial time; a change resizes the pool
+    /// and is rebuilt live on Reload (restart-required only if every
+    /// new-shape dial fails).
     #[serde(default)]
     pub concurrency: Option<usize>,
     /// How upstream sessions are reused across calls. `None` selects the
