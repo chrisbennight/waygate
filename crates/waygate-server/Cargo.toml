@@ -75,6 +75,8 @@ jsonschema.workspace = true
 time.workspace = true
 tracing.workspace = true
 rquickjs.workspace = true
+# Fills Code Mode's `crypto.getRandomValues` and `crypto.randomUUID`.
+rand.workspace = true
 tempfile.workspace = true
 
 rmcp = { workspace = true, features = [
