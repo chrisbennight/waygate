@@ -411,6 +411,9 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
   const dataViewByteLength = getter(DataView.prototype, "byteLength");
   const bufferDetached = getter(ArrayBuffer.prototype, "detached");
   const bufferByteLength = getter(ArrayBuffer.prototype, "byteLength");
+  const bufferResizable = getter(ArrayBuffer.prototype, "resizable");
+  const bufferMaxByteLength = getter(ArrayBuffer.prototype, "maxByteLength");
+  const bufferResize = method(ArrayBuffer.prototype, "resize");
   const bufferTransfer = method(ArrayBuffer.prototype, "transfer");
   const asciiWhitespace = /^[\t\n\f\r ]+|[\t\n\f\r ]+$/g;
   const utf8Labels = new Set([
@@ -579,8 +582,14 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
       return "This value";
     }
   };
+  // An empty buffer of the source's length, resizable to the same maximum
+  // when the source is resizable.
+  const bufferLike = (buffer) =>
+    bufferResizable(buffer)
+      ? new ArrayBuffer(bufferByteLength(buffer), { maxByteLength: bufferMaxByteLength(buffer) })
+      : new ArrayBuffer(bufferByteLength(buffer));
   const copyBuffer = (buffer) => {
-    const output = new ArrayBuffer(bufferByteLength(buffer));
+    const output = bufferLike(buffer);
     new Uint8Array(output).set(new Uint8Array(buffer));
     return output;
   };
@@ -621,7 +630,9 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
       switch (kind) {
         case "array": {
           const output = remember(new Array(input.length));
-          for (const key of Object.keys(input)) assign(output, key, copy(input[key]));
+          for (const key of Object.keys(input)) {
+            if (Object.hasOwn(input, key)) assign(output, key, copy(input[key]));
+          }
           return output;
         }
         // Entries are listed before any is copied, as the standard does, so
@@ -645,7 +656,7 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
           if (!transferred.has(input)) return remember(copyBuffer(input));
           // A transferred buffer's bytes are taken after cloning finishes, so
           // writes made later during cloning are carried over.
-          const output = remember(new ArrayBuffer(bufferByteLength(input)));
+          const output = remember(bufferLike(input));
           pendingTransfers.push([input, output]);
           return output;
         }
@@ -689,8 +700,12 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
           return output;
         }
         case "ordinary": {
+          // A captured key that a getter has since removed is skipped, as the
+          // standard does.
           const output = remember({});
-          for (const key of Object.keys(input)) assign(output, key, copy(input[key]));
+          for (const key of Object.keys(input)) {
+            if (Object.hasOwn(input, key)) assign(output, key, copy(input[key]));
+          }
           return output;
         }
         default:
@@ -704,6 +719,7 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
       if (bufferDetached(buffer)) throw uncloneable("A detached ArrayBuffer");
     }
     for (const [original, output] of pendingTransfers) {
+      if (bufferResizable(output)) bufferResize(output, bufferByteLength(original));
       const length = Math.min(bufferByteLength(original), bufferByteLength(output));
       new Uint8Array(output).set(new Uint8Array(original, 0, length));
     }
@@ -764,6 +780,12 @@ const URL_PRELUDE: &str = r#"
       if ((typeof init === "object" && init !== null) || typeof init === "function") {
         if (typeof init[Symbol.iterator] === "function") {
           for (const pair of init) {
+            if (
+              ((typeof pair !== "object" || pair === null) && typeof pair !== "function") ||
+              typeof pair[Symbol.iterator] !== "function"
+            ) {
+              throw new TypeError("Each URLSearchParams pair must be an iterable object");
+            }
             const items = Array.from(pair);
             if (items.length !== 2) {
               throw new TypeError("Each URLSearchParams pair must have exactly two items");
@@ -4489,6 +4511,52 @@ return {
                 "accessorRan": false,
                 "accessorCause": false,
                 "cause": {"code": 7},
+            })
+        );
+    }
+
+    #[test]
+    fn structured_clone_keeps_resizable_buffers_and_skips_removed_keys() {
+        assert_eq!(
+            evaluate(
+                r#"
+const resizable = new ArrayBuffer(2, { maxByteLength: 4 });
+const resizableCopy = structuredClone(resizable);
+const growing = new ArrayBuffer(2, { maxByteLength: 4 });
+const grown = structuredClone(
+  { growing, get grow() { growing.resize(4); new Uint8Array(growing)[3] = 9; return true; } },
+  { transfer: [growing] }
+);
+const proto = { b: () => "inherited" };
+const shrinking = Object.create(proto);
+Object.defineProperty(shrinking, "a", { enumerable: true, get() { delete this.b; return 1; } });
+shrinking.b = 2;
+const shrunk = structuredClone(shrinking);
+const refusedPair = (pairs) => {
+  try {
+    new URLSearchParams(pairs);
+    return null;
+  } catch (error) {
+    return error.name;
+  }
+};
+return {
+  resizable: resizableCopy.resizable && resizableCopy.maxByteLength,
+  grownLength: grown.growing.byteLength,
+  grownByte: new Uint8Array(grown.growing)[3],
+  shrunkKeys: Object.keys(shrunk),
+  stringPair: refusedPair(["ab"]),
+  arrayLikePair: refusedPair([{ 0: "a", 1: "b", length: 2 }]),
+};
+"#
+            ),
+            serde_json::json!({
+                "resizable": 4,
+                "grownLength": 4,
+                "grownByte": 9,
+                "shrunkKeys": ["a"],
+                "stringPair": "TypeError",
+                "arrayLikePair": "TypeError",
             })
         );
     }
