@@ -115,6 +115,7 @@ JSON Schema's `maxLength` counts characters, so admission also checks byte size.
 | `GATEWAY_CODEMODE_ARTIFACT_MAX_BYTES` | Heap divided by 16 |
 | `GATEWAY_CODEMODE_MAX_ARTIFACTS` | 256 per attempt |
 | `GATEWAY_CODEMODE_ARTIFACT_TOTAL_MAX_BYTES` | 16 times the individual artifact limit, per attempt |
+| `GATEWAY_CODEMODE_CONSOLE_MAX_BYTES` | 64 KiB of console output kept per attempt |
 | `GATEWAY_CODEMODE_QUERY_MAX_BYTES` | 4 KiB |
 | `GATEWAY_CODEMODE_EXECUTION_MAX_SECONDS` | 86,400 seconds (24 hours); operator may lower it |
 | `GATEWAY_CODEMODE_SETUP_TIMEOUT_SECONDS` | 30 seconds, separate from execution time |
@@ -128,8 +129,8 @@ JSON Schema's `maxLength` counts characters, so admission also checks byte size.
 | `GATEWAY_FILE_BUNDLE_MAX_LOCATIONS` | Eight times the file count |
 | `GATEWAY_RESOURCE_FILE_PREPARATION_SECONDS` | 30 seconds across the whole resource bundle |
 
-Control frames derive from the largest admitted output or request plus an
-allowance for metadata. Start frames account for worst-case source JSON escaping,
+Control frames derive from the largest admitted output or request, counting
+console output at its worst-case escaped size, plus an allowance for metadata. Start frames account for worst-case source JSON escaping,
 program input, checkpoint, resume input, and metadata, regardless of which input
 fields happen to be present. The MCP HTTP body allowance uses the same derived
 start-frame budget so source and input fit before Code Mode admission. Clients

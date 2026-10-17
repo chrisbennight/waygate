@@ -14,8 +14,9 @@ use rquickjs::{
 use serde_json::Value;
 
 use super::codemode_protocol::{
-    bounded_failure_message, encode_frame, ConnectorCallResult, ParentFrame, RunnerBinding,
-    RunnerFailureCode, RunnerFrame, RunnerResumeContext, CONFINEMENT_PROFILE, RUNNER_SPOOL_FLAG,
+    bounded_failure_message, encode_frame, ConnectorCallResult, ConsoleCapture, ConsoleLevel,
+    ParentFrame, RunnerBinding, RunnerFailureCode, RunnerFrame, RunnerResumeContext,
+    CONFINEMENT_PROFILE, RUNNER_SPOOL_FLAG,
 };
 
 /// Budget applied when no parent frame has narrowed it. Sourced from the
@@ -42,6 +43,333 @@ const PROGRAM_EPILOGUE: &str = r#"
   }
 })();
 "#;
+/// Installs the global `console`. Each call is formatted here, close to
+/// Node.js's `util.format`, and handed to the host as one line of text. The
+/// formatter stops once a call's text passes the console budget, so printing a
+/// huge value costs no more than the output that can be kept. Every method
+/// swallows its own failures: debugging output must never end a program.
+const CONSOLE_PRELUDE: &str = r#"
+Object.defineProperty(globalThis, "console", {
+  value: (() => {
+    const gatewayConsole = __gateway_console;
+    const textLimit = __gateway_console_bytes;
+    const programStack = __gateway_program_stack;
+    delete globalThis.__gateway_console;
+    delete globalThis.__gateway_console_bytes;
+    delete globalThis.__gateway_program_stack;
+    const wellFormed = Function.prototype.call.bind(String.prototype.toWellFormed);
+    const full = Symbol("console output limit");
+    const render = (args) => {
+      const parts = [];
+      let length = 0;
+      // Every piece is cut to the room left before it is kept, so the
+      // joined text never passes the budget by more than one character.
+      const room = () => textLimit - length;
+      const push = (text) => {
+        if (text.length > room()) {
+          parts.push(text.slice(0, room() + 1));
+          length = textLimit + 1;
+          throw full;
+        }
+        parts.push(text);
+        length += text.length;
+      };
+      const quote = (text) => JSON.stringify(text.length > room() ? text.slice(0, room() + 1) : text);
+      const inspect = (value, nested, seen) => {
+        switch (typeof value) {
+          case "string":
+            push(nested ? quote(value) : value);
+            return;
+          case "bigint":
+            push(`${value}n`);
+            return;
+          case "symbol":
+            push(value.toString());
+            return;
+          case "function":
+            push(`[Function: ${value.name || "anonymous"}]`);
+            return;
+          case "object":
+            break;
+          default:
+            push(Object.is(value, -0) ? "-0" : String(value));
+            return;
+        }
+        if (value === null) {
+          push("null");
+          return;
+        }
+        if (seen.includes(value)) {
+          push("[Circular]");
+          return;
+        }
+        if (seen.length >= 8) {
+          push(Array.isArray(value) ? "[Array]" : "[Object]");
+          return;
+        }
+        seen.push(value);
+        try {
+          if (value instanceof Error) {
+            push(`${value.name}: ${value.message}`);
+            if (typeof value.stack === "string" && value.stack !== "") {
+              push(`\n${programStack(value.stack.replace(/\n+$/, ""))}`);
+            }
+          } else if (Array.isArray(value)) {
+            push("[");
+            for (let index = 0; index < value.length; index += 1) {
+              if (index > 0) push(", ");
+              inspect(value[index], true, seen);
+            }
+            push("]");
+          } else if (value instanceof Map || value instanceof Set) {
+            push(`${value instanceof Map ? "Map" : "Set"}(${value.size}) {`);
+            let first = true;
+            for (const entry of value) {
+              if (!first) push(", ");
+              first = false;
+              if (value instanceof Map) {
+                inspect(entry[0], true, seen);
+                push(" => ");
+                inspect(entry[1], true, seen);
+              } else {
+                inspect(entry, true, seen);
+              }
+            }
+            push("}");
+          } else if (value instanceof Date) {
+            push(Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString());
+          } else if (value instanceof RegExp) {
+            push(String(value));
+          } else if (value instanceof ArrayBuffer) {
+            push(`ArrayBuffer { byteLength: ${value.byteLength} }`);
+          } else if (value instanceof DataView) {
+            push(`DataView { byteLength: ${value.byteLength} }`);
+          } else if (ArrayBuffer.isView(value)) {
+            push(`${value.constructor.name}(${value.length}) [`);
+            for (let index = 0; index < value.length; index += 1) {
+              if (index > 0) push(", ");
+              push(String(value[index]));
+            }
+            push("]");
+          } else if (value instanceof Promise) {
+            push("Promise {}");
+          } else {
+            push("{");
+            let first = true;
+            for (const key of Object.keys(value)) {
+              if (!first) push(", ");
+              first = false;
+              push(`${quote(key)}: `);
+              inspect(value[key], true, seen);
+            }
+            push("}");
+          }
+        } finally {
+          seen.pop();
+        }
+      };
+      const substitute = (spec, arg) => {
+        switch (spec) {
+          case "s":
+            if (typeof arg === "bigint") push(`${arg}n`);
+            else if (typeof arg === "object" && arg !== null) inspect(arg, true, []);
+            else push(String(arg));
+            return;
+          case "d":
+          case "i":
+          case "f":
+            if (typeof arg === "bigint") push(`${arg}n`);
+            else if (typeof arg === "symbol") push("NaN");
+            else if (spec === "d") push(String(Number(arg)));
+            else if (spec === "i") push(String(parseInt(arg, 10)));
+            else push(String(parseFloat(arg)));
+            return;
+          case "j": {
+            // The replacer stops serialization once its running size passes
+            // the budget; the bounded formatter then prints what fits.
+            let size = 0;
+            let text;
+            try {
+              text = JSON.stringify(arg, (key, item) => {
+                size += key.length + (typeof item === "string" ? item.length : 8);
+                if (size > room()) throw full;
+                return item;
+              });
+            } catch (error) {
+              if (error === full) {
+                inspect(arg, true, []);
+              } else {
+                push(/circular/i.test(String(error?.message)) ? "[Circular]" : "[could not serialize]");
+              }
+              return;
+            }
+            push(String(text));
+            return;
+          }
+          case "o":
+          case "O":
+            inspect(arg, true, []);
+            return;
+          default:
+            return;
+        }
+      };
+      try {
+        let next = 0;
+        if (typeof args[0] === "string" && args.length > 1) {
+          const template = args[0];
+          next = 1;
+          let literal = "";
+          for (let index = 0; index < template.length; index += 1) {
+            const spec = template[index + 1];
+            if (template[index] === "%" && spec === "%") {
+              literal += "%";
+              index += 1;
+            } else if (template[index] === "%" && spec !== undefined && "sdifjoOc".includes(spec) && next < args.length) {
+              push(literal);
+              literal = "";
+              substitute(spec, args[next]);
+              next += 1;
+              index += 1;
+            } else {
+              literal += template[index];
+            }
+            if (literal.length > room()) push(literal);
+          }
+          push(literal);
+        }
+        for (let index = next; index < args.length; index += 1) {
+          if (index > 0) push(" ");
+          inspect(args[index], false, []);
+        }
+      } catch (error) {
+        if (error !== full) {
+          // The note is budgeted like any other text, in pieces, so a huge
+          // message is never copied in full.
+          try {
+            push(" [console could not format a value: ");
+            push(error instanceof Error ? String(error.message) : typeof error);
+            push("]");
+          } catch {
+            // The budget ran out while noting the failure.
+          }
+        }
+      }
+      return parts.join("");
+    };
+    let depth = 0;
+    // Group indentation is charged against the same budget as the text.
+    const indentLines = (text) => {
+      const indent = "  ".repeat(Math.min(depth, Math.ceil(textLimit / 2)));
+      const lines = [];
+      let size = 0;
+      for (const line of text.split("\n")) {
+        const indented = indent + line;
+        if (size + indented.length > textLimit) {
+          lines.push(indented.slice(0, Math.max(0, textLimit - size + 1)));
+          break;
+        }
+        lines.push(indented);
+        size += indented.length + 1;
+      }
+      return lines.join("\n");
+    };
+    const emit = (level, args, suffix = "", prefix = "") => {
+      try {
+        let text = prefix + render(args) + suffix;
+        if (depth > 0) text = indentLines(text);
+        gatewayConsole(level, wellFormed(text));
+      } catch {
+        // Output that cannot be formatted or delivered is dropped.
+      }
+    };
+    const counts = new Map();
+    const timers = new Map();
+    const label = (name) => (name === undefined ? "default" : String(name));
+    const elapsed = (start) => `${(performance.now() - start).toFixed(3)}ms`;
+    const methods = {
+      log: (...args) => emit("log", args),
+      info: (...args) => emit("info", args),
+      debug: (...args) => emit("debug", args),
+      warn: (...args) => emit("warn", args),
+      error: (...args) => emit("error", args),
+      trace: (...args) => {
+        const stack = programStack((new Error().stack ?? "").replace(/\n+$/, ""));
+        emit("error", args, `\n${stack}`, args.length > 0 ? "Trace: " : "Trace");
+      },
+      dir: (value) => emit("log", [value]),
+      dirxml: (...args) => emit("log", args),
+      table: (data) => emit("log", [data]),
+      assert: (condition, ...args) => {
+        if (condition) return;
+        if (args.length === 0) emit("error", ["Assertion failed"]);
+        else if (typeof args[0] === "string") emit("error", [`Assertion failed: ${args[0]}`, ...args.slice(1)]);
+        else emit("error", ["Assertion failed:", ...args]);
+      },
+      count: (name) => {
+        const key = label(name);
+        const total = (counts.get(key) ?? 0) + 1;
+        counts.set(key, total);
+        emit("log", [`${key}: ${total}`]);
+      },
+      countReset: (name) => {
+        counts.delete(label(name));
+      },
+      group: (...args) => {
+        if (args.length > 0) emit("log", args);
+        depth += 1;
+      },
+      groupCollapsed: (...args) => {
+        if (args.length > 0) emit("log", args);
+        depth += 1;
+      },
+      groupEnd: () => {
+        if (depth > 0) depth -= 1;
+      },
+      time: (name) => {
+        const key = label(name);
+        if (timers.has(key)) {
+          emit("warn", [`Timer "${key}" already exists`]);
+          return;
+        }
+        timers.set(key, performance.now());
+      },
+      timeLog: (name, ...args) => {
+        const key = label(name);
+        const start = timers.get(key);
+        if (start === undefined) emit("warn", [`Timer "${key}" does not exist`]);
+        else emit("log", [`${key}: ${elapsed(start)}`, ...args]);
+      },
+      timeEnd: (name) => {
+        const key = label(name);
+        const start = timers.get(key);
+        if (start === undefined) {
+          emit("warn", [`Timer "${key}" does not exist`]);
+          return;
+        }
+        timers.delete(key);
+        emit("log", [`${key}: ${elapsed(start)}`]);
+      },
+    };
+    // A method that fails, for example on a label that cannot become text,
+    // drops its output rather than ending the program.
+    for (const name of Object.keys(methods)) {
+      const method = methods[name];
+      methods[name] = (...args) => {
+        try {
+          method(...args);
+        } catch {
+          // Debugging output must never end a program.
+        }
+      };
+    }
+    return methods;
+  })(),
+  writable: true,
+  enumerable: false,
+  configurable: true
+});
+"#;
 /// The name rquickjs gives every evaluated script while its `std` feature,
 /// which would allow choosing one, is off.
 const ENGINE_SCRIPT_NAME: &str = "eval_script";
@@ -54,11 +382,12 @@ struct RunnerExecutionFailure {
     message: String,
 }
 
-struct ExecutionCapabilities<F, P, A, W> {
+struct ExecutionCapabilities<F, P, A, W, C> {
     call: F,
     pause: P,
     artifact: A,
     wait: W,
+    console: C,
     artifacts_available: bool,
 }
 
@@ -121,6 +450,7 @@ pub fn run() -> anyhow::Result<()> {
             pause: runner_pause(),
             artifact: runner_artifact(),
             wait: runner_wait(deadline.clone(), deadline_reached.clone()),
+            console: runner_console(),
             artifacts_available,
         },
         &deadline_reached,
@@ -361,6 +691,54 @@ fn runner_artifact() -> impl Fn(&str) -> rquickjs::Result<String> {
     }
 }
 
+/// Send each console call to the parent until the console budget is spent.
+///
+/// The parent applies the same budget again, so this only saves the work of
+/// sending output that would be dropped.
+fn runner_console() -> impl Fn(ConsoleLevel, &str) -> rquickjs::Result<()> {
+    let capture = std::sync::Mutex::new(ConsoleCapture::new(limits().console_bytes));
+    move |level, text| {
+        let mut capture = capture.lock().map_err(|_| {
+            rquickjs::Error::new_from_js_message("console", "console output", "console lock failed")
+        })?;
+        let stdout = std::io::stdout();
+        for frame in console_frames(&mut capture, level, text) {
+            write_runner_frame(&mut stdout.lock(), &frame).map_err(|_| {
+                rquickjs::Error::new_from_js_message(
+                    "console",
+                    "console output",
+                    "console transport failed",
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// The frames that deliver one console call: the entry as the budget keeps
+/// it, then a truncation notice the first time the budget cuts or drops
+/// output.
+fn console_frames(
+    capture: &mut ConsoleCapture,
+    level: ConsoleLevel,
+    text: &str,
+) -> Vec<RunnerFrame> {
+    if capture.is_truncated() {
+        return Vec::new();
+    }
+    let mut frames = Vec::new();
+    if let Some(entry) = capture.admit(level, text) {
+        frames.push(RunnerFrame::Console {
+            level: entry.level,
+            text: entry.text.clone(),
+        });
+    }
+    if capture.is_truncated() {
+        frames.push(RunnerFrame::ConsoleTruncated);
+    }
+    frames
+}
+
 #[cfg(test)]
 fn execute_with<F>(
     source: &str,
@@ -414,24 +792,28 @@ where
                 "artifacts are unavailable in this test",
             ))
         },
+        |_, _| Ok(()),
         false,
     )
 }
 
 #[cfg(test)]
-fn execute_with_capabilities<F, P, A>(
+#[allow(clippy::too_many_arguments)]
+fn execute_with_capabilities<F, P, A, C>(
     source: &str,
     bindings: &[RunnerBinding],
     data: ProgramData<'_>,
     call: F,
     pause: P,
     artifact: A,
+    console: C,
     artifacts_available: bool,
 ) -> Result<Value, RunnerExecutionFailure>
 where
     F: Fn(&str) -> rquickjs::Result<String> + 'static,
     P: Fn(&str) -> rquickjs::Result<String> + 'static,
     A: Fn(&str) -> rquickjs::Result<String> + 'static,
+    C: Fn(ConsoleLevel, &str) -> rquickjs::Result<()> + 'static,
 {
     let (runtime, deadline_reached, deadline) = create_runtime_armable().map_err(|_| {
         RunnerExecutionFailure::new(
@@ -457,6 +839,7 @@ where
             pause,
             artifact,
             wait: runner_wait(deadline, deadline_reached.clone()),
+            console,
             artifacts_available,
         },
         &deadline_reached,
@@ -670,13 +1053,13 @@ fn apply_resource_limits() -> anyhow::Result<()> {
     ))
 }
 
-fn execute_in<F, P, A, W>(
+fn execute_in<F, P, A, W, C>(
     context: &JsContext,
     source: &str,
     bindings: &[RunnerBinding],
     resume: Option<&RunnerResumeContext>,
     input: &Value,
-    capabilities: ExecutionCapabilities<F, P, A, W>,
+    capabilities: ExecutionCapabilities<F, P, A, W, C>,
     deadline_reached: &Arc<AtomicBool>,
 ) -> Result<Value, RunnerExecutionFailure>
 where
@@ -684,6 +1067,7 @@ where
     P: Fn(&str) -> rquickjs::Result<String> + 'static,
     A: Fn(&str) -> rquickjs::Result<String> + 'static,
     W: Fn(f64) -> rquickjs::Result<String> + 'static,
+    C: Fn(ConsoleLevel, &str) -> rquickjs::Result<()> + 'static,
 {
     let bindings_json = serde_json::to_string(bindings).map_err(|_| {
         RunnerExecutionFailure::new(
@@ -711,6 +1095,7 @@ where
         pause,
         artifact,
         wait,
+        console,
         artifacts_available,
     } = capabilities;
     context.with(|ctx| {
@@ -997,11 +1382,56 @@ const execution = (() => {{
   }});
   return Object.freeze(generated);
 }})();
-(async () => {{
+{CONSOLE_PRELUDE}(async () => {{
   const gatewayProgramResult = await (async () => {{
 "#
         );
         let layout = ProgramLayout::new(&prelude, source);
+        let console_gate = gate.clone();
+        ctx.globals()
+            .set(
+                "__gateway_console",
+                Func::from(
+                    move |level: JsString<'_>, text: JsString<'_>| -> rquickjs::Result<()> {
+                        console_gate.require_open()?;
+                        let level = match level.to_string()?.as_str() {
+                            "debug" => ConsoleLevel::Debug,
+                            "info" => ConsoleLevel::Info,
+                            "warn" => ConsoleLevel::Warn,
+                            "error" => ConsoleLevel::Error,
+                            _ => ConsoleLevel::Log,
+                        };
+                        console(level, &text.to_string()?)
+                    },
+                ),
+            )
+            .map_err(|_| {
+                RunnerExecutionFailure::new(
+                    RunnerFailureCode::RunnerInternal,
+                    "Code Mode runner could not install the console",
+                )
+            })?;
+        // Error stacks the console prints name the same positions a failure
+        // would, so the prelude restates them the same way.
+        ctx.globals()
+            .set(
+                "__gateway_program_stack",
+                Func::from(move |stack: String| layout.program_stack(&stack)),
+            )
+            .map_err(|_| {
+                RunnerExecutionFailure::new(
+                    RunnerFailureCode::RunnerInternal,
+                    "Code Mode runner could not install the console",
+                )
+            })?;
+        ctx.globals()
+            .set("__gateway_console_bytes", limits().console_bytes)
+            .map_err(|_| {
+                RunnerExecutionFailure::new(
+                    RunnerFailureCode::RunnerInternal,
+                    "Code Mode runner could not install the console",
+                )
+            })?;
         let wrapped = format!("{prelude}{source}{PROGRAM_EPILOGUE}");
         let evaluated = match ctx.eval::<Promise<'_>, _>(wrapped).catch(&ctx) {
             Ok(program) => settle_program(&ctx, &program, deadline_reached),
@@ -1449,7 +1879,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::process_mode::codemode_protocol::MAX_FAILURE_MESSAGE_CHARS;
+    use crate::process_mode::codemode_protocol::{
+        ConsoleEntry, CONSOLE_ENTRY_OVERHEAD_BYTES, MAX_FAILURE_MESSAGE_CHARS,
+    };
 
     fn bindings(names: &[(&str, &str)]) -> Vec<RunnerBinding> {
         names
@@ -1627,6 +2059,7 @@ return {
                 })
                 .to_string())
             },
+            |_, _| Ok(()),
             true,
         )
         .expect("program emits an artifact");
@@ -1967,6 +2400,7 @@ return connectors.email.read({value: "inbox"}).result;
                 wait: |_: f64| -> rquickjs::Result<String> {
                     unreachable!("program does not wait")
                 },
+                console: |_: ConsoleLevel, _: &str| -> rquickjs::Result<()> { Ok(()) },
                 artifacts_available: false,
             },
             &deadline_reached,
@@ -2003,6 +2437,7 @@ return connectors.email.read({value: "inbox"}).result;
                 wait: |_: f64| -> rquickjs::Result<String> {
                     unreachable!("program does not wait")
                 },
+                console: |_: ConsoleLevel, _: &str| -> rquickjs::Result<()> { Ok(()) },
                 artifacts_available: false,
             },
             &deadline_reached,
@@ -2064,6 +2499,7 @@ return connectors.email.read({value: "inbox"}).result;
                     unreachable!("program emits no artifacts")
                 },
                 wait: runner_wait(deadline, deadline_reached.clone()),
+                console: |_: ConsoleLevel, _: &str| -> rquickjs::Result<()> { Ok(()) },
                 artifacts_available: false,
             },
             &deadline_reached,
@@ -2121,6 +2557,7 @@ return "too late";
                     Ok(serde_json::json!({"artifact_id": "too-late"}).to_string())
                 },
                 wait: runner_wait(deadline, deadline_reached.clone()),
+                console: |_: ConsoleLevel, _: &str| -> rquickjs::Result<()> { Ok(()) },
                 artifacts_available: true,
             },
             &deadline_reached,
@@ -2161,6 +2598,7 @@ return "too late";
                     unreachable!("program emits no artifacts")
                 },
                 wait: runner_wait(deadline, deadline_reached.clone()),
+                console: |_: ConsoleLevel, _: &str| -> rquickjs::Result<()> { Ok(()) },
                 artifacts_available: false,
             },
             &deadline_reached,
@@ -2213,6 +2651,7 @@ return "too late";
                 wait: |_: f64| -> rquickjs::Result<String> {
                     unreachable!("program does not wait")
                 },
+                console: |_: ConsoleLevel, _: &str| -> rquickjs::Result<()> { Ok(()) },
                 artifacts_available: false,
             },
             &deadline_reached,
@@ -2301,8 +2740,10 @@ return "too late";
 
     type HostCall = fn(&str) -> rquickjs::Result<String>;
     type HostWait = fn(f64) -> rquickjs::Result<String>;
+    type HostConsole = fn(ConsoleLevel, &str) -> rquickjs::Result<()>;
 
-    fn unused_capabilities() -> ExecutionCapabilities<HostCall, HostCall, HostCall, HostWait> {
+    fn unused_capabilities(
+    ) -> ExecutionCapabilities<HostCall, HostCall, HostCall, HostWait, HostConsole> {
         ExecutionCapabilities {
             call: |_: &str| -> rquickjs::Result<String> {
                 unreachable!("program makes no connector calls")
@@ -2312,6 +2753,7 @@ return "too late";
                 unreachable!("program emits no artifacts")
             },
             wait: |_: f64| -> rquickjs::Result<String> { unreachable!("program does not wait") },
+            console: |_: ConsoleLevel, _: &str| -> rquickjs::Result<()> { Ok(()) },
             artifacts_available: false,
         }
     }
@@ -2570,6 +3012,355 @@ try {
         }
     }
 
+    /// Run a program and return what it printed alongside its outcome.
+    fn execute_capturing_console(
+        source: &str,
+    ) -> (Result<Value, RunnerExecutionFailure>, Vec<ConsoleEntry>) {
+        let printed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = printed.clone();
+        let outcome = execute_with_capabilities(
+            source,
+            &[],
+            ProgramData::default(),
+            |_| unreachable!("program makes no connector calls"),
+            |_| unreachable!("program does not pause"),
+            |_| unreachable!("program emits no artifacts"),
+            move |level, text| {
+                sink.lock().expect("console sink").push(ConsoleEntry {
+                    level,
+                    text: text.to_owned(),
+                });
+                Ok(())
+            },
+            false,
+        );
+        let printed = printed.lock().expect("console sink").clone();
+        (outcome, printed)
+    }
+
+    fn printed_lines(source: &str) -> Vec<String> {
+        let (outcome, printed) = execute_capturing_console(source);
+        outcome.expect("program completes");
+        printed.into_iter().map(|entry| entry.text).collect()
+    }
+
+    #[test]
+    fn console_methods_exist_and_never_end_a_program() {
+        let (outcome, printed) = execute_capturing_console(
+            r#"
+const names = ["log", "info", "debug", "warn", "error", "trace", "dir", "dirxml", "table",
+  "assert", "count", "countReset", "group", "groupCollapsed", "groupEnd", "time", "timeLog",
+  "timeEnd"];
+const hostile = new Proxy({}, { ownKeys() { throw new Error("no keys"); } });
+for (const name of names) {
+  console[name]();
+  console[name](hostile, undefined, Symbol("s"));
+}
+return names.filter((name) => typeof console[name] !== "function");
+"#,
+        );
+        assert_eq!(
+            outcome.expect("console calls never throw"),
+            serde_json::json!([])
+        );
+        assert!(printed.iter().any(|entry| entry
+            .text
+            .contains("[console could not format a value: no keys]")));
+    }
+
+    #[test]
+    fn console_formats_values_close_to_node() {
+        assert_eq!(
+            printed_lines(
+                r#"
+console.log("plain", 1, -0, true, null, undefined, 2n, Symbol("s"));
+console.log({a: 1, b: "x", c: [1, "two", {d: null}]});
+const loop = {name: "loop"};
+loop.self = loop;
+console.log(loop);
+console.log(new Map([["k", 1]]), new Set([1, 2]), new Date(0), /a+/g);
+console.log(new Uint8Array([1, 2]), new ArrayBuffer(3), function named() {}, () => {});
+console.log("%s has %d items (%i%%) %o %j", "list", 3.5, 42.9, {a: 1}, {b: [2]});
+console.log("%s:", "key", "value");
+console.log("%cstyled", "color: red");
+console.log("100%");
+console.log("%s");
+return null;
+"#
+            ),
+            vec![
+                "plain 1 -0 true null undefined 2n Symbol(s)",
+                r#"{"a": 1, "b": "x", "c": [1, "two", {"d": null}]}"#,
+                r#"{"name": "loop", "self": [Circular]}"#,
+                r#"Map(1) {"k" => 1} Set(2) {1, 2} 1970-01-01T00:00:00.000Z /a+/g"#,
+                "Uint8Array(2) [1, 2] ArrayBuffer { byteLength: 3 } [Function: named] \
+                 [Function: anonymous]",
+                r#"list has 3.5 items (42%) {"a": 1} {"b":[2]}"#,
+                "key: value",
+                "styled",
+                "100%",
+                "%s",
+            ]
+        );
+    }
+
+    #[test]
+    fn console_errors_report_program_positions() {
+        let lines = printed_lines(
+            "const error = new TypeError('bad input');\nconsole.error(error);\nreturn null;",
+        );
+        assert_eq!(
+            lines,
+            vec!["TypeError: bad input\n    at <anonymous> (program:1:19)"]
+        );
+    }
+
+    #[test]
+    fn console_levels_counters_groups_and_timers() {
+        let (outcome, printed) = execute_capturing_console(
+            r#"
+console.debug("d");
+console.info("i");
+console.warn("w");
+console.error("e");
+console.assert(true, "hidden");
+console.assert(false, "count %s", "x");
+console.trace("here");
+console.count();
+console.count();
+console.count("a");
+console.countReset("a");
+console.count("a");
+console.group("outer");
+console.log("inner\nsecond");
+console.groupEnd();
+console.groupEnd();
+console.log("after");
+console.time("t");
+console.timeEnd("t");
+console.timeEnd("missing");
+return null;
+"#,
+        );
+        outcome.expect("program completes");
+        let summary: Vec<(ConsoleLevel, String)> = printed
+            .into_iter()
+            .map(|entry| (entry.level, entry.text))
+            .collect();
+        assert_eq!(summary[0], (ConsoleLevel::Debug, "d".to_owned()));
+        assert_eq!(summary[1], (ConsoleLevel::Info, "i".to_owned()));
+        assert_eq!(summary[2], (ConsoleLevel::Warn, "w".to_owned()));
+        assert_eq!(summary[3], (ConsoleLevel::Error, "e".to_owned()));
+        assert_eq!(
+            summary[4],
+            (ConsoleLevel::Error, "Assertion failed: count x".to_owned())
+        );
+        assert_eq!(summary[5].0, ConsoleLevel::Error);
+        assert!(
+            summary[5]
+                .1
+                .starts_with("Trace: here\n    at <anonymous> (program:8:"),
+            "{}",
+            summary[5].1
+        );
+        assert!(
+            !summary[5].1.contains(ENGINE_SCRIPT_NAME),
+            "{}",
+            summary[5].1
+        );
+        let texts: Vec<&str> = summary[6..].iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(
+            texts[..7],
+            [
+                "default: 1",
+                "default: 2",
+                "a: 1",
+                "a: 1",
+                "outer",
+                "  inner\n  second",
+                "after"
+            ]
+        );
+        let timed = texts[7];
+        assert!(timed.starts_with("t: ") && timed.ends_with("ms"), "{timed}");
+        assert_eq!(summary.last().expect("timer warning").0, ConsoleLevel::Warn);
+        assert_eq!(texts[8], "Timer \"missing\" does not exist");
+    }
+
+    /// Formatting stops once a call's text passes the console budget, so a
+    /// huge value costs no more than the output that can be kept.
+    #[test]
+    fn console_formatting_stops_at_the_console_budget() {
+        let lines = printed_lines(
+            "console.log(Array.from({length: 2_000_000}, (_, index) => index)); return null;",
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].len() <= limits().console_bytes + 16,
+            "{}",
+            lines[0].len()
+        );
+        assert!(lines[0].starts_with("[0, 1, 2, "));
+    }
+
+    /// The parent learns of truncation from the runner, because an entry the
+    /// runner cut to fit also fits the parent's identical budget exactly.
+    #[test]
+    fn console_frames_report_truncation_once() {
+        let mut exact = ConsoleCapture::new(CONSOLE_ENTRY_OVERHEAD_BYTES + 4);
+        let frames = console_frames(&mut exact, ConsoleLevel::Log, "abcd");
+        assert!(matches!(
+            frames.as_slice(),
+            [RunnerFrame::Console { text, .. }] if text == "abcd"
+        ));
+        assert!(matches!(
+            console_frames(&mut exact, ConsoleLevel::Log, "dropped").as_slice(),
+            [RunnerFrame::ConsoleTruncated]
+        ));
+        assert!(console_frames(&mut exact, ConsoleLevel::Log, "silent").is_empty());
+
+        let mut cut = ConsoleCapture::new(CONSOLE_ENTRY_OVERHEAD_BYTES + 2);
+        assert!(matches!(
+            console_frames(&mut cut, ConsoleLevel::Warn, "abcd").as_slice(),
+            [RunnerFrame::Console { text, .. }, RunnerFrame::ConsoleTruncated] if text == "ab"
+        ));
+    }
+
+    #[test]
+    fn console_methods_with_unprintable_labels_never_end_a_program() {
+        let (outcome, _) = execute_capturing_console(
+            r#"
+const bare = Object.create(null);
+const hostile = { toString() { throw new Error("no text"); } };
+console.count(bare);
+console.countReset(bare);
+console.time(hostile);
+console.timeLog(hostile);
+console.timeEnd(hostile);
+console.group(bare);
+console.groupEnd();
+return "finished";
+"#,
+        );
+        assert_eq!(
+            outcome.expect("console labels never end a program"),
+            Value::String("finished".to_owned())
+        );
+    }
+
+    /// Large strings, nested strings, long templates and `%j` all stop at the
+    /// console budget instead of formatting the whole input.
+    #[test]
+    fn console_formatting_is_bounded_for_every_large_input() {
+        let limit = limits().console_bytes;
+        let lines = printed_lines(&format!(
+            r#"
+const huge = "x".repeat({big});
+console.log(huge);
+console.log({{ nested: huge }});
+console.log("%s " + huge, "tail");
+console.log("%j", Array.from({{ length: 200000 }}, (_, index) => ({{ index }})));
+return null;
+"#,
+            big = limit * 4
+        ));
+        assert_eq!(lines.len(), 4);
+        for line in &lines {
+            assert!(line.len() <= limit + 1, "{}", line.len());
+        }
+        assert!(
+            lines[1].starts_with(r#"{"nested": "xxx"#),
+            "{}",
+            &lines[1][..40]
+        );
+        assert!(
+            lines[3].starts_with(r#"[{"index": 0}, {"index": 1}"#),
+            "{}",
+            &lines[3][..40]
+        );
+    }
+
+    /// Printed text is kept as written; only error stacks are restated in
+    /// program positions.
+    #[test]
+    fn console_keeps_printed_text_as_written() {
+        assert_eq!(
+            printed_lines(
+                "console.log('value\\r\\n', 'at eval_script:1', '    at f (eval_script:2:3)'); return null;"
+            ),
+            vec!["value\r\n at eval_script:1     at f (eval_script:2:3)"]
+        );
+    }
+
+    /// Group indentation counts against the console budget, however deep the
+    /// groups and however many lines the text has.
+    #[test]
+    fn console_group_indentation_stays_within_the_budget() {
+        let lines = printed_lines(
+            "for (let index = 0; index < 2000; index += 1) console.group();\n\
+             console.log('\\n'.repeat(65535));\nreturn null;",
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].len() <= limits().console_bytes + 1,
+            "{}",
+            lines[0].len()
+        );
+    }
+
+    #[test]
+    fn console_trace_substitutes_and_timers_keep_their_start() {
+        let (outcome, printed) = execute_capturing_console(
+            r#"
+console.trace("item %d", 3);
+console.time("t");
+console.time("t");
+console.log({ get value() { throw new Error("x".repeat(1_000_000)); } });
+return null;
+"#,
+        );
+        outcome.expect("program completes");
+        assert!(
+            printed[0].text.starts_with("Trace: item 3\n"),
+            "{}",
+            printed[0].text
+        );
+        assert_eq!(
+            (printed[1].level, printed[1].text.as_str()),
+            (ConsoleLevel::Warn, "Timer \"t\" already exists")
+        );
+        assert!(
+            printed[2].text.len() <= limits().console_bytes + 1,
+            "{}",
+            printed[2].text.len()
+        );
+        assert!(printed[2]
+            .text
+            .starts_with("{\"value\":  [console could not format a value: xxx"));
+    }
+
+    #[test]
+    fn undeliverable_console_output_does_not_end_a_program() {
+        let result = execute_with_capabilities(
+            "console.log('lost'); return 'finished';",
+            &[],
+            ProgramData::default(),
+            |_| unreachable!("program makes no connector calls"),
+            |_| unreachable!("program does not pause"),
+            |_| unreachable!("program emits no artifacts"),
+            |_, _| {
+                Err(rquickjs::Error::new_from_js_message(
+                    "console",
+                    "console output",
+                    "console transport failed",
+                ))
+            },
+            false,
+        )
+        .expect("console failures are swallowed");
+        assert_eq!(result, Value::String("finished".to_owned()));
+    }
+
     /// The Code Mode reference lists the globals a program can rely on and the
     /// common Node.js and browser globals it cannot. Keep that list and this
     /// one in step.
@@ -2588,9 +3379,10 @@ return {
     fromBase64: typeof Uint8Array.fromBase64,
     toBase64: typeof Uint8Array.prototype.toBase64,
     DOMException: typeof DOMException,
+    console: typeof console,
+    consoleLog: typeof console.log,
   },
   absent: {
-    console: typeof console,
     TextEncoder: typeof TextEncoder,
     TextDecoder: typeof TextDecoder,
     URL: typeof URL,
