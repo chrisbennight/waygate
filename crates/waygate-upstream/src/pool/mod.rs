@@ -1166,12 +1166,15 @@ async fn dial(
         install_catalog_probe_identity(manifest, issuer, identity_cell.as_ref())?;
     // Per-transport construction lives in the transport factory; the
     // common post-connect tail (tools/list + Connection) stays here.
-    let connected =
+    let dialed =
         transport::connect_with_destination(manifest, issuer, identity_cell.as_ref(), exchange)
             .await?;
-    let listed = list_all_tools(&connected.service)
+    let listed = list_all_tools(dialed.service())
         .await
-        .map_err(DialError::ListTools)?;
+        .map_err(|error| dialed.with_http_exchanges(DialError::list_tools(error)))?;
+    // The catalog is the last request of the dial; recording stops before the
+    // connection can serve a caller.
+    let connected = dialed.finish_dial();
     let peer_info = connected.service.peer_info();
     let negotiated_protocol = peer_info.as_ref().map(|i| i.protocol_version.to_string());
     let resource_capability_advertised =
@@ -2315,5 +2318,7 @@ use session_identity::{
 };
 pub use tool_listing::RejectedOutputSchema;
 
+#[cfg(test)]
+mod dial_tests;
 #[cfg(test)]
 mod tests;

@@ -13,6 +13,7 @@
 mod bounded_http_client;
 pub mod breaker;
 mod catalog_probe;
+mod dial_trace;
 pub mod http_policy;
 pub mod identity_client;
 pub mod pool;
@@ -34,7 +35,7 @@ pub use pool::{
     ExchangeBundle, ListedCatalog, ObservedContracts, ObservedToolContract, RejectedOutputSchema,
     ReloadReport, ScheduledCatalogRefresh, UpstreamHealth, UpstreamPool, UpstreamStatus,
 };
-pub use transport::{default_auto_lifecycle, legacy_bridge_lifecycle};
+pub use transport::{client_config, default_auto_lifecycle, legacy_bridge_lifecycle};
 
 /// Canonical behavior hash of a live tool descriptor — the exact value an
 /// annotation-native manifest entry must carry in `approved_behavior_hash`

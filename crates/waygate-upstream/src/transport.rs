@@ -28,6 +28,7 @@ use zeroize::Zeroizing;
 use waygate_oidc::SharedIdentityIssuer;
 
 use crate::bounded_http_client::BoundedResponseClient;
+use crate::dial_trace::{bounded_text, DialTrace, ExchangeRecorder};
 use crate::http_policy;
 use crate::identity_client::{IdentityAugmenter, IdentityCell, IdentityForwardingClient};
 use crate::pool::ExchangeBundle;
@@ -150,11 +151,53 @@ pub(crate) enum DialError {
     MtlsRequiresHttps { server: String, url: String },
 }
 
+/// Byte cap on the SDK text a handshake or catalog failure carries. That text
+/// can quote an upstream response, and it reaches operator logs and audit
+/// evidence.
+const MAX_DIAL_ERROR_DETAIL_BYTES: usize = 1024;
+
+impl DialError {
+    fn connect(detail: impl std::fmt::Display) -> Self {
+        Self::Connect(bounded_text(
+            &detail.to_string(),
+            MAX_DIAL_ERROR_DETAIL_BYTES,
+        ))
+    }
+
+    fn init(detail: impl std::fmt::Display) -> Self {
+        Self::Init(bounded_text(
+            &detail.to_string(),
+            MAX_DIAL_ERROR_DETAIL_BYTES,
+        ))
+    }
+
+    pub(crate) fn list_tools(detail: impl std::fmt::Display) -> Self {
+        Self::ListTools(bounded_text(
+            &detail.to_string(),
+            MAX_DIAL_ERROR_DETAIL_BYTES,
+        ))
+    }
+
+    /// Append what the upstream did on this dial to a handshake or catalog
+    /// failure, whose SDK text alone can be as little as `Transport closed`.
+    fn with_http_exchanges(self, exchanges: &DialTrace) -> Self {
+        let Some(summary) = exchanges.summary() else {
+            return self;
+        };
+        match self {
+            Self::Connect(detail) => Self::Connect(format!("{detail}; {summary}")),
+            Self::Init(detail) => Self::Init(format!("{detail}; {summary}")),
+            Self::ListTools(detail) => Self::ListTools(format!("{detail}; {summary}")),
+            other => other,
+        }
+    }
+}
+
 fn map_client_initialize_error(error: ClientInitializeError, connection_failed: bool) -> DialError {
     if connection_failed {
-        DialError::Connect(error.to_string())
+        DialError::connect(error)
     } else {
-        DialError::Init(error.to_string())
+        DialError::init(error)
     }
 }
 
@@ -201,6 +244,39 @@ pub(crate) struct ConnectedService {
     pub(crate) open_requests: tokio_util::sync::CancellationToken,
 }
 
+/// A connection whose dial is still recording its HTTP exchanges.
+///
+/// The connection is handed over only by [`Self::finish_dial`], which ends the
+/// recording, so traffic on an established connection is never recorded. The
+/// pool's dial lists the catalog through [`Self::service`] first, because a
+/// failed listing is still a failed dial.
+pub(crate) struct DialedService {
+    connected: ConnectedService,
+    exchanges: DialTrace,
+}
+
+impl DialedService {
+    /// The session, for requests that are still part of the dial.
+    pub(crate) fn service(&self) -> &RunningService<RoleClient, ClientConfig> {
+        &self.connected.service
+    }
+
+    /// `error` followed by a summary of this dial's HTTP exchanges.
+    pub(crate) fn with_http_exchanges(&self, error: DialError) -> DialError {
+        error.with_http_exchanges(&self.exchanges)
+    }
+
+    /// End the dial: stop recording and hand over the connection.
+    pub(crate) fn finish_dial(self) -> ConnectedService {
+        self.connected
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exchange_recorder(&self) -> ExchangeRecorder {
+        self.exchanges.recorder()
+    }
+}
+
 /// Build + serve the rmcp client transport for `manifest`, returning the
 /// connected [`RunningService`]. The caller (`dial`) does the
 /// post-connect `tools/list` and assembles its `Connection`. Network
@@ -228,7 +304,7 @@ pub(crate) async fn connect_with_destination(
     issuer: Option<&SharedIdentityIssuer>,
     cell: Option<&IdentityCell>,
     exchange: Option<&ExchangeBundle>,
-) -> Result<ConnectedService, DialError> {
+) -> Result<DialedService, DialError> {
     connect_with_handshake_timeout_and_destination(
         manifest,
         issuer,
@@ -260,7 +336,7 @@ pub(crate) async fn connect_with_capabilities(
     cell: Option<&IdentityCell>,
     exchange: Option<&ExchangeBundle>,
     capabilities: ClientCapabilities,
-) -> Result<ConnectedService, DialError> {
+) -> Result<DialedService, DialError> {
     connect_with_handshake_timeout_and_destination(
         manifest,
         issuer,
@@ -319,6 +395,25 @@ pub fn default_auto_lifecycle() -> ClientLifecycleMode {
     }
 }
 
+/// The client configuration every gateway dial and the `classify` CLI send.
+///
+/// The configured client version is read only by the `initialize` handshake.
+/// Discovery proposes the lifecycle's own preferred versions, and the SDK's
+/// `auto` fallback substitutes its own legacy version, but the plain
+/// `initialize` lifecycle sends this version unchanged. The SDK's default is
+/// its newest generation, which has no `initialize` handshake at all, so a
+/// handshake proposing it asks for a generation that cannot be negotiated that
+/// way. Every handshake this gateway sends therefore proposes the newest
+/// generation that still has one; the server answers with the version it will
+/// speak.
+pub fn client_config(
+    capabilities: ClientCapabilities,
+    implementation: Implementation,
+) -> ClientConfig {
+    ClientConfig::new(capabilities, implementation)
+        .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE)
+}
+
 /// The lifecycle the `auto` bridge falls back to when discovery fails —
 /// the second half of the negotiation [`default_auto_lifecycle`] starts.
 ///
@@ -359,9 +454,12 @@ pub fn legacy_bridge_lifecycle() -> ClientLifecycleMode {
 ///
 /// Scope is exactly `auto`: an explicit `2026-07-28` must still fail rather
 /// than be silently downgraded, and `legacy` has no discovery leg to fall
-/// back from. The legacy leg keeps proposing the client's own latest
-/// version in `initialize` — the handshake negotiates the version in its
-/// response, so the server picks what it supports.
+/// back from. The legacy leg proposes [`client_config`]'s version, the newest
+/// that has an `initialize` handshake; the handshake negotiates the version in
+/// its response, so the server picks what it supports.
+///
+/// Both attempts record into one [`DialTrace`], so a failure that reaches the
+/// caller also shows how discovery failed before the bridge.
 async fn connect_with_handshake_timeout(
     manifest: &UpstreamManifest,
     issuer: Option<&SharedIdentityIssuer>,
@@ -379,6 +477,7 @@ async fn connect_with_handshake_timeout(
         handshake_timeout,
     )
     .await?
+    .finish_dial()
     .service)
 }
 
@@ -389,7 +488,8 @@ async fn connect_with_handshake_timeout_and_destination(
     exchange: Option<&ExchangeBundle>,
     capabilities: ClientCapabilities,
     handshake_timeout: Duration,
-) -> Result<ConnectedService, DialError> {
+) -> Result<DialedService, DialError> {
+    let exchanges = DialTrace::new();
     let lifecycle = lifecycle_for(manifest);
     let dialed = dial_once(
         manifest,
@@ -399,10 +499,11 @@ async fn connect_with_handshake_timeout_and_destination(
         capabilities.clone(),
         handshake_timeout,
         lifecycle.clone(),
+        exchanges.recorder(),
     )
     .await;
 
-    match dialed {
+    let dialed = match dialed {
         // Only the handshake itself is bridgeable. A timeout, a failed
         // subprocess spawn, or a rejected `auth:`/`mtls:` block would fail
         // the same way twice, and retrying a timeout would spend the
@@ -416,14 +517,24 @@ async fn connect_with_handshake_timeout_and_destination(
                 capabilities,
                 handshake_timeout,
                 ClientLifecycleMode::Initialize,
+                exchanges.recorder(),
             )
             .await
         }
         dialed => dialed,
+    };
+    match dialed {
+        Ok(connected) => Ok(DialedService {
+            connected,
+            exchanges,
+        }),
+        Err(error) => Err(error.with_http_exchanges(&exchanges)),
     }
 }
 
-/// One dial under exactly the lifecycle it is given, with no fallback.
+/// One dial under exactly the lifecycle it is given, with no fallback. A
+/// streamable-HTTP dial reports its exchanges to `exchanges`; SSE and stdio
+/// record none.
 #[allow(clippy::too_many_arguments)]
 async fn dial_once(
     manifest: &UpstreamManifest,
@@ -433,8 +544,9 @@ async fn dial_once(
     capabilities: ClientCapabilities,
     handshake_timeout: Duration,
     lifecycle: ClientLifecycleMode,
+    exchanges: ExchangeRecorder,
 ) -> Result<ConnectedService, DialError> {
-    let info = ClientConfig::new(
+    let info = client_config(
         capabilities,
         Implementation::new(
             concat!("mcp-tool-search-gateway/", env!("CARGO_PKG_VERSION")),
@@ -481,7 +593,7 @@ async fn dial_once(
                 }
                 None => build_streaming_client(Some(&destination))?,
             };
-            let http = BoundedResponseClient::new(http);
+            let http = BoundedResponseClient::new(http, exchanges);
             let connection_probe = http.clone();
             let open_requests = http.open_requests();
             let service = match (issuer, cell) {
@@ -570,12 +682,12 @@ async fn dial_once(
                     http_policy::WRITE_TIMEOUT,
                 )
                 .await
-                .map_err(|e| DialError::Init(e.to_string()))?;
+                .map_err(DialError::init)?;
                 let cleartext_control_plane = connected.cleartext_control_plane;
                 let service = info
                     .serve(connected.transport)
                     .await
-                    .map_err(|e| DialError::Init(e.to_string()))?;
+                    .map_err(DialError::init)?;
                 Ok::<_, DialError>((service, cleartext_control_plane))
             };
             let (service, cleartext_control_plane) =
@@ -620,7 +732,7 @@ async fn dial_once(
             let service = info
                 .serve_with_lifecycle(transport, lifecycle)
                 .await
-                .map_err(|e| DialError::Init(e.to_string()))?;
+                .map_err(DialError::init)?;
             Ok(ConnectedService {
                 service,
                 network_destination: None,
@@ -1780,5 +1892,44 @@ mod lifecycle_tests {
             lifecycle_for(&manifest("sse", Some("legacy"))),
             ClientLifecycleMode::Initialize
         ));
+    }
+
+    /// The SDK's default client version is a generation without an
+    /// `initialize` handshake, so the gateway's own configuration must name
+    /// one that has it.
+    #[test]
+    fn every_initialize_handshake_proposes_the_newest_version_that_has_one() {
+        let config = client_config(
+            ClientCapabilities::default(),
+            Implementation::new("lifecycle-test", "0"),
+        );
+        assert_eq!(config.protocol_version, ProtocolVersion::V_2025_11_25);
+        assert!(config.protocol_version.has_initialize());
+    }
+
+    #[test]
+    fn handshake_and_catalog_failures_carry_bounded_escaped_detail() {
+        let body = format!(
+            "HTTP 502 Bad Gateway:\nforged log line {}",
+            "x".repeat(4096)
+        );
+        for error in [
+            DialError::init(&body),
+            DialError::connect(&body),
+            DialError::list_tools(&body),
+        ] {
+            let text = error.to_string();
+            assert!(
+                text.len()
+                    <= MAX_DIAL_ERROR_DETAIL_BYTES + "upstream transport connection failed: ".len(),
+                "{} bytes",
+                text.len()
+            );
+            assert!(
+                text.contains("HTTP 502 Bad Gateway:\\nforged log line"),
+                "{text}"
+            );
+            assert!(!text.contains('\n'), "{text}");
+        }
     }
 }

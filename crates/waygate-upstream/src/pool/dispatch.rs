@@ -916,6 +916,9 @@ pub(super) fn pinned_2026_manifest(snapshot: &crate::UpstreamManifest) -> crate:
 /// caller-supplied retry fields can never force a lifecycle the operator
 /// disabled. A dial that neither mirrors nor continues is the ordinary
 /// no-capabilities dial on the manifest's own lifecycle.
+///
+/// The session belongs to its call once returned, so the dial's HTTP
+/// exchange recording ends here.
 pub(super) async fn per_call_dial(
     snapshot: &crate::UpstreamManifest,
     issuer: Option<&waygate_oidc::SharedIdentityIssuer>,
@@ -935,22 +938,26 @@ pub(super) async fn per_call_dial(
         if lane_negotiated_legacy_under_auto(snapshot, negotiated_protocol) {
             let mut pinned = snapshot.clone();
             pinned.protocol = crate::UpstreamProtocol::Legacy;
-            return match crate::transport::connect_with_destination(&pinned, issuer, cell, exchange)
-                .await
-            {
-                Err(crate::transport::DialError::Init(_)) => {
-                    crate::transport::connect_with_destination(
-                        &pinned_2026_manifest(snapshot),
-                        issuer,
-                        cell,
-                        exchange,
-                    )
+            let dialed =
+                match crate::transport::connect_with_destination(&pinned, issuer, cell, exchange)
                     .await
-                }
-                dialed => dialed,
-            };
+                {
+                    Err(crate::transport::DialError::Init(_)) => {
+                        crate::transport::connect_with_destination(
+                            &pinned_2026_manifest(snapshot),
+                            issuer,
+                            cell,
+                            exchange,
+                        )
+                        .await
+                    }
+                    dialed => dialed,
+                };
+            return dialed.map(crate::transport::DialedService::finish_dial);
         }
-        return crate::transport::connect_with_destination(snapshot, issuer, cell, exchange).await;
+        return crate::transport::connect_with_destination(snapshot, issuer, cell, exchange)
+            .await
+            .map(crate::transport::DialedService::finish_dial);
     }
     crate::transport::connect_with_capabilities(
         &pinned_2026_manifest(snapshot),
@@ -960,6 +967,7 @@ pub(super) async fn per_call_dial(
         mirrored.unwrap_or_default(),
     )
     .await
+    .map(crate::transport::DialedService::finish_dial)
 }
 
 #[cfg(test)]
