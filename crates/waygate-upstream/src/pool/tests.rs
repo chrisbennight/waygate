@@ -2336,7 +2336,7 @@ async fn boot_dial_timeout_bounds_a_hung_upstream() {
         // `sleep` spawns, ignores stdin, and never writes stdout — so the MCP
         // initialize read blocks indefinitely (a true post-spawn wedge, the
         // shape of the prod incident).
-        command: Some(vec!["sleep".into(), "infinity".into()]),
+        command: Some(vec!["sleep".into(), "86400".into()]),
         tools: Vec::new(),
         resources: Vec::new(),
         exchange: None,

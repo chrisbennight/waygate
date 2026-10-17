@@ -3402,7 +3402,13 @@ mod tests {
                 tokio::fs::read(storage.path_for(&ready)).await.unwrap(),
                 bytes
             );
-            let remaining = ready.expires_at - OffsetDateTime::now_utc();
+            // Publication timestamps come from PostgreSQL, whose clock may
+            // differ from the test host when the database runs in a VM.
+            let database_now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let remaining = ready.expires_at - database_now;
             if sensitive {
                 assert!(remaining <= time::Duration::seconds(120));
             } else {
