@@ -5550,6 +5550,7 @@ dependencies = [
  "waygate-llm-dispatch",
  "waygate-llm-translate",
  "waygate-manifest-store",
+ "waygate-manifest-types",
  "waygate-mcp",
  "waygate-oidc",
  "waygate-policy",
@@ -6294,15 +6295,12 @@ dependencies = [
  "sqlx",
  "time",
  "uuid",
- "waygate-admin",
  "waygate-apikeys",
  "waygate-core",
  "waygate-dashboard-stores",
  "waygate-invocation",
  "waygate-manifest-store",
- "waygate-manifest-types",
  "waygate-skills",
- "waygate-upstream",
 ]
 
 [[package]]

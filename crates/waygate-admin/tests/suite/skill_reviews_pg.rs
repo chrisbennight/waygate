@@ -90,7 +90,7 @@ async fn skill_review_pages_escape_source_and_bind_decisions_to_csrf_and_generat
         source,
         Some(store.clone()),
     ));
-    let mut state = waygate_test_support::admin::base_admin_state()
+    let mut state = crate::admin_state::base_admin_state()
         .with_tenant_store(Some(Arc::new(waygate_tenants::PgTenantStore::new(pool))))
         .with_skill_catalog(Some(catalog))
         .with_skill_distribution(Some(reviewed));
@@ -246,7 +246,7 @@ async fn skill_review_pages_escape_source_and_bind_decisions_to_csrf_and_generat
         replacement_source,
         Some(store.clone()),
     ));
-    let restarted_state = waygate_test_support::admin::base_admin_state()
+    let restarted_state = crate::admin_state::base_admin_state()
         .with_skill_catalog(Some(restarted))
         .with_skill_distribution(Some(restarted_reviews));
     let (status, body) = request(
