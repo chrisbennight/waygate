@@ -1951,7 +1951,7 @@ async fn gateway_main() -> anyhow::Result<()> {
     }
 
     #[cfg(unix)]
-    let _reload_task = spawn_reload_task(
+    let mut reload_task = spawn_reload_task(
         ReloadDeps {
             policies_dir: cfg.policies_dir.clone(),
             servers_dir: cfg.servers_dir.clone(),
@@ -2550,9 +2550,19 @@ async fn gateway_main() -> anyhow::Result<()> {
         // session, including lanes a reconnect or catalog refresh is still
         // installing. A stateful upstream would otherwise hold them until its
         // idle expiry and could refuse the next process's sessions in the
-        // meantime. A short budget keeps an unresponsive upstream, or a dial
-        // that outlasts it, from holding the database pools open.
-        match tokio::time::timeout(std::time::Duration::from_secs(5), pool.close_sessions()).await {
+        // meantime. A manifest reload can add or resize lanes outside an
+        // entry's session guard, so one already under way finishes first and
+        // its lanes are closed with the rest. A short budget keeps an
+        // unresponsive upstream, or a dial that outlasts it, from holding the
+        // database pools open.
+        let closing = async {
+            #[cfg(unix)]
+            if let Err(error) = (&mut reload_task).await {
+                tracing::warn!(%error, "manifest reload task ended abnormally");
+            }
+            pool.close_sessions().await
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(5), closing).await {
             Ok(closed) => tracing::info!(closed, "closed pooled upstream sessions"),
             Err(_) => tracing::warn!("pooled upstream sessions did not all close in time"),
         }
