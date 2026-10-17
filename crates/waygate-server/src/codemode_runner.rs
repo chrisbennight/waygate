@@ -382,6 +382,23 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
     configurable: true
   });
   const wellFormed = Function.prototype.call.bind(String.prototype.toWellFormed);
+  // Built-ins captured before the program runs, called with the value as
+  // receiver, so a value's own properties cannot stand in for them.
+  const method = (prototype, name) => Function.prototype.call.bind(prototype[name]);
+  const getter = (prototype, name) =>
+    Function.prototype.call.bind(Object.getOwnPropertyDescriptor(prototype, name).get);
+  const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+  const typedArrayName = getter(typedArrayPrototype, Symbol.toStringTag);
+  const viewBuffer = getter(typedArrayPrototype, "buffer");
+  const viewOffset = getter(typedArrayPrototype, "byteOffset");
+  const viewByteLength = getter(typedArrayPrototype, "byteLength");
+  const viewLength = getter(typedArrayPrototype, "length");
+  const dataViewBuffer = getter(DataView.prototype, "buffer");
+  const dataViewOffset = getter(DataView.prototype, "byteOffset");
+  const dataViewByteLength = getter(DataView.prototype, "byteLength");
+  const bufferDetached = getter(ArrayBuffer.prototype, "detached");
+  const bufferSlice = method(ArrayBuffer.prototype, "slice");
+  const bufferTransfer = method(ArrayBuffer.prototype, "transfer");
   const asciiWhitespace = /^[\t\n\f\r ]+|[\t\n\f\r ]+$/g;
   const utf8Labels = new Set([
     "unicode-1-1-utf-8", "unicode11utf8", "unicode20utf8", "utf-8", "utf8", "x-unicode20utf8"
@@ -390,7 +407,12 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
   const bytesOf = (input) => {
     if (input === undefined) return empty();
     if (input instanceof ArrayBuffer || input instanceof SharedArrayBuffer) return new Uint8Array(input);
-    if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+    if (typedArrayName(input) !== undefined) {
+      return new Uint8Array(viewBuffer(input), viewOffset(input), viewByteLength(input));
+    }
+    if (input instanceof DataView) {
+      return new Uint8Array(dataViewBuffer(input), dataViewOffset(input), dataViewByteLength(input));
+    }
     throw new TypeError("TextDecoder.decode expects an ArrayBuffer, a typed array or a DataView");
   };
   const tailOf = (first, second, length) => {
@@ -452,15 +474,16 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
       return utf8Encode(wellFormed(String(input)));
     }
     encodeInto(source, destination) {
-      if (!(destination instanceof Uint8Array)) {
+      if (typedArrayName(destination) !== "Uint8Array") {
         throw new TypeError("TextEncoder.encodeInto expects a Uint8Array destination");
       }
+      const capacity = viewLength(destination);
       let read = 0;
       let written = 0;
       for (const character of wellFormed(String(source))) {
         const point = character.codePointAt(0);
         const size = point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
-        if (written + size > destination.length) break;
+        if (written + size > capacity) break;
         if (size === 1) {
           destination[written] = point;
         } else {
@@ -478,21 +501,23 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
     }
   }
 
-  const integerArrays = [
+  const integerArrays = {
     Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array,
     BigInt64Array, BigUint64Array
-  ];
+  };
+  const typedArrays = { ...integerArrays, Float16Array, Float32Array, Float64Array };
   const getRandomValues = (array) => {
-    if (!integerArrays.some((type) => array instanceof type)) {
+    if (!Object.hasOwn(integerArrays, typedArrayName(array) ?? "")) {
       throw new DOMException("getRandomValues expects an integer typed array", "TypeMismatchError");
     }
-    if (array.byteLength > 65536) {
+    const length = viewByteLength(array);
+    if (length > 65536) {
       throw new DOMException(
-        `getRandomValues was asked for ${array.byteLength} bytes; at most 65,536 are allowed`,
+        `getRandomValues was asked for ${length} bytes; at most 65,536 are allowed`,
         "QuotaExceededError"
       );
     }
-    new Uint8Array(array.buffer, array.byteOffset, array.byteLength).set(randomBytes(array.byteLength));
+    new Uint8Array(viewBuffer(array), viewOffset(array), length).set(randomBytes(length));
     return array;
   };
   const randomUUID = () => {
@@ -503,7 +528,25 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   };
 
-  const typedArrays = [...integerArrays, Float16Array, Float32Array, Float64Array];
+  const dateTime = method(Date.prototype, "getTime");
+  const regexpSource = getter(RegExp.prototype, "source");
+  const regexpFlagReaders = [
+    ["d", "hasIndices"], ["g", "global"], ["i", "ignoreCase"], ["m", "multiline"],
+    ["s", "dotAll"], ["u", "unicode"], ["v", "unicodeSets"], ["y", "sticky"]
+  ].flatMap(([flag, name]) => {
+    const read = Object.getOwnPropertyDescriptor(RegExp.prototype, name)?.get;
+    return read === undefined ? [] : [[flag, Function.prototype.call.bind(read)]];
+  });
+  const regexpFlags = (input) =>
+    regexpFlagReaders.filter(([, read]) => read(input)).map(([flag]) => flag).join("");
+  const mapEntries = method(Map.prototype, "entries");
+  const setValues = method(Set.prototype, "values");
+  const primitiveOf = [
+    [Boolean, method(Boolean.prototype, "valueOf")],
+    [Number, method(Number.prototype, "valueOf")],
+    [String, method(String.prototype, "valueOf")],
+    [BigInt, method(BigInt.prototype, "valueOf")]
+  ];
   const errorTypes = { Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError };
   const uncloneable = (what) => new DOMException(`${what} could not be cloned`, "DataCloneError");
   const assign = (target, key, value) => Object.defineProperty(target, key, {
@@ -518,7 +561,7 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
     for (const buffer of transfer) {
       if (!(buffer instanceof ArrayBuffer)) throw uncloneable("A transfer entry that is not an ArrayBuffer");
       if (transferred.has(buffer)) throw uncloneable("An ArrayBuffer listed twice for transfer");
-      if (buffer.detached) throw uncloneable("A detached ArrayBuffer");
+      if (bufferDetached(buffer)) throw uncloneable("A detached ArrayBuffer");
       transferred.add(buffer);
     }
     const memory = new Map();
@@ -542,32 +585,33 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
       }
       if (input instanceof Map) {
         const output = remember(new Map());
-        for (const [key, item] of input) output.set(copy(key), copy(item));
+        for (const [key, item] of mapEntries(input)) output.set(copy(key), copy(item));
         return output;
       }
       if (input instanceof Set) {
         const output = remember(new Set());
-        for (const item of input) output.add(copy(item));
+        for (const item of setValues(input)) output.add(copy(item));
         return output;
       }
-      if (input instanceof Date) return remember(new Date(input.getTime()));
-      if (input instanceof RegExp) return remember(new RegExp(input.source, input.flags));
+      if (input instanceof Date) return remember(new Date(dateTime(input)));
+      if (input instanceof RegExp) return remember(new RegExp(regexpSource(input), regexpFlags(input)));
       if (input instanceof ArrayBuffer) {
-        if (input.detached) throw uncloneable("A detached ArrayBuffer");
-        return remember(input.slice(0));
+        if (bufferDetached(input)) throw uncloneable("A detached ArrayBuffer");
+        return remember(bufferSlice(input, 0));
       }
       // Sharing memory needs a second agent, which this runtime never has.
       if (input instanceof SharedArrayBuffer) throw uncloneable("A SharedArrayBuffer");
+      const typedName = typedArrayName(input);
+      if (typedName !== undefined) {
+        const buffer = copy(viewBuffer(input));
+        return remember(new typedArrays[typedName](buffer, viewOffset(input), viewLength(input)));
+      }
       if (input instanceof DataView) {
-        return remember(new DataView(copy(input.buffer), input.byteOffset, input.byteLength));
+        const buffer = copy(dataViewBuffer(input));
+        return remember(new DataView(buffer, dataViewOffset(input), dataViewByteLength(input)));
       }
-      if (ArrayBuffer.isView(input)) {
-        const type = typedArrays.find((candidate) => input instanceof candidate);
-        return remember(new type(copy(input.buffer), input.byteOffset, input.length));
-      }
-      if (input instanceof Boolean || input instanceof Number || input instanceof String || input instanceof BigInt) {
-        return remember(Object(input.valueOf()));
-      }
+      const boxed = primitiveOf.find(([type]) => input instanceof type);
+      if (boxed !== undefined) return remember(Object(boxed[1](input)));
       if (input instanceof DOMException) return remember(new DOMException(input.message, input.name));
       if (input instanceof Error) {
         const type = Object.hasOwn(errorTypes, input.name) ? errorTypes[input.name] : Error;
@@ -592,7 +636,7 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
     // The clone already holds copies of every transferred buffer's bytes, so
     // detaching the originals completes the transfer; nothing is detached when
     // cloning fails.
-    for (const buffer of transferred) buffer.transfer();
+    for (const buffer of transferred) bufferTransfer(buffer);
     return result;
   };
 
@@ -4223,6 +4267,56 @@ return {
                 "pointMethods": "undefined",
                 "pointX": 1,
                 "sparse": ["0", "2"],
+            })
+        );
+    }
+
+    /// A value's own properties cannot stand in for the built-ins a clone, a
+    /// transfer, or a decode reads it through.
+    #[test]
+    fn helpers_read_values_through_built_ins_not_own_properties() {
+        assert_eq!(
+            evaluate(
+                r#"
+const buffer = new ArrayBuffer(4);
+new Uint8Array(buffer)[0] = 9;
+buffer.slice = () => buffer;
+const bytes = new Uint8Array([1, 2]);
+Object.defineProperty(bytes, "buffer", { value: new ArrayBuffer(0) });
+const date = new Date(5);
+date.getTime = () => 0;
+const pattern = /a/g;
+Object.defineProperty(pattern, "source", { value: "b" });
+Object.defineProperty(pattern, "flags", { value: "" });
+const map = new Map([[1, 2]]);
+map.entries = () => [][Symbol.iterator]();
+map[Symbol.iterator] = function* () {};
+const moved = new ArrayBuffer(2);
+moved.transfer = () => moved;
+const copy = structuredClone({ buffer, bytes, date, pattern, map, moved }, { transfer: [moved] });
+const view = new Uint8Array([0x6f, 0x6b]);
+Object.defineProperty(view, "byteLength", { value: 0 });
+return {
+  bufferIndependent: copy.buffer !== buffer && new Uint8Array(copy.buffer)[0] === 9,
+  bytes: Array.from(copy.bytes),
+  date: copy.date.getTime(),
+  pattern: `${copy.pattern}`,
+  map: [...copy.map],
+  movedDetached: moved.detached,
+  movedCopy: copy.moved !== moved && copy.moved.byteLength,
+  decoded: new TextDecoder().decode(view),
+};
+"#
+            ),
+            serde_json::json!({
+                "bufferIndependent": true,
+                "bytes": [1, 2],
+                "date": 5,
+                "pattern": "/a/g",
+                "map": [[1, 2]],
+                "movedDetached": true,
+                "movedCopy": 2,
+                "decoded": "ok",
             })
         );
     }
