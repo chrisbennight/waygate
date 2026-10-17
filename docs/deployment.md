@@ -309,14 +309,15 @@ do not account for a failure, this side is the next place to look, not the last.
   `GATEWAY_UPSTREAM_CALL_TIMEOUT_SECONDS`, a deployment environment setting
   applied to every forwarded `tools/call`, `resources/list` and `resources/read`
   with no per-tool or per-resource override. It exists so a wedged upstream
-  stream cannot hold a connection slot indefinitely; how much one hang costs
-  depends on that upstream's configured concurrency.
+  stream cannot hold a call open indefinitely; on an upstream with a
+  `session.concurrency` limit, each hung call also holds one of its places.
 
 Deliberately, this section does not tell you which timer wins a given race.
-Where a call spends its time — waiting for a pool lane, dialling, inside an
-upstream operation, or inside a program — decides that, and stating a fixed
-order here would produce a rule that is wrong for some supported configurations
-and that drifts as the code changes. Read the configured values for this
+Where a call spends its time — waiting under an upstream's concurrency limit
+or for a pooled session, dialling, inside an upstream operation, or inside a
+program — decides that, and stating a fixed order here would produce a rule
+that is wrong for some supported configurations and that drifts as the code
+changes. Read the configured values for this
 deployment and the client, and treat the source as authoritative over any
 ordering prose.
 

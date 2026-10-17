@@ -32,8 +32,8 @@
             <dt><label for="sess-concurrency">Concurrency</label></dt>
             <dd>
                 <input id="sess-concurrency" type="number" name="concurrency" min="1"
-                       value="{{ concurrency }}" placeholder="default" style="width: 8em">
-                <span class="muted">blank = inherit GATEWAY_UPSTREAM_POOL_SIZE</span>
+                       value="{{ concurrency }}" placeholder="no limit" style="width: 8em">
+                <span class="muted">most calls in flight; blank = no limit</span>
             </dd>
             <dt><label for="sess-isolation">Isolation</label></dt>
             <dd>
@@ -76,7 +76,7 @@
     <p class="muted" style="margin: 0 0 10px">{{ readonly_note }}</p>
     {% if admin_required %}<p class="muted" style="margin: 0 0 10px"><a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.nav_url("/servers") }}">Re-authorize with the admin scope</a> if your account is entitled to it.</p>{% endif %}
     <dl class="cfg-dl">
-        <dt>Concurrency</dt><dd class="mono">{% if concurrency.is_empty() %}<span class="muted">default</span>{% else %}{{ concurrency }}{% endif %}</dd>
+        <dt>Concurrency</dt><dd class="mono">{% if concurrency.is_empty() %}<span class="muted">no limit</span>{% else %}{{ concurrency }}{% endif %}</dd>
         <dt>Isolation</dt><dd class="mono">{% if isolation.is_empty() %}<span class="muted">default</span>{% else %}{{ isolation }}{% endif %}</dd>
         <dt>Scope</dt><dd class="mono">{% if scope.is_empty() %}<span class="muted">default</span>{% else %}{{ scope }}{% endif %}</dd>
         <dt>Setup recovery</dt><dd class="mono">{% if retry_on_setup_failure.is_empty() %}<span class="muted">default (one safe retry)</span>{% else %}{{ retry_on_setup_failure }}{% endif %}</dd>

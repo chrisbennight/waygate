@@ -79,27 +79,17 @@ impl ExchangeBundle {
     }
 }
 
-/// A single configured upstream and its (optional) live client.
-///
-/// `identity_cell` is `Some` only when the pool was built with an issuer and
-/// the transport is HTTP — it's the mailbox the `IdentityForwardingClient`
-/// reads from before each HTTP request. `call_serializer` gates concurrent
-/// `call_tool` invocations for the same upstream so two callers can't race on
-/// writing the cell.
-/// One independently-dialed connection lane to an upstream. An
-/// entry holds a small pool of these so concurrent calls to
-/// the same upstream run in parallel instead of serializing on a single
-/// connection. Each slot owns its **own** [`IdentityCell`], so a call
-/// that has checked out a slot can write the cell without racing any
-/// other call — the per-slot `in_use` mutex grants that exclusivity for
-/// the duration of the dispatch, replacing the old per-entry
-/// `call_serializer`.
+/// One independently-dialed, long-lived connection lane to an upstream. An
+/// entry holds a small pool of these. A `Reuse` call runs on a lane's session,
+/// and each lane owns its **own** [`IdentityCell`], so a call that has checked
+/// out a lane can write the cell without racing any other call — the per-slot
+/// `in_use` mutex grants that exclusivity for the duration of the dispatch. A
+/// `PerCall` call dials its own session and only reads a lane's connection.
 struct ConnectionSlot {
     conn: RwLock<Option<Connection>>,
     /// Held for a call's exclusive use of the slot. Acquiring it is the
     /// "checkout"; while held, no other call touches this slot's
-    /// connection or its identity cell. At pool size 1 this is exactly
-    /// the old per-upstream `call_serializer`.
+    /// connection or its identity cell.
     in_use: Mutex<()>,
 }
 
@@ -110,9 +100,9 @@ struct UpstreamEntry {
     /// time; a reload that changes them re-dials or rebuilds the entry live.
     manifest: StdRwLock<UpstreamManifest>,
     /// Connection pool for this upstream. Always ≥ 1 slot. Network
-    /// transports (HTTP/SSE) get `pool_size` slots so calls parallelize;
-    /// stdio is forced to 1 (a single child process). All slots dial the
-    /// same upstream and carry identical tool lists.
+    /// transports (HTTP/SSE) get `pool_size` slots, or `session.concurrency`
+    /// when set; stdio is forced to 1 (a single child process). All slots
+    /// dial the same upstream and carry identical tool lists.
     slots: lanes::ConnectionSlots,
     /// Serializes reconnect and forced catalog refresh for this upstream. Calls
     /// keep using the current slot connections while a replacement dials, but
@@ -597,9 +587,9 @@ fn quarantine_threshold_from_env() -> QuarantineThreshold {
     }
 }
 
-/// Default per-upstream connection-pool size for network transports.
-/// Four lanes covers typical concurrent-user fan-out to one upstream
-/// without opening an unreasonable number of sockets per server.
+/// Default per-upstream connection-pool size for network transports: the
+/// long-lived lanes kept open to each upstream. It does not limit calls in
+/// flight; only an explicit `session.concurrency` does.
 const DEFAULT_UPSTREAM_POOL_SIZE: usize = 4;
 
 /// Default per-upstream `call_tool` timeout. Long enough to absorb a slow
@@ -849,10 +839,13 @@ impl UpstreamPool {
                 let entry = Arc::new(UpstreamEntry {
                     // One empty slot — disconnected fixtures never dial,
                     // and the pool size is irrelevant with no issuer.
-                    slots: lanes::ConnectionSlots::new(vec![ConnectionSlot {
-                        conn: RwLock::new(None),
-                        in_use: Mutex::new(()),
-                    }]),
+                    slots: lanes::ConnectionSlots::new(
+                        vec![ConnectionSlot {
+                            conn: RwLock::new(None),
+                            in_use: Mutex::new(()),
+                        }],
+                        lanes::calls_bounded(&manifest),
+                    ),
                     session_mutation: Mutex::new(()),
                     forwards_identity: false,
                     breaker: Breaker::new_with_open_notify(
@@ -1804,31 +1797,35 @@ impl UpstreamPool {
             }
         };
 
-        // Check out a connection slot for this call. Holding the
-        // checkout's `in_use` lock makes the slot's connection AND its
-        // identity cell this call's alone for the dispatch — so concurrent
-        // calls to the same upstream run on different slots in parallel
-        // instead of serializing on one connection (the old per-upstream
-        // `call_serializer`). The cell lives inside the slot's `Connection`,
-        // so it always matches the live client and is never shared across
-        // slots — no cross-caller identity clobbering.
+        // Resolve session isolation for this upstream. `PerCall` (the
+        // HTTP/SSE default) dials a FRESH upstream session for this call and
+        // drops it afterwards, so no state from a prior call — or a different
+        // principal — can survive on a reused session (a property MCP does
+        // not guarantee). `Reuse` runs the call on a checked-out slot's
+        // long-lived session; the checkout's `in_use` lock makes the slot's
+        // connection AND its identity cell this call's alone for the
+        // dispatch, so no caller's identity reaches another's call.
         //
-        // The metrics measure the checkout: `wait` is the time to get
-        // a free slot (≈0 when a lane is idle), `queue_depth` the number of
-        // calls contending on this upstream's pool (> pool_size ⇒ saturated).
+        // Admission limits calls in flight only where the upstream is bounded
+        // (stdio, or an explicit `session.concurrency`), and may run a `Reuse`
+        // call `PerCall` when every slot is busy — see `UpstreamEntry::admit`.
+        // The metrics measure admission: `wait` is the time to be admitted
+        // (≈0 unless the upstream is bounded and saturated), `queue_depth`
+        // the number of calls admitted or waiting on this upstream.
         waygate_telemetry::metrics::identity_cell_queue_inc(server);
         let _depth_guard = SerializerDepthGuard {
             server: server.to_owned(),
         };
         let wait_start = std::time::Instant::now();
-        let checkout = entry.checkout().await;
+        let lane = entry.admit(resolve_isolation(&snapshot)).await;
+        let isolation = lane.isolation;
         waygate_telemetry::metrics::record_identity_cell_wait(
             server,
             wait_start.elapsed().as_secs_f64(),
         );
 
         // The `snapshot` above — and the Tier-A/Tier-C gates
-        // + per-call IdentityContext built from it — predate this checkout. A
+        // + per-call IdentityContext built from it — predate admission. A
         // live re-dial commits its new shape AND identity atomically under the
         // slot conn write locks, so a call that snapshotted before the swap and
         // dispatched after it could otherwise run on the freshly-installed
@@ -1851,14 +1848,6 @@ impl UpstreamPool {
             .map(|p| p.tenant.as_str())
             .unwrap_or(waygate_core::TenantId::DEFAULT);
 
-        // Resolve session isolation for this upstream. `PerCall` (the
-        // HTTP/SSE default) dials a FRESH upstream session for this call and
-        // drops it afterwards, so no state from a prior call — or a different
-        // principal — can survive on a reused session (a property MCP does
-        // not guarantee). `Reuse` runs the call on the checked-out slot's
-        // long-lived session. Either way the checkout's `in_use` lock bounds
-        // this upstream's concurrency.
-        let isolation = resolve_isolation(&snapshot);
         let call_deadline = self
             .call_timeout
             .and_then(|duration| tokio::time::Instant::now().checked_add(duration));
@@ -1879,8 +1868,8 @@ impl UpstreamPool {
                 // us and the `snapshot` we dial + gate from stays current.
                 // The ephemeral session itself does not use this
                 // connection — the lock is purely the re-dial barrier.
-                let conn_guard = checkout.slot.conn.read().await;
-                // First honor the boot slot's health: if no free slot holds a
+                let conn_guard = lane.slot.conn.read().await;
+                // First honor the boot slot's health: if no slot holds a
                 // live connection, the upstream was unreachable at the last
                 // probe — report "not connected" (as `Reuse` does, counting
                 // against the breaker) instead of attempting a doomed
@@ -1894,7 +1883,7 @@ impl UpstreamPool {
                     ));
                 };
                 // Re-check the tombstone AFTER the per-call setup awaits
-                // (identity/session build + slot checkout): a hot remove may have
+                // (identity/session build + admission): a hot remove may have
                 // tombstoned this entry since the early check in `call_tool_inner`.
                 // We hold the slot's conn READ lock here, which the remove drain's
                 // WRITE-lock barrier must wait on — so if `removed` is set we refuse
@@ -2015,7 +2004,7 @@ impl UpstreamPool {
                 }
             }
             SessionIsolation::Reuse => {
-                let conn_guard = checkout.slot.conn.read().await;
+                let conn_guard = lane.slot.conn.read().await;
                 let Some(conn) = conn_guard.as_ref() else {
                     // Not-connected counts against the breaker so a
                     // persistently down upstream trips open instead of
@@ -2148,7 +2137,7 @@ impl UpstreamPool {
                             );
                             permit.failure();
                             drop(conn_guard);
-                            self.mark_slot_down(server, &entry, checkout.slot, error_class)
+                            self.mark_slot_down(server, &entry, lane.slot, error_class)
                                 .await;
                             return Err(dispatch::bounded_upstream_error(
                                 server,
@@ -2265,7 +2254,7 @@ impl UpstreamPool {
             self,
             server,
             &entry,
-            dispatch::CallLaneGuard::new(checkout.slot, isolation, conn_guard),
+            dispatch::CallLaneGuard::new(lane.slot, isolation, conn_guard),
             permit,
             inner_result,
             dispatch::CallAttemptContext {

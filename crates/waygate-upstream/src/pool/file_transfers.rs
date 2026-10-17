@@ -226,13 +226,13 @@ impl UpstreamPool {
             server: server.to_owned(),
         };
         let wait_start = std::time::Instant::now();
-        let checkout = entry.checkout().await;
+        let lane = entry.admit(resolve_isolation(&snapshot)).await;
         waygate_telemetry::metrics::record_identity_cell_wait(
             server,
             wait_start.elapsed().as_secs_f64(),
         );
 
-        let conn_guard = checkout.slot.conn.read().await;
+        let conn_guard = lane.slot.conn.read().await;
         let Some(conn) = conn_guard.as_ref() else {
             permit.failure();
             entry.record_runtime_failure(UpstreamErrorClass::Transport);
@@ -259,7 +259,7 @@ impl UpstreamPool {
             ));
         }
 
-        let isolation = resolve_isolation(&snapshot);
+        let isolation = lane.isolation;
         let (result, network_destination, cleartext_control_plane) = match isolation {
             SessionIsolation::PerCall => {
                 let cell = entry.forwards_identity.then(IdentityCell::new);
@@ -385,7 +385,7 @@ impl UpstreamPool {
                                 self.mark_slot_down(
                                     server,
                                     &entry,
-                                    checkout.slot,
+                                    lane.slot,
                                     UpstreamErrorClass::Timeout,
                                 )
                                 .await;
@@ -470,13 +470,8 @@ impl UpstreamPool {
                 permit.failure();
                 drop(conn_guard);
                 if matches!(isolation, SessionIsolation::Reuse) {
-                    self.mark_slot_down(
-                        server,
-                        &entry,
-                        checkout.slot,
-                        UpstreamErrorClass::Transport,
-                    )
-                    .await;
+                    self.mark_slot_down(server, &entry, lane.slot, UpstreamErrorClass::Transport)
+                        .await;
                 } else {
                     entry.record_runtime_failure(UpstreamErrorClass::Transport);
                 }
