@@ -120,13 +120,16 @@ impl CodeModeLimits {
                 .ok_or_else(|| anyhow::anyhow!("Code Mode byte budget overflow"))
         };
         let envelope = MIB;
+        // Console text is framed as a JSON string, where escaping can grow
+        // each byte to six.
+        let console_frame = mul(self.console_bytes, 6)?;
         self.frame_bytes = add(
             *[
                 self.request_bytes,
                 self.result_bytes,
                 self.checkpoint_bytes,
                 self.artifact_bytes,
-                self.console_bytes,
+                console_frame,
             ]
             .iter()
             .max()
@@ -248,6 +251,24 @@ mod tests {
                 >= 6 * limits.source_bytes + 2 * limits.input_bytes + limits.checkpoint_bytes
         );
         assert!(limits.runner_peak_bytes > limits.heap_bytes + limits.parent_frame_bytes);
+    }
+
+    /// Any entry the console budget admits fits a frame, even when every
+    /// character needs escaping.
+    #[test]
+    fn frames_fit_a_maximal_escaped_console_entry() {
+        let limits = CodeModeLimits {
+            console_bytes: 2 * MIB,
+            ..CodeModeLimits::default()
+        }
+        .derive_transport()
+        .expect("derive transport");
+        let frame = crate::process_mode::codemode_protocol::RunnerFrame::Console {
+            level: crate::process_mode::codemode_protocol::ConsoleLevel::Log,
+            text: "\0".repeat(limits.console_bytes),
+        };
+        let encoded = serde_json::to_vec(&frame).expect("encode console frame");
+        assert!(encoded.len() <= limits.frame_bytes);
     }
 
     #[test]

@@ -53,8 +53,10 @@ Object.defineProperty(globalThis, "console", {
   value: (() => {
     const gatewayConsole = __gateway_console;
     const textLimit = __gateway_console_bytes;
+    const programStack = __gateway_program_stack;
     delete globalThis.__gateway_console;
     delete globalThis.__gateway_console_bytes;
+    delete globalThis.__gateway_program_stack;
     const wellFormed = Function.prototype.call.bind(String.prototype.toWellFormed);
     const full = Symbol("console output limit");
     const render = (args) => {
@@ -110,7 +112,7 @@ Object.defineProperty(globalThis, "console", {
           if (value instanceof Error) {
             push(`${value.name}: ${value.message}`);
             if (typeof value.stack === "string" && value.stack !== "") {
-              push(`\n${value.stack.replace(/\n+$/, "")}`);
+              push(`\n${programStack(value.stack.replace(/\n+$/, ""))}`);
             }
           } else if (Array.isArray(value)) {
             push("[");
@@ -248,13 +250,26 @@ Object.defineProperty(globalThis, "console", {
       return parts.join("");
     };
     let depth = 0;
+    // Group indentation is charged against the same budget as the text.
+    const indentLines = (text) => {
+      const indent = "  ".repeat(Math.min(depth, Math.ceil(textLimit / 2)));
+      const lines = [];
+      let size = 0;
+      for (const line of text.split("\n")) {
+        const indented = indent + line;
+        if (size + indented.length > textLimit) {
+          lines.push(indented.slice(0, Math.max(0, textLimit - size + 1)));
+          break;
+        }
+        lines.push(indented);
+        size += indented.length + 1;
+      }
+      return lines.join("\n");
+    };
     const emit = (level, args, suffix = "") => {
       try {
         let text = render(args) + suffix;
-        if (depth > 0) {
-          const indent = "  ".repeat(depth);
-          text = text.split("\n").map((line) => indent + line).join("\n");
-        }
+        if (depth > 0) text = indentLines(text);
         gatewayConsole(level, wellFormed(text));
       } catch {
         // Output that cannot be formatted or delivered is dropped.
@@ -271,8 +286,8 @@ Object.defineProperty(globalThis, "console", {
       warn: (...args) => emit("warn", args),
       error: (...args) => emit("error", args),
       trace: (...args) => {
-        const stack = new Error().stack ?? "";
-        emit("error", args.length > 0 ? ["Trace:", ...args] : ["Trace"], `\n${stack.replace(/\n+$/, "")}`);
+        const stack = programStack((new Error().stack ?? "").replace(/\n+$/, ""));
+        emit("error", args.length > 0 ? ["Trace:", ...args] : ["Trace"], `\n${stack}`);
       },
       dir: (value) => emit("log", [value]),
       dirxml: (...args) => emit("log", args),
@@ -1373,12 +1388,22 @@ const execution = (() => {{
                             "error" => ConsoleLevel::Error,
                             _ => ConsoleLevel::Log,
                         };
-                        // Error stacks printed to the console name the same
-                        // positions a failure would, so restate them the same
-                        // way; lines that are not stack frames pass through.
-                        console(level, &layout.program_stack(&text.to_string()?))
+                        console(level, &text.to_string()?)
                     },
                 ),
+            )
+            .map_err(|_| {
+                RunnerExecutionFailure::new(
+                    RunnerFailureCode::RunnerInternal,
+                    "Code Mode runner could not install the console",
+                )
+            })?;
+        // Error stacks the console prints name the same positions a failure
+        // would, so the prelude restates them the same way.
+        ctx.globals()
+            .set(
+                "__gateway_program_stack",
+                Func::from(move |stack: String| layout.program_stack(&stack)),
             )
             .map_err(|_| {
                 RunnerExecutionFailure::new(
@@ -3239,6 +3264,34 @@ return null;
             lines[3].starts_with(r#"[{"index": 0}, {"index": 1}"#),
             "{}",
             &lines[3][..40]
+        );
+    }
+
+    /// Printed text is kept as written; only error stacks are restated in
+    /// program positions.
+    #[test]
+    fn console_keeps_printed_text_as_written() {
+        assert_eq!(
+            printed_lines(
+                "console.log('value\\r\\n', 'at eval_script:1', '    at f (eval_script:2:3)'); return null;"
+            ),
+            vec!["value\r\n at eval_script:1     at f (eval_script:2:3)"]
+        );
+    }
+
+    /// Group indentation counts against the console budget, however deep the
+    /// groups and however many lines the text has.
+    #[test]
+    fn console_group_indentation_stays_within_the_budget() {
+        let lines = printed_lines(
+            "for (let index = 0; index < 2000; index += 1) console.group();\n\
+             console.log('\\n'.repeat(65535));\nreturn null;",
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].len() <= limits().console_bytes + 1,
+            "{}",
+            lines[0].len()
         );
     }
 
