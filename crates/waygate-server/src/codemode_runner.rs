@@ -244,7 +244,15 @@ Object.defineProperty(globalThis, "console", {
         }
       } catch (error) {
         if (error !== full) {
-          parts.push(` [console could not format a value: ${error instanceof Error ? error.message : typeof error}]`);
+          // The note is budgeted like any other text, in pieces, so a huge
+          // message is never copied in full.
+          try {
+            push(" [console could not format a value: ");
+            push(error instanceof Error ? String(error.message) : typeof error);
+            push("]");
+          } catch {
+            // The budget ran out while noting the failure.
+          }
         }
       }
       return parts.join("");
@@ -266,9 +274,9 @@ Object.defineProperty(globalThis, "console", {
       }
       return lines.join("\n");
     };
-    const emit = (level, args, suffix = "") => {
+    const emit = (level, args, suffix = "", prefix = "") => {
       try {
-        let text = render(args) + suffix;
+        let text = prefix + render(args) + suffix;
         if (depth > 0) text = indentLines(text);
         gatewayConsole(level, wellFormed(text));
       } catch {
@@ -287,7 +295,7 @@ Object.defineProperty(globalThis, "console", {
       error: (...args) => emit("error", args),
       trace: (...args) => {
         const stack = programStack((new Error().stack ?? "").replace(/\n+$/, ""));
-        emit("error", args.length > 0 ? ["Trace:", ...args] : ["Trace"], `\n${stack}`);
+        emit("error", args, `\n${stack}`, args.length > 0 ? "Trace: " : "Trace");
       },
       dir: (value) => emit("log", [value]),
       dirxml: (...args) => emit("log", args),
@@ -319,7 +327,12 @@ Object.defineProperty(globalThis, "console", {
         if (depth > 0) depth -= 1;
       },
       time: (name) => {
-        timers.set(label(name), performance.now());
+        const key = label(name);
+        if (timers.has(key)) {
+          emit("warn", [`Timer "${key}" already exists`]);
+          return;
+        }
+        timers.set(key, performance.now());
       },
       timeLog: (name, ...args) => {
         const key = label(name);
@@ -3293,6 +3306,37 @@ return null;
             "{}",
             lines[0].len()
         );
+    }
+
+    #[test]
+    fn console_trace_substitutes_and_timers_keep_their_start() {
+        let (outcome, printed) = execute_capturing_console(
+            r#"
+console.trace("item %d", 3);
+console.time("t");
+console.time("t");
+console.log({ get value() { throw new Error("x".repeat(1_000_000)); } });
+return null;
+"#,
+        );
+        outcome.expect("program completes");
+        assert!(
+            printed[0].text.starts_with("Trace: item 3\n"),
+            "{}",
+            printed[0].text
+        );
+        assert_eq!(
+            (printed[1].level, printed[1].text.as_str()),
+            (ConsoleLevel::Warn, "Timer \"t\" already exists")
+        );
+        assert!(
+            printed[2].text.len() <= limits().console_bytes + 1,
+            "{}",
+            printed[2].text.len()
+        );
+        assert!(printed[2]
+            .text
+            .starts_with("{\"value\":  [console could not format a value: xxx"));
     }
 
     #[test]
