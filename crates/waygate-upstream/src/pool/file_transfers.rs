@@ -274,7 +274,7 @@ impl UpstreamPool {
                 )
                 .await
                 {
-                    Ok(service) => service,
+                    Ok(dialed) => dialed.finish_dial(),
                     Err(error) => {
                         permit.failure();
                         entry.record_runtime_failure(UpstreamErrorClass::from_dial_error(&error));

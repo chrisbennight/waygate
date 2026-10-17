@@ -342,7 +342,9 @@ async fn main() -> ExitCode {
         }
     }
 
-    let info = ClientConfig::new(
+    // The gateway's own handshake configuration, so every `initialize` the
+    // scaffold sends proposes the same version the serving dial does.
+    let info = waygate_upstream::client_config(
         ClientCapabilities::default(),
         Implementation::new(
             concat!(

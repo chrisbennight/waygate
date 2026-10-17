@@ -6,6 +6,9 @@
 //! that request only, this wrapper consumes one JSON-RPC response under the
 //! raw-byte ceiling before rmcp can decode an untrusted body into the shared
 //! gateway process.
+//!
+//! Every request also reports its outcome to the dial's exchange recorder,
+//! which records only while the dial that built this client is in progress.
 
 use std::collections::HashMap;
 use std::io;
@@ -27,6 +30,8 @@ use tokio_util::sync::CancellationToken;
 
 use waygate_core::http_client::{read_body_capped, ReadBodyError};
 use waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY;
+
+use crate::dial_trace::ExchangeRecorder;
 
 const JSON_MIME_TYPE: &str = "application/json";
 const EVENT_STREAM_MIME_TYPE: &str = "text/event-stream";
@@ -69,14 +74,16 @@ pub(crate) struct BoundedResponseClient {
     inner: reqwest::Client,
     connection_failed: Arc<AtomicBool>,
     open_requests: CancellationToken,
+    exchanges: ExchangeRecorder,
 }
 
 impl BoundedResponseClient {
-    pub(crate) fn new(inner: reqwest::Client) -> Self {
+    pub(crate) fn new(inner: reqwest::Client, exchanges: ExchangeRecorder) -> Self {
         Self {
             inner,
             connection_failed: Arc::new(AtomicBool::new(false)),
             open_requests: CancellationToken::new(),
+            exchanges,
         }
     }
 
@@ -284,6 +291,7 @@ impl StreamableHttpClient for BoundedResponseClient {
         auth_header: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+        let exchange = self.exchanges.post(&message);
         let result = self
             .until_closed(self.inner.post_message(
                 uri,
@@ -294,7 +302,7 @@ impl StreamableHttpClient for BoundedResponseClient {
             ))
             .await;
         self.observe_connection_failure(&result);
-        result
+        exchange.post_result(result)
     }
 
     async fn post_message_with_max_sse_event_size(
@@ -306,6 +314,7 @@ impl StreamableHttpClient for BoundedResponseClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+        let exchange = self.exchanges.post(&message);
         let result = if let Some(limit) = Self::response_limit(&message) {
             self.until_closed(self.post_bounded(
                 uri,
@@ -328,7 +337,7 @@ impl StreamableHttpClient for BoundedResponseClient {
             .await
         };
         self.observe_connection_failure(&result);
-        result
+        exchange.post_result(result)
     }
 
     async fn delete_session(
@@ -338,12 +347,13 @@ impl StreamableHttpClient for BoundedResponseClient {
         auth_header: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<(), StreamableHttpError<Self::Error>> {
+        let exchange = self.exchanges.delete();
         let result = self
             .inner
             .delete_session(uri, session_id, auth_header, custom_headers)
             .await;
         self.observe_connection_failure(&result);
-        result
+        exchange.unit_result(result)
     }
 
     async fn get_stream(
@@ -354,12 +364,13 @@ impl StreamableHttpClient for BoundedResponseClient {
         auth_header: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
+        let exchange = self.exchanges.get();
         let result = self
             .inner
             .get_stream(uri, session_id, last_event_id, auth_header, custom_headers)
             .await;
         self.observe_connection_failure(&result);
-        result
+        exchange.stream_result(result)
     }
 
     async fn get_stream_with_max_sse_event_size(
@@ -371,6 +382,7 @@ impl StreamableHttpClient for BoundedResponseClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
+        let exchange = self.exchanges.get();
         let result = self
             .inner
             .get_stream_with_max_sse_event_size(
@@ -383,7 +395,7 @@ impl StreamableHttpClient for BoundedResponseClient {
             )
             .await;
         self.observe_connection_failure(&result);
-        result
+        exchange.stream_result(result)
     }
 }
 
@@ -485,6 +497,7 @@ mod tests {
         let client = BoundedResponseClient::new(
             waygate_core::http_client::client(waygate_core::http_client::Profile::NoTotalTimeout)
                 .unwrap(),
+            ExchangeRecorder::default(),
         );
 
         let error = client
@@ -541,6 +554,7 @@ mod tests {
         let client = BoundedResponseClient::new(
             waygate_core::http_client::client(waygate_core::http_client::Profile::NoTotalTimeout)
                 .unwrap(),
+            ExchangeRecorder::default(),
         );
 
         let error = client
