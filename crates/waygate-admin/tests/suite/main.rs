@@ -21,6 +21,11 @@
 //! The dashboard render suites stay in the sibling `dashboard_render`
 //! target, which already uses this same one-binary module layout.
 
+// Shared with the `dashboard_render` target. It lives with the admin tests
+// so `waygate-test-support` does not depend on `waygate-admin`.
+#[path = "../support/admin_state.rs"]
+mod admin_state;
+
 mod approval_grants_api;
 mod catalog_api;
 mod change_requests_api;

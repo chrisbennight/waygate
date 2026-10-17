@@ -1,7 +1,9 @@
 //! The common [`AdminState`] core behind the `dashboard_render/` suite's
-//! `state_with_*` builders, plus the `example-messages` fixture manifest they
-//! all seed the pool with. A test composes: `Arc::new(base_admin_state()
-//! .with_x(...))` — the `with_*` combinators are `AdminState`'s own.
+//! `state_with_*` builders and the `suite` target's dashboard tests, plus the
+//! `example-messages` fixture manifest they all seed the pool with. Both
+//! targets include this file as a module. A test composes:
+//! `Arc::new(base_admin_state().with_x(...))` — the `with_*` combinators are
+//! `AdminState`'s own.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

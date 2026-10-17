@@ -10,11 +10,11 @@
 //! `AuditReader` fake to test filter logic and the drawer route without
 //! dragging sqlx into the test runtime.
 
-pub(crate) use std::collections::BTreeMap;
-pub(crate) use std::sync::Arc;
-pub(crate) use waygate_test_support::admin::{
+pub(crate) use crate::admin_state::{
     base_admin_state, base_admin_state_with_pool, example_messages_manifest,
 };
+pub(crate) use std::collections::BTreeMap;
+pub(crate) use std::sync::Arc;
 pub(crate) use waygate_test_support::mocks::InMemoryManifestStore;
 
 pub(crate) use async_trait::async_trait;

@@ -87,6 +87,7 @@ utoipa.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+waygate-manifest-types.workspace = true
 waygate-test-support.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "net"] }
 tower = { workspace = true, features = ["util"] }

@@ -1,11 +1,15 @@
 //! Dashboard render-contract suite (formerly the monolithic
 //! `dashboard_render.rs`, 13,953 lines). One test target, one module
 //! per page family, mirroring the `dashboard_*.rs` source split.
-//! Shared builders/fakes live in [`common`]; the canonical pg
-//! preamble, mocks, and `AdminState` core live in
+//! Shared builders/fakes live in [`common`] and the `AdminState` core
+//! in [`admin_state`]; the canonical pg preamble and mocks live in
 //! `waygate-test-support`.
 
 mod common;
+// Shared with the `suite` target. It lives with the admin tests so
+// `waygate-test-support` does not depend on `waygate-admin`.
+#[path = "../support/admin_state.rs"]
+mod admin_state;
 
 mod activity;
 mod activity_live;

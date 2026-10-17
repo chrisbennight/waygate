@@ -29,9 +29,7 @@ The contract:
 
 > **Domain and shared types live in leaf crates — `waygate-core` first.**
 > **`waygate-mcp` is the MCP protocol surface, not a type hub.**
-> **Nothing depends on `waygate-admin` except `waygate-server`** (and
-> `waygate-test-support`, the dev-only crate that builds test fixtures
-> over `AdminState` — itself consumed by nothing but `[dev-dependencies]`).
+> **Nothing depends on `waygate-admin` except `waygate-server`.**
 > **`waygate-server` is the only composition root.**
 
 Intra-workspace dependencies (from `cargo metadata --no-deps`,
@@ -113,8 +111,8 @@ extending a crate.
 | `waygate-storage` | Domain | Audit/observability persistence: audit sink + hash chain + verification, ECS/OCSF export, retention/rollups/sweeps, syslog/exporter/outbox, LLM cache/usage/budgets/catalog, agent conversations | Audit/evidence domain types (`waygate-evidence`) and emission policy (callers choose required vs best-effort recording) |
 | `waygate-as` | Domain | The optional built-in OAuth 2.1 **Authorization Server**: CIMD client registration, PKCE, consent, and the upstream-session store + refresher implementing the `waygate_oidc::upstream_session` seam | Resource-server validation and the seam's types (`waygate-oidc`, re-exported here for compat) |
 | `waygate-upstream` | Domain | Upstream MCP connection pool: transports (streamable HTTP / SSE / stdio), health, session identity | Manifest types/parsers (`waygate-manifest-types` — re-exported here for compat); manifest *history* (`waygate-manifest-store`) |
-| `waygate-test-support` | Composition | Shared test infrastructure (dev-dependency ONLY): the `pool_or_skip` live-Postgres preamble, the canonical `Fake*`/`InMemory*` mock set (one per trait), and the `base_admin_state` core behind the dashboard test builders | Production code — no crate may list it in `[dependencies]` |
-| `waygate-admin` | Composition | Admin REST API, htmx dashboard, change-executor registry, contextual assistant | New shared types (put them in `waygate-core`); being depended on by anything except `waygate-server` (and the dev-only `waygate-test-support`) |
+| `waygate-test-support` | Composition | Shared test infrastructure (dev-dependency ONLY): the `pool_or_skip` live-Postgres preamble and the canonical `Fake*`/`InMemory*` mock set (one per trait) | Production code — no crate may list it in `[dependencies]` |
+| `waygate-admin` | Composition | Admin REST API, htmx dashboard, change-executor registry, contextual assistant | New shared types (put them in `waygate-core`); being depended on by anything except `waygate-server` |
 | `waygate-server` | Composition | The binary: env config (`config.rs`), wiring/routing, reload subsystem, built-in MCP tools, healthcheck | Reusable logic — if two things need it, it belongs in a library crate |
 <!-- crate-map:end -->
 
