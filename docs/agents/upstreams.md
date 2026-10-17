@@ -393,6 +393,15 @@ This document covers:
   save the per-call `initialize` round-trip. stdio always reuses,
   regardless of the field.
 
+  **The gateway closes its lanes when it shuts down.** A stateful upstream
+  holds a session for each lane until the gateway deletes it, and an upstream
+  with a fixed session table refuses new sessions while that table is full.
+  Graceful shutdown therefore closes every pooled lane once in-flight calls
+  have drained, so the next gateway process is not refused while the old
+  sessions wait for their idle expiry. Size such an upstream's table for twice
+  its lanes, because a catalog refresh dials the replacement lanes before it
+  closes the current ones, plus the per-call sessions it serves concurrently.
+
   **Measure that round-trip before trading it for a wider trust boundary.**
   What `per_call` costs depends on the upstream and the path to it, so read it
   from the deployment rather than assuming. A quantile of

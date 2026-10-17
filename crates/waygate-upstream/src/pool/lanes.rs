@@ -50,6 +50,41 @@ pub(super) struct SlotCheckout<'a> {
 }
 
 impl super::UpstreamPool {
+    /// End every pooled upstream session and return how many lanes were open.
+    ///
+    /// A stateful upstream keeps a lane's session until the client deletes it
+    /// or the upstream's own idle expiry ends it, and an upstream with a fixed
+    /// session table refuses new sessions while it is full. A process that
+    /// exits without closing its lanes leaves their sessions in that table, so
+    /// the next gateway process can be refused until they expire. Closing a
+    /// lane's client ends its session with the upstream.
+    ///
+    /// Every entry is retired, so the pool serves no upstream afterwards. Each
+    /// entry's session guard is taken first: a reconnect or catalog refresh
+    /// already dialing finishes installing its lanes and they are closed here,
+    /// and one still waiting for the guard finds the entry retired and does not
+    /// dial. Call this only once nothing can check out a lane.
+    pub async fn close_sessions(&self) -> usize {
+        let entries = self.entries.load_full();
+        let closing = entries.iter().map(|(name, entry)| async move {
+            let _session = entry.session_mutation.lock().await;
+            entry.removed.store(true, Ordering::Release);
+            let lanes = entry.slots.iter().map(|slot| async move {
+                let connection = slot.conn.write().await.take()?;
+                if let Err(error) = connection.client.cancel().await {
+                    tracing::warn!(server = %name, %error, "upstream lane did not close cleanly");
+                }
+                Some(())
+            });
+            futures::future::join_all(lanes)
+                .await
+                .into_iter()
+                .flatten()
+                .count()
+        });
+        futures::future::join_all(closing).await.into_iter().sum()
+    }
+
     /// Mark a slot's connection down so the per-upstream scheduler
     /// re-dials it. Used by the dispatch error paths and the breaker-open
     /// recovery dial-failure path — a transport error or a failed re-dial
