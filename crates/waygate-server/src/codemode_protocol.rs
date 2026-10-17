@@ -189,10 +189,20 @@ impl ConsoleCapture {
     /// Record one call and return what was kept, or `None` once output has
     /// been truncated. An entry that does not fit is cut on a character
     /// boundary and ends the output.
+    ///
+    /// U+0000 becomes U+FFFD: console output is stored inside results, and
+    /// the store's JSON type cannot hold U+0000 in a string.
     pub fn admit(&mut self, level: ConsoleLevel, text: &str) -> Option<&ConsoleEntry> {
         if self.output.truncated {
             return None;
         }
+        let replaced;
+        let text = if text.contains('\0') {
+            replaced = text.replace('\0', "\u{fffd}");
+            replaced.as_str()
+        } else {
+            text
+        };
         let Some(room) = self.remaining.checked_sub(CONSOLE_ENTRY_OVERHEAD_BYTES) else {
             self.output.truncated = true;
             self.remaining = 0;
@@ -303,6 +313,18 @@ mod tests {
         let output = capture.into_output();
         assert!(output.truncated);
         assert_eq!(output.entries.len(), 2);
+    }
+
+    #[test]
+    fn console_capture_never_keeps_nul() {
+        let mut capture = ConsoleCapture::new(CONSOLE_ENTRY_OVERHEAD_BYTES * 2 + 8);
+        let kept = capture
+            .admit(ConsoleLevel::Log, "a\0b")
+            .expect("entry fits")
+            .clone();
+        assert_eq!(kept.text, "a\u{fffd}b");
+        let output = capture.into_output();
+        assert!(!output.entries[0].text.contains('\0'));
     }
 
     #[test]
