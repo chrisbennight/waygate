@@ -521,7 +521,8 @@ or times out returns them in its error data, which, like the failure message,
 is not stored; detached executions keep console output only with a stored
 result, which `codemode.result` returns. The `console_bytes` limit that
 `codemode.limits` reports bounds the total; output past it is dropped,
-`truncated` is set, and the program continues. Console output is program
+`truncated` is set, and the program continues. U+0000 in console text becomes
+U+FFFD, because stored results cannot hold it. Console output is program
 output: it goes only to the caller, is stored only as part of a stored result,
 and is never written to the gateway's own logs.
 
