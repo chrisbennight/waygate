@@ -21,7 +21,7 @@ retain their parent/step/call/attempt relationship; direct events do not.
 
 | Producer | Events covered | Reason |
 |---|---|---|
-| `DefaultInvocationService::resolve_tool` | catalog quarantine refusal | Governed dispatch refusal. |
+| `DefaultInvocationService::resolve_tool` | catalog refusal (`refused:<code>`) and temporary unavailability (`unavailable:<code>`) | Governed dispatch refusal. |
 | `DefaultInvocationService::authorize` | Cedar deny and step-up | Authorization decisions used for replay and compliance review. |
 | `DefaultInvocationService::{check_quota,check_profile_restrictions}` | rate-limit and API-key-profile denials | Governed dispatch refusals. |
 | `DefaultInvocationService::prepare_output_validation` | invalid approved output schema | Approved catalog state is unsafe to dispatch. |

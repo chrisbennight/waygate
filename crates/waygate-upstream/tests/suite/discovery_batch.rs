@@ -10,7 +10,7 @@ use rmcp::model::Tool;
 use serde_json::json;
 use tokio::sync::oneshot;
 use waygate_catalog::*;
-use waygate_mcp::catalog::{ResolvedInvocationTool, UpstreamCatalog};
+use waygate_mcp::catalog::{ResolvedInvocationTool, ToolRefusal, UpstreamCatalog};
 use waygate_mcp::protocol::RiskTier;
 use waygate_upstream::{ToolClassification, Transport, UpstreamManifest, UpstreamPool};
 
@@ -277,6 +277,7 @@ async fn a_catalog_change_during_a_batch_refuses_the_stale_projection() {
         ResolvedTool::Quarantined {
             server_name: "scale".into(),
             tool_name: names[0].clone(),
+            retired: false,
         },
     );
     catalog.rows.lock().unwrap().remove(&names[1]);
@@ -292,11 +293,17 @@ async fn a_catalog_change_during_a_batch_refuses_the_stale_projection() {
         .unwrap();
     assert!(matches!(
         refreshed[0],
-        ResolvedInvocationTool::Quarantined { .. }
+        ResolvedInvocationTool::Refused {
+            reason: ToolRefusal::ServerQuarantined,
+            ..
+        }
     ));
     assert!(matches!(
         refreshed[1],
-        ResolvedInvocationTool::Quarantined { .. }
+        ResolvedInvocationTool::Refused {
+            reason: ToolRefusal::NotInCatalog,
+            ..
+        }
     ));
     assert!(matches!(refreshed[2], ResolvedInvocationTool::Ready(_)));
 }
@@ -337,6 +344,39 @@ async fn http_pages_use_batches_instead_of_individual_catalog_reads() {
         catalog.singles.load(Ordering::Relaxed),
         0,
         "every page must use the bulk storage boundary"
+    );
+}
+
+/// A client holding a stale tool list can call a name the upstream no longer
+/// serves. Over the wire that is the unknown-tool error, never a quarantine.
+#[tokio::test]
+async fn http_call_to_a_retired_tool_name_is_tool_unavailable() {
+    let (pool, _catalog, _upstream, _names) = fixture(1).await;
+    let gateway = serve(waygate_mcp::GatewayServer::new(pool)).await;
+    let client = reqwest::Client::new();
+    let response = request(
+        &client,
+        &gateway.url,
+        "tools/call",
+        json!({"name": "scale.searchTools", "arguments": {}}),
+    )
+    .await;
+    let error = response.error.expect("a retired name is refused");
+    assert_eq!(error["code"], -32602, "{error}");
+    assert_eq!(error["data"]["error"], "tool_unavailable");
+    assert_eq!(error["data"]["tool"], "scale.searchTools");
+    assert!(
+        error["data"]["trace_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "{error}"
+    );
+    assert!(
+        !error["message"]
+            .as_str()
+            .expect("message")
+            .contains("quarantined"),
+        "{error}"
     );
 }
 

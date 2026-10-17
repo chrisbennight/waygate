@@ -525,8 +525,10 @@ impl std::fmt::Debug for DispatchAdmissionHandle {
 /// variant preserves that contract.
 #[derive(Debug, Error)]
 pub enum InvocationError {
-    /// Tool name didn't include a `<server>.` qualifier, or the named
-    /// `<server>` isn't in the catalog.
+    /// The request cannot form a valid call: an unqualified name, an unknown
+    /// inference model, malformed arguments, or an execution binding that no
+    /// longer matches. A tool the catalog cannot run is
+    /// [`Self::ToolUnavailable`] instead.
     #[error("invalid arguments: {0}")]
     InvalidArguments(String),
     /// The caller's arguments did not satisfy the immutable input schema
@@ -573,12 +575,25 @@ pub enum InvocationError {
     /// JSON-RPC `data` envelope so an operator debugging a denial can
     /// see *why* without re-running the gate offline. May be empty when
     /// the deny came from baseline forbid (no matching policy).
+    ///
+    /// A quarantined or retired server is also refused with this variant,
+    /// for a caller who may discover that server. No policy explains that
+    /// refusal, so `trace_id` is set and names the gateway's log and audit
+    /// record for it; Cedar denials leave it `None`.
     #[error("forbidden: {reason}")]
     Forbidden {
         reason: String,
         policy_ids: Vec<String>,
         reasons: Vec<String>,
+        trace_id: Option<String>,
     },
+    /// The named tool does not exist, or the gateway withholds it from this
+    /// caller. Every per-tool refusal shares this shape with a name that does
+    /// not exist, so the error never confirms that a withheld tool exists.
+    /// The precise reason is recorded only in the gateway's log and audit
+    /// record for `trace_id`. `tool` is the requested `<server>.<tool>` name.
+    #[error("unknown or unavailable tool `{tool}`")]
+    ToolUnavailable { tool: String, trace_id: String },
     /// Cedar policy returned `StepUpRequired` — the caller is otherwise
     /// authenticated but missing a scope the tool's risk class requires.
     #[error("step-up required (scope `{required_scope}`): {reason}")]
@@ -739,6 +754,7 @@ impl InvocationError {
             InvocationError::ReadOnlyRequired { .. } => "read_only_required",
             InvocationError::ReadOnlyOperationRequired { .. } => "read_only_operation_required",
             InvocationError::Forbidden { .. } => "forbidden",
+            InvocationError::ToolUnavailable { .. } => "tool_unavailable",
             InvocationError::StepUpRequired { .. } => "step_up_required",
             InvocationError::Upstream(_) => "upstream",
             InvocationError::AuditUnavailable(_) => "audit_unavailable",
@@ -1021,9 +1037,18 @@ mod tests {
                 reason: "x".into(),
                 policy_ids: Vec::new(),
                 reasons: Vec::new(),
+                trace_id: None,
             }
             .kind(),
             "forbidden",
+        );
+        assert_eq!(
+            InvocationError::ToolUnavailable {
+                tool: "example-messages.send".into(),
+                trace_id: "0123456789abcdef0123456789abcdef".into(),
+            }
+            .kind(),
+            "tool_unavailable",
         );
         assert_eq!(
             InvocationError::StepUpRequired {

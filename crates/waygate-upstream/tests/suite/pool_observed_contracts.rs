@@ -234,7 +234,7 @@ async fn durable_quarantine_blocks_dispatch_survives_restart_and_releases_only_r
     use waygate_catalog::{
         tool_reviews::PgCatalogStore, ImportServer, ImportTool, ManifestImporter,
     };
-    use waygate_mcp::catalog::ResolvedInvocationTool;
+    use waygate_mcp::catalog::{ResolvedInvocationTool, ToolRefusal};
     let Some(db) = waygate_test_support::pg::audit_pool_or_skip().await else {
         return;
     };
@@ -325,7 +325,10 @@ async fn durable_quarantine_blocks_dispatch_survives_restart_and_releases_only_r
     assert!(matches!(
         pool.resolve_invocation_tool("default", &name, "stable")
             .await,
-        ResolvedInvocationTool::Quarantined { .. }
+        ResolvedInvocationTool::Refused {
+            reason: ToolRefusal::ReviewRequired,
+            ..
+        }
     ));
     assert!(matches!(
         pool.resolve_invocation_tool("default", &name, "bare").await,
@@ -343,7 +346,10 @@ async fn durable_quarantine_blocks_dispatch_survives_restart_and_releases_only_r
         matches!(
             pool.resolve_invocation_tool("default", &name, "stable")
                 .await,
-            ResolvedInvocationTool::Quarantined { .. }
+            ResolvedInvocationTool::Refused {
+                reason: ToolRefusal::ReviewRequired,
+                ..
+            }
         ),
         "upstream-wide clear cannot bypass durable quarantine"
     );
@@ -357,7 +363,10 @@ async fn durable_quarantine_blocks_dispatch_survives_restart_and_releases_only_r
         restarted
             .resolve_invocation_tool("default", &name, "stable")
             .await,
-        ResolvedInvocationTool::Quarantined { .. }
+        ResolvedInvocationTool::Refused {
+            reason: ToolRefusal::ReviewRequired,
+            ..
+        }
     ));
     let review = store
         .get("default", &name, "stable")
@@ -461,7 +470,10 @@ async fn durable_quarantine_blocks_dispatch_survives_restart_and_releases_only_r
         oversized
             .resolve_invocation_tool("default", &name, "stable")
             .await,
-        ResolvedInvocationTool::Quarantined { .. }
+        ResolvedInvocationTool::Refused {
+            reason: ToolRefusal::ReviewRequired,
+            ..
+        }
     ));
     assert!(
         matches!(

@@ -4,6 +4,7 @@
 //! identity re-check, and the shared session catalog reader live together
 //! without growing the pool's transport and lifecycle module.
 
+use super::admission::Admission;
 use super::*;
 
 /// Manifest-derived governance facts for one tool, computed against an
@@ -152,13 +153,13 @@ impl UpstreamPool {
     /// Resolver-derived contract identity for the agent-chat allowlist, so a
     /// later call can be PINNED to the exact contract whose `side_effects` drove
     /// the operator-approval decision. Returns `None` when the tool will not
-    /// resolve (quarantined); the consumer then treats it as side-effecting and
-    /// invocation refuses it regardless. Pinning this identity into the
-    /// `InvocationRequest` makes the pipeline refuse (at the resolve stage,
-    /// atomically before authorize/approval/dispatch) if a reload changes the
-    /// contract — e.g. read-only to side-effecting — between the listing-time
-    /// approval decision and execution, rather than trusting the cached
-    /// listing-time fact.
+    /// resolve (refused or temporarily unavailable); the consumer then treats
+    /// it as side-effecting and invocation refuses it regardless. Pinning this
+    /// identity into the `InvocationRequest` makes the pipeline refuse (at the
+    /// resolve stage, atomically before authorize/approval/dispatch) if a
+    /// reload changes the contract — e.g. read-only to side-effecting —
+    /// between the listing-time approval decision and execution, rather than
+    /// trusting the cached listing-time fact.
     pub async fn resolved_contract_identity(
         &self,
         tenant: &str,
@@ -170,8 +171,9 @@ impl UpstreamPool {
             .await
         {
             ResolvedInvocationTool::Ready(snapshot) => Some(snapshot.contract_identity()),
-            ResolvedInvocationTool::Quarantined { .. }
-            | ResolvedInvocationTool::Unavailable { .. } => None,
+            ResolvedInvocationTool::Refused { .. } | ResolvedInvocationTool::Unavailable { .. } => {
+                None
+            }
         }
     }
 }
@@ -377,7 +379,7 @@ pub(super) struct SnapshotInputs {
 /// Request-local reads, captured before any asynchronous batch lookup. These
 /// never survive a discovery request or replace the invocation-time recheck.
 pub(super) struct DiscoveryReads {
-    pub(super) review_allows: bool,
+    pub(super) review: Admission,
     pub(super) catalog:
         Option<Result<waygate_catalog::ResolvedTool, Arc<waygate_catalog::CatalogError>>>,
     pub(super) transition: Option<CatalogTransition>,
@@ -449,7 +451,7 @@ impl AdmissionReadCache {
 
 #[derive(Clone)]
 struct AdmissionReads {
-    review: Option<(String, bool)>,
+    review: Option<waygate_catalog::tool_reviews::ReviewDecision>,
     catalog: waygate_catalog::ResolvedTool,
 }
 
@@ -493,8 +495,14 @@ impl UpstreamPool {
                         .ok()?,
                 };
                 // Keep only live tools, and only reads taken within one
-                // generation.
+                // generation. A quarantined review is read fresh each time:
+                // whether an operator has kept it blocked selects the refusal
+                // reason but does not advance the generation.
                 if matches!(reads.catalog, waygate_catalog::ResolvedTool::Live(_))
+                    && reads
+                        .review
+                        .as_ref()
+                        .is_none_or(|review| !review.quarantined)
                     && catalog.discovery_generation().await.ok().flatten() == Some(generation)
                 {
                     self.admission_reads
@@ -505,11 +513,11 @@ impl UpstreamPool {
                 reads
             }
         };
-        let review_allows = self
-            .review_allows_with(server, tool, advertised, mode, reads.review)
+        let review = self
+            .review_admission_with(server, tool, advertised, mode, reads.review)
             .await;
         Some(DiscoveryReads {
-            review_allows,
+            review,
             catalog: Some(Ok(reads.catalog)),
             transition,
         })
@@ -567,10 +575,10 @@ impl UpstreamPool {
         } else {
             crate::ClassificationMode::Manifest
         };
-        let review_allows = match reads.as_ref() {
-            Some(reads) => reads.review_allows,
+        let review = match reads.as_ref() {
+            Some(reads) => reads.review,
             None => {
-                self.review_allows(
+                self.review_admission(
                     server,
                     tool_name,
                     published.advertised_definition.as_ref(),
@@ -579,11 +587,8 @@ impl UpstreamPool {
                 .await
             }
         };
-        if !review_allows {
-            return ResolvedInvocationTool::Quarantined {
-                server: server.to_owned(),
-                tool: tool_name.to_owned(),
-            };
+        if let Some(refusal) = review.refusal(server, tool_name) {
+            return refusal;
         }
         // A reload publishes manifest fields and reconciles the governed
         // catalog in separate commits. The reload generation is armed before
@@ -598,12 +603,13 @@ impl UpstreamPool {
         if catalog_transition.is_some_and(|transition| transition.pending) {
             tracing::warn!(
                 %tenant, %server, tool = %tool_name,
-                "manifest authorization inputs are awaiting catalog convergence; quarantined",
+                "manifest authorization inputs are awaiting catalog convergence; unavailable",
             );
-            return ResolvedInvocationTool::Quarantined {
-                server: server.to_owned(),
-                tool: tool_name.to_owned(),
-            };
+            return ResolvedInvocationTool::unavailable(
+                server,
+                tool_name,
+                TemporaryUnavailability::CatalogConverging,
+            );
         }
         // Annotation mode requires the COMPLETE published contract. An
         // admitted live descriptor always publishes at least its input
@@ -625,10 +631,11 @@ impl UpstreamPool {
                 "published contract is not the approved behavior generation; \
                  refusing until the published inventory converges",
             );
-            return ResolvedInvocationTool::Quarantined {
-                server: server.to_owned(),
-                tool: tool_name.to_owned(),
-            };
+            return ResolvedInvocationTool::unavailable(
+                server,
+                tool_name,
+                TemporaryUnavailability::CatalogConverging,
+            );
         }
         if annotation_mode && published.input_schema.is_none() {
             tracing::warn!(
@@ -636,10 +643,11 @@ impl UpstreamPool {
                 "annotation mode has no published contract for an admitted tool; \
                  refusing until the published inventory converges with the manifest",
             );
-            return ResolvedInvocationTool::Quarantined {
-                server: server.to_owned(),
-                tool: tool_name.to_owned(),
-            };
+            return ResolvedInvocationTool::unavailable(
+                server,
+                tool_name,
+                TemporaryUnavailability::CatalogConverging,
+            );
         }
         // Annotation-mode policy facts now DERIVE from the reviewed claims
         // instead of the bridge's conservative always-side-effecting
@@ -656,12 +664,13 @@ impl UpstreamPool {
                     tracing::warn!(
                         %tenant, %server, tool = %tool_name,
                         error_class = %error,
-                        "admitted annotation metadata could not produce policy facts; quarantined",
+                        "admitted annotation metadata could not produce policy facts; refused",
                     );
-                    return ResolvedInvocationTool::Quarantined {
-                        server: server.to_owned(),
-                        tool: tool_name.to_owned(),
-                    };
+                    return ResolvedInvocationTool::refused(
+                        server,
+                        tool_name,
+                        ToolRefusal::NotAdmitted,
+                    );
                 }
             }
         } else {
@@ -729,12 +738,13 @@ impl UpstreamPool {
         {
             tracing::warn!(
                 %tenant, %server, tool = %tool_name,
-                "manifest/catalog generation changed during resolution; quarantined",
+                "manifest/catalog generation changed during resolution; unavailable",
             );
-            return ResolvedInvocationTool::Quarantined {
-                server: server.to_owned(),
-                tool: tool_name.to_owned(),
-            };
+            return ResolvedInvocationTool::unavailable(
+                server,
+                tool_name,
+                TemporaryUnavailability::CatalogConverging,
+            );
         }
         match resolved {
             Ok(waygate_catalog::ResolvedTool::Live(def)) => {
@@ -755,10 +765,11 @@ impl UpstreamPool {
                         live_annotation_mode = annotation_mode,
                         "catalog row and live manifest disagree on classification mode;                          refusing until both authorities activate the same generation",
                     );
-                    return ResolvedInvocationTool::Quarantined {
-                        server: server.to_owned(),
-                        tool: tool_name.to_owned(),
-                    };
+                    return ResolvedInvocationTool::unavailable(
+                        server,
+                        tool_name,
+                        TemporaryUnavailability::CatalogConverging,
+                    );
                 }
                 // Annotation mode: the catalog row's `schema_hash` IS the
                 // reviewed behavior hash recorded at import, and the catalog
@@ -783,10 +794,11 @@ impl UpstreamPool {
                          generation; refusing until both authorities activate the same \
                          contract generation",
                     );
-                    return ResolvedInvocationTool::Quarantined {
-                        server: server.to_owned(),
-                        tool: tool_name.to_owned(),
-                    };
+                    return ResolvedInvocationTool::unavailable(
+                        server,
+                        tool_name,
+                        TemporaryUnavailability::CatalogConverging,
+                    );
                 }
                 // Legacy manifest rows carry the hash of the source manifest
                 // tuple that produced the catalog version. Compare that
@@ -808,10 +820,11 @@ impl UpstreamPool {
                         "catalog row was produced from a different manifest generation; \
                          refusing until this replica and the shared catalog converge",
                     );
-                    return ResolvedInvocationTool::Quarantined {
-                        server: server.to_owned(),
-                        tool: tool_name.to_owned(),
-                    };
+                    return ResolvedInvocationTool::unavailable(
+                        server,
+                        tool_name,
+                        TemporaryUnavailability::CatalogConverging,
+                    );
                 }
                 let definition = published.definition.take();
                 let input_schema = if annotation_mode {
@@ -894,16 +907,21 @@ impl UpstreamPool {
                         ),
                 )
             }
-            Ok(waygate_catalog::ResolvedTool::Quarantined { .. }) => {
+            Ok(waygate_catalog::ResolvedTool::Quarantined { retired, .. }) => {
                 tracing::info!(
-                    %tenant, %server, tool = %tool_name,
+                    %tenant, %server, tool = %tool_name, retired,
                     "catalog server is quarantined/retired; refusing dispatch \
                      (no manifest fallback)",
                 );
-                ResolvedInvocationTool::Quarantined {
-                    server: server.to_owned(),
-                    tool: tool_name.to_owned(),
-                }
+                ResolvedInvocationTool::refused(
+                    server,
+                    tool_name,
+                    if retired {
+                        ToolRefusal::ServerRetired
+                    } else {
+                        ToolRefusal::ServerQuarantined
+                    },
+                )
             }
             Ok(waygate_catalog::ResolvedTool::PendingApproval { .. }) => {
                 if self.catalog_strict_pending_approval {
@@ -914,10 +932,11 @@ impl UpstreamPool {
                         %tenant, %server, tool = %tool_name,
                         "catalog returned PendingApproval and strict mode is on; refusing dispatch",
                     );
-                    return ResolvedInvocationTool::Quarantined {
-                        server: server.to_owned(),
-                        tool: tool_name.to_owned(),
-                    };
+                    return ResolvedInvocationTool::refused(
+                        server,
+                        tool_name,
+                        ToolRefusal::ApprovalPending,
+                    );
                 }
                 tracing::warn!(
                     %tenant, %server, tool = %tool_name,
@@ -932,10 +951,11 @@ impl UpstreamPool {
                         %tenant, %server, tool = %tool_name,
                         "tool is absent from the authoritative governed catalog; refusing dispatch",
                     );
-                    return ResolvedInvocationTool::Quarantined {
-                        server: server.to_owned(),
-                        tool: tool_name.to_owned(),
-                    };
+                    return ResolvedInvocationTool::refused(
+                        server,
+                        tool_name,
+                        ToolRefusal::NotInCatalog,
+                    );
                 }
                 tracing::warn!(
                     %tenant, %server, tool = %tool_name,
@@ -952,10 +972,11 @@ impl UpstreamPool {
                         %tenant, %server, tool = %tool_name, error = %e,
                         "authoritative governed catalog lookup failed; refusing dispatch",
                     );
-                    return ResolvedInvocationTool::Unavailable {
-                        server: server.to_owned(),
-                        tool: tool_name.to_owned(),
-                    };
+                    return ResolvedInvocationTool::unavailable(
+                        server,
+                        tool_name,
+                        TemporaryUnavailability::CatalogUnavailable,
+                    );
                 }
                 tracing::warn!(
                     %tenant, %server, tool = %tool_name, error = %e,
@@ -1008,8 +1029,9 @@ impl UpstreamPool {
             .await
         {
             ResolvedInvocationTool::Ready(snapshot) => snapshot.contract_identity() == *admitted,
-            ResolvedInvocationTool::Quarantined { .. }
-            | ResolvedInvocationTool::Unavailable { .. } => false,
+            ResolvedInvocationTool::Refused { .. } | ResolvedInvocationTool::Unavailable { .. } => {
+                false
+            }
         }
     }
 }

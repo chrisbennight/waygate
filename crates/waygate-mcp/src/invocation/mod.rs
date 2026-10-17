@@ -980,10 +980,14 @@ impl DefaultInvocationService {
     /// the adapter boundary (the `<server>.<tool>` split is done in
     /// `GatewayServer::dispatch_tool_call` before `InvocationRequest` is
     /// constructed) so the stage's job is to populate `ctx.tool_snapshot`
-    /// from the catalog with manifest fallback. Catalog quarantine is enforced
-    /// here; the actual upstream "tool not found" response still happens
-    /// inside `call_tool` at dispatch time and surfaces as
-    /// `InvocationError::Upstream`.
+    /// from the catalog with manifest fallback. Every refusal and temporary
+    /// condition the catalog reports is enforced here, before any later
+    /// stage; `catalog_resolution` maps them to caller errors. That includes
+    /// a name the server's manifest does not classify and, in annotation
+    /// mode, one no connected session advertises. A classified name the
+    /// upstream no longer serves, or, without an authoritative catalog, a
+    /// name on a server the pool does not know, reaches dispatch and the
+    /// upstream call rejects it there.
     async fn resolve_tool(&self, ctx: &mut InvocationContext<'_>) -> Result<(), InvocationError> {
         // Consult the governed catalog (tenant-aware)
         // with manifest fallback. Anonymous calls (no principal, e.g.
@@ -1038,30 +1042,20 @@ impl DefaultInvocationService {
                 }
                 ctx.admit_snapshot(snapshot)
             }
-            // The catalog has administratively quarantined (or
-            // retired) the owning server. Refuse before dispatch —
-            // this is the enforcement half of the quarantine admin
-            // endpoint. Modeled as `Forbidden` (no policy IDs: the
-            // block comes from catalog status, not a Cedar rule).
-            ResolvedInvocationTool::Quarantined { server, tool } => {
-                tracing::info!(%server, %tool, "refusing call: server quarantined in catalog");
-                self.audit
-                    .record_chained_best_effort(
-                        ctx.audit_event("CallTool", AuditOutcome::Denied)
-                            .with_principal(ctx.principal)
-                            .with_tool(&server, &tool)
-                            .with_reason("server quarantined in catalog"),
-                    )
-                    .await;
-                Err(InvocationError::Forbidden {
-                    reason: "server quarantined".into(),
-                    policy_ids: Vec::new(),
-                    reasons: Vec::new(),
-                })
-            }
-            ResolvedInvocationTool::Unavailable { server, tool } => {
-                Err(self.catalog_unavailable_error(ctx, &server, &tool).await)
-            }
+            // Refuse before dispatch. This is also the enforcement half of
+            // the server quarantine admin endpoint.
+            ResolvedInvocationTool::Refused {
+                server,
+                tool,
+                reason,
+            } => Err(self.refusal_error(ctx, &server, &tool, reason).await),
+            ResolvedInvocationTool::Unavailable {
+                server,
+                tool,
+                reason,
+            } => Err(self
+                .catalog_unavailable_error(ctx, &server, &tool, reason)
+                .await),
         }
     }
 
@@ -1336,6 +1330,7 @@ impl DefaultInvocationService {
                     reason,
                     policy_ids,
                     reasons,
+                    trace_id: None,
                 })
             }
             AuthzVerdict::StepUpRequired {
@@ -2083,13 +2078,16 @@ impl DefaultInvocationService {
                     .await;
             }
             // `Forbidden` and `StepUpRequired` are emitted by the
-            // `authorize` stage itself — emitting a second row here
-            // would double-count denials in the activity feed. The
-            // explicit no-op arms are load-bearing: if a future change
-            // moves the deny-emit out of `authorize`, the matching arm
-            // here must move with it (or the deny row will go missing).
+            // `authorize` stage itself, and a catalog refusal
+            // (`ToolUnavailable`, or `Forbidden` for a blocked server) by
+            // `resolve_tool` — emitting a second row here would
+            // double-count denials in the activity feed. The explicit
+            // no-op arms are load-bearing: if a future change moves a
+            // deny-emit out of its stage, the matching arm here must move
+            // with it (or the deny row will go missing).
             Err(InvocationError::Forbidden { .. })
-            | Err(InvocationError::StepUpRequired { .. }) => {}
+            | Err(InvocationError::StepUpRequired { .. })
+            | Err(InvocationError::ToolUnavailable { .. }) => {}
             // Input validation owns its refusal row because it returns before
             // the final outcome stage. `AuditUnavailable` is emitted by
             // `record_pre_call` after

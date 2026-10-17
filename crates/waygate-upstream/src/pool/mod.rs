@@ -43,7 +43,7 @@ use waygate_mcp::authz::ToolFacts;
 use waygate_mcp::catalog::{
     AdmittedResourceReadError, CallToolResultProcessing, InvocationContractIdentity,
     InvocationToolSnapshot, ResolvedInvocationTool, ResourceClaim, ResourceReadAdmission,
-    ResourceRoutingSnapshot, ToolCallMrtr, UpstreamCatalog,
+    ResourceRoutingSnapshot, TemporaryUnavailability, ToolCallMrtr, ToolRefusal, UpstreamCatalog,
 };
 use waygate_mcp::files::{
     AuthorizeDownloadParams, AuthorizeDownloadResult, AuthorizeUploadParams, AuthorizeUploadResult,
@@ -483,7 +483,7 @@ pub struct UpstreamPool {
     /// When an observed-drift event fires for a tool that meets
     /// this threshold (by risk tier OR `side_effects`), the tool is added to the
     /// per-entry quarantine set and subsequent `resolve_invocation_tool`
-    /// returns `ResolvedInvocationTool::Quarantined`. `Off` (default) leaves
+    /// refuses it as `ToolRefusal::DriftQuarantined`. `Off` (default) leaves
     /// drift recorded but never auto-blocking.
     /// Read at construction from `GATEWAY_QUARANTINE_ON_DRIFT_RISK`.
     quarantine_threshold: QuarantineThreshold,
@@ -492,7 +492,7 @@ pub struct UpstreamPool {
     /// triggers the transitional manifest fallback — operators get a
     /// WARN but calls proceed against the manifest-classified facts.
     /// When `true`, `PendingApproval` is treated as a hard refusal
-    /// (returns `ResolvedInvocationTool::Quarantined`) — the right behavior
+    /// (`ToolRefusal::ApprovalPending`) — the right behavior
     /// once the catalog is reliably populated and an un-approved
     /// schema means "do not dispatch." Read at construction from
     /// `GATEWAY_CATALOG_STRICT_PENDING_APPROVAL`. Transitional catalog
@@ -980,8 +980,8 @@ impl UpstreamPool {
     }
 
     /// Opt into strict mode for catalog `PendingApproval`.
-    /// When enabled, `resolve_invocation_tool` returns
-    /// `ResolvedInvocationTool::Quarantined` on a `PendingApproval` instead of
+    /// When enabled, `resolve_invocation_tool` refuses a `PendingApproval`
+    /// tool as `ToolRefusal::ApprovalPending` instead of
     /// falling back to the manifest classification (the transitional
     /// behavior, kept for `false`). Tests use this to exercise the
     /// strict-mode branch without setting the
@@ -1466,16 +1466,18 @@ impl UpstreamCatalog for UpstreamPool {
     /// When a `CatalogStore` is wired, consult
     /// `resolve_tool(tenant, "server.tool")` first:
     /// - `Live` → retain the catalog identity, admitted schemas, and classification.
-    /// - `Quarantined` → return `ResolvedInvocationTool::Quarantined`, an
-    ///   authoritative block. The caller refuses dispatch / hides the
-    ///   tool and does **not** fall back to the manifest — otherwise an
-    ///   operator's quarantine would have no effect on a
-    ///   manifest-backed upstream.
+    /// - `Quarantined` → refuse as `ToolRefusal::ServerQuarantined` or
+    ///   `ServerRetired`, an authoritative block. The caller refuses
+    ///   dispatch / hides the tool and does **not** fall back to the
+    ///   manifest — otherwise an operator's quarantine would have no effect
+    ///   on a manifest-backed upstream.
     /// - `PendingApproval` follows the configured strict-mode contract.
     /// - `NotFound` / DB error fall back only for a transitional catalog
-    ///   attachment. An authoritative attachment refuses them because boot
-    ///   already reconciled the exact serving set and absence or unreadability
-    ///   cannot safely be distinguished from withdrawal.
+    ///   attachment. An authoritative attachment refuses a miss as
+    ///   `ToolRefusal::NotInCatalog` and reports a read failure as
+    ///   `TemporaryUnavailability::CatalogUnavailable`, because boot already
+    ///   reconciled the exact serving set and a miss cannot safely be
+    ///   distinguished from withdrawal.
     ///
     /// When no `CatalogStore` is wired, this is just `tool_facts`.
     async fn resolve_invocation_tool(
@@ -1502,20 +1504,19 @@ impl UpstreamCatalog for UpstreamPool {
                     %tenant, %server, tool = %tool_name,
                     "tool is in-process quarantined (drift-triggered); refusing dispatch",
                 );
-                return ResolvedInvocationTool::Quarantined {
-                    server: server.to_owned(),
-                    tool: tool_name.to_owned(),
-                };
+                return ResolvedInvocationTool::refused(
+                    server,
+                    tool_name,
+                    ToolRefusal::DriftQuarantined,
+                );
             }
-            if !admission::entry_tool_is_admitted(entry, manifest, tool_name).await {
+            let admission = admission::entry_tool_admission(entry, manifest, tool_name).await;
+            if let Some(refusal) = admission.refusal(server, tool_name) {
                 tracing::info!(
-                    %tenant, %server, tool = %tool_name,
+                    %tenant, %server, tool = %tool_name, ?admission,
                     "tool is not admitted by the current classification mode and behavior hash",
                 );
-                return ResolvedInvocationTool::Quarantined {
-                    server: server.to_owned(),
-                    tool: tool_name.to_owned(),
-                };
+                return refusal;
             }
         }
         let published =
@@ -1585,7 +1586,10 @@ impl UpstreamPool {
         // would silently apply to upstream tools the operator never audited.
         // Runs before the breaker so a flood of calls to a typo'd tool name
         // can't drain the failure budget on a healthy upstream.
-        if !admission::entry_tool_is_admitted(&entry, &entry.manifest_snapshot(), tool_name).await {
+        if !admission::entry_tool_admission(&entry, &entry.manifest_snapshot(), tool_name)
+            .await
+            .is_admitted()
+        {
             return Err(McpError::invalid_params(
                 format!("upstream `{server}` has no admitted tool `{tool_name}`"),
                 None,

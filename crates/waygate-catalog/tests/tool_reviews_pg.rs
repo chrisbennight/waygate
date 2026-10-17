@@ -1,6 +1,9 @@
 use serde_json::json;
 use uuid::Uuid;
-use waygate_catalog::{tool_reviews::PgCatalogStore, ImportServer, ImportTool, ManifestImporter};
+use waygate_catalog::{
+    tool_reviews::{PgCatalogStore, ReviewDecision},
+    ImportServer, ImportTool, ManifestImporter,
+};
 
 #[tokio::test]
 async fn pending_review_pages_honor_counts_offsets_and_tenant_scope() {
@@ -443,6 +446,18 @@ async fn initial_mismatch_and_keep_blocked_are_durable_exact_decisions() {
         kept.generation, first.generation,
         "repeated observation preserves the recorded decision"
     );
+    assert_eq!(
+        store
+            .review_state(&tenant, "docs", "search-00")
+            .await
+            .unwrap(),
+        Some(ReviewDecision {
+            observed_hash: "b".into(),
+            quarantined: true,
+            kept_blocked: true,
+        }),
+        "admission distinguishes a kept-blocked contract from one awaiting review"
+    );
     store
         .observe_against_approval(
             &tenant,
@@ -461,6 +476,15 @@ async fn initial_mismatch_and_keep_blocked_are_durable_exact_decisions() {
         .unwrap()
         .unwrap();
     assert!(newer.quarantined && newer.decided_at.is_none());
+    assert!(
+        !store
+            .review_state(&tenant, "docs", "search-00")
+            .await
+            .unwrap()
+            .expect("recorded review")
+            .kept_blocked,
+        "a changed contract reopens review"
+    );
     assert!(!store.reject(&first, "operator").await.unwrap());
     assert!(!store.approve(&first, "operator").await.unwrap());
     assert!(store.approve(&newer, "operator").await.unwrap());
@@ -1010,5 +1034,12 @@ async fn an_unchanged_contract_is_admitted_without_waiting_while_a_change_still_
     assert!(after_change.quarantined && after_change.observed_hash == "b");
     assert!(after_change.generation > seeded.generation);
     assert!(reobserved.unwrap());
-    assert_eq!(after_reobservation, Some(("a".into(), true)));
+    assert_eq!(
+        after_reobservation,
+        Some(ReviewDecision {
+            observed_hash: "a".into(),
+            quarantined: true,
+            kept_blocked: false,
+        })
+    );
 }

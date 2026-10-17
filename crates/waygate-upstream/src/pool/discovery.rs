@@ -30,11 +30,10 @@ impl UpstreamPool {
                 .or_insert(classification);
         }
         let wanted: HashSet<&str> = names.iter().map(String::as_str).collect();
-        let mut admitted: HashSet<&str> = wanted
-            .iter()
-            .copied()
-            .filter(|name| classifications.contains_key(name))
-            .collect();
+        let annotation_mode =
+            manifest.classification_mode == crate::ClassificationMode::McpAnnotations;
+        let mut tallies: HashMap<&str, admission::LaneTally> = HashMap::new();
+        let mut listed: HashSet<&str> = HashSet::new();
         let mut published: HashMap<String, PublishedToolContract> = HashMap::new();
         let mut connected = false;
         for slot in &entry.slots {
@@ -46,11 +45,12 @@ impl UpstreamPool {
             let mut advertised = HashMap::new();
             let mut lane_admission = HashMap::new();
             for tool in &connection.live_tools {
-                if !wanted.contains(tool.name.as_ref()) {
+                let Some(&name) = wanted.get(tool.name.as_ref()) else {
                     continue;
-                }
+                };
                 advertised.entry(tool.name.as_ref()).or_insert(tool);
-                if manifest.classification_mode == crate::ClassificationMode::McpAnnotations {
+                listed.insert(name);
+                if annotation_mode {
                     let allowed = admission::tool_is_admitted(
                         classifications.get(tool.name.as_ref()).copied(),
                         manifest.classification_mode,
@@ -62,8 +62,13 @@ impl UpstreamPool {
                         .or_insert(allowed);
                 }
             }
-            if manifest.classification_mode == crate::ClassificationMode::McpAnnotations {
-                admitted.retain(|name| lane_admission.get(name) == Some(&true));
+            if annotation_mode {
+                for name in &wanted {
+                    tallies
+                        .entry(name)
+                        .or_default()
+                        .record_lane(lane_admission.get(name).copied());
+                }
             }
             for tool in &connection.tools {
                 if !wanted.contains(tool.name.as_ref())
@@ -82,16 +87,48 @@ impl UpstreamPool {
                 published.insert(tool.name.to_string(), contract);
             }
         }
-        if !connected {
-            admitted.clear();
-        }
-        if self.tool_reviews.is_none() {
-            let quarantined = entry
-                .quarantined
-                .read()
-                .expect("upstream quarantine lock poisoned");
-            admitted.retain(|name| !quarantined.contains(*name));
-        }
+        // The same rules as single-name admission, decided for every name
+        // in the batch; discovery serves nothing from a server with no
+        // connected session.
+        let admissions: HashMap<&str, admission::Admission> = {
+            let drift_quarantined = self.tool_reviews.is_none().then(|| {
+                entry
+                    .quarantined
+                    .read()
+                    .expect("upstream quarantine lock poisoned")
+            });
+            wanted
+                .iter()
+                .map(|&name| {
+                    let classified = classifications.contains_key(name);
+                    let admission = if !connected {
+                        admission::Admission::Unavailable(TemporaryUnavailability::NoConnectedLane)
+                    } else if annotation_mode {
+                        tallies
+                            .get(name)
+                            .copied()
+                            .unwrap_or_default()
+                            .annotation_admission(classified)
+                    } else if classified {
+                        admission::Admission::Admitted
+                    } else if listed.contains(name) {
+                        admission::Admission::Refused(ToolRefusal::Unclassified)
+                    } else {
+                        admission::Admission::Refused(ToolRefusal::NotInCatalog)
+                    };
+                    let admission = if admission.is_admitted()
+                        && drift_quarantined
+                            .as_ref()
+                            .is_some_and(|quarantined| quarantined.contains(name))
+                    {
+                        admission::Admission::Refused(ToolRefusal::DriftQuarantined)
+                    } else {
+                        admission
+                    };
+                    (name, admission)
+                })
+                .collect()
+        };
         let mut out = Vec::with_capacity(names.len());
         for chunk in names.chunks(waygate_catalog::TOOL_RESOLUTION_BATCH_SIZE) {
             let transitions: Vec<_> = chunk
@@ -129,11 +166,16 @@ impl UpstreamPool {
                 None => chunk.iter().map(|_| None).collect(),
             };
             for ((name, catalog), transition) in chunk.iter().zip(resolved).zip(transitions) {
-                if !admitted.contains(name.as_str()) || entry.removed.load(Ordering::Acquire) {
-                    out.push(ResolvedInvocationTool::Quarantined {
-                        server: server.to_owned(),
-                        tool: name.clone(),
-                    });
+                if entry.removed.load(Ordering::Acquire) {
+                    out.push(ResolvedInvocationTool::refused(
+                        server,
+                        name,
+                        ToolRefusal::NotInCatalog,
+                    ));
+                    continue;
+                }
+                if let Some(refusal) = admissions[name.as_str()].refusal(server, name) {
+                    out.push(refusal);
                     continue;
                 }
                 let classification = classifications.get(name.as_str()).copied();
@@ -146,8 +188,8 @@ impl UpstreamPool {
                                 == crate::ClassificationMode::McpAnnotations,
                     )
                 });
-                let review_allows = self
-                    .review_allows_from_state(
+                let review = self
+                    .review_admission_from_state(
                         server,
                         name,
                         contract.advertised_definition.as_ref(),
@@ -170,7 +212,7 @@ impl UpstreamPool {
                         name,
                         inputs,
                         Some(DiscoveryReads {
-                            review_allows,
+                            review,
                             catalog,
                             transition,
                         }),

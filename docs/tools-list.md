@@ -13,6 +13,9 @@ Authorization and runtime admission are re-evaluated on every list and every
 call. API-key profiles, Cedar policy, schema admission, and quarantine all
 filter the list; a declaration a client still holds never grants access,
 because every call is resolved, authorized, and admitted again at invocation.
+A call to a name the gateway does not hold, or withholds from the caller,
+returns the INVALID_PARAMS `tool_unavailable` error; refresh the list rather
+than retrying the call.
 
 For search across a large catalog, use the gateway's own discovery tools,
 `gateway-discovery.search` and `gateway-discovery.inspect` (see

@@ -1279,6 +1279,9 @@ fn invocation_error_response(e: InvocationError) -> Response {
         | InvocationError::ResponseInspectionBlocked { .. } => {
             error_response(StatusCode::FORBIDDEN, "permission_error", &e.to_string())
         }
+        InvocationError::ToolUnavailable { .. } => {
+            error_response(StatusCode::NOT_FOUND, "not_found_error", &e.to_string())
+        }
         InvocationError::RateLimited { .. } => error_response(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limit_error",
