@@ -837,12 +837,10 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
     vec![
         Tool::new(
             format!("{NAMESPACE}.query_audit"),
-            "Query the gateway's audit log for recent activity — who called which tool when, the \
-             outcome (success / denied / step_up_required / execution_error), and on a denial the \
-             policy IDs and reason. Filters: `server`, `outcome`, `category`, `risk`, `principal` \
-             (substring of sub/email), `since` (relative window, default 24h). Tenant-scoped to \
-             you. Returns compact rows, newest first. Reads have a 20-second total budget; \
-             errors distinguish timeout, database cancellation, and connection unavailability.",
+            "Read tenant-scoped audit events, newest IDs first, with actors, outcomes and denial \
+             details. Filter by server, outcome, category, risk, principal (literal subject/email \
+             substring), or since (relative window; default 24h). Reads have a 20-second total \
+             budget; errors distinguish timeout, database cancellation and connection unavailability.",
             query_audit_schema(),
         )
         .with_title("Query the audit log")
