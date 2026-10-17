@@ -28,6 +28,22 @@ Positive explicit counts are honored. Responses report the requested count and
 the applied SQL limit; counts beyond the database integer range saturate to that
 range. Tenant scope, filters, and audit retention still determine available rows.
 
+`query_audit` has a 20-second total read budget, including waiting for a database
+connection. A principal filter remains a literal, case-sensitive substring of
+the subject or email. Principal searches collect matches within the requested
+tenant and time window before selecting the newest IDs, avoiding a full-history
+ID scan when the principal has fewer matches than the requested count.
+
+An unsuccessful read returns an MCP error with an `error` field in its data:
+`audit_query_timeout` for an exhausted total budget, `audit_query_cancelled`
+for database cancellation (including the statement time limit),
+`audit_query_unavailable` for connection-pool exhaustion or closure, and
+`audit_query_failed` for other database failures. Timeout errors return no
+partial results. Try a shorter window after a timeout or cancellation; retry
+later after a connection failure. The gateway logs the failure category and
+elapsed time without query arguments. PostgreSQL enforces a transaction-local
+statement timeout, and interrupted connections are retired from the pool.
+
 ## Inspect rejected output schemas
 
 On **Servers**, expand the **Output schemas** rejection count to see each

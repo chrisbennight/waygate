@@ -41,6 +41,16 @@ use waygate_telemetry::metrics::{
 mod category_feed_tests;
 
 mod notable_feed;
+mod query_events;
+
+/// Failures of a read with a caller-supplied total execution budget.
+#[derive(Debug, Error)]
+pub enum AuditReadError {
+    #[error("audit query exceeded its execution budget")]
+    DeadlineExceeded,
+    #[error("audit query database failure: {0}")]
+    Database(#[from] sqlx::Error),
+}
 
 #[cfg(test)]
 static VERIFY_MARKER_ROWS_LOADED: std::sync::atomic::AtomicUsize =
@@ -1334,6 +1344,22 @@ pub trait AuditReader: Send + Sync + 'static {
         after_id: Option<Uuid>,
     ) -> Result<Vec<AuditRow>, sqlx::Error>;
 
+    /// Query rows within a total budget, including connection acquisition.
+    /// PostgreSQL also sets a transaction-local statement timeout and retires
+    /// interrupted connections; other readers must be safe to cancel on drop.
+    async fn query_events_bounded(
+        &self,
+        query: &AuditQuery,
+        limit: i64,
+        after_id: Option<Uuid>,
+        budget: Duration,
+    ) -> Result<Vec<AuditRow>, AuditReadError> {
+        tokio::time::timeout(budget, self.query_events(query, limit, after_id))
+            .await
+            .map_err(|_| AuditReadError::DeadlineExceeded)?
+            .map_err(Into::into)
+    }
+
     /// Recent non-success events for one tenant, excluding `pre_call` rows.
     /// Apply the inclusive `since` bound and order by event timestamp descending,
     /// then ID descending for ties, before taking `limit` (clamped to 1..=500).
@@ -1626,77 +1652,17 @@ impl AuditReader for PgAuditSink {
         limit: i64,
         after_id: Option<Uuid>,
     ) -> Result<Vec<AuditRow>, sqlx::Error> {
-        let limit = limit.max(1);
-        // One static query using the `($N IS NULL OR <pred>)` idiom (same
-        // house style as `verify_chain`'s ts filter): every filter is a
-        // bound `Option`, so a `None` dimension drops out of the WHERE
-        // without a dynamic query builder. `strpos(col, needle) > 0` is a
-        // literal, case-sensitive substring test — the exact semantics of
-        // the prior in-memory `str::contains`, with no LIKE-wildcard
-        // surprises (a NULL `principal_*` makes that arm NULL → false).
-        // `id < $9` keeps the keyset cursor composed with the filters so
-        // each page is 50 *matching* rows.
-        //
-        // The category predicate is the *sargable* spelling of the old
-        // `COALESCE(category, 'invocation') = $4`: wrapping the column in
-        // COALESCE made it un-indexable, so a rare category full-scanned the
-        // table. `category = $4 OR (category IS NULL AND $4 = 'invocation')`
-        // is semantically identical (NULL counts as `invocation`) but lets the
-        // planner use `audit_log_category_ts_idx`. `$12` is the optional
-        // `outcome <> $12` predicate (non-success activity filter); served by the
-        // partial `audit_log (tenant_id, id DESC) WHERE outcome <> 'success'`.
-        sqlx::query_as::<_, AuditRow>(
-            r#"
-            SELECT id, ts, category, tenant_id, action, outcome,
-                   principal_sub, principal_email, principal_groups, issuer,
-                   server, tool, operation, risk_level, pii,
-                   policy_ids, reason, trace_id, latency_ms,
-                   scim_active, scim_groups, target,
-                   req_scopes, auth_method, req_roles, side_effects,
-                   parent_execution_id, execution_step,
-                   execution_call_id, execution_attempt
-            FROM audit_log
-            WHERE ($1::TEXT IS NULL OR server = $1)
-              AND ($2::TEXT IS NULL OR outcome = $2)
-              AND ($12::TEXT IS NULL OR outcome <> $12)
-              AND ($3::TEXT IS NULL OR risk_level = $3)
-              AND ($4::TEXT IS NULL
-                   OR category = $4
-                   OR (category IS NULL AND $4 = 'invocation'))
-              AND ($5::TEXT IS NULL
-                   OR strpos(principal_sub, $5) > 0
-                   OR strpos(principal_email, $5) > 0)
-              AND ($6::BOOLEAN IS NULL OR pii = $6)
-              AND ($7::TIMESTAMPTZ IS NULL OR ts >= $7)
-              AND ($8::TIMESTAMPTZ IS NULL OR ts <= $8)
-              AND ($9::UUID IS NULL OR id < $9)
-              AND ($11::TEXT IS NULL OR tenant_id = $11)
-              AND ($13::TEXT IS NULL OR policy_ids @> ARRAY[$13])
-              AND (cardinality($14::TEXT[]) = 0
-                   OR category = ANY($14)
-                   OR (category IS NULL AND 'invocation' = ANY($14)))
-              AND ($15::TEXT IS NULL OR reason IS DISTINCT FROM $15)
-            ORDER BY id DESC
-            LIMIT $10
-            "#,
-        )
-        .bind(query.server.as_deref())
-        .bind(query.outcome.as_deref())
-        .bind(query.risk_level.as_deref())
-        .bind(query.category.as_deref())
-        .bind(query.principal_substr.as_deref())
-        .bind(query.pii)
-        .bind(query.since)
-        .bind(query.until)
-        .bind(after_id)
-        .bind(limit)
-        .bind(query.tenant_id.as_deref())
-        .bind(query.outcome_ne.as_deref())
-        .bind(query.policy_id.as_deref())
-        .bind(query.categories.as_slice())
-        .bind(query.reason_ne.as_deref())
-        .fetch_all(&self.pool)
-        .await
+        query_events::fetch(&self.pool, query, limit, after_id, false).await
+    }
+
+    async fn query_events_bounded(
+        &self,
+        query: &AuditQuery,
+        limit: i64,
+        after_id: Option<Uuid>,
+        budget: Duration,
+    ) -> Result<Vec<AuditRow>, AuditReadError> {
+        query_events::fetch_bounded(&self.pool, query, limit, after_id, budget).await
     }
 
     async fn recent_by_category(
