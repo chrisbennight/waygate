@@ -129,8 +129,8 @@ JSON Schema's `maxLength` counts characters, so admission also checks byte size.
 | `GATEWAY_FILE_BUNDLE_MAX_LOCATIONS` | Eight times the file count |
 | `GATEWAY_RESOURCE_FILE_PREPARATION_SECONDS` | 30 seconds across the whole resource bundle |
 
-Control frames derive from the largest admitted output or request plus an
-allowance for metadata. Start frames account for worst-case source JSON escaping,
+Control frames derive from the largest admitted output or request, counting
+console output at its worst-case escaped size, plus an allowance for metadata. Start frames account for worst-case source JSON escaping,
 program input, checkpoint, resume input, and metadata, regardless of which input
 fields happen to be present. The MCP HTTP body allowance uses the same derived
 start-frame budget so source and input fit before Code Mode admission. Clients
