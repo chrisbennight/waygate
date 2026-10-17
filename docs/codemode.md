@@ -494,8 +494,8 @@ turns base64 file content into text. `crypto` provides `randomUUID()` and
 from the operating system's secure random source; `crypto.subtle` is absent.
 `structuredClone` copies the standard cloneable types, keeps shared references
 and cycles, supports the `transfer` option for `ArrayBuffer`s, and throws a
-`DataCloneError` `DOMException` for functions, symbols, promises, and weak
-collections. A cloned class instance becomes a plain object without its
+`DataCloneError` `DOMException` for functions, symbols, proxies, promises, weak
+collections, generators, iterators, and `SharedArrayBuffer`s. A cloned class instance becomes a plain object without its
 prototype's methods, as the standard requires.
 
 `URL` and `URLSearchParams` follow the URL Standard. `new URL(input, base)`

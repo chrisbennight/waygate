@@ -355,9 +355,11 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
   const utf8Decode = __gateway_utf8_decode;
   const utf8Encode = __gateway_utf8_encode;
   const randomBytes = __gateway_random_bytes;
+  const objectClass = __gateway_object_class;
   delete globalThis.__gateway_utf8_decode;
   delete globalThis.__gateway_utf8_encode;
   delete globalThis.__gateway_random_bytes;
+  delete globalThis.__gateway_object_class;
   const define = (name, value) => Object.defineProperty(globalThis, name, {
     value,
     writable: true,
@@ -510,6 +512,10 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
       if (typeof input === "function") throw uncloneable(`The function ${input.name || "(anonymous)"}`);
       if (typeof input !== "object" || input === null) return input;
       if (memory.has(input)) return memory.get(input);
+      // A proxy's target cannot be cloned through it, and the engine is the
+      // only reliable judge of what is a proxy.
+      const kind = objectClass(input);
+      if (kind === "proxy") throw uncloneable("A Proxy");
       const remember = (output) => {
         memory.set(input, output);
         return output;
@@ -535,7 +541,8 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
         if (input.detached) throw uncloneable("A detached ArrayBuffer");
         return remember(input.slice(0));
       }
-      if (input instanceof SharedArrayBuffer) return remember(input);
+      // Sharing memory needs a second agent, which this runtime never has.
+      if (input instanceof SharedArrayBuffer) throw uncloneable("A SharedArrayBuffer");
       if (input instanceof DataView) {
         return remember(new DataView(copy(input.buffer), input.byteOffset, input.byteLength));
       }
@@ -558,12 +565,10 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
         }
         return output;
       }
-      if (
-        input instanceof Promise || input instanceof WeakMap || input instanceof WeakSet ||
-        input instanceof WeakRef || input instanceof FinalizationRegistry || input instanceof Symbol
-      ) {
-        throw uncloneable(Object.prototype.toString.call(input));
-      }
+      // Anything left that carries engine state beyond its properties, such as
+      // a promise, a weak collection, a generator or an iterator, is not an
+      // ordinary object and cannot be cloned.
+      if (kind !== "ordinary") throw uncloneable(Object.prototype.toString.call(input));
       const output = remember({});
       for (const key of Object.keys(input)) assign(output, key, copy(input[key]));
       return output;
@@ -2184,6 +2189,8 @@ fn install_standard_helpers(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     ctx.globals()
         .set("__gateway_random_bytes", Func::from(random_bytes))?;
     ctx.globals()
+        .set("__gateway_object_class", Func::from(object_class))?;
+    ctx.globals()
         .set("__gateway_url_parse", Func::from(url_parse))?;
     ctx.globals()
         .set("__gateway_url_components", Func::from(url_components))?;
@@ -2193,6 +2200,35 @@ fn install_standard_helpers(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         .set("__gateway_form_parse", Func::from(form_parse))?;
     ctx.globals()
         .set("__gateway_form_serialize", Func::from(form_serialize))
+}
+
+/// How the engine represents a value, for `structuredClone`: `"proxy"`, an
+/// `"ordinary"` object whose only state is its properties, or `"other"`.
+///
+/// An object is ordinary when its engine class is the class of a freshly
+/// created plain object, which avoids depending on the engine's internal class
+/// numbering.
+fn object_class<'js>(ctx: Ctx<'js>, value: rquickjs::Value<'js>) -> rquickjs::Result<&'static str> {
+    if value.is_proxy() {
+        return Ok("proxy");
+    }
+    if !value.is_object() {
+        return Ok("other");
+    }
+    let plain = rquickjs::Object::new(ctx)?;
+    // SAFETY: `JS_GetClassID` only reads the class recorded in a live value's
+    // header; both values are borrowed for the duration of the calls.
+    let (class, plain_class) = unsafe {
+        (
+            rquickjs::qjs::JS_GetClassID(value.as_raw()),
+            rquickjs::qjs::JS_GetClassID(plain.as_value().as_raw()),
+        )
+    };
+    Ok(if class == plain_class {
+        "ordinary"
+    } else {
+        "other"
+    })
 }
 
 /// Parse `input` against an optional `base` as the URL Standard does and
@@ -4160,6 +4196,11 @@ return {
   symbol: refusal(Symbol("s")),
   promise: refusal(Promise.resolve()),
   weakMap: refusal(new WeakMap()),
+  proxy: refusal(new Proxy({ x: 1 }, {})),
+  proxiedArray: refusal(new Proxy([1], {})),
+  generator: refusal((function* () { yield 1; })()),
+  iterator: refusal(new Map([[1, 2]]).entries()),
+  shared: refusal(new SharedArrayBuffer(4)),
   duplicate: refusal(null, { transfer: [moved, moved] }),
   failed,
   keptAfterFailure: kept.detached,
@@ -4173,6 +4214,11 @@ return {
                 "symbol": "DataCloneError:true",
                 "promise": "DataCloneError:true",
                 "weakMap": "DataCloneError:true",
+                "proxy": "DataCloneError:true",
+                "proxiedArray": "DataCloneError:true",
+                "generator": "DataCloneError:true",
+                "iterator": "DataCloneError:true",
+                "shared": "DataCloneError:true",
                 "duplicate": "DataCloneError:true",
                 "failed": "DataCloneError:true",
                 "keptAfterFailure": false,
