@@ -3563,6 +3563,7 @@ impl CodeModeTools {
                     // Program output: kept only for the caller, never logged.
                     console.admit(level, &text);
                 }
+                RunnerFrame::ConsoleTruncated => console.mark_truncated(),
                 RunnerFrame::Ready { .. } => return Err(runner_protocol_failure()),
             }
         };
@@ -11185,6 +11186,49 @@ mod tests {
             }
         );
         assert_eq!(output.entries[1].level, ConsoleLevel::Warn);
+    }
+
+    /// A truncation notice from the runner reaches the caller even when every
+    /// entry it sent fits the parent's budget.
+    #[tokio::test]
+    async fn broker_reports_truncation_the_runner_announces() {
+        let catalog: SharedCatalog = Arc::new(FakeCatalog::with_tools(&[]));
+        let tools = CodeModeTools::new(
+            catalog,
+            Arc::new(SelectiveAuthz),
+            Arc::new(RecordingInvocation::default()),
+        );
+        let (mut parent_stdin, _runner_parent_input) = tokio::io::duplex(4096);
+        let (mut runner_parent_output, parent_stdout) = tokio::io::duplex(4096);
+        write_runner_frames(
+            &mut runner_parent_output,
+            [
+                RunnerFrame::Console {
+                    level: ConsoleLevel::Log,
+                    text: "kept".to_owned(),
+                },
+                RunnerFrame::ConsoleTruncated,
+                RunnerFrame::Complete { result: json!(1) },
+            ],
+        )
+        .await;
+        let mut parent_stdout = BufReader::new(parent_stdout);
+        let mut console = ConsoleCapture::new(limits().console_bytes);
+
+        tools
+            .broker_runner_frames_with_console(
+                console_attempt(None),
+                &HashMap::new(),
+                &mut parent_stdin,
+                &mut parent_stdout,
+                &mut console,
+            )
+            .await
+            .expect("the program completes");
+
+        let output = console.into_output();
+        assert!(output.truncated);
+        assert_eq!(output.entries.len(), 1);
     }
 
     /// Output printed before a deadline ends the attempt is still there for
