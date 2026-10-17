@@ -94,7 +94,7 @@ pub enum ToolsCommand {
     /// Print one tool's definition, including its JSON Schemas, from
     /// `tools/list`.
     ///
-    /// For the gateway's authoritative contract and governance facts, call
+    /// For the gateway's authoritative contract, call
     /// `gateway-discovery.inspect` with `tools call`.
     Describe(DescribeArgs),
     /// Invoke a tool by its fully-qualified name.

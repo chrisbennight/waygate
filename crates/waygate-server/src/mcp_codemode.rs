@@ -41,9 +41,9 @@ use waygate_mcp::catalog::{InvocationToolSnapshot, ResolutionAuthority};
 use waygate_mcp::tool_schema::input_schema_value_has_object_root;
 use waygate_mcp::{
     rank_visible_tools, AuditEvent, AuditOutcome, AuthorizedCatalog, BuiltinCatalog,
-    BuiltinProfileScope, BuiltinRegistry, BuiltinSurfaceDescriptor, BuiltinTools,
-    CatalogAuthorization, CatalogChannel, CatalogTool, CatalogToolSource, SharedAuthz,
-    SharedBuiltinTools, SharedCatalog, SharedEvidence, ToolCatalogEpoch,
+    BuiltinProfileScope, BuiltinRegistry, BuiltinSurfaceDescriptor, BuiltinTools, CatalogChannel,
+    CatalogTool, CatalogToolSource, SharedAuthz, SharedBuiltinTools, SharedCatalog, SharedEvidence,
+    ToolCatalogEpoch,
 };
 use waygate_oidc::session::HasExp;
 use waygate_oidc::{Principal, Scope};
@@ -6156,7 +6156,6 @@ fn summary(name: &str, tool: &CatalogTool) -> ConnectorSummary {
     ConnectorSummary {
         name: name.to_owned(),
         description: waygate_mcp::compact_tool_description(tool.definition.description.as_deref()),
-        governance: Governance::from_admission(&tool.facts, Some(&tool.authorization)),
     }
 }
 
@@ -6226,8 +6225,8 @@ fn identity(snapshot: &InvocationToolSnapshot) -> SnapshotIdentity {
             operations_hash,
         },
         ResolutionAuthority::ManifestFallback {
-            approval_requirements_known,
             approved_behavior_hash,
+            ..
         } => SnapshotIdentity::ManifestFallback {
             approved_behavior_hash: approved_behavior_hash.clone(),
             input_schema_hash,
@@ -6235,7 +6234,6 @@ fn identity(snapshot: &InvocationToolSnapshot) -> SnapshotIdentity {
             tool_annotations_hash,
             action_metadata_hash,
             operations_hash,
-            approval_requirements_known: *approval_requirements_known,
         },
         ResolutionAuthority::SyntheticModel => {
             unreachable!("synthetic model identities are not admitted as MCP connectors")
@@ -6249,16 +6247,6 @@ enum Risk {
     Low,
     Medium,
     High,
-}
-
-impl From<RiskTier> for Risk {
-    fn from(risk: RiskTier) -> Self {
-        match risk {
-            RiskTier::Low => Self::Low,
-            RiskTier::Medium => Self::Medium,
-            RiskTier::High => Self::High,
-        }
-    }
 }
 
 fn validate_source(source: &str) -> Result<(), McpError> {
@@ -6842,8 +6830,6 @@ struct ConnectorSummary {
     /// contract and its snapshot identity.
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    /// Governance facts admitted with this tool snapshot.
-    governance: Governance,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -6862,8 +6848,6 @@ struct DescribeResponse {
     /// Response schema supplied by the governed catalog or upstream declaration.
     #[serde(skip_serializing_if = "Option::is_none")]
     output_schema: Option<Value>,
-    /// Governance facts admitted with this tool snapshot.
-    governance: Governance,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -7197,63 +7181,15 @@ enum SnapshotIdentity {
         /// when the tool is classified by name alone.
         #[serde(skip_serializing_if = "Option::is_none")]
         operations_hash: Option<String>,
-        approval_requirements_known: bool,
     },
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
-struct Governance {
-    /// Admitted risk tier.
-    risk: Risk,
-    /// Whether the operation can cause an external effect.
-    side_effects: bool,
-    /// Whether the operator classified the operation as handling PII.
-    pii: bool,
-    /// Whether a live per-call approval grant is required.
-    requires_approval: bool,
-    /// Whether the authority supplying `requires_approval` was available and
-    /// trustworthy when this snapshot was admitted.
-    requires_approval_known: bool,
-    /// Scope required to make the tool callable when current Code Mode policy
-    /// requires step-up authentication.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    required_step_up_scope: Option<String>,
-}
-
-impl Governance {
-    fn from_admission(
-        facts: &waygate_mcp::ToolFacts,
-        authorization: Option<&CatalogAuthorization>,
-    ) -> Self {
-        let approval_required =
-            matches!(authorization, Some(CatalogAuthorization::ApprovalRequired));
-        let required_step_up_scope = match authorization {
-            Some(CatalogAuthorization::StepUpRequired { required_scope }) => {
-                Some(required_scope.clone())
-            }
-            Some(CatalogAuthorization::Allowed | CatalogAuthorization::ApprovalRequired) | None => {
-                None
-            }
-        };
-        Self {
-            risk: Risk::from(facts.risk),
-            side_effects: facts.side_effects,
-            pii: facts.pii,
-            requires_approval: approval_required || facts.requires_approval,
-            requires_approval_known: approval_required || facts.requires_approval_known,
-            required_step_up_scope,
-        }
-    }
-}
-
-fn connector_contract_with_authorization(
+fn upstream_connector_contract(
     server: &str,
     tool_name: &str,
     snapshot: &InvocationToolSnapshot,
-    authorization: Option<&CatalogAuthorization>,
 ) -> Option<DescribeResponse> {
     let input_schema = snapshot.input_schema().cloned()?;
-    let facts = snapshot.facts();
     Some(DescribeResponse {
         contract_version: ContractVersion::V1,
         binding: ConnectorBinding {
@@ -7276,18 +7212,14 @@ fn connector_contract_with_authorization(
                     schema,
                 ))
             }),
-        governance: Governance::from_admission(facts, authorization),
     })
 }
 
 fn connector_contract_for_tool(tool: &CatalogTool) -> Option<DescribeResponse> {
     match &tool.identity.source {
-        CatalogToolSource::Upstream(server) => connector_contract_with_authorization(
-            server,
-            &tool.identity.name,
-            tool.invocation_snapshot()?,
-            Some(&tool.authorization),
-        ),
+        CatalogToolSource::Upstream(server) => {
+            upstream_connector_contract(server, &tool.identity.name, tool.invocation_snapshot()?)
+        }
         CatalogToolSource::Builtin(namespace) => Some(DescribeResponse {
             contract_version: ContractVersion::V1,
             binding: ConnectorBinding {
@@ -7303,7 +7235,6 @@ fn connector_contract_for_tool(tool: &CatalogTool) -> Option<DescribeResponse> {
                 .output_schema
                 .as_ref()
                 .map(|schema| Value::Object(schema.as_ref().clone())),
-            governance: Governance::from_admission(&tool.facts, Some(&tool.authorization)),
         }),
     }
 }
@@ -7412,7 +7343,7 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
             format!("{NAMESPACE}.search"),
             "Search the governed direct catalog across upstream and gateway-local connectors. Returns only tools this \
              caller may discover after profile restrictions, quarantine state, and Cedar \
-             decisions. Results carry governance facts; pass a result's `name` unchanged to \
+             decisions. Pass a result's `name` unchanged to \
              `codemode.describe` for the exact connector schemas and snapshot identity.",
             input_schema::<SearchParams>(),
         )
@@ -7423,8 +7354,8 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
             format!("{NAMESPACE}.describe"),
             "Describe one tool returned by `codemode.search` as a runtime-neutral, versioned \
              connector contract. Pass the `name` that search returned. \
-             Returns exact admitted input/output schemas, raw connector binding names, governance \
-             classification, and catalog or manifest snapshot identity. Denied, restricted, \
+             Returns exact admitted input/output schemas, raw connector binding names, and \
+             catalog or manifest snapshot identity. Denied, restricted, \
              quarantined, ambiguous, and unknown selectors share one unavailable error shape. \
              If you still hold a complete description, pass its document_hash as known_document_hash \
              for compact unchanged content after fresh authorization and catalog resolution; omit to refresh.",
@@ -9657,8 +9588,10 @@ mod tests {
             found.get("identity").is_none(),
             "search leaves snapshot identity to describe"
         );
-        assert_eq!(found["governance"]["side_effects"], true);
-        assert_eq!(found["governance"]["requires_approval"], true);
+        assert!(
+            found.get("governance").is_none(),
+            "search does not expose gateway governance classification"
+        );
 
         let describe = server
             .dispatch_tool_call(
@@ -9668,6 +9601,10 @@ mod tests {
             .await
             .expect("describe succeeds");
         let described = structured(&describe);
+        assert!(
+            described.get("governance").is_none(),
+            "describe does not expose gateway governance classification"
+        );
         assert_eq!(described["identity"]["authority"], "catalog");
         assert_eq!(
             described["identity"]["catalog_schema_hash"],
@@ -9706,9 +9643,7 @@ mod tests {
             )
             .await
             .expect("directly authorized tool remains discoverable");
-        let governance = &structured(&search)["tools"][0]["governance"];
-        assert_eq!(governance["requires_approval"], false);
-        assert_eq!(governance["requires_approval_known"], true);
+        assert_eq!(structured(&search)["tools"][0]["name"], "email.paused");
 
         let describe = server
             .dispatch_tool_call(
@@ -9717,9 +9652,7 @@ mod tests {
             )
             .await
             .expect("directly authorized tool remains describable");
-        assert!(structured(&describe)["governance"]
-            .get("required_step_up_scope")
-            .is_none());
+        assert_eq!(structured(&describe)["binding"]["name"], "email.elevated");
     }
 
     #[tokio::test]
@@ -12830,8 +12763,7 @@ mod tests {
         };
         let first = snapshot("string");
         let second = snapshot("integer");
-        let contract =
-            connector_contract_with_authorization("records", "read", &first, None).unwrap();
+        let contract = upstream_connector_contract("records", "read", &first).unwrap();
         assert!(contract.output_schema.is_some());
         assert!(first.output_schema().is_none());
         let before = serde_json::to_value(identity(&first)).unwrap();
@@ -13323,8 +13255,10 @@ mod tests {
         assert!(described["identity"]["input_schema_hash"]
             .as_str()
             .is_some_and(|hash| !hash.is_empty()));
-        assert_eq!(described["identity"]["approval_requirements_known"], false);
-        assert_eq!(described["governance"]["requires_approval_known"], false);
+        assert!(described["identity"]
+            .get("approval_requirements_known")
+            .is_none());
+        assert!(described.get("governance").is_none());
         assert!(described["identity"]["output_schema_hash"]
             .as_str()
             .is_some_and(|hash| !hash.is_empty()));
