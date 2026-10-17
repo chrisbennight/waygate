@@ -59,25 +59,30 @@ impl super::UpstreamPool {
     /// the next gateway process can be refused until they expire. Closing a
     /// lane's client ends its session with the upstream.
     ///
-    /// Call this only once nothing can check out or re-dial a lane: a lane
-    /// dialed afterwards stays open.
+    /// Every entry is retired, so the pool serves no upstream afterwards. Each
+    /// entry's session guard is taken first: a reconnect or catalog refresh
+    /// already dialing finishes installing its lanes and they are closed here,
+    /// and one still waiting for the guard finds the entry retired and does not
+    /// dial. Call this only once nothing can check out a lane.
     pub async fn close_sessions(&self) -> usize {
         let entries = self.entries.load_full();
-        let closing = entries
-            .iter()
-            .flat_map(|(name, entry)| entry.slots.iter().map(move |slot| (name, slot)))
-            .map(|(name, slot)| async move {
+        let closing = entries.iter().map(|(name, entry)| async move {
+            let _session = entry.session_mutation.lock().await;
+            entry.removed.store(true, Ordering::Release);
+            let lanes = entry.slots.iter().map(|slot| async move {
                 let connection = slot.conn.write().await.take()?;
                 if let Err(error) = connection.client.cancel().await {
                     tracing::warn!(server = %name, %error, "upstream lane did not close cleanly");
                 }
                 Some(())
             });
-        futures::future::join_all(closing)
-            .await
-            .into_iter()
-            .flatten()
-            .count()
+            futures::future::join_all(lanes)
+                .await
+                .into_iter()
+                .flatten()
+                .count()
+        });
+        futures::future::join_all(closing).await.into_iter().sum()
     }
 
     /// Mark a slot's connection down so the per-upstream scheduler

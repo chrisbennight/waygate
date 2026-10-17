@@ -1008,6 +1008,14 @@ async fn closing_the_pool_ends_every_lane_session() {
         !pool.is_connected("mock").await,
         "a closed pool serves no lane"
     );
+    assert!(
+        !pool.reconnect_one("mock").await,
+        "a closed pool does not re-dial"
+    );
+    assert!(
+        rig.open.lock().unwrap().is_empty(),
+        "a reconnect after closing must not open a session",
+    );
 }
 
 #[tokio::test]
