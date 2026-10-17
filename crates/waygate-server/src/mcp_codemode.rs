@@ -149,8 +149,8 @@ const EXECUTION_CANCEL_SETTLE_INTERVAL: Duration = Duration::from_millis(25);
 /// runner that does not install it would replay an input-dependent program
 /// with no input and take a different path — so an older binary, which knows
 /// nothing of these numbers, fails the compatibility check instead.
-const SDK_CONTRACT_VERSION: i32 = 6;
-const RUNNER_CONTRACT_VERSION: i32 = 9;
+const SDK_CONTRACT_VERSION: i32 = 7;
+const RUNNER_CONTRACT_VERSION: i32 = 10;
 
 /// Every `(sdk, runner)` stamp this binary continues. Each surface change has
 /// kept earlier programs running unchanged, so a current binary can replay a
@@ -159,13 +159,14 @@ const RUNNER_CONTRACT_VERSION: i32 = 9;
 /// that used `await` as a name now fails to parse instead of running
 /// differently. A pair leaves this list only when its rows can no longer exist
 /// or its programs can no longer run unchanged.
-const CONTINUABLE_CONTRACTS: [(i32, i32); 7] = [
+const CONTINUABLE_CONTRACTS: [(i32, i32); 8] = [
     (2, 5),
     (3, 6),
     (4, 6),
     (3, 7),
     (4, 7),
     (5, 8),
+    (6, 9),
     (SDK_CONTRACT_VERSION, RUNNER_CONTRACT_VERSION),
 ];
 
@@ -3191,8 +3192,8 @@ impl CodeModeTools {
                     .await;
                 return Ok(ExecuteResponse {
                     contract_version: ContractVersion::V1,
-                    sdk_contract_version: SdkContractVersion::V6,
-                    runner_contract_version: RunnerContractVersion::V9,
+                    sdk_contract_version: SdkContractVersion::V7,
+                    runner_contract_version: RunnerContractVersion::V10,
                     execution_id: attempt.execution_id,
                     source_ref,
                     status: ExecutionResponseStatus::WaitingForResume,
@@ -3220,8 +3221,8 @@ impl CodeModeTools {
                     .await;
                 return Ok(ExecuteResponse {
                     contract_version: ContractVersion::V1,
-                    sdk_contract_version: SdkContractVersion::V6,
-                    runner_contract_version: RunnerContractVersion::V9,
+                    sdk_contract_version: SdkContractVersion::V7,
+                    runner_contract_version: RunnerContractVersion::V10,
                     execution_id: attempt.execution_id,
                     source_ref,
                     status: ExecutionResponseStatus::WaitingForApproval,
@@ -3257,8 +3258,8 @@ impl CodeModeTools {
             .await;
         Ok(ExecuteResponse {
             contract_version: ContractVersion::V1,
-            sdk_contract_version: SdkContractVersion::V6,
-            runner_contract_version: RunnerContractVersion::V9,
+            sdk_contract_version: SdkContractVersion::V7,
+            runner_contract_version: RunnerContractVersion::V10,
             execution_id: attempt.execution_id,
             source_ref,
             status: ExecutionResponseStatus::Completed,
@@ -6845,14 +6846,14 @@ enum ContractVersion {
 /// something other than what it ran against.
 #[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
 enum SdkContractVersion {
-    #[serde(rename = "6")]
-    V6,
+    #[serde(rename = "7")]
+    V7,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
 enum RunnerContractVersion {
-    #[serde(rename = "9")]
-    V9,
+    #[serde(rename = "10")]
+    V10,
 }
 
 #[derive(Debug)]
@@ -7447,10 +7448,12 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
              source reusable by digest, and `source_ref` reports the digest and its retention \
              state. The source is the body of an async function: it may `await`, and it returns \
              the result. Beyond standard JavaScript it has `console`, whose output returns as \
-             `console` (in the error data on failure), and `atob`, `btoa`, `queueMicrotask` and \
-             `performance`; Node and browser globals such as `Buffer`, `TextDecoder`, `URL`, \
-             `crypto`, `setTimeout`, `fetch`, `require` and `Intl` are absent. The runtime has \
-             no filesystem, network, process, environment or credential \
+             `console` (in the error data on failure), `TextEncoder`, `TextDecoder` (UTF-8), \
+             `URL`, `URLSearchParams`, `structuredClone`, `crypto.randomUUID`, \
+             `crypto.getRandomValues`, `atob`, `btoa`, `queueMicrotask` and `performance`; Node \
+             and browser globals such as `Buffer`, `crypto.subtle`, `setTimeout`, `fetch`, \
+             `require` and `Intl` are absent. The runtime has no filesystem, network, process, \
+             environment or credential \
              access. It exposes `connectors[server][operation]({...})` only for operations \
              `codemode.describe` returns to this caller, and each call goes through the gateway's \
              normal authorization, approval, validation, quota, inspection and audit under the same \
@@ -13547,8 +13550,8 @@ mod tests {
 
         let sample = super::structured(&ExecuteResponse {
             contract_version: ContractVersion::V1,
-            sdk_contract_version: SdkContractVersion::V6,
-            runner_contract_version: RunnerContractVersion::V9,
+            sdk_contract_version: SdkContractVersion::V7,
+            runner_contract_version: RunnerContractVersion::V10,
             execution_id: uuid::Uuid::now_v7(),
             source_ref: SourceReference {
                 sha256: source_digest("return null;"),
@@ -13572,8 +13575,8 @@ mod tests {
                 truncated: true,
             }),
         });
-        assert_eq!(structured(&sample)["sdk_contract_version"], "6");
-        assert_eq!(structured(&sample)["runner_contract_version"], "9");
+        assert_eq!(structured(&sample)["sdk_contract_version"], "7");
+        assert_eq!(structured(&sample)["runner_contract_version"], "10");
         for name in ["codemode.execute", "codemode.resume"] {
             let definition = tool_defs()
                 .into_iter()
@@ -15904,11 +15907,11 @@ mod tests {
     #[test]
     fn responses_advertise_the_contracts_executions_are_stamped_with() {
         assert_eq!(
-            serde_json::to_value(SdkContractVersion::V6).expect("serialize sdk stamp"),
+            serde_json::to_value(SdkContractVersion::V7).expect("serialize sdk stamp"),
             Value::String(SDK_CONTRACT_VERSION.to_string()),
         );
         assert_eq!(
-            serde_json::to_value(RunnerContractVersion::V9).expect("serialize runner stamp"),
+            serde_json::to_value(RunnerContractVersion::V10).expect("serialize runner stamp"),
             Value::String(RUNNER_CONTRACT_VERSION.to_string()),
         );
     }

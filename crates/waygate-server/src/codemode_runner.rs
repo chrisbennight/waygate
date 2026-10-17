@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
 use rquickjs::{
-    function::Func, CatchResultExt, CaughtError, CaughtResult, Context as JsContext, Ctx, Promise,
-    Runtime, String as JsString,
+    convert::List, function::Func, CatchResultExt, CaughtError, CaughtResult, Context as JsContext,
+    Ctx, Exception, Promise, Runtime, String as JsString, TypedArray,
 };
 use serde_json::Value;
 
@@ -145,6 +145,8 @@ Object.defineProperty(globalThis, "console", {
             push("]");
           } else if (value instanceof Promise) {
             push("Promise {}");
+          } else if (typeof value.toJSON === "function") {
+            inspect(value.toJSON(), nested, seen);
           } else {
             push("{");
             let first = true;
@@ -307,6 +309,447 @@ Object.defineProperty(globalThis, "console", {
   enumerable: false,
   configurable: true
 });
+"#;
+/// Installs `TextEncoder`, `TextDecoder`, `crypto.getRandomValues`,
+/// `crypto.randomUUID` and `structuredClone`, following the web standards for
+/// the parts this runtime supports. UTF-8 is the only encoding: any other
+/// label is refused rather than decoded differently. Decoding, encoding and
+/// randomness come from the host; they compute and never reach outside the
+/// runner.
+const STANDARD_HELPERS_PRELUDE: &str = r#"
+(() => {
+  const utf8Decode = __gateway_utf8_decode;
+  const utf8Encode = __gateway_utf8_encode;
+  const randomBytes = __gateway_random_bytes;
+  delete globalThis.__gateway_utf8_decode;
+  delete globalThis.__gateway_utf8_encode;
+  delete globalThis.__gateway_random_bytes;
+  const define = (name, value) => Object.defineProperty(globalThis, name, {
+    value,
+    writable: true,
+    enumerable: false,
+    configurable: true
+  });
+  const wellFormed = Function.prototype.call.bind(String.prototype.toWellFormed);
+  const asciiWhitespace = /^[\t\n\f\r ]+|[\t\n\f\r ]+$/g;
+  const utf8Labels = new Set([
+    "unicode-1-1-utf-8", "unicode11utf8", "unicode20utf8", "utf-8", "utf8", "x-unicode20utf8"
+  ]);
+  const empty = () => new Uint8Array(0);
+  const bytesOf = (input) => {
+    if (input === undefined) return empty();
+    if (input instanceof ArrayBuffer || input instanceof SharedArrayBuffer) return new Uint8Array(input);
+    if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+    throw new TypeError("TextDecoder.decode expects an ArrayBuffer, a typed array or a DataView");
+  };
+  const tailOf = (first, second, length) => {
+    const tail = new Uint8Array(length);
+    for (let index = 0; index < length; index += 1) {
+      const position = first.length + second.length - length + index;
+      tail[index] = position < first.length ? first[position] : second[position - first.length];
+    }
+    return tail;
+  };
+
+  class TextDecoder {
+    #fatal;
+    #ignoreBOM;
+    #pending = empty();
+    #bomChecked = false;
+    constructor(label = "utf-8", options = undefined) {
+      const normalized = String(label).replace(asciiWhitespace, "").toLowerCase();
+      if (!utf8Labels.has(normalized)) {
+        throw new RangeError(`The "${label}" encoding is not supported; this runtime decodes UTF-8 only`);
+      }
+      this.#fatal = Boolean(options?.fatal);
+      this.#ignoreBOM = Boolean(options?.ignoreBOM);
+    }
+    get encoding() { return "utf-8"; }
+    get fatal() { return this.#fatal; }
+    get ignoreBOM() { return this.#ignoreBOM; }
+    get [Symbol.toStringTag]() { return "TextDecoder"; }
+    decode(input = undefined, options = undefined) {
+      const stream = Boolean(options?.stream);
+      const bytes = bytesOf(input);
+      let decoded;
+      try {
+        decoded = utf8Decode(this.#pending, bytes, this.#fatal, stream);
+      } catch (error) {
+        this.#pending = empty();
+        this.#bomChecked = false;
+        throw error;
+      }
+      let text = decoded[0];
+      if (!this.#bomChecked && text.length > 0) {
+        this.#bomChecked = true;
+        if (!this.#ignoreBOM && text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+      }
+      if (stream) {
+        this.#pending = tailOf(this.#pending, bytes, decoded[1]);
+      } else {
+        this.#pending = empty();
+        this.#bomChecked = false;
+      }
+      return text;
+    }
+  }
+
+  class TextEncoder {
+    get encoding() { return "utf-8"; }
+    get [Symbol.toStringTag]() { return "TextEncoder"; }
+    encode(input = "") {
+      return utf8Encode(wellFormed(String(input)));
+    }
+    encodeInto(source, destination) {
+      if (!(destination instanceof Uint8Array)) {
+        throw new TypeError("TextEncoder.encodeInto expects a Uint8Array destination");
+      }
+      let read = 0;
+      let written = 0;
+      for (const character of wellFormed(String(source))) {
+        const point = character.codePointAt(0);
+        const size = point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+        if (written + size > destination.length) break;
+        if (size === 1) {
+          destination[written] = point;
+        } else {
+          let remaining = point;
+          for (let index = size - 1; index > 0; index -= 1) {
+            destination[written + index] = 0x80 | (remaining & 0x3f);
+            remaining >>= 6;
+          }
+          destination[written] = [0, 0, 0xc0, 0xe0, 0xf0][size] | remaining;
+        }
+        written += size;
+        read += character.length;
+      }
+      return { read, written };
+    }
+  }
+
+  const integerArrays = [
+    Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array,
+    BigInt64Array, BigUint64Array
+  ];
+  const getRandomValues = (array) => {
+    if (!integerArrays.some((type) => array instanceof type)) {
+      throw new DOMException("getRandomValues expects an integer typed array", "TypeMismatchError");
+    }
+    if (array.byteLength > 65536) {
+      throw new DOMException(
+        `getRandomValues was asked for ${array.byteLength} bytes; at most 65,536 are allowed`,
+        "QuotaExceededError"
+      );
+    }
+    new Uint8Array(array.buffer, array.byteOffset, array.byteLength).set(randomBytes(array.byteLength));
+    return array;
+  };
+  const randomUUID = () => {
+    const bytes = randomBytes(16);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  };
+
+  const typedArrays = [...integerArrays, Float16Array, Float32Array, Float64Array];
+  const errorTypes = { Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError };
+  const uncloneable = (what) => new DOMException(`${what} could not be cloned`, "DataCloneError");
+  const assign = (target, key, value) => Object.defineProperty(target, key, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true
+  });
+  const structuredClone = (value, options = undefined) => {
+    const transfer = options?.transfer === undefined ? [] : Array.from(options.transfer);
+    const transferred = new Set();
+    for (const buffer of transfer) {
+      if (!(buffer instanceof ArrayBuffer)) throw uncloneable("A transfer entry that is not an ArrayBuffer");
+      if (transferred.has(buffer)) throw uncloneable("An ArrayBuffer listed twice for transfer");
+      if (buffer.detached) throw uncloneable("A detached ArrayBuffer");
+      transferred.add(buffer);
+    }
+    const memory = new Map();
+    const copy = (input) => {
+      if (typeof input === "symbol") throw uncloneable(String(input));
+      if (typeof input === "function") throw uncloneable(`The function ${input.name || "(anonymous)"}`);
+      if (typeof input !== "object" || input === null) return input;
+      if (memory.has(input)) return memory.get(input);
+      const remember = (output) => {
+        memory.set(input, output);
+        return output;
+      };
+      if (Array.isArray(input)) {
+        const output = remember(new Array(input.length));
+        for (const key of Object.keys(input)) assign(output, key, copy(input[key]));
+        return output;
+      }
+      if (input instanceof Map) {
+        const output = remember(new Map());
+        for (const [key, item] of input) output.set(copy(key), copy(item));
+        return output;
+      }
+      if (input instanceof Set) {
+        const output = remember(new Set());
+        for (const item of input) output.add(copy(item));
+        return output;
+      }
+      if (input instanceof Date) return remember(new Date(input.getTime()));
+      if (input instanceof RegExp) return remember(new RegExp(input.source, input.flags));
+      if (input instanceof ArrayBuffer) {
+        if (input.detached) throw uncloneable("A detached ArrayBuffer");
+        return remember(input.slice(0));
+      }
+      if (input instanceof SharedArrayBuffer) return remember(input);
+      if (input instanceof DataView) {
+        return remember(new DataView(copy(input.buffer), input.byteOffset, input.byteLength));
+      }
+      if (ArrayBuffer.isView(input)) {
+        const type = typedArrays.find((candidate) => input instanceof candidate);
+        return remember(new type(copy(input.buffer), input.byteOffset, input.length));
+      }
+      if (input instanceof Boolean || input instanceof Number || input instanceof String || input instanceof BigInt) {
+        return remember(Object(input.valueOf()));
+      }
+      if (input instanceof DOMException) return remember(new DOMException(input.message, input.name));
+      if (input instanceof Error) {
+        const type = Object.hasOwn(errorTypes, input.name) ? errorTypes[input.name] : Error;
+        const output = remember(new type(String(input.message ?? "")));
+        if (typeof input.stack === "string") {
+          Object.defineProperty(output, "stack", { value: input.stack, writable: true, configurable: true });
+        }
+        if ("cause" in input) {
+          Object.defineProperty(output, "cause", { value: copy(input.cause), writable: true, configurable: true });
+        }
+        return output;
+      }
+      if (
+        input instanceof Promise || input instanceof WeakMap || input instanceof WeakSet ||
+        input instanceof WeakRef || input instanceof FinalizationRegistry || input instanceof Symbol
+      ) {
+        throw uncloneable(Object.prototype.toString.call(input));
+      }
+      const output = remember({});
+      for (const key of Object.keys(input)) assign(output, key, copy(input[key]));
+      return output;
+    };
+    const result = copy(value);
+    // The clone already holds copies of every transferred buffer's bytes, so
+    // detaching the originals completes the transfer; nothing is detached when
+    // cloning fails.
+    for (const buffer of transferred) buffer.transfer();
+    return result;
+  };
+
+  define("TextDecoder", TextDecoder);
+  define("TextEncoder", TextEncoder);
+  define("crypto", { getRandomValues, randomUUID });
+  define("structuredClone", structuredClone);
+})();
+"#;
+/// Installs `URL` and `URLSearchParams`, following the URL Standard. The
+/// host's parser is the workspace's WHATWG `url` crate; parsing only computes
+/// a URL and never resolves or contacts it.
+const URL_PRELUDE: &str = r#"
+(() => {
+  const parseUrl = __gateway_url_parse;
+  // The host reports a failed parse as undefined.
+  const parse = (input, base) => parseUrl(input, base) ?? null;
+  const components = __gateway_url_components;
+  const setComponent = __gateway_url_set;
+  const formParse = __gateway_form_parse;
+  const formSerialize = __gateway_form_serialize;
+  delete globalThis.__gateway_url_parse;
+  delete globalThis.__gateway_url_components;
+  delete globalThis.__gateway_url_set;
+  delete globalThis.__gateway_form_parse;
+  delete globalThis.__gateway_form_serialize;
+  const define = (name, value) => Object.defineProperty(globalThis, name, {
+    value,
+    writable: true,
+    enumerable: false,
+    configurable: true
+  });
+  const wellFormed = Function.prototype.call.bind(String.prototype.toWellFormed);
+  const usv = (value) => wellFormed(String(value));
+  const optional = (value) => (value === undefined ? null : usv(value));
+  const states = new WeakMap();
+  const state = (searchParams) => {
+    const found = states.get(searchParams);
+    if (found === undefined) throw new TypeError("Illegal invocation: not a URLSearchParams");
+    return found;
+  };
+  const serialize = (list) => formSerialize(list.map((pair) => pair[0]), list.map((pair) => pair[1]));
+  const changed = (current) => {
+    if (current.update !== null) current.update(serialize(current.list));
+  };
+
+  class URLSearchParams {
+    constructor(init = undefined) {
+      const list = [];
+      states.set(this, { list, update: null });
+      if (init === undefined) return;
+      if ((typeof init === "object" && init !== null) || typeof init === "function") {
+        if (typeof init[Symbol.iterator] === "function") {
+          for (const pair of init) {
+            const items = Array.from(pair);
+            if (items.length !== 2) {
+              throw new TypeError("Each URLSearchParams pair must have exactly two items");
+            }
+            list.push([usv(items[0]), usv(items[1])]);
+          }
+        } else {
+          for (const key of Object.keys(init)) list.push([usv(key), usv(init[key])]);
+        }
+        return;
+      }
+      const text = usv(init);
+      for (const pair of formParse(text.startsWith("?") ? text.slice(1) : text)) list.push(pair);
+    }
+    get size() { return state(this).list.length; }
+    get [Symbol.toStringTag]() { return "URLSearchParams"; }
+    append(name, value) {
+      const current = state(this);
+      current.list.push([usv(name), usv(value)]);
+      changed(current);
+    }
+    delete(name, value = undefined) {
+      const current = state(this);
+      const key = usv(name);
+      const match = value === undefined ? null : usv(value);
+      for (let index = current.list.length - 1; index >= 0; index -= 1) {
+        const pair = current.list[index];
+        if (pair[0] === key && (match === null || pair[1] === match)) current.list.splice(index, 1);
+      }
+      changed(current);
+    }
+    get(name) {
+      const key = usv(name);
+      const pair = state(this).list.find((candidate) => candidate[0] === key);
+      return pair === undefined ? null : pair[1];
+    }
+    getAll(name) {
+      const key = usv(name);
+      return state(this).list.filter((pair) => pair[0] === key).map((pair) => pair[1]);
+    }
+    has(name, value = undefined) {
+      const key = usv(name);
+      const match = value === undefined ? null : usv(value);
+      return state(this).list.some((pair) => pair[0] === key && (match === null || pair[1] === match));
+    }
+    set(name, value) {
+      const current = state(this);
+      const key = usv(name);
+      const text = usv(value);
+      const first = current.list.findIndex((pair) => pair[0] === key);
+      if (first === -1) {
+        current.list.push([key, text]);
+      } else {
+        current.list[first][1] = text;
+        for (let index = current.list.length - 1; index > first; index -= 1) {
+          if (current.list[index][0] === key) current.list.splice(index, 1);
+        }
+      }
+      changed(current);
+    }
+    sort() {
+      const current = state(this);
+      current.list.sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0));
+      changed(current);
+    }
+    forEach(callback, thisArg = undefined) {
+      if (typeof callback !== "function") throw new TypeError("URLSearchParams.forEach expects a function");
+      const list = state(this).list;
+      for (let index = 0; index < list.length; index += 1) {
+        callback.call(thisArg, list[index][1], list[index][0], this);
+      }
+    }
+    *entries() {
+      const list = state(this).list;
+      for (let index = 0; index < list.length; index += 1) yield [list[index][0], list[index][1]];
+    }
+    *keys() {
+      for (const pair of this.entries()) yield pair[0];
+    }
+    *values() {
+      for (const pair of this.entries()) yield pair[1];
+    }
+    [Symbol.iterator]() { return this.entries(); }
+    toString() { return serialize(state(this).list); }
+  }
+
+  const invalid = (input) => new TypeError(`Invalid URL: ${input}`);
+  class URL {
+    #href;
+    #parts;
+    #searchParams;
+    static canParse(input, base = undefined) {
+      return parse(usv(input), optional(base)) !== null;
+    }
+    static parse(input, base = undefined) {
+      const href = parse(usv(input), optional(base));
+      return href === null ? null : new URL(href);
+    }
+    constructor(input, base = undefined) {
+      const text = usv(input);
+      const href = parse(text, optional(base));
+      if (href === null) throw invalid(text);
+      this.#adopt(href);
+      this.#searchParams = new URLSearchParams(this.#parts[8]);
+      state(this.#searchParams).update = (query) => this.#adopt(setComponent(this.#href, "search", query));
+    }
+    #adopt(href) {
+      this.#href = href;
+      this.#parts = components(href);
+    }
+    #refreshParams() {
+      const list = state(this.#searchParams).list;
+      list.length = 0;
+      for (const pair of formParse(this.#parts[8].slice(1))) list.push(pair);
+    }
+    #set(component, value) {
+      this.#adopt(setComponent(this.#href, component, usv(value)));
+    }
+    get href() { return this.#href; }
+    set href(value) {
+      const text = usv(value);
+      const href = parse(text, null);
+      if (href === null) throw invalid(text);
+      this.#adopt(href);
+      this.#refreshParams();
+    }
+    get origin() { return this.#parts[0]; }
+    get protocol() { return this.#parts[1]; }
+    set protocol(value) { this.#set("protocol", value); }
+    get username() { return this.#parts[2]; }
+    set username(value) { this.#set("username", value); }
+    get password() { return this.#parts[3]; }
+    set password(value) { this.#set("password", value); }
+    get host() { return this.#parts[4]; }
+    set host(value) { this.#set("host", value); }
+    get hostname() { return this.#parts[5]; }
+    set hostname(value) { this.#set("hostname", value); }
+    get port() { return this.#parts[6]; }
+    set port(value) { this.#set("port", value); }
+    get pathname() { return this.#parts[7]; }
+    set pathname(value) { this.#set("pathname", value); }
+    get search() { return this.#parts[8]; }
+    set search(value) {
+      this.#set("search", value);
+      this.#refreshParams();
+    }
+    get hash() { return this.#parts[9]; }
+    set hash(value) { this.#set("hash", value); }
+    get searchParams() { return this.#searchParams; }
+    get [Symbol.toStringTag]() { return "URL"; }
+    toString() { return this.#href; }
+    toJSON() { return this.#href; }
+  }
+
+  define("URL", URL);
+  define("URLSearchParams", URLSearchParams);
+})();
 "#;
 /// The name rquickjs gives every evaluated script while its `std` feature,
 /// which would allow choosing one, is off.
@@ -1300,7 +1743,7 @@ const execution = (() => {{
   }});
   return Object.freeze(generated);
 }})();
-{CONSOLE_PRELUDE}(async () => {{
+{CONSOLE_PRELUDE}{STANDARD_HELPERS_PRELUDE}{URL_PRELUDE}(async () => {{
   const gatewayProgramResult = await (async () => {{
 "#
         );
@@ -1340,6 +1783,12 @@ const execution = (() => {{
                     "Code Mode runner could not install the console",
                 )
             })?;
+        install_standard_helpers(&ctx).map_err(|_| {
+            RunnerExecutionFailure::new(
+                RunnerFailureCode::RunnerInternal,
+                "Code Mode runner could not install the standard helpers",
+            )
+        })?;
         let wrapped = format!("{prelude}{source}{PROGRAM_EPILOGUE}");
         let evaluated = match ctx.eval::<Promise<'_>, _>(wrapped).catch(&ctx) {
             Ok(program) => settle_program(&ctx, &program, deadline_reached),
@@ -1667,6 +2116,199 @@ fn describe_program_error(error: &CaughtError<'_>, layout: ProgramLayout) -> Str
         }
     }
     description
+}
+
+/// The most bytes one `crypto.getRandomValues` call may request, as the Web
+/// Crypto API specifies.
+const RANDOM_BYTES_LIMIT: usize = 65_536;
+
+fn install_standard_helpers(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+    ctx.globals()
+        .set("__gateway_utf8_decode", Func::from(utf8_decode))?;
+    ctx.globals()
+        .set("__gateway_utf8_encode", Func::from(utf8_encode))?;
+    ctx.globals()
+        .set("__gateway_random_bytes", Func::from(random_bytes))?;
+    ctx.globals()
+        .set("__gateway_url_parse", Func::from(url_parse))?;
+    ctx.globals()
+        .set("__gateway_url_components", Func::from(url_components))?;
+    ctx.globals()
+        .set("__gateway_url_set", Func::from(url_set))?;
+    ctx.globals()
+        .set("__gateway_form_parse", Func::from(form_parse))?;
+    ctx.globals()
+        .set("__gateway_form_serialize", Func::from(form_serialize))
+}
+
+/// Parse `input` against an optional `base` as the URL Standard does and
+/// return the serialized URL, or `None` when either fails to parse.
+fn url_parse(input: String, base: Option<String>) -> Option<String> {
+    let base = match base {
+        Some(base) => Some(url::Url::parse(&base).ok()?),
+        None => None,
+    };
+    url::Url::options()
+        .base_url(base.as_ref())
+        .parse(&input)
+        .ok()
+        .map(String::from)
+}
+
+fn serialized_url<'js>(ctx: &Ctx<'js>, href: &str) -> rquickjs::Result<url::Url> {
+    url::Url::parse(href).map_err(|_| Exception::throw_type(ctx, "not a serialized URL"))
+}
+
+/// The URL Standard's getters for one serialized URL, in the order the
+/// prelude reads them.
+fn url_components<'js>(ctx: Ctx<'js>, href: String) -> rquickjs::Result<Vec<String>> {
+    use url::quirks;
+    let url = serialized_url(&ctx, &href)?;
+    Ok(vec![
+        quirks::origin(&url),
+        quirks::protocol(&url).to_owned(),
+        quirks::username(&url).to_owned(),
+        quirks::password(&url).to_owned(),
+        quirks::host(&url).to_owned(),
+        quirks::hostname(&url).to_owned(),
+        quirks::port(&url).to_owned(),
+        quirks::pathname(&url).to_owned(),
+        quirks::search(&url).to_owned(),
+        quirks::hash(&url).to_owned(),
+    ])
+}
+
+/// Apply one URL Standard setter and return the resulting serialized URL. A
+/// value the standard ignores for this URL leaves it unchanged, as a setter
+/// does in the standard.
+fn url_set<'js>(
+    ctx: Ctx<'js>,
+    href: String,
+    component: String,
+    value: String,
+) -> rquickjs::Result<String> {
+    use url::quirks;
+    let mut url = serialized_url(&ctx, &href)?;
+    // The setters' errors mean "ignored", which the standard expresses by
+    // leaving the URL as it was.
+    match component.as_str() {
+        "protocol" => {
+            let _ = quirks::set_protocol(&mut url, &value);
+        }
+        "username" => {
+            let _ = quirks::set_username(&mut url, &value);
+        }
+        "password" => {
+            let _ = quirks::set_password(&mut url, &value);
+        }
+        "host" => {
+            let _ = quirks::set_host(&mut url, &value);
+        }
+        "hostname" => {
+            let _ = quirks::set_hostname(&mut url, &value);
+        }
+        "port" => {
+            let _ = quirks::set_port(&mut url, &value);
+        }
+        "pathname" => quirks::set_pathname(&mut url, &value),
+        "search" => quirks::set_search(&mut url, &value),
+        "hash" => quirks::set_hash(&mut url, &value),
+        _ => return Err(Exception::throw_type(&ctx, "unknown URL component")),
+    }
+    Ok(url.into())
+}
+
+/// `application/x-www-form-urlencoded` parsing, which never fails: malformed
+/// escapes stay as written and invalid UTF-8 becomes U+FFFD.
+fn form_parse(query: String) -> Vec<Vec<String>> {
+    url::form_urlencoded::parse(query.as_bytes())
+        .map(|(name, value)| vec![name.into_owned(), value.into_owned()])
+        .collect()
+}
+
+fn form_serialize(names: Vec<String>, values: Vec<String>) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(names.iter().zip(values.iter()))
+        .finish()
+}
+
+/// Decode `pending` followed by `input` as UTF-8 and return the text with the
+/// number of trailing bytes held back for the next streaming call.
+///
+/// Invalid sequences become U+FFFD by substituting each maximal invalid
+/// subpart, as the Encoding Standard requires, unless `fatal` asks for a
+/// `TypeError`. With `stream`, an incomplete sequence at the end is held back
+/// instead of being replaced.
+fn utf8_decode<'js>(
+    pending: TypedArray<'js, u8>,
+    input: TypedArray<'js, u8>,
+    fatal: bool,
+    stream: bool,
+) -> rquickjs::Result<List<(String, usize)>> {
+    let ctx = input.ctx().clone();
+    let (Some(pending), Some(input)) = (pending.as_bytes(), input.as_bytes()) else {
+        return Err(Exception::throw_type(
+            &ctx,
+            "TextDecoder cannot decode a detached buffer",
+        ));
+    };
+    let joined;
+    let mut rest: &[u8] = if pending.is_empty() {
+        input
+    } else {
+        joined = [pending, input].concat();
+        &joined
+    };
+    let mut text = String::with_capacity(rest.len());
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(valid) => {
+                text.push_str(valid);
+                return Ok(List((text, 0)));
+            }
+            Err(error) => {
+                let (valid, after) = rest.split_at(error.valid_up_to());
+                text.push_str(std::str::from_utf8(valid).expect("prefix is valid UTF-8"));
+                match error.error_len() {
+                    None if stream => return Ok(List((text, after.len()))),
+                    _ if fatal => {
+                        return Err(Exception::throw_type(
+                            &ctx,
+                            "The encoded data was not valid UTF-8",
+                        ))
+                    }
+                    None => {
+                        text.push(char::REPLACEMENT_CHARACTER);
+                        return Ok(List((text, 0)));
+                    }
+                    Some(length) => {
+                        text.push(char::REPLACEMENT_CHARACTER);
+                        rest = &after[length..];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Encode text the prelude has already made well formed, so every unpaired
+/// surrogate has become U+FFFD as `TextEncoder` requires.
+fn utf8_encode<'js>(text: JsString<'js>) -> rquickjs::Result<TypedArray<'js, u8>> {
+    let ctx = text.ctx().clone();
+    TypedArray::new(ctx, text.to_string()?.into_bytes())
+}
+
+fn random_bytes<'js>(ctx: Ctx<'js>, length: usize) -> rquickjs::Result<TypedArray<'js, u8>> {
+    use rand::Rng as _;
+    if length > RANDOM_BYTES_LIMIT {
+        return Err(Exception::throw_range(
+            &ctx,
+            "random byte requests are limited to 65,536 bytes",
+        ));
+    }
+    let mut bytes = vec![0; length];
+    rand::rng().fill_bytes(&mut bytes);
+    TypedArray::new(ctx, bytes)
 }
 
 /// Routing metadata has its own transport allowance; the public budget counts only arguments.
@@ -2991,6 +3633,7 @@ console.log("%s:", "key", "value");
 console.log("%cstyled", "color: red");
 console.log("100%");
 console.log("%s");
+console.log(new URL("https://example.com/a"), { link: new URL("https://example.com/b") });
 return null;
 "#
             ),
@@ -3006,6 +3649,7 @@ return null;
                 "styled",
                 "100%",
                 "%s",
+                r#"https://example.com/a {"link": "https://example.com/b"}"#,
             ]
         );
     }
@@ -3131,6 +3775,425 @@ return null;
         assert_eq!(result, Value::String("finished".to_owned()));
     }
 
+    fn evaluate(source: &str) -> Value {
+        execute_with(source, &[], |_| {
+            unreachable!("program makes no connector calls")
+        })
+        .expect("program completes")
+    }
+
+    #[test]
+    fn text_decoder_turns_base64_file_content_into_text() {
+        assert_eq!(
+            evaluate(
+                "return new TextDecoder().decode(Uint8Array.fromBase64('aMOpbGxvIOKckyDwn5iA'));"
+            ),
+            Value::String("héllo ✓ 😀".to_owned())
+        );
+    }
+
+    #[test]
+    fn text_decoder_replaces_or_rejects_invalid_bytes() {
+        assert_eq!(
+            evaluate(
+                r#"
+const decoder = new TextDecoder();
+let fatal;
+try {
+  new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array([0x61, 0xff]));
+} catch (error) {
+  fatal = `${error.name}: ${error.message}`;
+}
+return {
+  replaced: decoder.decode(new Uint8Array([0x61, 0xff, 0x62])),
+  maximalSubpart: decoder.decode(new Uint8Array([0xe2, 0x82, 0x41])),
+  truncatedEnd: decoder.decode(new Uint8Array([0x61, 0xe2, 0x82])),
+  fatal,
+};
+"#
+            ),
+            serde_json::json!({
+                "replaced": "a\u{fffd}b",
+                "maximalSubpart": "\u{fffd}A",
+                "truncatedEnd": "a\u{fffd}",
+                "fatal": "TypeError: The encoded data was not valid UTF-8",
+            })
+        );
+    }
+
+    #[test]
+    fn text_decoder_handles_byte_order_marks_and_streams() {
+        assert_eq!(
+            evaluate(
+                r#"
+const streaming = new TextDecoder();
+const split = streaming.decode(new Uint8Array([0x61, 0xe2, 0x82]), { stream: true });
+const joined = split + streaming.decode(new Uint8Array([0xac, 0x62]));
+const bom = new TextDecoder();
+const splitBom = bom.decode(new Uint8Array([0xef, 0xbb]), { stream: true }) +
+  bom.decode(new Uint8Array([0xbf, 0x63]));
+return {
+  split,
+  joined,
+  stripped: new TextDecoder().decode(new Uint8Array([0xef, 0xbb, 0xbf, 0x61])),
+  kept: new TextDecoder("utf-8", { ignoreBOM: true })
+    .decode(new Uint8Array([0xef, 0xbb, 0xbf, 0x61])),
+  splitBom,
+  fromBuffer: new TextDecoder().decode(new Uint8Array([0x6f, 0x6b]).buffer),
+  fromView: new TextDecoder().decode(new DataView(new Uint8Array([0x78, 0x6f, 0x6b]).buffer, 1)),
+};
+"#
+            ),
+            serde_json::json!({
+                "split": "a",
+                "joined": "a€b",
+                "stripped": "a",
+                "kept": "\u{feff}a",
+                "splitBom": "c",
+                "fromBuffer": "ok",
+                "fromView": "ok",
+            })
+        );
+    }
+
+    #[test]
+    fn text_decoder_accepts_only_utf8_labels() {
+        assert_eq!(
+            evaluate(
+                r#"
+let refused;
+try {
+  new TextDecoder("latin1");
+} catch (error) {
+  refused = error.name;
+}
+const decoder = new TextDecoder(" UTF8 ", { fatal: 1 });
+return { encoding: decoder.encoding, fatal: decoder.fatal, ignoreBOM: decoder.ignoreBOM, refused };
+"#
+            ),
+            serde_json::json!({
+                "encoding": "utf-8",
+                "fatal": true,
+                "ignoreBOM": false,
+                "refused": "RangeError",
+            })
+        );
+    }
+
+    #[test]
+    fn text_encoder_encodes_and_fills_destinations() {
+        assert_eq!(
+            evaluate(
+                r#"
+const encoder = new TextEncoder();
+const destination = new Uint8Array(5);
+const into = encoder.encodeInto("a€😀", destination);
+return {
+  encoded: Array.from(encoder.encode("é😀")),
+  unpaired: Array.from(encoder.encode("\uD800")),
+  into,
+  destination: Array.from(destination),
+  roundTrip: new TextDecoder().decode(encoder.encode("½ ✓")),
+};
+"#
+            ),
+            serde_json::json!({
+                "encoded": [0xc3, 0xa9, 0xf0, 0x9f, 0x98, 0x80],
+                "unpaired": [0xef, 0xbf, 0xbd],
+                "into": {"read": 2, "written": 4},
+                "destination": [0x61, 0xe2, 0x82, 0xac, 0],
+                "roundTrip": "½ ✓",
+            })
+        );
+    }
+
+    #[test]
+    fn crypto_produces_random_uuids_and_values() {
+        let result = evaluate(
+            r#"
+const first = crypto.randomUUID();
+const second = crypto.randomUUID();
+const words = new Uint32Array(8);
+const errorName = (call) => {
+  try {
+    call();
+    return null;
+  } catch (error) {
+    return `${error.name}:${error instanceof DOMException}`;
+  }
+};
+return {
+  format: /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(first),
+  distinct: first !== second,
+  sameArray: crypto.getRandomValues(words) === words,
+  filled: words.some((word) => word !== 0),
+  bigints: crypto.getRandomValues(new BigUint64Array(2)).length,
+  floats: errorName(() => crypto.getRandomValues(new Float32Array(1))),
+  quota: errorName(() => crypto.getRandomValues(new Uint8Array(65537))),
+  largest: crypto.getRandomValues(new Uint8Array(65536)).length,
+};
+"#,
+        );
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "format": true,
+                "distinct": true,
+                "sameArray": true,
+                "filled": true,
+                "bigints": 2,
+                "floats": "TypeMismatchError:true",
+                "quota": "QuotaExceededError:true",
+                "largest": 65536,
+            })
+        );
+    }
+
+    #[test]
+    fn structured_clone_copies_standard_types_and_shared_references() {
+        assert_eq!(
+            evaluate(
+                r#"
+const shared = { label: "shared" };
+const loop = { name: "loop" };
+loop.self = loop;
+class Point { constructor() { this.x = 1; } norm() { return 1; } }
+const source = {
+  shared, again: shared, loop,
+  date: new Date(0), pattern: /a+/gi, map: new Map([["k", shared]]), set: new Set([1, 2]),
+  bytes: new Uint8Array([1, 2, 3]), view: new DataView(new ArrayBuffer(2)), big: 10n,
+  boxed: Object("text"), error: new RangeError("too far"), point: new Point(),
+  sparse: [1, , 3],
+};
+const copy = structuredClone(source);
+return {
+  sharedKept: copy.shared === copy.again && copy.shared !== shared,
+  cycleKept: copy.loop.self === copy.loop,
+  date: copy.date instanceof Date && copy.date.getTime() === 0,
+  pattern: `${copy.pattern}`,
+  mapValueShared: copy.map.get("k") === copy.shared,
+  set: [...copy.set],
+  bytes: Array.from(copy.bytes),
+  independentBytes: copy.bytes.buffer !== source.bytes.buffer,
+  view: copy.view instanceof DataView && copy.view.byteLength,
+  big: typeof copy.big,
+  boxed: copy.boxed instanceof String && copy.boxed.valueOf(),
+  error: copy.error instanceof RangeError && copy.error.message,
+  pointMethods: typeof copy.point.norm,
+  pointX: copy.point.x,
+  sparse: Object.keys(copy.sparse),
+};
+"#
+            ),
+            serde_json::json!({
+                "sharedKept": true,
+                "cycleKept": true,
+                "date": true,
+                "pattern": "/a+/gi",
+                "mapValueShared": true,
+                "set": [1, 2],
+                "bytes": [1, 2, 3],
+                "independentBytes": true,
+                "view": 2,
+                "big": "bigint",
+                "boxed": "text",
+                "error": "too far",
+                "pointMethods": "undefined",
+                "pointX": 1,
+                "sparse": ["0", "2"],
+            })
+        );
+    }
+
+    #[test]
+    fn structured_clone_refuses_uncloneable_values_and_transfers_buffers() {
+        assert_eq!(
+            evaluate(
+                r#"
+const refusal = (value, options) => {
+  try {
+    structuredClone(value, options);
+    return null;
+  } catch (error) {
+    return `${error.name}:${error instanceof DOMException}`;
+  }
+};
+const kept = new ArrayBuffer(4);
+const failed = refusal({ fn() {} }, { transfer: [kept] });
+const moved = new Uint8Array([7, 8]).buffer;
+const copy = structuredClone({ bytes: new Uint8Array(moved) }, { transfer: [moved] });
+return {
+  function: refusal(() => {}),
+  symbol: refusal(Symbol("s")),
+  promise: refusal(Promise.resolve()),
+  weakMap: refusal(new WeakMap()),
+  duplicate: refusal(null, { transfer: [moved, moved] }),
+  failed,
+  keptAfterFailure: kept.detached,
+  movedDetached: moved.detached,
+  movedBytes: Array.from(copy.bytes),
+};
+"#
+            ),
+            serde_json::json!({
+                "function": "DataCloneError:true",
+                "symbol": "DataCloneError:true",
+                "promise": "DataCloneError:true",
+                "weakMap": "DataCloneError:true",
+                "duplicate": "DataCloneError:true",
+                "failed": "DataCloneError:true",
+                "keptAfterFailure": false,
+                "movedDetached": true,
+                "movedBytes": [7, 8],
+            })
+        );
+    }
+
+    #[test]
+    fn url_parses_resolves_and_reports_components() {
+        assert_eq!(
+            evaluate(
+                r#"
+const page = new URL("../items?page=2&sort=name#top", "https://user:pw@example.com:8443/api/v1/list");
+const invalid = (() => {
+  try {
+    new URL("not a url");
+    return null;
+  } catch (error) {
+    return error.name;
+  }
+})();
+return {
+  href: page.href,
+  origin: page.origin,
+  protocol: page.protocol,
+  username: page.username,
+  password: page.password,
+  host: page.host,
+  hostname: page.hostname,
+  port: page.port,
+  pathname: page.pathname,
+  search: page.search,
+  hash: page.hash,
+  page: page.searchParams.get("page"),
+  json: JSON.stringify({ link: page }),
+  invalid,
+  canParse: [URL.canParse("https://a.example"), URL.canParse("relative"), URL.canParse("relative", "https://a.example")],
+  parsed: URL.parse("nope"),
+  defaultPort: new URL("https://example.com:443/").port,
+};
+"#
+            ),
+            serde_json::json!({
+                "href": "https://user:pw@example.com:8443/api/items?page=2&sort=name#top",
+                "origin": "https://example.com:8443",
+                "protocol": "https:",
+                "username": "user",
+                "password": "pw",
+                "host": "example.com:8443",
+                "hostname": "example.com",
+                "port": "8443",
+                "pathname": "/api/items",
+                "search": "?page=2&sort=name",
+                "hash": "#top",
+                "page": "2",
+                "json": r#"{"link":"https://user:pw@example.com:8443/api/items?page=2&sort=name#top"}"#,
+                "invalid": "TypeError",
+                "canParse": [true, false, true],
+                "parsed": null,
+                "defaultPort": "",
+            })
+        );
+    }
+
+    #[test]
+    fn url_setters_and_search_params_stay_linked() {
+        assert_eq!(
+            evaluate(
+                r#"
+const url = new URL("https://example.com/path?a=1&b=2");
+url.searchParams.append("c", "x y");
+const afterAppend = url.href;
+url.search = "?z=9";
+const fromSearch = url.searchParams.get("z");
+url.searchParams.delete("z");
+const afterDelete = url.href;
+url.pathname = "/other path";
+url.port = "8080";
+url.hash = "frag";
+url.protocol = "not a scheme";
+url.hostname = "example.org";
+return { afterAppend, fromSearch, afterDelete, final: url.href };
+"#
+            ),
+            serde_json::json!({
+                "afterAppend": "https://example.com/path?a=1&b=2&c=x+y",
+                "fromSearch": "9",
+                "afterDelete": "https://example.com/path",
+                "final": "https://example.org:8080/other%20path#frag",
+            })
+        );
+    }
+
+    #[test]
+    fn url_search_params_follow_form_encoding() {
+        assert_eq!(
+            evaluate(
+                r#"
+const parsed = new URLSearchParams("?a=1&b=x+y&c=%E2%9C%93&d=%zz&a=2&e");
+const fromRecord = new URLSearchParams({ q: "café & co", n: 3 });
+const fromPairs = new URLSearchParams([["b", "2"], ["a", "1"], ["b", "1"]]);
+fromPairs.sort();
+const edited = new URLSearchParams("a=1&a=2&b=3");
+edited.set("a", "only");
+edited.delete("b", "4");
+const visited = [];
+edited.forEach((value, name) => visited.push(`${name}=${value}`));
+const badPair = (() => {
+  try {
+    new URLSearchParams([["only one"]]);
+    return null;
+  } catch (error) {
+    return error.name;
+  }
+})();
+return {
+  all: parsed.getAll("a"),
+  space: parsed.get("b"),
+  decoded: parsed.get("c"),
+  malformed: parsed.get("d"),
+  empty: parsed.get("e"),
+  missing: parsed.get("nope"),
+  has: [parsed.has("a", "2"), parsed.has("a", "3")],
+  size: parsed.size,
+  record: fromRecord.toString(),
+  sorted: [...fromPairs].map(([name, value]) => `${name}=${value}`),
+  keys: [...fromPairs.keys()],
+  edited: edited.toString(),
+  visited,
+  badPair,
+};
+"#
+            ),
+            serde_json::json!({
+                "all": ["1", "2"],
+                "space": "x y",
+                "decoded": "✓",
+                "malformed": "%zz",
+                "empty": "",
+                "missing": null,
+                "has": [true, false],
+                "size": 6,
+                "record": "q=caf%C3%A9+%26+co&n=3",
+                "sorted": ["a=1", "b=2", "b=1"],
+                "keys": ["a", "b", "b"],
+                "edited": "a=only&b=3",
+                "visited": ["a=only", "b=3"],
+                "badPair": "TypeError",
+            })
+        );
+    }
+
     /// The Code Mode reference lists the globals a program can rely on and the
     /// common Node.js and browser globals it cannot. Keep that list and this
     /// one in step.
@@ -3151,14 +4214,16 @@ return {
     DOMException: typeof DOMException,
     console: typeof console,
     consoleLog: typeof console.log,
-  },
-  absent: {
     TextEncoder: typeof TextEncoder,
     TextDecoder: typeof TextDecoder,
+    randomUUID: typeof crypto.randomUUID,
+    getRandomValues: typeof crypto.getRandomValues,
+    structuredClone: typeof structuredClone,
     URL: typeof URL,
     URLSearchParams: typeof URLSearchParams,
-    crypto: typeof crypto,
-    structuredClone: typeof structuredClone,
+  },
+  absent: {
+    subtle: typeof crypto.subtle,
     Buffer: typeof Buffer,
     setTimeout: typeof setTimeout,
     setInterval: typeof setInterval,

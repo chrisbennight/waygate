@@ -479,21 +479,48 @@ The engine is QuickJS with current ECMAScript built-ins, for example
 `Promise.withResolvers`, `Uint8Array.fromBase64`,
 `Uint8Array.prototype.toBase64`, and `DOMException`. Beyond the language, a
 program has the gateway's `connectors` and `execution` objects and the globals
-`console`, `atob`, `btoa`, `queueMicrotask`, and `performance`.
+`console`, `TextEncoder`, `TextDecoder`, `URL`, `URLSearchParams`,
+`structuredClone`, `crypto`, `atob`, `btoa`, `queueMicrotask`, and
+`performance`.
+
+`TextEncoder` and `TextDecoder` follow the Encoding Standard for UTF-8, the only
+encoding they support; any other label throws a `RangeError`. Decoding accepts
+an `ArrayBuffer`, a typed array, or a `DataView`, replaces invalid bytes with
+U+FFFD unless `fatal` is set, removes a leading byte-order mark unless
+`ignoreBOM` is set, and with `stream: true` holds an incomplete trailing
+sequence for the next call. `new TextDecoder().decode(Uint8Array.fromBase64(text))`
+turns base64 file content into text. `crypto` provides `randomUUID()` and
+`getRandomValues()`, which fills an integer typed array of at most 65,536 bytes
+from the operating system's secure random source; `crypto.subtle` is absent.
+`structuredClone` copies the standard cloneable types, keeps shared references
+and cycles, supports the `transfer` option for `ArrayBuffer`s, and throws a
+`DataCloneError` `DOMException` for functions, symbols, promises, and weak
+collections. A cloned class instance becomes a plain object without its
+prototype's methods, as the standard requires.
+
+`URL` and `URLSearchParams` follow the URL Standard. `new URL(input, base)`
+resolves relative input, throws a `TypeError` for an invalid URL, and exposes
+the standard components with their setters; `URL.canParse` and `URL.parse`
+test input without throwing. `url.searchParams` stays linked to its URL in both
+directions, and `URLSearchParams` parses and serializes
+`application/x-www-form-urlencoded` text, so `+` means a space and malformed
+escapes are kept as written. Parsing only computes a URL; it never resolves a
+name or contacts anything.
 
 `console` has the usual methods, including `log`, `info`, `debug`, `warn`,
 `error`, `trace`, `dir`, `table`, `assert`, `count`, `group`, and `time` with
 their companions, and none of them throws. Each call becomes one entry with its
-level and text, formatted close to Node.js: strings print as they are, other
-values as JSON-like text in which a cycle prints as `[Circular]`, errors with
-their stack in program positions, and the `%s`, `%d`, `%i`, `%f`, `%j`, `%o`,
-`%O`, `%c`, and `%%` substitutions apply. `dir` and `table` print their value
-the same way. The response's `console` field returns the attempt's entries in
-order. A call that waits for an execution that fails or times out returns them
-in its error data, which, like the failure message, is not stored; detached
-executions keep console output only with a stored result, which
-`codemode.result` returns. The `console_bytes` limit
-that `codemode.limits` reports bounds the total; output past it is dropped,
+level and text, formatted close to Node.js. Strings print as they are. Other
+values print as JSON-like text: a cycle prints as `[Circular]`, a value with a
+`toJSON` method, such as a `URL`, prints what that method returns, and an error
+prints its name, message, and stack in program positions. The `%s`, `%d`, `%i`,
+`%f`, `%j`, `%o`, `%O`, `%c`, and `%%` substitutions apply, and `dir` and
+`table` print their value the same way. The response's `console` field returns
+the attempt's entries in order. A call that waits for an execution that fails
+or times out returns them in its error data, which, like the failure message,
+is not stored; detached executions keep console output only with a stored
+result, which `codemode.result` returns. The `console_bytes` limit that
+`codemode.limits` reports bounds the total; output past it is dropped,
 `truncated` is set, and the program continues. Console output is program
 output: it goes only to the caller, is stored only as part of a stored result,
 and is never written to the gateway's own logs.
@@ -502,11 +529,8 @@ Common Node.js and browser globals are absent:
 
 | Absent | Use instead |
 | --- | --- |
-| `TextEncoder`, `TextDecoder` | For valid UTF-8, `decodeURIComponent(escape(atob(text)))` decodes base64 text; it throws on malformed bytes. |
-| `Buffer` | `Uint8Array.fromBase64(text)` and `bytes.toBase64()` for base64 bytes. |
-| `URL`, `URLSearchParams` | String methods and regular expressions. |
-| `crypto` | No replacement; `Math.random` is not suitable for identifiers. |
-| `structuredClone` | `JSON.parse(JSON.stringify(value))` for JSON data. |
+| `Buffer` | `Uint8Array.fromBase64(text)` and `bytes.toBase64()` for base64 bytes, with `TextEncoder` and `TextDecoder` for text. |
+| `crypto.subtle` | No replacement for hashing or signing inside a program. |
 | `setTimeout`, `setInterval` | `execution.wait(milliseconds)`. |
 | `fetch`, `require`, `import`, `process`, `fs` | Connectors. The runtime has no network, module, process, or filesystem access. |
 | `Intl` | Format numbers and dates explicitly; `toLocaleString()` does not localize. |
@@ -828,10 +852,11 @@ completed-result spool without changing the JavaScript SDK. SDK version 2
 exposes the artifact capability, SDK version 3 adds the bounded wait
 primitive, and SDK version 4 with runner version 7 adds `execution.input`. SDK
 version 5 with runner version 8 runs program bodies as async functions, and
-SDK version 6 with runner version 9 adds `console` and its console frames. A
-current worker continues executions stamped 2/5, 3/6, 4/6, 3/7, 4/7, 5/8, or 6/9
-and atomically restamps them with the current pair when it claims the next
-attempt. Rolling upgrades therefore preserve continuations while an older
+SDK version 6 with runner version 9 adds `console` and its console frames, and
+SDK version 7 with runner version 10 adds `TextEncoder`, `TextDecoder`, `URL`,
+`URLSearchParams`, `crypto`, and `structuredClone`. A current worker continues
+executions stamped 2/5, 3/6, 4/6, 3/7, 4/7, 5/8, 6/9, or 7/10 and atomically
+restamps them with the current pair when it claims the next attempt. Rolling upgrades therefore preserve continuations while an older
 worker cannot claim an execution that may depend on a newer SDK surface.
 Success-result contract versioning remains independent.
 

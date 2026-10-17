@@ -6113,6 +6113,7 @@ dependencies = [
  "futures",
  "jsonschema",
  "libc",
+ "rand 0.10.1",
  "rcgen",
  "reqwest",
  "rmcp",
