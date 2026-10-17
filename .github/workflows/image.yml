@@ -196,7 +196,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo fetch --locked
-          cargo install cargo-about --version 0.9.1 --locked --features cli
+          bash scripts/ensure-cargo-about.sh
           bash scripts/generate-rust-licenses.sh --check
       - if: needs.scope.outputs.rust_scope != 'none'
         name: Install pinned cargo-nextest
@@ -211,11 +211,13 @@ jobs:
       - if: needs.scope.outputs.rust_scope == 'workspace' || needs.scope.outputs.tool_context == 'true'
         name: Check tool-definition size limits
         # This example consumes the production budget and registry projection.
-        # It reuses compiled workspace dependencies without starting a database.
+        # Selecting the whole workspace keeps the dependency features the test
+        # build resolved, so the example reuses those artifacts instead of
+        # recompiling them. It needs no database.
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked -p waygate-mcp --example tool_context_projection
+          cargo build --locked --workspace --example tool_context_projection
           projection="${CARGO_TARGET_DIR:-target}/debug/examples/tool_context_projection"
           "$projection" |
             node scripts/report-tool-context.mjs --budget scripts/fixtures/tool-context/standard-budget.json -
