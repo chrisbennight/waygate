@@ -53,9 +53,9 @@ use crate::mcp_builtin::{schema_obj, structured};
 #[cfg(test)]
 use crate::process_mode::codemode_protocol::encode_frame;
 use crate::process_mode::codemode_protocol::{
-    bounded_failure_message, encode_parent_frame, ConnectorCallResult, ParentFrame, RunnerBinding,
-    RunnerFailureCode, RunnerFrame, RunnerResumeContext, CONFINEMENT_PROFILE, RUNNER_FLAG,
-    RUNNER_SPOOL_FLAG,
+    bounded_failure_message, encode_parent_frame, ConnectorCallResult, ConsoleCapture,
+    ConsoleOutput, ParentFrame, RunnerBinding, RunnerFailureCode, RunnerFrame, RunnerResumeContext,
+    CONFINEMENT_PROFILE, RUNNER_FLAG, RUNNER_SPOOL_FLAG,
 };
 
 mod call_tasks;
@@ -149,8 +149,8 @@ const EXECUTION_CANCEL_SETTLE_INTERVAL: Duration = Duration::from_millis(25);
 /// runner that does not install it would replay an input-dependent program
 /// with no input and take a different path — so an older binary, which knows
 /// nothing of these numbers, fails the compatibility check instead.
-const SDK_CONTRACT_VERSION: i32 = 5;
-const RUNNER_CONTRACT_VERSION: i32 = 8;
+const SDK_CONTRACT_VERSION: i32 = 6;
+const RUNNER_CONTRACT_VERSION: i32 = 9;
 
 /// Every `(sdk, runner)` stamp this binary continues. Each surface change has
 /// kept earlier programs running unchanged, so a current binary can replay a
@@ -159,12 +159,13 @@ const RUNNER_CONTRACT_VERSION: i32 = 8;
 /// that used `await` as a name now fails to parse instead of running
 /// differently. A pair leaves this list only when its rows can no longer exist
 /// or its programs can no longer run unchanged.
-const CONTINUABLE_CONTRACTS: [(i32, i32); 6] = [
+const CONTINUABLE_CONTRACTS: [(i32, i32); 7] = [
     (2, 5),
     (3, 6),
     (4, 6),
     (3, 7),
     (4, 7),
+    (5, 8),
     (SDK_CONTRACT_VERSION, RUNNER_CONTRACT_VERSION),
 ];
 
@@ -1229,10 +1230,16 @@ impl CodeModeTools {
             .get("result")
             .cloned()
             .ok_or_else(stored_result_unavailable)?;
+        // Results stored before console capture carry no output.
+        let console = payload
+            .get("console")
+            .cloned()
+            .and_then(|console| serde_json::from_value(console).ok());
         Ok(structured(&StoredResultResponse {
             contract_version: ContractVersion::V1,
             reference: ExecutionResultReference { execution_id },
             result,
+            console,
         }))
     }
 
@@ -3145,19 +3152,27 @@ impl CodeModeTools {
         // Every profile carries its deadline into the broker so in-flight
         // effects finish and are journaled before a timeout can stop the run.
         attempt.deadline = self.program_phase_deadline(attempt.profile);
+        // Owned here rather than by the broker so output survives every way
+        // the program phase can end, including the timeout below, which drops
+        // the broker mid-frame.
+        let mut console = ConsoleCapture::new(crate::codemode_limits::limits().console_bytes);
         let brokered = self.broker_runner_frames_with_spool(
             attempt.clone(),
             &admitted_calls,
             &mut child_stdin,
             &mut child_stdout,
             connector_spool.as_file_mut(),
+            &mut console,
         );
         let outcome = match attempt.deadline {
-            Some(_) => brokered.await?,
+            Some(_) => brokered.await,
             None => tokio::time::timeout(self.program_phase_timeout(), brokered)
                 .await
-                .map_err(|_| execution_timeout())??,
+                .unwrap_or_else(|_| Err(execution_timeout())),
         };
+        let console = Some(console.into_output()).filter(|output| !output.is_empty());
+        let outcome =
+            outcome.map_err(|error| execution_error_with_console(error, console.as_ref()))?;
         let outcome = match outcome {
             RunnerProgramOutcome::Paused {
                 checkpoint,
@@ -3176,8 +3191,8 @@ impl CodeModeTools {
                     .await;
                 return Ok(ExecuteResponse {
                     contract_version: ContractVersion::V1,
-                    sdk_contract_version: SdkContractVersion::V5,
-                    runner_contract_version: RunnerContractVersion::V8,
+                    sdk_contract_version: SdkContractVersion::V6,
+                    runner_contract_version: RunnerContractVersion::V9,
                     execution_id: attempt.execution_id,
                     source_ref,
                     status: ExecutionResponseStatus::WaitingForResume,
@@ -3187,6 +3202,7 @@ impl CodeModeTools {
                     connector_calls: calls,
                     result_ref: None,
                     artifacts,
+                    console,
                 });
             }
             RunnerProgramOutcome::WaitingForApproval {
@@ -3204,8 +3220,8 @@ impl CodeModeTools {
                     .await;
                 return Ok(ExecuteResponse {
                     contract_version: ContractVersion::V1,
-                    sdk_contract_version: SdkContractVersion::V5,
-                    runner_contract_version: RunnerContractVersion::V8,
+                    sdk_contract_version: SdkContractVersion::V6,
+                    runner_contract_version: RunnerContractVersion::V9,
                     execution_id: attempt.execution_id,
                     source_ref,
                     status: ExecutionResponseStatus::WaitingForApproval,
@@ -3215,6 +3231,7 @@ impl CodeModeTools {
                     connector_calls: calls,
                     result_ref: None,
                     artifacts,
+                    console,
                 });
             }
             completed @ RunnerProgramOutcome::Completed { .. } => completed,
@@ -3240,8 +3257,8 @@ impl CodeModeTools {
             .await;
         Ok(ExecuteResponse {
             contract_version: ContractVersion::V1,
-            sdk_contract_version: SdkContractVersion::V5,
-            runner_contract_version: RunnerContractVersion::V8,
+            sdk_contract_version: SdkContractVersion::V6,
+            runner_contract_version: RunnerContractVersion::V9,
             execution_id: attempt.execution_id,
             source_ref,
             status: ExecutionResponseStatus::Completed,
@@ -3253,6 +3270,7 @@ impl CodeModeTools {
                 execution_id: attempt.execution_id,
             }),
             artifacts,
+            console,
         })
     }
 
@@ -3263,6 +3281,7 @@ impl CodeModeTools {
         child_stdin: &mut (impl AsyncWrite + Unpin),
         child_stdout: &mut (impl AsyncBufRead + Unpin),
         connector_spool: &mut std::fs::File,
+        console: &mut ConsoleCapture,
     ) -> Result<RunnerProgramOutcome, McpError> {
         let mut calls = 0usize;
         let mut mutation_calls = 0usize;
@@ -3539,6 +3558,11 @@ impl CodeModeTools {
                     tracing::debug!(?code, "Code Mode runner reported execution failure");
                     return Err(runner_reported_failure(code, &message));
                 }
+                RunnerFrame::Console { level, text } => {
+                    // Program output: kept only for the caller, never logged.
+                    console.admit(level, &text);
+                }
+                RunnerFrame::ConsoleTruncated => console.mark_truncated(),
                 RunnerFrame::Ready { .. } => return Err(runner_protocol_failure()),
             }
         };
@@ -3553,6 +3577,26 @@ impl CodeModeTools {
         child_stdin: &mut (impl AsyncWrite + Unpin),
         child_stdout: &mut (impl AsyncBufRead + Unpin),
     ) -> Result<RunnerProgramOutcome, McpError> {
+        let mut console = ConsoleCapture::new(crate::codemode_limits::limits().console_bytes);
+        self.broker_runner_frames_with_console(
+            attempt,
+            admitted_calls,
+            child_stdin,
+            child_stdout,
+            &mut console,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    async fn broker_runner_frames_with_console(
+        &self,
+        attempt: RunnerAttempt<'_>,
+        admitted_calls: &HashMap<String, AdmittedCall>,
+        child_stdin: &mut (impl AsyncWrite + Unpin),
+        child_stdout: &mut (impl AsyncBufRead + Unpin),
+        console: &mut ConsoleCapture,
+    ) -> Result<RunnerProgramOutcome, McpError> {
         let mut spool = tempfile::tempfile().map_err(|_| execution_unavailable())?;
         self.broker_runner_frames_with_spool(
             attempt,
@@ -3560,6 +3604,7 @@ impl CodeModeTools {
             child_stdin,
             child_stdout,
             &mut spool,
+            console,
         )
         .await
     }
@@ -5323,6 +5368,25 @@ fn execution_error_with_id(mut error: McpError, execution_id: uuid::Uuid) -> Mcp
     error
 }
 
+/// Return a failed attempt's console output with its error, where the output
+/// matters most for finding what went wrong.
+fn execution_error_with_console(mut error: McpError, console: Option<&ConsoleOutput>) -> McpError {
+    let Some(console) = console else {
+        return error;
+    };
+    let console = serde_json::to_value(console).expect("console output serializes");
+    match error.data.as_mut().and_then(Value::as_object_mut) {
+        Some(fields) => {
+            fields.insert("console".to_owned(), console);
+        }
+        None => {
+            let detail = error.data.take();
+            error.data = Some(serde_json::json!({"console": console, "detail": detail}));
+        }
+    }
+    error
+}
+
 fn execution_setup_timeout() -> McpError {
     McpError::invalid_request(
         "Code Mode runner did not become ready within its setup allowance",
@@ -6782,14 +6846,14 @@ enum ContractVersion {
 /// something other than what it ran against.
 #[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
 enum SdkContractVersion {
-    #[serde(rename = "5")]
-    V5,
+    #[serde(rename = "6")]
+    V6,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
 enum RunnerContractVersion {
-    #[serde(rename = "8")]
-    V8,
+    #[serde(rename = "9")]
+    V9,
 }
 
 #[derive(Debug)]
@@ -6917,6 +6981,10 @@ struct ExecuteResponse {
     result_ref: Option<ExecutionResultReference>,
     /// Stable references for artifacts emitted during this runner attempt.
     artifacts: Vec<ArtifactReference>,
+    /// Output the program wrote with `console` during this runner attempt,
+    /// bounded by the `console_bytes` limit. Absent when it wrote none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    console: Option<ConsoleOutput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
@@ -6959,6 +7027,10 @@ struct StoredResultResponse {
     reference: ExecutionResultReference,
     /// Original JSON-compatible value returned by the program.
     result: Value,
+    /// Console output of the attempt that produced the result, when it
+    /// wrote any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    console: Option<ConsoleOutput>,
 }
 
 /// Decision-shaped projection of one durable execution.
@@ -7375,10 +7447,11 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
              keeps a retained source reusable. `retain_for_seconds` keeps inline, uploaded or skill \
              source reusable by digest, and `source_ref` reports the digest and its retention \
              state. The source is the body of an async function: it may `await`, and it returns \
-             the result. Beyond standard JavaScript only `atob`, `btoa`, `queueMicrotask` and \
-             `performance` are global; Node and browser globals such as `console`, `Buffer`, \
-             `TextDecoder`, `URL`, `crypto`, `setTimeout`, `fetch`, `require` and `Intl` are \
-             absent. The runtime has no filesystem, network, process, environment or credential \
+             the result. Beyond standard JavaScript it has `console`, whose output returns as \
+             `console` (in the error data on failure), and `atob`, `btoa`, `queueMicrotask` and \
+             `performance`; Node and browser globals such as `Buffer`, `TextDecoder`, `URL`, \
+             `crypto`, `setTimeout`, `fetch`, `require` and `Intl` are absent. The runtime has \
+             no filesystem, network, process, environment or credential \
              access. It exposes `connectors[server][operation]({...})` only for operations \
              `codemode.describe` returns to this caller, and each call goes through the gateway's \
              normal authorization, approval, validation, quota, inspection and audit under the same \
@@ -7597,7 +7670,9 @@ mod tests {
     use waygate_mcp::{DefaultInvocationService, GatewayServer, SharedCatalog};
     use waygate_oidc::{ApiKeyProfileRestrictions, AuthMethod};
 
-    use crate::process_mode::codemode_protocol::MAX_FAILURE_MESSAGE_CHARS;
+    use crate::process_mode::codemode_protocol::{
+        ConsoleEntry, ConsoleLevel, MAX_FAILURE_MESSAGE_CHARS,
+    };
     use waygate_invocation::InvocationContractAuthority;
 
     use super::*;
@@ -11021,6 +11096,193 @@ mod tests {
         );
     }
 
+    async fn write_runner_frames(
+        output: &mut (impl AsyncWrite + Unpin),
+        frames: impl IntoIterator<Item = RunnerFrame>,
+    ) {
+        for frame in frames {
+            output
+                .write_all(&encode_frame(&frame).expect("encode runner frame"))
+                .await
+                .expect("write runner frame");
+            output
+                .write_all(b"\n")
+                .await
+                .expect("terminate runner frame");
+        }
+    }
+
+    fn console_attempt(deadline: Option<tokio::time::Instant>) -> RunnerAttempt<'static> {
+        static PRINCIPAL: std::sync::OnceLock<Principal> = std::sync::OnceLock::new();
+        RunnerAttempt {
+            principal: PRINCIPAL.get_or_init(reader),
+            execution_id: Uuid::now_v7(),
+            claim: None,
+            persist_content: false,
+            profile: CodeExecutionProfile::Direct,
+            source_digest: source_digest("return null;"),
+            deadline,
+        }
+    }
+
+    /// Console output is collected for the caller in call order, and only up
+    /// to the console budget, however much the runner sends.
+    #[tokio::test]
+    async fn broker_keeps_console_output_within_the_budget() {
+        let catalog: SharedCatalog = Arc::new(FakeCatalog::with_tools(&[]));
+        let tools = CodeModeTools::new(
+            catalog,
+            Arc::new(SelectiveAuthz),
+            Arc::new(RecordingInvocation::default()),
+        );
+        let (mut parent_stdin, _runner_parent_input) = tokio::io::duplex(4096);
+        let (mut runner_parent_output, parent_stdout) =
+            tokio::io::duplex(limits().console_bytes * 4);
+        write_runner_frames(
+            &mut runner_parent_output,
+            [
+                RunnerFrame::Console {
+                    level: ConsoleLevel::Log,
+                    text: "first".to_owned(),
+                },
+                RunnerFrame::Console {
+                    level: ConsoleLevel::Warn,
+                    text: "x".repeat(limits().console_bytes),
+                },
+                RunnerFrame::Console {
+                    level: ConsoleLevel::Error,
+                    text: "past the budget".to_owned(),
+                },
+                RunnerFrame::Complete { result: json!(1) },
+            ],
+        )
+        .await;
+        let mut parent_stdout = BufReader::new(parent_stdout);
+        let mut console = ConsoleCapture::new(limits().console_bytes);
+
+        let outcome = tools
+            .broker_runner_frames_with_console(
+                console_attempt(None),
+                &HashMap::new(),
+                &mut parent_stdin,
+                &mut parent_stdout,
+                &mut console,
+            )
+            .await
+            .expect("console frames never end the program");
+
+        assert!(matches!(outcome, RunnerProgramOutcome::Completed { .. }));
+        let output = console.into_output();
+        assert!(output.truncated);
+        assert_eq!(output.entries.len(), 2);
+        assert_eq!(
+            output.entries[0],
+            ConsoleEntry {
+                level: ConsoleLevel::Log,
+                text: "first".to_owned(),
+            }
+        );
+        assert_eq!(output.entries[1].level, ConsoleLevel::Warn);
+    }
+
+    /// A truncation notice from the runner reaches the caller even when every
+    /// entry it sent fits the parent's budget.
+    #[tokio::test]
+    async fn broker_reports_truncation_the_runner_announces() {
+        let catalog: SharedCatalog = Arc::new(FakeCatalog::with_tools(&[]));
+        let tools = CodeModeTools::new(
+            catalog,
+            Arc::new(SelectiveAuthz),
+            Arc::new(RecordingInvocation::default()),
+        );
+        let (mut parent_stdin, _runner_parent_input) = tokio::io::duplex(4096);
+        let (mut runner_parent_output, parent_stdout) = tokio::io::duplex(4096);
+        write_runner_frames(
+            &mut runner_parent_output,
+            [
+                RunnerFrame::Console {
+                    level: ConsoleLevel::Log,
+                    text: "kept".to_owned(),
+                },
+                RunnerFrame::ConsoleTruncated,
+                RunnerFrame::Complete { result: json!(1) },
+            ],
+        )
+        .await;
+        let mut parent_stdout = BufReader::new(parent_stdout);
+        let mut console = ConsoleCapture::new(limits().console_bytes);
+
+        tools
+            .broker_runner_frames_with_console(
+                console_attempt(None),
+                &HashMap::new(),
+                &mut parent_stdin,
+                &mut parent_stdout,
+                &mut console,
+            )
+            .await
+            .expect("the program completes");
+
+        let output = console.into_output();
+        assert!(output.truncated);
+        assert_eq!(output.entries.len(), 1);
+    }
+
+    /// Output printed before a deadline ends the attempt is still there for
+    /// the caller, which is when it is most needed.
+    #[tokio::test]
+    async fn console_output_survives_a_deadline() {
+        let catalog: SharedCatalog = Arc::new(FakeCatalog::with_tools(&[]));
+        let tools = CodeModeTools::new(
+            catalog,
+            Arc::new(SelectiveAuthz),
+            Arc::new(RecordingInvocation::default()),
+        );
+        let (mut parent_stdin, _runner_parent_input) = tokio::io::duplex(4096);
+        let (mut runner_parent_output, parent_stdout) = tokio::io::duplex(4096);
+        write_runner_frames(
+            &mut runner_parent_output,
+            [RunnerFrame::Console {
+                level: ConsoleLevel::Info,
+                text: "fetched page 1".to_owned(),
+            }],
+        )
+        .await;
+        let mut parent_stdout = BufReader::new(parent_stdout);
+        let mut console = ConsoleCapture::new(limits().console_bytes);
+
+        let error = tools
+            .broker_runner_frames_with_console(
+                console_attempt(Some(
+                    tokio::time::Instant::now() + std::time::Duration::from_millis(50),
+                )),
+                &HashMap::new(),
+                &mut parent_stdin,
+                &mut parent_stdout,
+                &mut console,
+            )
+            .await
+            .expect_err("a runner that goes quiet reaches the deadline");
+        let console = Some(console.into_output());
+        let error = execution_error_with_console(error, console.as_ref());
+
+        let data = error.data.expect("structured failure");
+        assert_eq!(data["error"], "execution_timeout");
+        assert_eq!(
+            data["console"],
+            json!({"entries": [{"level": "info", "text": "fetched page 1"}]})
+        );
+    }
+
+    #[test]
+    fn failures_without_console_output_are_unchanged() {
+        let error = execution_error_with_console(execution_timeout(), None);
+        assert_eq!(
+            error.data.expect("structured failure"),
+            json!({"error": "execution_timeout"})
+        );
+    }
+
     #[tokio::test]
     async fn mutation_broker_refuses_checkpoint_pause() {
         let catalog: SharedCatalog = Arc::new(FakeCatalog::with_tools(&[]));
@@ -13329,8 +13591,8 @@ mod tests {
 
         let sample = super::structured(&ExecuteResponse {
             contract_version: ContractVersion::V1,
-            sdk_contract_version: SdkContractVersion::V5,
-            runner_contract_version: RunnerContractVersion::V8,
+            sdk_contract_version: SdkContractVersion::V6,
+            runner_contract_version: RunnerContractVersion::V9,
             execution_id: uuid::Uuid::now_v7(),
             source_ref: SourceReference {
                 sha256: source_digest("return null;"),
@@ -13346,9 +13608,16 @@ mod tests {
                 execution_id: uuid::Uuid::now_v7(),
             }),
             artifacts: Vec::new(),
+            console: Some(ConsoleOutput {
+                entries: vec![crate::process_mode::codemode_protocol::ConsoleEntry {
+                    level: crate::process_mode::codemode_protocol::ConsoleLevel::Warn,
+                    text: "retrying page 2".to_owned(),
+                }],
+                truncated: true,
+            }),
         });
-        assert_eq!(structured(&sample)["sdk_contract_version"], "5");
-        assert_eq!(structured(&sample)["runner_contract_version"], "8");
+        assert_eq!(structured(&sample)["sdk_contract_version"], "6");
+        assert_eq!(structured(&sample)["runner_contract_version"], "9");
         for name in ["codemode.execute", "codemode.resume"] {
             let definition = tool_defs()
                 .into_iter()
@@ -15679,11 +15948,11 @@ mod tests {
     #[test]
     fn responses_advertise_the_contracts_executions_are_stamped_with() {
         assert_eq!(
-            serde_json::to_value(SdkContractVersion::V5).expect("serialize sdk stamp"),
+            serde_json::to_value(SdkContractVersion::V6).expect("serialize sdk stamp"),
             Value::String(SDK_CONTRACT_VERSION.to_string()),
         );
         assert_eq!(
-            serde_json::to_value(RunnerContractVersion::V8).expect("serialize runner stamp"),
+            serde_json::to_value(RunnerContractVersion::V9).expect("serialize runner stamp"),
             Value::String(RUNNER_CONTRACT_VERSION.to_string()),
         );
     }
