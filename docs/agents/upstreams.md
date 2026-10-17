@@ -180,7 +180,10 @@ Code Mode discovery. A reload that updates the pool and the catalog non-atomical
 therefore yields a fail-closed refusal until both authorities activate the
 same generation — never an execution under another generation's facts. A failed doorbell/SIGHUP catalog reconcile
 arms a retry on the next tick even without a manifest change, which is what
-heals that refusal without operator action; every dashboard-reload reconcile
+heals that refusal without operator action. Until a retry succeeds, manifest
+configuration health stays degraded with the catalog failure as its detail, so
+the Servers page's stale-configuration banner names it; each tick publishes
+health after its reconcile attempt. Every dashboard-reload reconcile
 attempt arms the same latch, so an interleaving with a concurrent
 doorbell/SIGHUP run converges the catalog to disk truth on the next tick.
 The latch is generation-fenced: a tick observes the owed generation before

@@ -37,6 +37,9 @@ struct ToolsPage {
     /// `true` when `total` exceeded [`TOOLS_PAGE_CAP`] and the list was
     /// truncated — the fragment renders a "refine your filter" hint.
     truncated: bool,
+    /// Connected servers that contribute no rows, limited to the server
+    /// filter when one is set.
+    withheld: Vec<WithheldServer>,
 }
 
 struct ToolRow {
@@ -46,6 +49,28 @@ struct ToolRow {
     side_effects: bool,
     pii: bool,
     description: Option<String>,
+    /// `false` for a manifest-declared row of a server with no connected
+    /// lane. Its classification is known, but nothing currently confirms the
+    /// upstream advertises it or that a call would reach it.
+    connected: bool,
+}
+
+/// A connected server none of whose tools reach clients. Its manifest
+/// classifications are not listed as rows: they are withheld from clients,
+/// and presenting them beside published tools would make them look callable.
+struct WithheldServer {
+    server: String,
+    /// Tools the server's manifest classifies; none of them is published.
+    classified: usize,
+    /// `true` when the published list could not be read at all, as opposed
+    /// to being read and found empty.
+    unreadable: bool,
+}
+
+/// Every upstream's tools, split into listed rows and servers withheld whole.
+struct ToolCatalogue {
+    rows: Vec<ToolRow>,
+    withheld: Vec<WithheldServer>,
 }
 
 /// Plain-GET filters for the Tools console. Empty strings normalise to
@@ -141,51 +166,80 @@ impl ToolFilters {
 /// filter, not to ship a megabyte of table — mirrors the palette cap.
 const TOOLS_PAGE_CAP: usize = 200;
 
-/// Assemble the full tool catalogue across every upstream: live tools from
-/// connected upstreams, manifest-only rows for disconnected ones.
-async fn collect_tool_rows(state: &Arc<AdminState>) -> Vec<ToolRow> {
-    let mut tools = Vec::new();
-    for m in state.upstreams.manifests() {
-        let live = state
-            .upstreams
-            .list_tools(&m.name)
-            .await
-            .unwrap_or_default();
+/// Assemble the tool catalogue across every upstream. A server with a
+/// connected lane contributes exactly the tools it publishes. Only a server
+/// with no connected lane falls back to its manifest classifications, marked
+/// not connected. A connected server that publishes nothing has every tool
+/// withheld (quarantined, refused by the catalog, or not advertised), so it is
+/// reported as withheld instead of listing those tools as if they worked.
+async fn collect_tool_catalogue(state: &Arc<AdminState>) -> ToolCatalogue {
+    let mut rows = Vec::new();
+    let mut withheld = Vec::new();
+    for status in state.upstreams.status_snapshot().await {
+        let m = status.manifest;
+        if status.health.connected_lanes == 0 {
+            rows.extend(m.tools.iter().map(|c| ToolRow {
+                server: m.name.clone(),
+                name: c.name.clone(),
+                risk: risk_str(c.risk),
+                side_effects: c.side_effects,
+                pii: c.pii,
+                description: None,
+                connected: false,
+            }));
+            continue;
+        }
+        let live = match state.upstreams.list_tools(&m.name).await {
+            Ok(live) => live,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    server = %m.name,
+                    "tools page: published tool list unavailable",
+                );
+                withheld.push(WithheldServer {
+                    server: m.name,
+                    classified: m.tools.len(),
+                    unreadable: true,
+                });
+                continue;
+            }
+        };
         if live.is_empty() {
-            for c in &m.tools {
-                tools.push(ToolRow {
-                    server: m.name.clone(),
-                    name: c.name.clone(),
-                    risk: risk_str(c.risk),
-                    side_effects: c.side_effects,
-                    pii: c.pii,
-                    description: None,
-                });
-            }
-        } else {
-            for t in live {
-                let facts = state.upstreams.tool_facts(&m.name, &t.name);
-                tools.push(ToolRow {
-                    server: m.name.clone(),
-                    name: t.name.to_string(),
-                    risk: risk_str(facts.risk),
-                    side_effects: facts.side_effects,
-                    pii: facts.pii,
-                    description: t.description.as_ref().map(|d| d.to_string()),
-                });
-            }
+            withheld.push(WithheldServer {
+                server: m.name,
+                classified: m.tools.len(),
+                unreadable: false,
+            });
+            continue;
+        }
+        for t in live {
+            let facts = state.upstreams.tool_facts(&m.name, &t.name);
+            rows.push(ToolRow {
+                server: m.name.clone(),
+                name: t.name.to_string(),
+                risk: risk_str(facts.risk),
+                side_effects: facts.side_effects,
+                pii: facts.pii,
+                description: t.description.as_ref().map(|d| d.to_string()),
+                connected: true,
+            });
         }
     }
-    tools
+    ToolCatalogue { rows, withheld }
 }
 
 /// Distinct servers + tool counts, sorted by name — drives the server
 /// `<select>` options. Computed from the unfiltered catalogue so the counts
-/// stay stable as filters change.
-fn build_server_facets(rows: &[ToolRow]) -> Vec<(String, usize)> {
+/// stay stable as filters change. A withheld server is offered with a zero
+/// count so filtering to it shows why it has no rows.
+fn build_server_facets(rows: &[ToolRow], withheld: &[WithheldServer]) -> Vec<(String, usize)> {
     let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for r in rows {
         *counts.entry(r.server.clone()).or_default() += 1;
+    }
+    for w in withheld {
+        counts.entry(w.server.clone()).or_default();
     }
     counts.into_iter().collect()
 }
@@ -208,8 +262,8 @@ pub(crate) async fn tools_page(
     Query(q): Query<ToolFilters>,
 ) -> Response {
     let mut filters = q.cleaned();
-    let all = collect_tool_rows(&state).await;
-    let servers = build_server_facets(&all);
+    let ToolCatalogue { rows, withheld } = collect_tool_catalogue(&state).await;
+    let servers = build_server_facets(&rows, &withheld);
     // Drop an unknown server so the `<select>` (which would render "All
     // servers" for an unrepresentable value) can't disagree with a 0-row
     // result.
@@ -218,7 +272,11 @@ pub(crate) async fn tools_page(
             filters.server = None;
         }
     }
-    let (tools, total, truncated) = filter_tool_rows(all, &filters);
+    let withheld = withheld
+        .into_iter()
+        .filter(|w| filters.server.as_ref().is_none_or(|s| *s == w.server))
+        .collect();
+    let (tools, total, truncated) = filter_tool_rows(rows, &filters);
     let tenant_ctx = tenant_ctx.map(|Extension(c)| c);
     render(&ToolsPage {
         chrome: PageChrome::build(
@@ -235,6 +293,7 @@ pub(crate) async fn tools_page(
         tools,
         total,
         truncated,
+        withheld,
     })
 }
 

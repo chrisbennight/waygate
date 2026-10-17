@@ -180,7 +180,7 @@ impl ApprovalsFakeCatalog {
         }
     }
 
-    fn with_servers(servers: Vec<waygate_catalog::CatalogServerSummary>) -> Self {
+    pub(crate) fn with_servers(servers: Vec<waygate_catalog::CatalogServerSummary>) -> Self {
         Self {
             grants: std::sync::Mutex::new(Vec::new()),
             servers,
@@ -366,7 +366,7 @@ pub(crate) fn state_with_catalog(catalog: waygate_catalog::SharedCatalogStore) -
     state_with_catalog_pool(catalog, pool)
 }
 
-fn state_with_catalog_pool(
+pub(crate) fn state_with_catalog_pool(
     catalog: waygate_catalog::SharedCatalogStore,
     pool: Arc<UpstreamPool>,
 ) -> Arc<AdminState> {

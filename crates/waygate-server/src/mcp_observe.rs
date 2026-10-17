@@ -178,7 +178,10 @@ impl ObserveTools {
         let query = AuditQuery {
             tenant_id: Some(principal.tenant.as_str().to_owned()),
             server: opt_string(args, "server")?,
+            tool: opt_string(args, "tool")?,
             outcome: opt_string(args, "outcome")?,
+            reason: opt_string(args, "reason")?,
+            trace_id: opt_string(args, "trace_id")?,
             risk_level: opt_string(args, "risk")?,
             category: opt_string(args, "category")?,
             principal_substr: opt_string(args, "principal")?,
@@ -838,9 +841,10 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         Tool::new(
             format!("{NAMESPACE}.query_audit"),
             "Read tenant-scoped audit events, newest IDs first, with actors, outcomes and denial \
-             details. Filter by server, outcome, category, risk, principal (literal subject/email \
-             substring), or since (relative window; default 24h). Reads have a 20-second total \
-             budget; errors distinguish timeout, database cancellation and connection unavailability.",
+             details. Filter by server, tool, outcome, reason, trace_id, category, risk, principal \
+             (literal subject/email substring), or since (relative window; default 24h). Reads have \
+             a 20-second total budget; errors distinguish timeout, database cancellation and \
+             connection unavailability.",
             query_audit_schema(),
         )
         .with_title("Query the audit log")
@@ -919,7 +923,10 @@ fn query_audit_schema() -> Arc<JsonObject> {
         "properties": {
             "since": {"type": "string", "description": "Relative window, e.g. `24h`, `7d`, `30m`, `2w`. Default 24h."},
             "server": {"type": "string", "description": "Exact upstream server name."},
+            "tool": {"type": "string", "description": "Exact unqualified tool name."},
             "outcome": {"type": "string", "description": "Exact outcome: success | denied | step_up_required | execution_error."},
+            "reason": {"type": "string", "description": "Whole recorded reason, matched exactly."},
+            "trace_id": {"type": "string", "description": "Exact trace ID from a caller's error."},
             "category": {"type": "string", "description": "Exact event category, e.g. invocation | admin_mutation | auth_attempt | policy_reload."},
             "risk": {"type": "string", "description": "Exact tool risk tier: low | medium | high."},
             "principal": {"type": "string", "description": "Case-sensitive substring matched against principal sub OR email."},
@@ -1849,6 +1856,166 @@ mod tests {
         assert!(
             format!("{err}").contains("not yet initialised"),
             "got: {err}"
+        );
+    }
+
+    /// Records the query each row read receives; every read returns no rows.
+    #[derive(Default)]
+    struct CapturingAudit {
+        queries: std::sync::Mutex<Vec<AuditQuery>>,
+    }
+
+    #[async_trait]
+    impl waygate_storage::AuditReader for CapturingAudit {
+        async fn recent_events(
+            &self,
+            _limit: i64,
+            _after_id: Option<uuid::Uuid>,
+        ) -> Result<Vec<AuditRow>, sqlx::Error> {
+            Ok(Vec::new())
+        }
+        async fn query_events(
+            &self,
+            query: &AuditQuery,
+            _limit: i64,
+            _after_id: Option<uuid::Uuid>,
+        ) -> Result<Vec<AuditRow>, sqlx::Error> {
+            self.queries.lock().unwrap().push(query.clone());
+            Ok(Vec::new())
+        }
+        async fn recent_notable(
+            &self,
+            _tenant: &str,
+            _since: OffsetDateTime,
+            _limit: i64,
+        ) -> Result<Vec<AuditRow>, sqlx::Error> {
+            Ok(Vec::new())
+        }
+        async fn facet_counts(
+            &self,
+            _query: &AuditQuery,
+        ) -> Result<waygate_storage::AuditFacets, sqlx::Error> {
+            Ok(Default::default())
+        }
+        async fn tool_stats(
+            &self,
+            _query: &AuditQuery,
+            _limit: i64,
+        ) -> Result<Vec<waygate_storage::ToolStat>, sqlx::Error> {
+            Ok(Vec::new())
+        }
+        async fn histogram(
+            &self,
+            _query: &AuditQuery,
+            _bucket_seconds: i64,
+        ) -> Result<Vec<waygate_storage::HistogramBucket>, sqlx::Error> {
+            Ok(Vec::new())
+        }
+        async fn fetch_event(&self, _id: uuid::Uuid) -> Result<Option<AuditRow>, sqlx::Error> {
+            Ok(None)
+        }
+        async fn count_events_by_sub_since(
+            &self,
+            _sub: &str,
+            _since: OffsetDateTime,
+            _exclude_issuer: Option<&str>,
+        ) -> Result<i64, sqlx::Error> {
+            Ok(0)
+        }
+        async fn verify_chain(
+            &self,
+            tenant_id: &str,
+            from: Option<OffsetDateTime>,
+            to: Option<OffsetDateTime>,
+            _after_chain_seq: Option<i64>,
+            _limit: i64,
+        ) -> Result<waygate_storage::ChainVerifyReport, sqlx::Error> {
+            Ok(waygate_storage::ChainVerifyReport {
+                tenant_id: tenant_id.to_owned(),
+                from,
+                to,
+                rows_walked: 0,
+                status: waygate_storage::ChainVerifyStatus::Empty,
+                first_mismatch: None,
+                truncated: false,
+                next_after_chain_seq: None,
+                chain_head: None,
+            })
+        }
+        async fn fetch_events_for_bundle(
+            &self,
+            _tenant_id: &str,
+            _from: OffsetDateTime,
+            _to: OffsetDateTime,
+            _principal_sub: Option<&str>,
+            _tool: Option<&str>,
+            _limit: i64,
+        ) -> Result<(Vec<AuditRow>, bool), sqlx::Error> {
+            Ok((Vec::new(), false))
+        }
+    }
+
+    #[tokio::test]
+    async fn query_audit_passes_exact_tool_reason_and_trace_filters_to_the_reader() {
+        let audit = Arc::new(CapturingAudit::default());
+        let pool = Arc::new(waygate_upstream::UpstreamPool::from_manifests_disconnected(
+            Default::default(),
+        ));
+        let reader: Arc<dyn waygate_storage::AuditReader> = audit.clone();
+        let cell = Arc::new(OnceLock::new());
+        assert!(cell
+            .set(Arc::new(AdminState::new(
+                pool,
+                None,
+                Some(reader),
+                AdminState::null_evidence(),
+                None,
+                None,
+                None,
+                None,
+                "http://127.0.0.1:0".into(),
+            )))
+            .is_ok());
+        let t = ObserveTools::new(cell);
+        let caller = principal(&["mcp:observe"]);
+        let args = json!({
+            "tool": "send",
+            "reason": "refused:server_quarantined",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        });
+        t.call("query_audit", args.as_object().cloned(), Some(&caller))
+            .await
+            .expect("query_audit succeeds");
+        {
+            let queries = audit.queries.lock().unwrap();
+            assert_eq!(queries.len(), 1);
+            let q = &queries[0];
+            assert_eq!(q.tenant_id.as_deref(), Some("default"));
+            assert_eq!(q.tool.as_deref(), Some("send"));
+            assert_eq!(q.reason.as_deref(), Some("refused:server_quarantined"));
+            assert_eq!(
+                q.trace_id.as_deref(),
+                Some("4bf92f3577b34da6a3ce929d0e0e4736")
+            );
+            assert!(q.server.is_none() && q.principal_substr.is_none());
+        }
+
+        let err = t
+            .call(
+                "query_audit",
+                json!({"trace_id": 7}).as_object().cloned(),
+                Some(&caller),
+            )
+            .await
+            .expect_err("a non-string filter is invalid");
+        assert!(
+            format!("{err}").contains("`trace_id` must be a string"),
+            "got: {err}"
+        );
+        assert_eq!(
+            audit.queries.lock().unwrap().len(),
+            1,
+            "an invalid filter is rejected before any read"
         );
     }
 

@@ -149,8 +149,11 @@ docker logs mcp-gateway 2>&1 | grep 'source of truth' | tail -1
 ```
 
 A `Config STALE` dashboard banner (or a `config-health: degraded` signal) means
-the live volume was unreadable and the gateway is serving a ledger snapshot —
-fix the volume and Reload.
+the gateway is not serving the intended configuration. The banner's detail
+names the cause: an unreadable live volume served from a ledger snapshot (fix
+the volume and Reload), a refused reload, or a catalog reconcile that failed
+after a reload (restore catalog database access; the reload task retries and
+the banner clears when a reconcile succeeds).
 
 ### Rollback
 

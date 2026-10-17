@@ -7,12 +7,13 @@
 </header>
 
 {# Prominent, never-silently-good banner when the on-disk config is
-   broken / a reload was refused and the gateway is serving a stale set. #}
+   broken, a reload was refused, or the catalog did not reconcile with the
+   served set. The detail names which, since the remedies differ. #}
 {% if config_degraded %}
 <div role="alert" class="form-error forms-error">
-    <strong>⚠ Config STALE.</strong> {{ config_detail }} — the gateway is serving
-    the previously-loaded upstream set. Fix <code>servers/*.yaml</code> (or
-    the source it was recovered from) and reload / restart.
+    <strong>⚠ Config STALE.</strong> {{ config_detail }}. Correct the cause
+    (<code>servers/*.yaml</code>, the source it was recovered from, or the
+    catalog database), then reload or restart.
 </div>
 {% endif %}
 
@@ -32,7 +33,10 @@
     clear a drift quarantine when no database is configured — or <strong>refresh its catalog</strong> to replace
     a healthy session after the upstream adds tools. Expand a row (▸) to see its
     resolved connection, identity tier, and tool-risk summary; select a server
-    name to browse its tools.
+    name to browse its tools. For administrators, a <strong>catalog</strong>
+    chip under the runtime status marks a server whose governed-catalog
+    lifecycle blocks or holds its tools, with a link to the Catalog control
+    that resolves it where one exists.
 </p>
 {% if is_admin %}{% if reload_available %}
 <div class="reload-row">
@@ -78,6 +82,13 @@
                         <span class="status-dot status-dot--bad" aria-hidden="true"></span><span class="state-err">down</span>
                     {% endif %}
                     <span class="muted mono">({{ s.breaker }})</span>
+                    {# Runtime health reports whether the upstream answers; the
+                       governed catalog decides whether its tools are served.
+                       A non-live lifecycle is shown beside it so a reachable
+                       but blocked server never reads only "ok". #}
+                    {% match s.catalog %}{% when Some with (c) %}
+                    <p><span class="chip chip--{{ c.tone }}" title="{{ c.detail }}">catalog: {{ c.label }}</span>{% match c.action %}{% when Some with (a) %} <a href="{{ a.href }}">{{ a.label }}</a>{% when None %}{% endmatch %}</p>
+                    {% when None %}{% endmatch %}
                 </td>
                 <td class="mono">{{ s.connected_lanes }} / {{ s.total_lanes }}</td>
                 <td><span class="mono">{{ s.last_error_class }}</span><br><span class="muted" title="Last success: {{ s.last_success_at }}">next: {{ s.next_retry_at }}</span></td>

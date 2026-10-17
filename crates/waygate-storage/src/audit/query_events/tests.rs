@@ -128,6 +128,15 @@ async fn bounded_rows_preserve_filters_cursors_and_connection_settings() {
     q = base.clone();
     q.tenant_id = Some("absent".to_owned());
     rejected.push(q);
+    q = base.clone();
+    q.tool = Some("absent".to_owned());
+    rejected.push(q);
+    q = base.clone();
+    q.reason = Some("absent".to_owned());
+    rejected.push(q);
+    q = base.clone();
+    q.trace_id = Some("absent".to_owned());
+    rejected.push(q);
     for q in rejected {
         assert!(sink
             .query_events_bounded(&q, 60, None, Duration::from_secs(60))
@@ -179,11 +188,172 @@ async fn bounded_principal_plan_does_not_scan_old_history() {
         .await
         .unwrap();
     for statement in [
-        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE observer_rows (NULL,NULL,NULL,NULL,'rare%_',NULL,to_timestamp(1699999900),NULL,NULL,60,'home',NULL,NULL,'{}'::text[],NULL)",
-        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE observer_rows (NULL,NULL,NULL,NULL,'absent',NULL,to_timestamp(1699999900),NULL,NULL,60,'home',NULL,NULL,'{}'::text[],NULL)",
-        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE observer_rows (NULL,NULL,NULL,NULL,'common',NULL,to_timestamp(1699999900),NULL,NULL,60,'home',NULL,NULL,'{}'::text[],NULL)",
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE observer_rows (NULL,NULL,NULL,NULL,'rare%_',NULL,to_timestamp(1699999900),NULL,NULL,60,'home',NULL,NULL,'{}'::text[],NULL,NULL,NULL,NULL)",
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE observer_rows (NULL,NULL,NULL,NULL,'absent',NULL,to_timestamp(1699999900),NULL,NULL,60,'home',NULL,NULL,'{}'::text[],NULL,NULL,NULL,NULL)",
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE observer_rows (NULL,NULL,NULL,NULL,'common',NULL,to_timestamp(1699999900),NULL,NULL,60,'home',NULL,NULL,'{}'::text[],NULL,NULL,NULL,NULL)",
     ] {
         let plan: Value = sqlx::query_scalar(statement).fetch_one(&pool).await.unwrap();
+        let mut found_time_bound = false;
+        inspect_plan(&plan[0]["Plan"], &mut found_time_bound);
+        assert!(found_time_bound, "missing audit scan: {plan}");
+    }
+    pool.close().await;
+}
+
+/// Marks three in-window rows of the fixture tenant with a tool, refusal
+/// reason, and trace id; every other row keeps NULL in those columns.
+async fn mark_refusals(pool: &PgPool) {
+    sqlx::raw_sql(
+        r#"
+        UPDATE audit_log
+           SET tool = 'send', reason = 'refused:server_quarantined', trace_id = 'trace-a'
+         WHERE id IN (lpad(to_hex(2), 32, '0')::uuid, lpad(to_hex(4), 32, '0')::uuid);
+        UPDATE audit_log
+           SET tool = 'send', reason = 'refused:drift_quarantined', trace_id = 'trace-b'
+         WHERE id = lpad(to_hex(6), 32, '0')::uuid;
+        ANALYZE audit_log;
+        "#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+fn window() -> AuditQuery {
+    AuditQuery {
+        tenant_id: Some("home".to_owned()),
+        since: Some(OffsetDateTime::from_unix_timestamp(1_699_999_900).unwrap()),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn exact_tool_reason_and_trace_filters_select_only_matching_rows() {
+    let Some(pool) = fixture().await else { return };
+    mark_refusals(&pool).await;
+    let sink = PgAuditSink::with_pool(pool.clone());
+    let ids = |rows: &[AuditRow]| rows.iter().map(|r| r.id).collect::<Vec<_>>();
+    let cases = [
+        (
+            AuditQuery {
+                tool: Some("send".to_owned()),
+                ..window()
+            },
+            vec![6, 4, 2],
+        ),
+        (
+            AuditQuery {
+                reason: Some("refused:server_quarantined".to_owned()),
+                ..window()
+            },
+            vec![4, 2],
+        ),
+        (
+            AuditQuery {
+                trace_id: Some("trace-b".to_owned()),
+                ..window()
+            },
+            vec![6],
+        ),
+        (
+            AuditQuery {
+                tool: Some("send".to_owned()),
+                reason: Some("refused:server_quarantined".to_owned()),
+                trace_id: Some("trace-a".to_owned()),
+                ..window()
+            },
+            vec![4, 2],
+        ),
+        (
+            AuditQuery {
+                reason: Some("refused:server".to_owned()),
+                ..window()
+            },
+            vec![],
+        ),
+        (
+            AuditQuery {
+                trace_id: Some("trace-a".to_owned()),
+                tenant_id: Some("foreign".to_owned()),
+                ..window()
+            },
+            vec![],
+        ),
+    ];
+    for (q, expected) in cases {
+        let expected: Vec<Uuid> = expected.into_iter().map(Uuid::from_u128).collect();
+        let bounded = sink
+            .query_events_bounded(&q, 60, None, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(ids(&bounded), expected, "bounded read for {q:?}");
+        assert!(bounded.iter().all(|r| q.matches(r)), "{q:?}");
+        let unbounded = sink.query_events(&q, 60, None).await.unwrap();
+        assert_eq!(ids(&unbounded), expected, "dashboard read for {q:?}");
+    }
+
+    // The Activity aggregates apply the same predicates as the rows.
+    let refused = AuditQuery {
+        reason: Some("refused:server_quarantined".to_owned()),
+        ..window()
+    };
+    let stats = sink.tool_stats(&refused, 10).await.unwrap();
+    assert_eq!(stats.len(), 1, "{stats:?}");
+    assert_eq!(
+        (
+            stats[0].server.as_str(),
+            stats[0].tool.as_str(),
+            stats[0].total
+        ),
+        ("fixture", "send", 2)
+    );
+    let traced = AuditQuery {
+        trace_id: Some("trace-b".to_owned()),
+        ..window()
+    };
+    let buckets = sink.histogram(&traced, 3600).await.unwrap();
+    assert_eq!(buckets.iter().map(|b| b.count).sum::<i64>(), 1);
+    let rollup = sink.rollup_tool_stats(&refused, 10).await.unwrap();
+    assert_eq!(
+        rollup.iter().map(|s| s.total).sum::<i64>(),
+        2,
+        "a reason filter must not be dropped by the rollup reader"
+    );
+    pool.close().await;
+}
+
+/// The new exact-match filters have no index of their own. Within a time
+/// window the tenant timestamp index must bound the rows examined, whether or
+/// not any row matches.
+#[tokio::test]
+async fn bounded_exact_filter_plans_do_not_scan_old_history() {
+    let Some(pool) = fixture().await else { return };
+    mark_refusals(&pool).await;
+    sqlx::raw_sql("SET plan_cache_mode=force_custom_plan; SET random_page_cost=1.1; SET jit=off")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut q = window();
+    q.trace_id = Some("trace-a".to_owned());
+    sqlx::QueryBuilder::<Postgres>::new("PREPARE exact_rows AS ")
+        .push(sql(&q, true))
+        .build()
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Parameters $16, $17, and $18 are the tool, reason, and trace id.
+    for statement in [
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE exact_rows (NULL,NULL,NULL,NULL,NULL,NULL,to_timestamp(1699999900),NULL,NULL,60,'home',NULL,NULL,'{}'::text[],NULL,'send',NULL,NULL)",
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE exact_rows (NULL,NULL,NULL,NULL,NULL,NULL,to_timestamp(1699999900),NULL,NULL,60,'home',NULL,NULL,'{}'::text[],NULL,'absent',NULL,NULL)",
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE exact_rows (NULL,NULL,NULL,NULL,NULL,NULL,to_timestamp(1699999900),NULL,NULL,60,'home',NULL,NULL,'{}'::text[],NULL,NULL,'refused:server_quarantined',NULL)",
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE exact_rows (NULL,NULL,NULL,NULL,NULL,NULL,to_timestamp(1699999900),NULL,NULL,60,'home',NULL,NULL,'{}'::text[],NULL,NULL,'absent',NULL)",
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE exact_rows (NULL,NULL,NULL,NULL,NULL,NULL,to_timestamp(1699999900),NULL,NULL,60,'home',NULL,NULL,'{}'::text[],NULL,NULL,NULL,'trace-a')",
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE exact_rows (NULL,NULL,NULL,NULL,NULL,NULL,to_timestamp(1699999900),NULL,NULL,60,'home',NULL,NULL,'{}'::text[],NULL,NULL,NULL,'absent')",
+    ] {
+        let plan: Value = sqlx::query_scalar(statement)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         let mut found_time_bound = false;
         inspect_plan(&plan[0]["Plan"], &mut found_time_bound);
         assert!(found_time_bound, "missing audit scan: {plan}");
