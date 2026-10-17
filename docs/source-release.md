@@ -138,7 +138,9 @@ and fetch locked dependencies with `cargo fetch --locked`. After changing Rust
 dependencies, run `bash scripts/generate-rust-licenses.sh`. Browser and font
 attributions are maintained in `scripts/licenses/about.hbs`. CI regenerates the
 notice with `--check` and fails if the checked-in Markdown differs; it does not
-commit changes automatically.
+commit changes automatically. CI installs the same pinned version's published
+Linux binary, verified against a pinned checksum, with
+`scripts/ensure-cargo-about.sh`.
 
 After changing CodeMirror dependencies or source, run `npm ci` and `./build.sh`
 in `crates/waygate-admin/codemirror`. CI rebuilds with `./build.sh --check` and

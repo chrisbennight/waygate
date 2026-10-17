@@ -66,6 +66,7 @@ else
       *.md|scripts/check-doc-anchors.sh|scripts/check-licenses.sh|scripts/check-no-plan-citations.sh) docs=true ;;
       scripts/licenses/*|scripts/generate-rust-licenses.sh|THIRD_PARTY_LICENSES.md|LICENSE-APACHE)
         docs=true; licenses=true; image=true; quickstart=true; helper=true ;;
+      scripts/ensure-cargo-about.sh) licenses=true ;;
       scripts/helper_release.py|scripts/verify-mcp-files-version.sh|.github/workflows/release-mcp-files.yml)
         helper=true; tooling=true ;;
       scripts/release_policy.py) tooling=true; image=true; quickstart=true; helper=true ;;

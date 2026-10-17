@@ -128,7 +128,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo fetch --locked
-          cargo install cargo-about --version 0.9.1 --locked --features cli
+          bash scripts/ensure-cargo-about.sh
           bash scripts/generate-rust-licenses.sh --check
       - if: steps.scope.outputs.rust_scope != 'none'
         name: Check formatting
