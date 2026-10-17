@@ -132,7 +132,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "source_kind":"upstream",
                     "name":tool.identity.qualified_name(),
                     "description":compact_tool_description(tool.definition.description.as_deref()),
-                    "governance":{"risk":"low","side_effects":false,"pii":false,"requires_approval":false,"requires_approval_known":true},
                 })
             })
             .collect();

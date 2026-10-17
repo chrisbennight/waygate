@@ -5,10 +5,9 @@ not already know which upstream server or gateway-local namespace owns a
 capability:
 
 1. Call `gateway-discovery.search` with keywords or a natural-language query.
-   The response contains each tool's fully-qualified `name`, a description, and
-   governance facts, but no schemas. Titles and descriptions are preview text with a
-   bounded character budget; inspection remains the exact documentation
-   authority.
+   The response contains each tool's fully-qualified `name` and a description,
+   but no schemas. Titles and descriptions are preview text with a bounded
+   character budget; inspection remains the exact documentation authority.
 2. Pass that `name` unchanged to `gateway-discovery.inspect`. The response
    contains the exact current MCP definition, including input and output
    schemas and annotations, and the tool's structured identity.
@@ -25,11 +24,10 @@ admission state, and per-tool Cedar decision before ranking. A denied,
 quarantined, retired, or profile-restricted record is therefore absent before
 document frequencies, result counts, and cursors are computed. Unknown and
 invisible selectors have one `tool_unavailable` response shape.
-Discoverable approval and step-up verdicts are represented explicitly in the
-governance projection. `requires_approval_known: false` means clients must not
-infer that approval is unnecessary, and `required_step_up_scope` names the
-current re-authentication requirement when one applies. Invocation always
-re-evaluates these decisions at the authoritative call boundary.
+Risk, side-effect, PII, approval, and step-up classifications stay inside the
+gateway; discovery search and inspection, and Code Mode search and describe,
+do not return them. Invocation evaluates them at the authoritative call
+boundary and reports an approval or step-up requirement there.
 
 The catalog contains both ordinary upstream tools and gateway-local built-ins.
 One fully-qualified name identifies a tool on every surface, and clients never

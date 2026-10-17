@@ -492,18 +492,14 @@ struct ToolSummary {
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    /// Gateway-owned safety facts bound to this catalog record.
-    governance: Governance,
 }
 
 impl ToolSummary {
     fn from_tool(tool: CatalogTool) -> Self {
-        let governance = Governance::from_tool(&tool);
         Self {
             name: tool.identity.qualified_name(),
             title: compact_optional(tool.definition.title.as_deref(), MAX_SUMMARY_TITLE_CHARS),
             description: compact_tool_description(tool.definition.description.as_deref()),
-            governance,
         }
     }
 }
@@ -515,13 +511,10 @@ struct InspectResponse {
     /// Exact current MCP tool definition, including input/output schemas,
     /// annotations, title, description, and metadata.
     definition: Value,
-    /// Gateway-owned safety facts bound to this exact definition.
-    governance: Governance,
 }
 
 impl InspectResponse {
     fn from_tool(tool: CatalogTool) -> Self {
-        let governance = Governance::from_tool(&tool);
         Self {
             identity: ToolIdentity {
                 name: tool.identity.qualified_name(),
@@ -531,7 +524,6 @@ impl InspectResponse {
             },
             definition: serde_json::to_value(&tool.definition)
                 .expect("rmcp tool definitions are serializable"),
-            governance,
         }
     }
 }
@@ -546,44 +538,6 @@ struct ToolIdentity {
     source: String,
     /// Exact bare tool name within the source.
     tool: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-struct Governance {
-    /// Gateway risk tier (`low`, `medium`, or `high`).
-    risk: String,
-    /// Whether the operation can change external or durable state.
-    side_effects: bool,
-    /// Whether the operation can handle or return personally identifiable data.
-    pii: bool,
-    /// Whether a live per-call approval is required before invocation.
-    requires_approval: bool,
-    /// Whether the catalog's approval classification is authoritative. False
-    /// tells clients not to infer that approval is unnecessary.
-    requires_approval_known: bool,
-    /// Scope required to make the tool callable when current policy requires
-    /// step-up authentication.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    required_step_up_scope: Option<String>,
-}
-
-impl Governance {
-    fn from_tool(tool: &CatalogTool) -> Self {
-        let approval_required =
-            matches!(tool.authorization, CatalogAuthorization::ApprovalRequired);
-        let required_step_up_scope = match &tool.authorization {
-            CatalogAuthorization::StepUpRequired { required_scope } => Some(required_scope.clone()),
-            CatalogAuthorization::Allowed | CatalogAuthorization::ApprovalRequired => None,
-        };
-        Self {
-            risk: tool.facts.risk.as_str().to_owned(),
-            side_effects: tool.facts.side_effects,
-            pii: tool.facts.pii,
-            requires_approval: approval_required || tool.facts.requires_approval,
-            requires_approval_known: approval_required || tool.facts.requires_approval_known,
-            required_step_up_scope,
-        }
-    }
 }
 
 fn paginate_search(
@@ -769,7 +723,7 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         .annotate(ToolAnnotations::new().read_only(true).destructive(false)),
         Tool::new(
             format!("{NAMESPACE}.inspect"),
-            "Return the exact current MCP definition and gateway governance facts for one tool selected by the fully-qualified `name` returned by `gateway-discovery.search`. Denied, quarantined, stale, and unknown selectors all return the same unavailable shape. This tool never executes the inspected operation; call its fully-qualified identity through ordinary `tools/call` so the original typed authorization and audit path remains authoritative.",
+            "Return the exact current MCP definition for one tool selected by the fully-qualified `name` returned by `gateway-discovery.search`. Denied, quarantined, stale, and unknown selectors all return the same unavailable shape. This tool never executes the inspected operation; call its fully-qualified identity through ordinary `tools/call` so the original typed authorization and audit path remains authoritative.",
             input_schema::<InspectParams>(),
         )
         .with_title("Inspect an exact governed tool contract")
@@ -1548,31 +1502,35 @@ mod tests {
     }
 
     #[test]
-    fn governance_projects_live_approval_and_step_up_requirements() {
-        let mut approval = CatalogTool::builtin(
+    fn responses_omit_gateway_governance_classification() {
+        let mut tool = CatalogTool::builtin(
             "gateway-test",
             Tool::new(
                 "gateway-test.approve",
                 "description",
                 schema_obj(json!({"type": "object"})),
             ),
-            RiskTier::Low,
-            false,
-            false,
+            RiskTier::High,
+            true,
+            true,
         );
-        approval.authorization = CatalogAuthorization::ApprovalRequired;
-        let projected = Governance::from_tool(&approval);
-        assert!(projected.requires_approval);
-        assert!(projected.requires_approval_known);
-
-        approval.authorization = CatalogAuthorization::StepUpRequired {
-            required_scope: "mcp:elevated".to_owned(),
-        };
-        let projected = Governance::from_tool(&approval);
-        assert_eq!(
-            projected.required_step_up_scope.as_deref(),
-            Some("mcp:elevated")
-        );
+        for authorization in [
+            CatalogAuthorization::ApprovalRequired,
+            CatalogAuthorization::StepUpRequired {
+                required_scope: "mcp:elevated".to_owned(),
+            },
+        ] {
+            tool.authorization = authorization;
+            let keys = |value: Value| {
+                let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+                keys.sort();
+                keys
+            };
+            let summary = serde_json::to_value(ToolSummary::from_tool(tool.clone())).unwrap();
+            let inspected = serde_json::to_value(InspectResponse::from_tool(tool.clone())).unwrap();
+            assert_eq!(keys(summary), ["description", "name"]);
+            assert_eq!(keys(inspected), ["definition", "identity"]);
+        }
     }
 
     #[test]
@@ -1585,14 +1543,6 @@ mod tests {
                         name: "kagi.search".to_owned(),
                         title: Some("Search the web".to_owned()),
                         description: Some("Find relevant web pages".to_owned()),
-                        governance: Governance {
-                            risk: "low".to_owned(),
-                            side_effects: false,
-                            pii: false,
-                            requires_approval: false,
-                            requires_approval_known: true,
-                            required_step_up_scope: None,
-                        },
                     }],
                     next_cursor: Some("opaque".to_owned()),
                 })
@@ -1611,14 +1561,6 @@ mod tests {
                         "name": "gateway-observe.query_audit",
                         "inputSchema": {"type": "object"}
                     }),
-                    governance: Governance {
-                        risk: "low".to_owned(),
-                        side_effects: false,
-                        pii: true,
-                        requires_approval: false,
-                        requires_approval_known: true,
-                        required_step_up_scope: None,
-                    },
                 })
                 .unwrap(),
             ),

@@ -401,7 +401,7 @@
       {
         "name": "codemode.describe",
         "title": "Describe a Code Mode connector",
-        "description": "Describe one tool returned by `codemode.search` as a runtime-neutral, versioned connector contract. Pass the `name` that search returned. Returns exact admitted input/output schemas, raw connector binding names, governance classification, and catalog or manifest snapshot identity. Denied, restricted, quarantined, ambiguous, and unknown selectors share one unavailable error shape. If you still hold a complete description, pass its document_hash as known_document_hash for compact unchanged content after fresh authorization and catalog resolution; omit to refresh.",
+        "description": "Describe one tool returned by `codemode.search` as a runtime-neutral, versioned connector contract. Pass the `name` that search returned. Returns exact admitted input/output schemas, raw connector binding names, and catalog or manifest snapshot identity. Denied, restricted, quarantined, ambiguous, and unknown selectors share one unavailable error shape. If you still hold a complete description, pass its document_hash as known_document_hash for compact unchanged content after fresh authorization and catalog resolution; omit to refresh.",
         "inputSchema": {
           "additionalProperties": false,
           "title": "DescribeParams",
@@ -502,10 +502,6 @@
                     "not": {}
                   }
                 },
-                "governance": {
-                  "description": "Governance facts admitted with this tool snapshot.",
-                  "$ref": "#/$defs/Governance"
-                },
                 "document_hash": {
                   "type": "string"
                 }
@@ -515,7 +511,6 @@
                 "binding",
                 "identity",
                 "input_schema",
-                "governance",
                 "document_hash"
               ]
             },
@@ -739,9 +734,6 @@
                         }
                       ]
                     },
-                    "approval_requirements_known": {
-                      "type": "boolean"
-                    },
                     "authority": {
                       "type": "string",
                       "const": "manifest_fallback"
@@ -749,61 +741,9 @@
                   },
                   "required": [
                     "authority",
-                    "input_schema_hash",
-                    "approval_requirements_known"
+                    "input_schema_hash"
                   ]
                 }
-              ]
-            },
-            "Governance": {
-              "type": "object",
-              "properties": {
-                "risk": {
-                  "description": "Admitted risk tier.",
-                  "$ref": "#/$defs/Risk"
-                },
-                "side_effects": {
-                  "description": "Whether the operation can cause an external effect.",
-                  "type": "boolean"
-                },
-                "pii": {
-                  "description": "Whether the operator classified the operation as handling PII.",
-                  "type": "boolean"
-                },
-                "requires_approval": {
-                  "description": "Whether a live per-call approval grant is required.",
-                  "type": "boolean"
-                },
-                "requires_approval_known": {
-                  "description": "Whether the authority supplying `requires_approval` was available and\ntrustworthy when this snapshot was admitted.",
-                  "type": "boolean"
-                },
-                "required_step_up_scope": {
-                  "description": "Scope required to make the tool callable when current Code Mode policy\nrequires step-up authentication.",
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "risk",
-                "side_effects",
-                "pii",
-                "requires_approval",
-                "requires_approval_known"
-              ]
-            },
-            "Risk": {
-              "type": "string",
-              "enum": [
-                "low",
-                "medium",
-                "high"
               ]
             }
           },
@@ -2105,7 +2045,7 @@
       {
         "name": "codemode.search",
         "title": "Search Code Mode connectors",
-        "description": "Search the governed direct catalog across upstream and gateway-local connectors. Returns only tools this caller may discover after profile restrictions, quarantine state, and Cedar decisions. Results carry governance facts; pass a result's `name` unchanged to `codemode.describe` for the exact connector schemas and snapshot identity.",
+        "description": "Search the governed direct catalog across upstream and gateway-local connectors. Returns only tools this caller may discover after profile restrictions, quarantine state, and Cedar decisions. Pass a result's `name` unchanged to `codemode.describe` for the exact connector schemas and snapshot identity.",
         "inputSchema": {
           "additionalProperties": false,
           "title": "SearchParams",
@@ -2179,66 +2119,10 @@
                       "type": "null"
                     }
                   ]
-                },
-                "governance": {
-                  "description": "Governance facts admitted with this tool snapshot.",
-                  "$ref": "#/$defs/Governance"
                 }
               },
               "required": [
-                "name",
-                "governance"
-              ]
-            },
-            "Governance": {
-              "type": "object",
-              "properties": {
-                "risk": {
-                  "description": "Admitted risk tier.",
-                  "$ref": "#/$defs/Risk"
-                },
-                "side_effects": {
-                  "description": "Whether the operation can cause an external effect.",
-                  "type": "boolean"
-                },
-                "pii": {
-                  "description": "Whether the operator classified the operation as handling PII.",
-                  "type": "boolean"
-                },
-                "requires_approval": {
-                  "description": "Whether a live per-call approval grant is required.",
-                  "type": "boolean"
-                },
-                "requires_approval_known": {
-                  "description": "Whether the authority supplying `requires_approval` was available and\ntrustworthy when this snapshot was admitted.",
-                  "type": "boolean"
-                },
-                "required_step_up_scope": {
-                  "description": "Scope required to make the tool callable when current Code Mode policy\nrequires step-up authentication.",
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "risk",
-                "side_effects",
-                "pii",
-                "requires_approval",
-                "requires_approval_known"
-              ]
-            },
-            "Risk": {
-              "type": "string",
-              "enum": [
-                "low",
-                "medium",
-                "high"
+                "name"
               ]
             }
           },
@@ -3883,7 +3767,7 @@
       {
         "name": "gateway-discovery.inspect",
         "title": "Inspect an exact governed tool contract",
-        "description": "Return the exact current MCP definition and gateway governance facts for one tool selected by the fully-qualified `name` returned by `gateway-discovery.search`. Denied, quarantined, stale, and unknown selectors all return the same unavailable shape. This tool never executes the inspected operation; call its fully-qualified identity through ordinary `tools/call` so the original typed authorization and audit path remains authoritative.",
+        "description": "Return the exact current MCP definition for one tool selected by the fully-qualified `name` returned by `gateway-discovery.search`. Denied, quarantined, stale, and unknown selectors all return the same unavailable shape. This tool never executes the inspected operation; call its fully-qualified identity through ordinary `tools/call` so the original typed authorization and audit path remains authoritative.",
         "inputSchema": {
           "required": [
             "name"
@@ -3900,8 +3784,7 @@
         "outputSchema": {
           "required": [
             "identity",
-            "definition",
-            "governance"
+            "definition"
           ],
           "$defs": {
             "ToolIdentity": {
@@ -3944,49 +3827,6 @@
                   "const": "builtin"
                 }
               ]
-            },
-            "Governance": {
-              "type": "object",
-              "properties": {
-                "risk": {
-                  "description": "Gateway risk tier (`low`, `medium`, or `high`).",
-                  "type": "string"
-                },
-                "side_effects": {
-                  "description": "Whether the operation can change external or durable state.",
-                  "type": "boolean"
-                },
-                "pii": {
-                  "description": "Whether the operation can handle or return personally identifiable data.",
-                  "type": "boolean"
-                },
-                "requires_approval": {
-                  "description": "Whether a live per-call approval is required before invocation.",
-                  "type": "boolean"
-                },
-                "requires_approval_known": {
-                  "description": "Whether the catalog's approval classification is authoritative. False\ntells clients not to infer that approval is unnecessary.",
-                  "type": "boolean"
-                },
-                "required_step_up_scope": {
-                  "description": "Scope required to make the tool callable when current policy requires\nstep-up authentication.",
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "risk",
-                "side_effects",
-                "pii",
-                "requires_approval",
-                "requires_approval_known"
-              ]
             }
           },
           "type": "object",
@@ -4000,10 +3840,6 @@
               "not": {
                 "not": {}
               }
-            },
-            "governance": {
-              "description": "Gateway-owned safety facts bound to this exact definition.",
-              "$ref": "#/$defs/Governance"
             }
           }
         },
@@ -4086,58 +3922,10 @@
                       "type": "null"
                     }
                   ]
-                },
-                "governance": {
-                  "description": "Gateway-owned safety facts bound to this catalog record.",
-                  "$ref": "#/$defs/Governance"
                 }
               },
               "required": [
-                "name",
-                "governance"
-              ]
-            },
-            "Governance": {
-              "type": "object",
-              "properties": {
-                "risk": {
-                  "description": "Gateway risk tier (`low`, `medium`, or `high`).",
-                  "type": "string"
-                },
-                "side_effects": {
-                  "description": "Whether the operation can change external or durable state.",
-                  "type": "boolean"
-                },
-                "pii": {
-                  "description": "Whether the operation can handle or return personally identifiable data.",
-                  "type": "boolean"
-                },
-                "requires_approval": {
-                  "description": "Whether a live per-call approval is required before invocation.",
-                  "type": "boolean"
-                },
-                "requires_approval_known": {
-                  "description": "Whether the catalog's approval classification is authoritative. False\ntells clients not to infer that approval is unnecessary.",
-                  "type": "boolean"
-                },
-                "required_step_up_scope": {
-                  "description": "Scope required to make the tool callable when current policy requires\nstep-up authentication.",
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "risk",
-                "side_effects",
-                "pii",
-                "requires_approval",
-                "requires_approval_known"
+                "name"
               ]
             }
           },
