@@ -421,21 +421,20 @@ pub fn default_auto_lifecycle() -> ClientLifecycleMode {
 
 /// The client configuration every gateway dial and the `classify` CLI send.
 ///
-/// The configured client version is read only by the `initialize` handshake.
-/// Discovery proposes the lifecycle's own preferred versions, and the SDK's
-/// `auto` fallback substitutes its own legacy version, but the plain
-/// `initialize` lifecycle sends this version unchanged. The SDK's default is
-/// its newest generation, which has no `initialize` handshake at all, so a
-/// handshake proposing it asks for a generation that cannot be negotiated that
-/// way. Every handshake this gateway sends therefore proposes the newest
-/// generation that still has one; the server answers with the version it will
-/// speak.
+/// The configured client version is read only by the plain `initialize`
+/// lifecycle; discovery and the SDK's `auto` fallback choose their own. It
+/// stays the SDK's newest version on purpose. An upstream that speaks that
+/// version answers the handshake with it and keeps no protocol session, while
+/// one that answers with an older version opens a session for the handshake.
+/// Per-call isolation dials on every call, so proposing an older version would
+/// open a session per call on an upstream that could have served them without
+/// one, and a session-limited upstream refuses every call once its limit is
+/// reached. A legacy upstream answers with the version it speaks either way.
 pub fn client_config(
     capabilities: ClientCapabilities,
     implementation: Implementation,
 ) -> ClientConfig {
     ClientConfig::new(capabilities, implementation)
-        .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE)
 }
 
 /// The lifecycle the `auto` bridge falls back to when discovery fails —
@@ -478,9 +477,9 @@ pub fn legacy_bridge_lifecycle() -> ClientLifecycleMode {
 ///
 /// Scope is exactly `auto`: an explicit `2026-07-28` must still fail rather
 /// than be silently downgraded, and `legacy` has no discovery leg to fall
-/// back from. The legacy leg proposes [`client_config`]'s version, the newest
-/// that has an `initialize` handshake; the handshake negotiates the version in
-/// its response, so the server picks what it supports.
+/// back from. The legacy leg proposes [`client_config`]'s version; the
+/// handshake negotiates the version in its response, so the server picks what
+/// it supports.
 ///
 /// Both attempts record into one [`DialTrace`], so a failure that reaches the
 /// caller also shows how discovery failed before the bridge.
@@ -1932,17 +1931,16 @@ mod lifecycle_tests {
         ));
     }
 
-    /// The SDK's default client version is a generation without an
-    /// `initialize` handshake, so the gateway's own configuration must name
-    /// one that has it.
+    /// An upstream that speaks the newest version answers the handshake with
+    /// it and keeps no protocol session, so a per-call dial must not ask for
+    /// an older, session-holding version.
     #[test]
-    fn every_initialize_handshake_proposes_the_newest_version_that_has_one() {
+    fn the_initialize_handshake_proposes_the_newest_version() {
         let config = client_config(
             ClientCapabilities::default(),
             Implementation::new("lifecycle-test", "0"),
         );
-        assert_eq!(config.protocol_version, ProtocolVersion::V_2025_11_25);
-        assert!(config.protocol_version.has_initialize());
+        assert_eq!(config.protocol_version, ProtocolVersion::LATEST);
     }
 
     #[test]

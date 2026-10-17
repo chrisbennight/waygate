@@ -431,7 +431,7 @@ pub(crate) async fn catalog_quarantined_row_proposes_governed_recovery() {
                 owner: None,
             },
         ]));
-    let mut manifest = waygate_test_support::admin::example_messages_manifest();
+    let mut manifest = crate::admin_state::example_messages_manifest();
     manifest.name = "grounded-docs".into();
     let pool = Arc::new(UpstreamPool::from_manifests_disconnected(BTreeMap::from([
         ("grounded-docs".into(), manifest),

@@ -140,7 +140,7 @@ async fn acceptance_workflow(
             .await
             .unwrap();
     });
-    let mut manifest = waygate_test_support::admin::example_messages_manifest();
+    let mut manifest = crate::admin_state::example_messages_manifest();
     manifest.name = format!("review-accept-{}", uuid::Uuid::new_v4());
     manifest.url = Some(format!("http://{addr}/mcp"));
     manifest.tools = vec![waygate_upstream::ToolClassification::new(
@@ -222,7 +222,7 @@ async fn acceptance_workflow(
             .with_tool_reviews(store.clone())
             .await,
     );
-    let mut state = waygate_test_support::admin::base_admin_state_with_pool(pool.clone());
+    let mut state = crate::admin_state::base_admin_state_with_pool(pool.clone());
     state.evidence = Arc::new(waygate_storage::PgAuditSink::with_pool(db.clone()));
     if annotation_mode {
         state = state
@@ -793,9 +793,9 @@ async fn tool_review_renders_real_evidence_and_refuses_stale_cross_tenant_and_cs
         .await
         .with_tool_reviews(store.clone())
         .await;
-    let state = Arc::new(waygate_test_support::admin::base_admin_state_with_pool(
-        Arc::new(pool),
-    ));
+    let state = Arc::new(crate::admin_state::base_admin_state_with_pool(Arc::new(
+        pool,
+    )));
     let context = waygate_admin::change_context::read_action_context(
         &state,
         "default",
@@ -929,7 +929,7 @@ async fn tool_review_rejects_missing_and_non_admin_principals() {
         ),
     ] {
         let mut app = waygate_admin::dashboard_tool_reviews::router()
-            .with_state(Arc::new(waygate_test_support::admin::base_admin_state()));
+            .with_state(Arc::new(crate::admin_state::base_admin_state()));
         if let Some(actor) = actor {
             app = app.layer(axum::Extension(actor));
         }

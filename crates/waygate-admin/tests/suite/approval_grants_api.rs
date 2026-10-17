@@ -1125,7 +1125,7 @@ async fn mint_imported_grant_normalizes_with_the_published_input_contract() {
         catalog.input_schema.is_none(),
         "imported versions have no stored input schema"
     );
-    let mut manifest = waygate_test_support::admin::example_messages_manifest();
+    let mut manifest = crate::admin_state::example_messages_manifest();
     manifest.url = Some(format!("http://{address}/mcp"));
     let mut classification = waygate_upstream::ToolClassification::new(
         "send",

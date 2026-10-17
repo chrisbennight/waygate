@@ -391,8 +391,9 @@ delivery, and failure propagation differ. Always populate
 ## Test patterns
 
 Integration tests live under `crates/waygate-admin/tests/dashboard_render/`
-(one module per page family; shared builders in `common.rs`, the pg
-preamble/mocks/state core in `waygate-test-support`).
+(one module per page family; shared builders in `common.rs`, the
+`AdminState` core in `tests/support/admin_state.rs`, and the pg preamble
+and mocks in `waygate-test-support`).
 Use the existing helpers:
 
 - `empty_state()` — `AdminState` with no audit / no api-keys / no tenants
