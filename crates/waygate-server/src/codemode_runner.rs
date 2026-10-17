@@ -605,7 +605,9 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
     const transfer = options?.transfer === undefined ? [] : Array.from(options.transfer);
     const transferred = new Set();
     for (const buffer of transfer) {
-      if (!(buffer instanceof ArrayBuffer)) throw uncloneable("A transfer entry that is not an ArrayBuffer");
+      if (kindOfClass.get(engineClass(buffer)) !== "arrayBuffer") {
+        throw uncloneable("A transfer entry that is not an ArrayBuffer");
+      }
       if (transferred.has(buffer)) throw uncloneable("An ArrayBuffer listed twice for transfer");
       if (bufferDetached(buffer)) throw uncloneable("A detached ArrayBuffer");
       transferred.add(buffer);
@@ -4454,11 +4456,15 @@ const written = structuredClone(
   { moved, get update() { new Uint8Array(moved)[0] = 2; return true; } },
   { transfer: [moved] }
 );
+const bareBuffer = new Uint8Array([7]).buffer;
+Object.setPrototypeOf(bareBuffer, null);
+const bareBufferCopy = structuredClone(bareBuffer, { transfer: [bareBuffer] });
 const error = new DOMException("busy", "InvalidStateError");
 const errorCopy = structuredClone(error);
 return {
   fakeDatePrototype: Object.getPrototypeOf(fakeDate) === Object.prototype,
   bareMap: mapCopy instanceof Map && mapCopy.get(1),
+  bareBufferTransferred: new Uint8Array(bareBufferCopy)[0],
   bufferIndependent: bufferCopy !== victim && bufferCopy.byteLength,
   transferredFinalByte: new Uint8Array(written.moved)[0],
   movedDetached: moved.detached,
@@ -4469,6 +4475,7 @@ return {
             serde_json::json!({
                 "fakeDatePrototype": true,
                 "bareMap": 2,
+                "bareBufferTransferred": 7,
                 "bufferIndependent": 2,
                 "transferredFinalByte": 2,
                 "movedDetached": true,

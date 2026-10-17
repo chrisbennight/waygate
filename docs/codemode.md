@@ -496,7 +496,9 @@ from the operating system's secure random source; `crypto.subtle` is absent.
 and cycles, supports the `transfer` option for `ArrayBuffer`s, and throws a
 `DataCloneError` `DOMException` for functions, symbols, proxies, promises, weak
 collections, generators, iterators, and `SharedArrayBuffer`s. A cloned class instance becomes a plain object without its
-prototype's methods, as the standard requires.
+prototype's methods, as the standard requires. A cloned typed array or
+`DataView` keeps the source view's current length, so a view that tracked a
+resizable buffer's length becomes a fixed-length view of the cloned buffer.
 
 `URL` and `URLSearchParams` follow the URL Standard. `new URL(input, base)`
 resolves relative input, throws a `TypeError` for an invalid URL, and exposes
