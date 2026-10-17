@@ -351,7 +351,11 @@ This document covers:
   the outcome (accepted, JSON, an event stream with its event counts and how
   it ended, or a failure with its HTTP status when known), and the elapsed
   time. Both attempts of an `auto` dial share one summary, so it also shows
-  how discovery failed before the bridge. It keeps the 12 most recent
+  how discovery failed before the bridge. The summary accompanies failures
+  the dial reports itself, including its own handshake deadline. A caller's
+  deadline that ends a stalled dial first, such as the reconnect deadline or
+  the boot deadline on a `tools/list` that never answers, reports only that
+  deadline. It keeps the 12 most recent
   exchanges and counts older ones, and it never contains payloads, header
   values, the bearer token, or the session id. The SDK error text in front of
   it is capped at 1024 bytes with control characters escaped. Recording stops
