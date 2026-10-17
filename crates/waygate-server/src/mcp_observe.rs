@@ -700,7 +700,6 @@ struct AuditRowView {
     reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     latency_ms: Option<i64>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     policy_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     trace_id: Option<String>,
@@ -1530,6 +1529,60 @@ mod tests {
             limit: 50,
             offset: 0,
         });
+    }
+
+    #[test]
+    fn query_audit_output_schema_validates_rows_with_and_without_policies() {
+        let tool = tool_defs()
+            .into_iter()
+            .find(|tool| tool.name == format!("{NAMESPACE}.query_audit"))
+            .expect("query_audit is advertised");
+        let schema = serde_json::to_value(tool.output_schema.expect("output schema"))
+            .expect("schema serializes");
+        let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+
+        for policies in [
+            vec![],
+            vec![vec![]],
+            vec![vec!["permit-observer".to_owned()]],
+            vec![vec![], vec!["permit-observer".to_owned()]],
+        ] {
+            let events = policies
+                .iter()
+                .map(|policy_ids| AuditRowView {
+                    ts: "2026-01-01T00:00:00Z".to_owned(),
+                    category: "invocation".to_owned(),
+                    action: "tools/call".to_owned(),
+                    outcome: "denied".to_owned(),
+                    principal: None,
+                    server: None,
+                    operation: None,
+                    tool: None,
+                    target: None,
+                    risk: None,
+                    reason: None,
+                    latency_ms: None,
+                    policy_ids: policy_ids.clone(),
+                    trace_id: None,
+                })
+                .collect::<Vec<_>>();
+            let result = structured(&QueryAuditResponse {
+                requested_limit: 20,
+                limit: 20,
+                count: events.len(),
+                events,
+            });
+            let content = result.structured_content.expect("structured content");
+            let errors: Vec<_> = validator
+                .iter_errors(&content)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(errors.is_empty(), "invalid audit response: {errors:?}");
+            for (event, expected) in content["events"].as_array().unwrap().iter().zip(&policies) {
+                assert_eq!(event["policy_ids"], json!(expected));
+                assert!(event.get("principal").is_none());
+            }
+        }
     }
 
     #[test]

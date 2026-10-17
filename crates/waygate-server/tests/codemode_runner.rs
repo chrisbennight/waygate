@@ -1,6 +1,6 @@
+use std::io::{BufRead, BufReader};
 #[cfg(target_os = "linux")]
-use std::io::Write;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom, Write};
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 use std::process::{Command, Stdio};
