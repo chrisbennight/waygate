@@ -332,6 +332,36 @@ This document covers:
   errors distinguishable only by SDK message text, and matching on that
   text would stop bridging the day the wording changed.
 
+  **Every `initialize` handshake proposes `2025-11-25`.** That is the newest
+  MCP version that still has the handshake; `2026-07-28` replaced it with
+  discovery, so a handshake proposing `2026-07-28` asks for a generation it
+  cannot negotiate. The `auto` bridge, `protocol: legacy`, SSE, stdio, and the
+  `classify` scaffold all propose `2025-11-25`, and the upstream answers with
+  the version it will speak.
+
+  **A failed connection reports what the upstream did.** When a
+  streamable-HTTP dial fails during the handshake or its first `tools/list`,
+  the dial error, and with it the `upstream connect failed` log line, ends
+  with a bounded summary of the HTTP exchanges that dial made. For example:
+  `tools/list failed: Transport closed; HTTP exchanges on this dial: POST
+  server/discover -> HTTP 503 after 1 ms; POST initialize -> event stream,
+  2 events, 1 data event, closed by the gateway after 1 ms; ...; POST
+  tools/list -> event stream, 0 events, 0 data events, ended normally after
+  1 ms`. Each entry gives the gateway's own JSON-RPC method, the HTTP method,
+  the outcome (accepted, JSON, an event stream with its event counts and how
+  it ended, or a failure with its HTTP status when known), and the elapsed
+  time. Both attempts of an `auto` dial share one summary, so it also shows
+  how discovery failed before the bridge. The summary accompanies failures
+  the dial reports itself, including its own handshake deadline. A caller's
+  deadline that ends a stalled dial first, such as the reconnect deadline or
+  the boot deadline on a `tools/list` that never answers, reports only that
+  deadline. It keeps the 12 most recent
+  exchanges and counts older ones, and it never contains payloads, header
+  values, the bearer token, or the session id. The SDK error text in front of
+  it is capped at 1024 bytes with control characters escaped. Recording stops
+  when the dial finishes, so traffic on an established connection is never
+  recorded.
+
   The cost is one refused probe per dial against an upstream that cannot
   discover. Boot and re-probe lanes pay it, as does every other dial except a
   per-call tool call, including per-call resource reads and file transfers.
