@@ -479,13 +479,29 @@ The engine is QuickJS with current ECMAScript built-ins, for example
 `Promise.withResolvers`, `Uint8Array.fromBase64`,
 `Uint8Array.prototype.toBase64`, and `DOMException`. Beyond the language, a
 program has the gateway's `connectors` and `execution` objects and the globals
-`atob`, `btoa`, `queueMicrotask`, and `performance`.
+`console`, `atob`, `btoa`, `queueMicrotask`, and `performance`.
+
+`console` has the usual methods, including `log`, `info`, `debug`, `warn`,
+`error`, `trace`, `dir`, `table`, `assert`, `count`, `group`, and `time` with
+their companions, and none of them throws. Each call becomes one entry with its
+level and text, formatted close to Node.js: strings print as they are, other
+values as JSON-like text in which a cycle prints as `[Circular]`, errors with
+their stack in program positions, and the `%s`, `%d`, `%i`, `%f`, `%j`, `%o`,
+`%O`, `%c`, and `%%` substitutions apply. `dir` and `table` print their value
+the same way. The response's `console` field returns the attempt's entries in
+order. A call that waits for an execution that fails or times out returns them
+in its error data, which, like the failure message, is not stored; detached
+executions keep console output only with a stored result, which
+`codemode.result` returns. The `console_bytes` limit
+that `codemode.limits` reports bounds the total; output past it is dropped,
+`truncated` is set, and the program continues. Console output is program
+output: it goes only to the caller, is stored only as part of a stored result,
+and is never written to the gateway's own logs.
 
 Common Node.js and browser globals are absent:
 
 | Absent | Use instead |
 | --- | --- |
-| `console` | Return the values you need, or publish them with `execution.emitArtifact`. |
 | `TextEncoder`, `TextDecoder` | For valid UTF-8, `decodeURIComponent(escape(atob(text)))` decodes base64 text; it throws on malformed bytes. |
 | `Buffer` | `Uint8Array.fromBase64(text)` and `bytes.toBase64()` for base64 bytes. |
 | `URL`, `URLSearchParams` | String methods and regular expressions. |
@@ -811,8 +827,9 @@ version 5 adds durable artifact emission, and version 6 adds the private
 completed-result spool without changing the JavaScript SDK. SDK version 2
 exposes the artifact capability, SDK version 3 adds the bounded wait
 primitive, and SDK version 4 with runner version 7 adds `execution.input`. SDK
-version 5 with runner version 8 runs program bodies as async functions. A
-current worker continues executions stamped 2/5, 3/6, 4/6, 3/7, 4/7, or 5/8
+version 5 with runner version 8 runs program bodies as async functions, and
+SDK version 6 with runner version 9 adds `console` and its console frames. A
+current worker continues executions stamped 2/5, 3/6, 4/6, 3/7, 4/7, 5/8, or 6/9
 and atomically restamps them with the current pair when it claims the next
 attempt. Rolling upgrades therefore preserve continuations while an older
 worker cannot claim an execution that may depend on a newer SDK surface.

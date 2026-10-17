@@ -20,7 +20,9 @@ return { first, second };
 
 This example requires the tutorial's `demo.greet` tool to be admitted for the
 caller. Submit the body in `codemode.execute.source`. The body runs as an async
-function, so `await` also works, including on a connector result. The
+function, so `await` also works, including on a connector result. Output from
+`console.log` and the other `console` methods comes back in the response's
+`console` field, or in the error data when the program fails. The
 [program runtime](../codemode.md#program-runtime) lists the available globals
 and what to use instead of common Node.js and browser ones. For real workflows,
 project only the fields needed for the answer instead of returning whole

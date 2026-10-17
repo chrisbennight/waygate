@@ -34,6 +34,9 @@ pub(crate) struct CodeModeLimits {
     pub artifacts_per_attempt: usize,
     /// Maximum cumulative serialized artifact bytes per attempt.
     pub artifact_total_bytes: usize,
+    /// Maximum console output kept per attempt, counting each entry's UTF-8
+    /// text plus a small fixed charge per entry.
+    pub console_bytes: usize,
     /// Maximum search query length in UTF-8 bytes.
     pub query_bytes: usize,
     /// Maximum distinct files in a file bundle.
@@ -81,6 +84,7 @@ impl Default for CodeModeLimits {
             artifact_bytes: 8 * MIB,
             artifacts_per_attempt: 256,
             artifact_total_bytes: 128 * MIB,
+            console_bytes: 64 * 1024,
             query_bytes: 4096,
             file_count: 64,
             file_locations: 512,
@@ -122,6 +126,7 @@ impl CodeModeLimits {
                 self.result_bytes,
                 self.checkpoint_bytes,
                 self.artifact_bytes,
+                self.console_bytes,
             ]
             .iter()
             .max()
@@ -170,6 +175,7 @@ impl CodeModeLimits {
             self.input_bytes,
             self.checkpoint_bytes,
             self.artifact_bytes,
+            self.console_bytes,
             self.stack_bytes,
         ] {
             anyhow::ensure!(

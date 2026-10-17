@@ -115,6 +115,7 @@ JSON Schema's `maxLength` counts characters, so admission also checks byte size.
 | `GATEWAY_CODEMODE_ARTIFACT_MAX_BYTES` | Heap divided by 16 |
 | `GATEWAY_CODEMODE_MAX_ARTIFACTS` | 256 per attempt |
 | `GATEWAY_CODEMODE_ARTIFACT_TOTAL_MAX_BYTES` | 16 times the individual artifact limit, per attempt |
+| `GATEWAY_CODEMODE_CONSOLE_MAX_BYTES` | 64 KiB of console output kept per attempt |
 | `GATEWAY_CODEMODE_QUERY_MAX_BYTES` | 4 KiB |
 | `GATEWAY_CODEMODE_EXECUTION_MAX_SECONDS` | 86,400 seconds (24 hours); operator may lower it |
 | `GATEWAY_CODEMODE_SETUP_TIMEOUT_SECONDS` | 30 seconds, separate from execution time |

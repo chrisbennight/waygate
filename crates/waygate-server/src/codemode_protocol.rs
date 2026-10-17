@@ -1,6 +1,7 @@
 use crate::codemode_limits::limits;
 use std::io::{self, Write};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -113,6 +114,108 @@ pub enum RunnerFrame {
         code: RunnerFailureCode,
         message: String,
     },
+    /// One `console` call, already formatted. The runner stops sending once
+    /// the console budget is spent; the parent applies the same budget again
+    /// and keeps only what fits.
+    Console {
+        level: ConsoleLevel,
+        text: String,
+    },
+}
+
+// The severity a `console` method reports, named as programs know them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleLevel {
+    Debug,
+    Info,
+    Log,
+    Warn,
+    Error,
+}
+
+// One line of program console output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConsoleEntry {
+    /// The `console` method's severity.
+    pub level: ConsoleLevel,
+    /// The formatted output of that call.
+    pub text: String,
+}
+
+// Console output a program produced during one runner attempt.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConsoleOutput {
+    /// Output in call order.
+    pub entries: Vec<ConsoleEntry>,
+    /// True when output beyond the console budget was dropped; the last entry
+    /// may then end early.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+impl ConsoleOutput {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty() && !self.truncated
+    }
+}
+
+/// Per-entry cost charged in addition to its text, so a flood of empty calls
+/// is bounded by the same budget as long ones.
+const CONSOLE_ENTRY_OVERHEAD_BYTES: usize = 16;
+
+/// Console output admitted against a byte budget.
+///
+/// The runner and the parent both account with this type, so the runner
+/// stops sending exactly where the parent stops keeping.
+#[derive(Debug)]
+pub struct ConsoleCapture {
+    output: ConsoleOutput,
+    remaining: usize,
+}
+
+impl ConsoleCapture {
+    pub fn new(budget_bytes: usize) -> Self {
+        Self {
+            output: ConsoleOutput::default(),
+            remaining: budget_bytes,
+        }
+    }
+
+    /// Record one call and return what was kept, or `None` once output has
+    /// been truncated. An entry that does not fit is cut on a character
+    /// boundary and ends the output.
+    pub fn admit(&mut self, level: ConsoleLevel, text: &str) -> Option<&ConsoleEntry> {
+        if self.output.truncated {
+            return None;
+        }
+        let Some(room) = self.remaining.checked_sub(CONSOLE_ENTRY_OVERHEAD_BYTES) else {
+            self.output.truncated = true;
+            self.remaining = 0;
+            return None;
+        };
+        let kept = if text.len() <= room {
+            self.remaining = room - text.len();
+            text
+        } else {
+            self.output.truncated = true;
+            self.remaining = 0;
+            let mut end = room;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            &text[..end]
+        };
+        self.output.entries.push(ConsoleEntry {
+            level,
+            text: kept.to_owned(),
+        });
+        self.output.entries.last()
+    }
+
+    pub fn into_output(self) -> ConsoleOutput {
+        self.output
+    }
 }
 
 pub fn encode_frame(frame: &impl Serialize) -> serde_json::Result<Vec<u8>> {
@@ -171,6 +274,47 @@ impl Write for BoundedBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_capture_keeps_output_within_its_budget() {
+        let mut capture = ConsoleCapture::new(CONSOLE_ENTRY_OVERHEAD_BYTES * 2 + 6);
+        assert!(capture.admit(ConsoleLevel::Log, "abc").is_some());
+        // Two of the three remaining bytes fit; the cut never splits a character.
+        let cut = capture
+            .admit(ConsoleLevel::Warn, "aé✓")
+            .expect("a shortened entry is kept")
+            .clone();
+        assert_eq!(cut.text, "aé");
+        assert!(capture.admit(ConsoleLevel::Error, "dropped").is_none());
+        let output = capture.into_output();
+        assert!(output.truncated);
+        assert_eq!(output.entries.len(), 2);
+    }
+
+    #[test]
+    fn console_capture_bounds_floods_of_empty_entries() {
+        let mut capture = ConsoleCapture::new(CONSOLE_ENTRY_OVERHEAD_BYTES * 3);
+        let kept = (0..100)
+            .filter(|_| capture.admit(ConsoleLevel::Log, "").is_some())
+            .count();
+        assert_eq!(kept, 3);
+        assert!(capture.into_output().truncated);
+    }
+
+    #[test]
+    fn console_output_omits_the_flag_until_truncated() {
+        let output = ConsoleOutput {
+            entries: vec![ConsoleEntry {
+                level: ConsoleLevel::Info,
+                text: "ready".to_owned(),
+            }],
+            truncated: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&output).expect("serialize console output"),
+            serde_json::json!({"entries": [{"level": "info", "text": "ready"}]})
+        );
+    }
 
     #[test]
     fn frame_encoder_refuses_oversized_values() {
