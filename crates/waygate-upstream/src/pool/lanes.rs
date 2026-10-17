@@ -50,6 +50,36 @@ pub(super) struct SlotCheckout<'a> {
 }
 
 impl super::UpstreamPool {
+    /// End every pooled upstream session and return how many lanes were open.
+    ///
+    /// A stateful upstream keeps a lane's session until the client deletes it
+    /// or the upstream's own idle expiry ends it, and an upstream with a fixed
+    /// session table refuses new sessions while it is full. A process that
+    /// exits without closing its lanes leaves their sessions in that table, so
+    /// the next gateway process can be refused until they expire. Closing a
+    /// lane's client ends its session with the upstream.
+    ///
+    /// Call this only once nothing can check out or re-dial a lane: a lane
+    /// dialed afterwards stays open.
+    pub async fn close_sessions(&self) -> usize {
+        let entries = self.entries.load_full();
+        let closing = entries
+            .iter()
+            .flat_map(|(name, entry)| entry.slots.iter().map(move |slot| (name, slot)))
+            .map(|(name, slot)| async move {
+                let connection = slot.conn.write().await.take()?;
+                if let Err(error) = connection.client.cancel().await {
+                    tracing::warn!(server = %name, %error, "upstream lane did not close cleanly");
+                }
+                Some(())
+            });
+        futures::future::join_all(closing)
+            .await
+            .into_iter()
+            .flatten()
+            .count()
+    }
+
     /// Mark a slot's connection down so the per-upstream scheduler
     /// re-dials it. Used by the dispatch error paths and the breaker-open
     /// recovery dial-failure path — a transport error or a failed re-dial

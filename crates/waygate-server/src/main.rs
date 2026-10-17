@@ -2546,6 +2546,16 @@ async fn gateway_main() -> anyhow::Result<()> {
         if let Err(error) = interrupting.await {
             tracing::warn!(%error, "recording interrupted Code Mode runs did not complete");
         }
+        // No call can check out a lane now, and the schedulers that re-dial
+        // lanes were cancelled with the shutdown signal, so end each pooled
+        // upstream session. A stateful upstream would otherwise hold them
+        // until its idle expiry and could refuse the next process's sessions
+        // in the meantime. Each close is one request, so a short budget keeps
+        // an unresponsive upstream from holding the database pools open.
+        match tokio::time::timeout(std::time::Duration::from_secs(5), pool.close_sessions()).await {
+            Ok(closed) => tracing::info!(closed, "closed pooled upstream sessions"),
+            Err(_) => tracing::warn!("pooled upstream sessions did not all close in time"),
+        }
         // Then close every isolated workload pool so connections are returned
         // to Postgres before the process exits.
         if let Some(pools) = &database_pools {

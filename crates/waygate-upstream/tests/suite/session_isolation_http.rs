@@ -860,6 +860,156 @@ async fn resource_requests_preserve_per_call_session_isolation() {
     );
 }
 
+/// A session-limited upstream shaped like a server that predates the stateless
+/// protocol. Every `initialize` opens a stateful session that holds one of a
+/// fixed number of slots until the client deletes it, whatever version the
+/// handshake settled on; a full table refuses new sessions; and any other
+/// sessionless request — such as `server/discover` — is rejected with `-32600`
+/// as an unexpected non-`initialize` message. Such a server would also expire an
+/// idle session after minutes, far longer than a call.
+struct SessionLimitedRig {
+    addr: std::net::SocketAddr,
+    open: Arc<Mutex<std::collections::HashMap<String, tokio::sync::OwnedSemaphorePermit>>>,
+}
+
+async fn spawn_session_limited_upstream(slots: usize) -> SessionLimitedRig {
+    let slots = Arc::new(tokio::sync::Semaphore::new(slots));
+    let open = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let svc = StreamableHttpService::new(
+        || Ok(MockUpstream),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default().with_legacy_session_mode(true),
+    );
+    let table = open.clone();
+    let app: Router<()> = Router::new()
+        .nest_service("/mcp", svc)
+        .layer(middleware::from_fn(move |req: Request, next: Next| {
+            let slots = slots.clone();
+            let table = table.clone();
+            async move {
+                let session = req
+                    .headers()
+                    .get("mcp-session-id")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                if req.method() == Method::DELETE {
+                    if let Some(session) = session {
+                        table.lock().unwrap().remove(&session);
+                    }
+                    return next.run(req).await;
+                }
+                if req.method() != Method::POST || session.is_some() {
+                    return next.run(req).await;
+                }
+                let (parts, body) = req.into_parts();
+                let bytes = to_bytes(body, 1 << 20).await.expect("request body");
+                let message: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+                if message.get("method").and_then(serde_json::Value::as_str) != Some("initialize") {
+                    let refusal = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": message.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                        "error": {
+                            "code": -32600,
+                            "message": "Unexpected message, expect initialize request",
+                        },
+                    });
+                    return (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(refusal)).into_response();
+                }
+                let Ok(slot) = slots.try_acquire_owned() else {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "maximum sessions reached",
+                    )
+                        .into_response();
+                };
+                let response = next
+                    .run(Request::from_parts(parts, Body::from(bytes)))
+                    .await;
+                if let Some(session) = response
+                    .headers()
+                    .get("mcp-session-id")
+                    .and_then(|value| value.to_str().ok())
+                {
+                    table.lock().unwrap().insert(session.to_owned(), slot);
+                }
+                response
+            }
+        }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    SessionLimitedRig { addr, open }
+}
+
+/// Per-call isolation opens a session for every call, so each call must give
+/// its session back. Against a session-limited upstream, a call that left its
+/// session open would exhaust the table after a few calls and every later call
+/// would be refused, while the pooled lanes stayed connected.
+#[tokio::test]
+async fn per_call_sessions_return_their_upstream_session_slots() {
+    const SLOTS: usize = 4;
+    const LANES: usize = 2;
+    let rig = spawn_session_limited_upstream(SLOTS).await;
+    let mut upstream = manifest(rig.addr, None);
+    upstream
+        .session
+        .as_mut()
+        .expect("session config")
+        .concurrency = Some(LANES);
+    let pool = UpstreamPool::connect(BTreeMap::from([("mock".to_owned(), upstream)])).await;
+    assert!(pool.is_connected("mock").await, "boot dial must connect");
+    assert_eq!(
+        rig.open.lock().unwrap().len(),
+        LANES,
+        "each pooled lane holds one session",
+    );
+
+    for call in 0..(SLOTS * 3) {
+        pool.call_tool("mock", "noop", None, None, None)
+            .await
+            .unwrap_or_else(|error| panic!("per-call call {call} failed: {error}"));
+    }
+    assert_eq!(
+        rig.open.lock().unwrap().len(),
+        LANES,
+        "every per-call session must be deleted before its call returns",
+    );
+}
+
+/// A gateway that exits must not leave its lanes holding a stateful upstream's
+/// session table: the next process would be refused until those sessions
+/// expired. Closing the pool ends every lane's session with the upstream.
+#[tokio::test]
+async fn closing_the_pool_ends_every_lane_session() {
+    const LANES: usize = 3;
+    let rig = spawn_session_limited_upstream(LANES).await;
+    let mut upstream = manifest(rig.addr, None);
+    upstream
+        .session
+        .as_mut()
+        .expect("session config")
+        .concurrency = Some(LANES);
+    let pool = UpstreamPool::connect(BTreeMap::from([("mock".to_owned(), upstream)])).await;
+    assert!(pool.is_connected("mock").await, "boot dial must connect");
+    assert_eq!(
+        rig.open.lock().unwrap().len(),
+        LANES,
+        "each lane holds one session"
+    );
+
+    assert_eq!(pool.close_sessions().await, LANES);
+    assert!(
+        rig.open.lock().unwrap().is_empty(),
+        "every lane session must be deleted when the pool closes",
+    );
+    assert!(
+        !pool.is_connected("mock").await,
+        "a closed pool serves no lane"
+    );
+}
+
 #[tokio::test]
 async fn native_response_limit_provenance_survives_rmcp_transport_erasure() {
     let (addr, _) = spawn_mock_upstream().await;
