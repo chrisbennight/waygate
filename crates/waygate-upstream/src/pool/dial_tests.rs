@@ -56,6 +56,9 @@ enum ToolsListReply {
     Serve,
     /// Answer `tools/list` with an event stream that ends before any event.
     CloseEventStream,
+    /// Answer `tools/list` with one JSON-RPC error that names no request id,
+    /// which the SDK cannot route, then end the stream.
+    ErrorWithoutId,
 }
 
 /// What the bearer-gated upstream observed.
@@ -162,6 +165,16 @@ async fn gate(
                 .body(Body::empty())
                 .expect("event-stream response");
         }
+        (Some("tools/list"), _, ToolsListReply::ErrorWithoutId) => {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .body(Body::from(
+                    "data: {\"jsonrpc\":\"2.0\",\"id\":null,\"error\":\
+                     {\"code\":-32600,\"message\":\"Bad Request: session not ready\"}}\n\n",
+                ))
+                .expect("event-stream response");
+        }
         _ => {}
     }
     next.run(Request::from_parts(parts, Body::from(bytes)))
@@ -205,7 +218,7 @@ fn tool_names(connection: &Connection) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn a_legacy_bearer_dial_lists_tools_and_proposes_the_newest_initialize_version() {
+async fn a_legacy_bearer_dial_lists_tools_and_proposes_the_newest_version() {
     let bearer = BearerEnv::set("GW_TEST_DIAL_LEGACY_BEARER");
     let (address, observed) = spawn_bearer_upstream(None, ToolsListReply::Serve).await;
 
@@ -218,16 +231,19 @@ async fn a_legacy_bearer_dial_lists_tools_and_proposes_the_newest_initialize_ver
         connection.negotiated_protocol.as_deref(),
         Some("2025-11-25")
     );
-    assert_eq!(observed.proposed_versions(), vec!["2025-11-25".to_owned()]);
+    assert_eq!(
+        observed.proposed_versions(),
+        vec![rmcp::model::ProtocolVersion::LATEST.as_str().to_owned()]
+    );
     assert_eq!(observed.discovery_probes.load(Ordering::SeqCst), 0);
     assert_eq!(observed.unauthenticated.load(Ordering::SeqCst), 0);
 }
 
 /// An upstream that refuses the discovery probe, whether with an
 /// authentication failure or a server error, is reached through the `auto`
-/// bridge, and the bridge's handshake proposes a version that has one.
+/// bridge, whose handshake proposes the newest version.
 #[tokio::test]
-async fn the_auto_bridge_after_a_refused_discovery_proposes_the_newest_initialize_version() {
+async fn the_auto_bridge_after_a_refused_discovery_proposes_the_newest_version() {
     let bearer = BearerEnv::set("GW_TEST_DIAL_AUTO_BRIDGE_BEARER");
     for status in [StatusCode::UNAUTHORIZED, StatusCode::SERVICE_UNAVAILABLE] {
         let (address, observed) = spawn_bearer_upstream(Some(status), ToolsListReply::Serve).await;
@@ -249,7 +265,7 @@ async fn the_auto_bridge_after_a_refused_discovery_proposes_the_newest_initializ
         );
         assert_eq!(
             observed.proposed_versions(),
-            vec!["2025-11-25".to_owned()],
+            vec![rmcp::model::ProtocolVersion::LATEST.as_str().to_owned()],
             "{status}"
         );
         assert_eq!(
@@ -279,12 +295,40 @@ async fn a_tools_list_stream_that_closes_without_a_response_is_named_in_the_dial
     assert!(text.contains("POST initialize -> "), "{text}");
     assert!(
         text.contains(
-            "POST tools/list -> event stream, 0 events, 0 data events, ended normally after "
+            "POST tools/list -> event stream, 0 events, 0 data events, \
+             no readable answer to this request, ended normally after "
         ),
         "{text}"
     );
     assert!(!text.contains(FIXTURE_BEARER), "{text}");
     assert_eq!(observed.unauthenticated.load(Ordering::SeqCst), 0);
+}
+
+/// The SDK drops an error that names no request id without reporting it, so
+/// the dial error alone would say only `Transport closed`. The summary names
+/// what the stream carried instead.
+#[tokio::test]
+async fn a_tools_list_error_without_an_id_is_named_in_the_dial_error() {
+    let bearer = BearerEnv::set("GW_TEST_DIAL_ID_LESS_ERROR_BEARER");
+    let (address, _observed) = spawn_bearer_upstream(None, ToolsListReply::ErrorWithoutId).await;
+
+    let error = match dial(&manifest(address, "legacy", &bearer), None, None).await {
+        Ok(_) => panic!("an unroutable answer must fail the dial"),
+        Err(error) => error,
+    };
+
+    let text = error.to_string();
+    assert!(matches!(error, DialError::ListTools(_)), "{text}");
+    assert!(
+        text.contains(
+            "POST tools/list -> event stream, 1 event, 1 data event, \
+             no readable answer to this request, first other data event: \
+             error without an id, code -32600: Bad Request: session not ready, \
+             ended normally after "
+        ),
+        "{text}"
+    );
+    assert!(!text.contains(FIXTURE_BEARER), "{text}");
 }
 
 /// Both attempts of an `auto` dial share one record, so a failure after the

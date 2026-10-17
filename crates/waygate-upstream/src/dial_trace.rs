@@ -9,8 +9,11 @@
 //! (taken from the message the gateway sends, never from upstream data), the
 //! HTTP method, the shape of the outcome, event counts for an event stream and
 //! how it ended, the elapsed time, and for a failure the HTTP status when it is
-//! known plus a short error text. It never records a request or response
-//! payload, a header value, the bearer token, or the session id.
+//! known plus a short error text. For a request's event stream it also notes
+//! whether a readable answer arrived and describes the first data event that
+//! was not one: its JSON-RPC kind, an error's code and bounded message, or why
+//! the SDK cannot read it. It never records a request, a result, a header
+//! value, the bearer token, or the session id.
 //!
 //! Recording ends with the dial. [`DialTrace`] owns the record and every
 //! recorder holds only a weak reference to it, so once the dial's owner drops
@@ -25,7 +28,10 @@ use std::time::{Duration, Instant};
 
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt as _};
-use rmcp::model::{ClientJsonRpcMessage, ClientNotification, ConstString as _, JsonRpcMessage};
+use rmcp::model::{
+    ClientJsonRpcMessage, ClientNotification, ConstString as _, JsonRpcMessage, NumberOrString,
+    RequestId, ServerJsonRpcMessage,
+};
 use rmcp::transport::streamable_http_client::{
     SseError, StreamableHttpError, StreamableHttpPostResponse,
 };
@@ -135,7 +141,13 @@ pub(crate) struct ExchangeRecorder {
 
 impl ExchangeRecorder {
     pub(crate) fn post(&self, message: &ClientJsonRpcMessage) -> PendingExchange {
-        self.start(HttpMethod::Post, || Some(message_label(message)))
+        let mut exchange = self.start(HttpMethod::Post, || Some(message_label(message)));
+        if let JsonRpcMessage::Request(request) = message {
+            exchange.request = Some(AwaitedResponse {
+                id: request.id.clone(),
+            });
+        }
+        exchange
     }
 
     pub(crate) fn get(&self) -> PendingExchange {
@@ -171,8 +183,15 @@ impl ExchangeRecorder {
                 id,
             },
             settled: false,
+            request: None,
         }
     }
+}
+
+/// The request a POST carries, which its event stream should answer.
+#[derive(Clone)]
+struct AwaitedResponse {
+    id: RequestId,
 }
 
 /// One started exchange. Settling it with the request's result records the
@@ -180,6 +199,7 @@ impl ExchangeRecorder {
 pub(crate) struct PendingExchange {
     slot: Slot,
     settled: bool,
+    request: Option<AwaitedResponse>,
 }
 
 impl PendingExchange {
@@ -190,6 +210,7 @@ impl PendingExchange {
                 id: 0,
             },
             settled: true,
+            request: None,
         }
     }
 
@@ -206,9 +227,13 @@ impl PendingExchange {
                 self.slot.settle(Outcome::Json);
                 Ok(StreamableHttpPostResponse::Json(message, session))
             }
-            Ok(StreamableHttpPostResponse::Sse(stream, session)) => Ok(
-                StreamableHttpPostResponse::Sse(self.slot.tap(stream), session),
-            ),
+            Ok(StreamableHttpPostResponse::Sse(stream, session)) => {
+                let request = self.request.take();
+                Ok(StreamableHttpPostResponse::Sse(
+                    self.slot.tap(stream, request),
+                    session,
+                ))
+            }
             Ok(other) => {
                 self.slot.settle(Outcome::Unrecognized);
                 Ok(other)
@@ -224,7 +249,7 @@ impl PendingExchange {
     pub(crate) fn stream_result(mut self, result: StreamResult) -> StreamResult {
         self.settled = true;
         match result {
-            Ok(stream) => Ok(self.slot.tap(stream)),
+            Ok(stream) => Ok(self.slot.tap(stream, None)),
             Err(error) => {
                 self.slot.settle(failure(&error));
                 Err(error)
@@ -278,17 +303,20 @@ impl Slot {
         });
     }
 
-    fn tap(&self, stream: EventStream) -> EventStream {
+    fn tap(&self, stream: EventStream, request: Option<AwaitedResponse>) -> EventStream {
         // A response that arrives after the dial ends belongs to the
         // established connection and passes through unwrapped.
         if self.record.strong_count() == 0 {
             return stream;
         }
+        let answered = request.as_ref().map(|_| false);
         self.update(|exchange| {
             exchange.outcome = Outcome::EventStream {
                 events: 0,
                 data_events: 0,
                 end: StreamEnd::Open,
+                answered,
+                first_other: None,
             };
         });
         StreamTap {
@@ -298,18 +326,21 @@ impl Slot {
                 id: self.id,
             },
             ended: false,
+            request,
         }
         .boxed()
     }
 }
 
 /// Passes an event stream through unchanged while counting its events and
-/// noting how it ends. Event data is checked only for being blank, the way
-/// the SDK skips a keep-alive, and is never parsed or kept.
+/// noting how it ends. While the dial records, each data event on a request's
+/// stream is also read once to tell whether it answers the request; nothing
+/// from it is kept but a bounded description of the first one that does not.
 struct StreamTap {
     inner: EventStream,
     slot: Slot,
     ended: bool,
+    request: Option<AwaitedResponse>,
 }
 
 impl StreamTap {
@@ -319,9 +350,40 @@ impl StreamTap {
                 events,
                 data_events,
                 end,
+                ..
             } = &mut exchange.outcome
             {
                 update(events, data_events, end);
+            }
+        });
+    }
+
+    fn note_data(&mut self, data: &str) {
+        let Some(request) = self.request.as_ref() else {
+            return;
+        };
+        if self.slot.record.strong_count() == 0 {
+            return;
+        }
+        let read = read_data_event(data, request);
+        self.slot.update(|exchange| {
+            let Outcome::EventStream {
+                answered,
+                first_other,
+                ..
+            } = &mut exchange.outcome
+            else {
+                return;
+            };
+            match read {
+                DataEvent::Answer => {
+                    if let Some(answered) = answered {
+                        *answered = true;
+                    }
+                }
+                DataEvent::Other(description) => {
+                    first_other.get_or_insert(description);
+                }
             }
         });
     }
@@ -346,14 +408,14 @@ impl Stream for StreamTap {
         let polled = self.inner.poll_next_unpin(cx);
         match &polled {
             Poll::Ready(Some(Ok(event))) => {
-                let has_data = event
-                    .data
-                    .as_deref()
-                    .is_some_and(|data| !data.trim().is_empty());
+                let data = event.data.as_deref().filter(|data| !data.trim().is_empty());
                 self.observe(|events, data_events, _| {
                     *events += 1;
-                    *data_events += usize::from(has_data);
+                    *data_events += usize::from(data.is_some());
                 });
+                if let Some(data) = data {
+                    self.note_data(data);
+                }
             }
             Poll::Ready(Some(Err(error))) => {
                 let detail = sse_failure(error);
@@ -439,6 +501,11 @@ enum Outcome {
         events: usize,
         data_events: usize,
         end: StreamEnd,
+        /// For a request's stream, whether a readable answer to that request
+        /// arrived; `None` for a stream that answers no request.
+        answered: Option<bool>,
+        /// The first data event that was not that answer, described.
+        first_other: Option<String>,
     },
     Failed {
         status: Option<u16>,
@@ -487,6 +554,8 @@ impl Exchange {
                 events,
                 data_events,
                 end,
+                answered,
+                first_other,
             } => {
                 let _ = write!(
                     out,
@@ -494,6 +563,12 @@ impl Exchange {
                     counted(*events, "event"),
                     counted(*data_events, "data event"),
                 );
+                if *answered == Some(false) && !matches!(end, StreamEnd::Open) {
+                    out.push_str("no readable answer to this request, ");
+                }
+                if let Some(first_other) = first_other {
+                    let _ = write!(out, "first other data event: {first_other}, ");
+                }
                 match end {
                     StreamEnd::Open => {
                         let _ = write!(out, "still open after {elapsed}");
@@ -619,6 +694,102 @@ fn client_failure(error: &reqwest::Error) -> (Option<u16>, Option<String>) {
 fn refused_status(text: &str) -> Option<u16> {
     let code: u16 = text.strip_prefix("HTTP ")?.get(..3)?.parse().ok()?;
     (100..=599).contains(&code).then_some(code)
+}
+
+/// What one event-stream data event was, relative to the request it streams.
+enum DataEvent {
+    /// The answer to the request, in a form the SDK reads.
+    Answer,
+    /// Anything else: a notification, an answer to another request, an
+    /// error the SDK cannot route, or text the SDK cannot read.
+    Other(String),
+}
+
+/// Read a data event the way the SDK will, and describe anything that will
+/// not complete the request. The SDK skips an unreadable event and an error
+/// without an id without reporting them, so a stream that carried one ends
+/// with only `Transport closed`. The description keeps JSON-RPC structure,
+/// error codes, and a bounded error message; never a result.
+fn read_data_event(data: &str, request: &AwaitedResponse) -> DataEvent {
+    let value: serde_json::Value = match serde_json::from_str(data) {
+        Ok(value) => value,
+        Err(error) => return DataEvent::Other(format!("not JSON ({})", decode_error(&error))),
+    };
+    let Some(object) = value.as_object() else {
+        return DataEvent::Other("JSON that is not a JSON-RPC message".to_owned());
+    };
+    if let Some(method) = object.get("method").and_then(serde_json::Value::as_str) {
+        let kind = if object.contains_key("id") {
+            "request"
+        } else {
+            "notification"
+        };
+        return DataEvent::Other(format!("{kind} {}", bounded_text(method, MAX_LABEL_BYTES)));
+    }
+    let answers = id_matches(object.get("id"), &request.id);
+    let whose = match object.get("id") {
+        None | Some(serde_json::Value::Null) => "without an id",
+        Some(_) if answers => "for this request",
+        Some(_) => "for another request",
+    };
+    if let Some(error) = object.get("error") {
+        if answers {
+            // The SDK reports a routed error itself.
+            return DataEvent::Answer;
+        }
+        let code = error
+            .get("code")
+            .and_then(serde_json::Value::as_i64)
+            .map_or_else(|| "unknown".to_owned(), |code| code.to_string());
+        let message = error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        return DataEvent::Other(format!(
+            "error {whose}, code {code}: {}",
+            bounded_text(message, MAX_EXCHANGE_ERROR_BYTES)
+        ));
+    }
+    if !object.contains_key("result") {
+        return DataEvent::Other("JSON-RPC message without a method, result, or error".to_owned());
+    }
+    if !answers {
+        return DataEvent::Other(format!("response {whose}"));
+    }
+    match serde_json::from_value::<ServerJsonRpcMessage>(value.clone()) {
+        Ok(_) => DataEvent::Answer,
+        Err(error) => DataEvent::Other(format!(
+            "response for this request that the SDK cannot read ({})",
+            unreadable_envelope(&value, &error)
+        )),
+    }
+}
+
+fn id_matches(id: Option<&serde_json::Value>, expected: &RequestId) -> bool {
+    match (id, expected) {
+        (Some(serde_json::Value::Number(id)), NumberOrString::Number(expected)) => {
+            id.as_i64() == Some(*expected)
+        }
+        (Some(serde_json::Value::String(id)), NumberOrString::String(expected)) => {
+            id.as_str() == expected.as_ref()
+        }
+        _ => false,
+    }
+}
+
+/// Why the SDK cannot read an answer. Its result type accepts any object, so
+/// an unreadable answer has a malformed envelope, most often its version
+/// marker; the SDK's own error names no field.
+fn unreadable_envelope(value: &serde_json::Value, error: &serde_json::Error) -> String {
+    match value.get("jsonrpc") {
+        Some(serde_json::Value::String(version)) if version == "2.0" => decode_error(error),
+        Some(_) => "its jsonrpc member is not \"2.0\"".to_owned(),
+        None => "it has no jsonrpc member".to_owned(),
+    }
+}
+
+fn decode_error(error: &serde_json::Error) -> String {
+    bounded_text(&error.to_string(), MAX_EXCHANGE_ERROR_BYTES)
 }
 
 /// A body error wraps the HTTP client's error, which names the request URL.
@@ -789,7 +960,105 @@ mod tests {
         assert_eq!(
             summary(&trace),
             "HTTP exchanges on this dial: POST tools/list -> event stream, 3 events, \
-             1 data event, ended normally after T",
+             1 data event, no readable answer to this request, first other data event: \
+             JSON-RPC message without a method, result, or error, ended normally after T",
+        );
+    }
+
+    #[test]
+    fn a_data_event_is_described_by_its_role_never_by_its_result() {
+        let request = AwaitedResponse {
+            id: RequestId::Number(1),
+        };
+        let read = |data: &str| match read_data_event(data, &request) {
+            DataEvent::Answer => "answer".to_owned(),
+            DataEvent::Other(description) => description,
+        };
+        assert_eq!(
+            read(r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#),
+            "answer"
+        );
+        assert_eq!(
+            read(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no"}}"#),
+            "answer",
+            "the SDK reports a routed error itself"
+        );
+        assert_eq!(
+            read(r#"{"jsonrpc":"2.0","id":7,"result":{"secret":"value"}}"#),
+            "response for another request"
+        );
+        assert_eq!(
+            read(r#"{"jsonrpc":"2.0","id":"1","result":{}}"#),
+            "response for another request",
+            "a string id never answers a numeric request id"
+        );
+        assert_eq!(
+            read(r#"{"jsonrpc":"2.0","method":"notifications/message","params":{"data":"x"}}"#),
+            "notification notifications/message"
+        );
+        assert_eq!(
+            read(r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#),
+            "request ping"
+        );
+        assert_eq!(
+            read(r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Bad Request"}}"#),
+            "error without an id, code -32600: Bad Request"
+        );
+        assert_eq!(
+            read(r#"{"id":1,"result":{"secret":"value"}}"#),
+            "response for this request that the SDK cannot read (it has no jsonrpc member)"
+        );
+        assert_eq!(
+            read(r#"{"jsonrpc":"1.0","id":1,"result":{}}"#),
+            "response for this request that the SDK cannot read \
+             (its jsonrpc member is not \"2.0\")"
+        );
+        assert_eq!(
+            read("retry later"),
+            "not JSON (expected value at line 1 column 1)"
+        );
+
+        let forged = format!(
+            r#"{{"jsonrpc":"2.0","error":{{"code":-32000,"message":"line\nforged {}"}}}}"#,
+            "x".repeat(4 * MAX_EXCHANGE_ERROR_BYTES)
+        );
+        let described = read(&forged);
+        let prefix = "error without an id, code -32000: line\\nforged ";
+        assert!(described.starts_with(prefix), "{described}");
+        assert!(
+            described.len()
+                <= "error without an id, code -32000: ".len() + MAX_EXCHANGE_ERROR_BYTES,
+            "{} bytes",
+            described.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_stream_notes_only_what_does_not_answer_it() {
+        let trace = DialTrace::new();
+        let recorder = trace.recorder();
+        let answered =
+            recorder
+                .post(&list_tools())
+                .post_result(Ok(StreamableHttpPostResponse::Sse(
+                    stream::iter(vec![
+                        event(Some(
+                            r#"{"jsonrpc":"2.0","method":"notifications/progress"}"#,
+                        )),
+                        event(Some(r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#)),
+                    ])
+                    .boxed(),
+                    None,
+                )));
+        let Ok(StreamableHttpPostResponse::Sse(answered, _)) = answered else {
+            panic!("an event stream stays an event stream");
+        };
+        let _: Vec<_> = answered.collect().await;
+        assert_eq!(
+            summary(&trace),
+            "HTTP exchanges on this dial: POST tools/list -> event stream, 2 events, \
+             2 data events, first other data event: notification notifications/progress, \
+             ended normally after T",
         );
     }
 
