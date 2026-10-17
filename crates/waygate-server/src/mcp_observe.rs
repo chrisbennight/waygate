@@ -65,7 +65,7 @@ use waygate_mcp::{
     CatalogTool, SharedBuiltinTools,
 };
 use waygate_oidc::{AuthMethod, Principal, Scope};
-use waygate_storage::audit::{AuditQuery, AuditRow};
+use waygate_storage::audit::{AuditQuery, AuditReadError, AuditRow};
 use waygate_upstream::{UpstreamHealth, UpstreamRuntimeState};
 
 use crate::mcp_builtin::{parse_count, parse_opt_u32, schema_obj, structured};
@@ -74,6 +74,9 @@ use waygate_core::fmt::format_ts_rfc3339;
 /// The reserved namespace this handler answers, aliased to the cross-crate
 /// source of truth so dispatch and the load-time guard agree.
 pub const NAMESPACE: &str = waygate_core::OBSERVE_BUILTIN_NAMESPACE;
+
+/// Includes waiting for a database connection and completing the read.
+const AUDIT_QUERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Built-in read-only MCP tools backing the `gateway-observe.*` analysis plane.
 /// Holds only the deferred `AdminState` cell (set once at boot, before any
@@ -182,10 +185,11 @@ impl ObserveTools {
             since,
             ..Default::default()
         };
+        let started = std::time::Instant::now();
         let rows = audit
-            .query_events(&query, limit, None)
+            .query_events_bounded(&query, limit, None, AUDIT_QUERY_BUDGET)
             .await
-            .map_err(|e| db_error("audit query", e))?;
+            .map_err(|e| audit_query_error(e, started.elapsed()))?;
         let events: Vec<AuditRowView> = rows.iter().map(AuditRowView::from_row).collect();
         Ok(structured(&QueryAuditResponse {
             count: events.len(),
@@ -833,11 +837,10 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
     vec![
         Tool::new(
             format!("{NAMESPACE}.query_audit"),
-            "Query the gateway's audit log for recent activity — who called which tool when, the \
-             outcome (success / denied / step_up_required / execution_error), and on a denial the \
-             policy IDs and reason. Filters: `server`, `outcome`, `category`, `risk`, `principal` \
-             (substring of sub/email), `since` (relative window, default 24h). Tenant-scoped to \
-             you. Returns compact rows, newest first.",
+            "Read tenant-scoped audit events, newest IDs first, with actors, outcomes and denial \
+             details. Filter by server, outcome, category, risk, principal (literal subject/email \
+             substring), or since (relative window; default 24h). Reads have a 20-second total \
+             budget; errors distinguish timeout, database cancellation and connection unavailability.",
             query_audit_schema(),
         )
         .with_title("Query the audit log")
@@ -1067,6 +1070,34 @@ fn opt_string(args: &JsonObject, key: &str) -> Result<Option<String>, McpError> 
 fn db_error<E: std::fmt::Display>(what: &str, e: E) -> McpError {
     tracing::warn!(error = %e, "gateway-observe {what} failed");
     McpError::internal_error(format!("{what} failed"), None)
+}
+
+fn audit_query_error(error: AuditReadError, elapsed: std::time::Duration) -> McpError {
+    let (kind, message) = match &error {
+        AuditReadError::DeadlineExceeded => (
+            "audit_query_timeout",
+            "Audit query exceeded its execution budget; try a shorter time window.",
+        ),
+        AuditReadError::Database(sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed) => (
+            "audit_query_unavailable",
+            "Audit query could not acquire a database connection; retry later.",
+        ),
+        AuditReadError::Database(sqlx::Error::Database(db))
+            if db.code().as_deref() == Some("57014") =>
+        {
+            (
+                "audit_query_cancelled",
+                "Audit query was canceled or exceeded its database time limit; try a shorter time window.",
+            )
+        }
+        AuditReadError::Database(_) => ("audit_query_failed", "Audit query failed."),
+    };
+    tracing::warn!(
+        error_kind = kind,
+        elapsed_ms = elapsed.as_millis() as u64,
+        "gateway-observe audit query failed"
+    );
+    McpError::internal_error(message, Some(json!({ "error": kind })))
 }
 
 /// Structured insufficient-scope error mirroring the maker surface's step-up
@@ -1582,6 +1613,24 @@ mod tests {
                 assert_eq!(event["policy_ids"], json!(expected));
                 assert!(event.get("principal").is_none());
             }
+        }
+    }
+
+    #[test]
+    fn audit_query_errors_distinguish_deadline_connection_and_database_failures() {
+        for (error, expected) in [
+            (AuditReadError::DeadlineExceeded, "audit_query_timeout"),
+            (sqlx::Error::PoolTimedOut.into(), "audit_query_unavailable"),
+            (sqlx::Error::PoolClosed.into(), "audit_query_unavailable"),
+            (
+                sqlx::Error::Protocol("private diagnostic".to_owned()).into(),
+                "audit_query_failed",
+            ),
+        ] {
+            let error = audit_query_error(error, std::time::Duration::from_secs(1));
+            assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+            assert_eq!(error.data, Some(json!({ "error": expected })));
+            assert!(!error.message.contains("private diagnostic"));
         }
     }
 
