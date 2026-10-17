@@ -32,7 +32,7 @@ use waygate_mcp::DefaultInvocationService;
 use waygate_oidc::{ApiKeyProfileRestrictions, Principal};
 
 /// What the catalog fake reports for every tool.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Outcome {
     Refused(ToolRefusal),
     Unavailable(TemporaryUnavailability),
@@ -323,6 +323,37 @@ async fn temporary_condition_is_not_revealed_to_a_caller_who_cannot_discover_the
                 AuditOutcome::ExecutionError,
                 Some("unavailable:no_connected_lane".to_owned())
             )],
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_audit_row_carries_the_trace_id_the_caller_receives() {
+    // No OpenTelemetry context is active here, so the trace id is the
+    // generated fallback that only this refusal knows.
+    let hidden = confined_elsewhere();
+    let visible = principal(None);
+    let cases: [(Outcome, &Principal); 4] = [
+        (Outcome::Refused(ToolRefusal::ServerQuarantined), &visible),
+        (Outcome::Refused(ToolRefusal::KeptBlocked), &visible),
+        (
+            Outcome::Unavailable(TemporaryUnavailability::CatalogConverging),
+            &visible,
+        ),
+        (
+            Outcome::Unavailable(TemporaryUnavailability::NoConnectedLane),
+            &hidden,
+        ),
+    ];
+    for (outcome, caller) in cases {
+        let (err, events) = refuse(outcome, Arc::new(AllowAllGate), Some(caller)).await;
+        let data = wire(err).data.expect("structured error data");
+        let returned = data["trace_id"].as_str().expect("trace id in the error");
+        assert_eq!(events.len(), 1, "{outcome:?}");
+        assert_eq!(
+            events[0].trace_id.as_deref(),
+            Some(returned),
+            "{outcome:?}: the audit row must be findable by the caller's trace id"
         );
     }
 }
