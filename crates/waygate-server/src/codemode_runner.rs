@@ -383,11 +383,11 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
   const utf8Decode = __gateway_utf8_decode;
   const utf8Encode = __gateway_utf8_encode;
   const randomBytes = __gateway_random_bytes;
-  const objectClass = __gateway_object_class;
+  const engineClass = __gateway_engine_class;
   delete globalThis.__gateway_utf8_decode;
   delete globalThis.__gateway_utf8_encode;
   delete globalThis.__gateway_random_bytes;
-  delete globalThis.__gateway_object_class;
+  delete globalThis.__gateway_engine_class;
   const define = (name, value) => Object.defineProperty(globalThis, name, {
     value,
     writable: true,
@@ -410,7 +410,7 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
   const dataViewOffset = getter(DataView.prototype, "byteOffset");
   const dataViewByteLength = getter(DataView.prototype, "byteLength");
   const bufferDetached = getter(ArrayBuffer.prototype, "detached");
-  const bufferSlice = method(ArrayBuffer.prototype, "slice");
+  const bufferByteLength = getter(ArrayBuffer.prototype, "byteLength");
   const bufferTransfer = method(ArrayBuffer.prototype, "transfer");
   const asciiWhitespace = /^[\t\n\f\r ]+|[\t\n\f\r ]+$/g;
   const utf8Labels = new Set([
@@ -554,12 +554,36 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
     regexpFlagReaders.filter(([, read]) => read(input)).map(([flag]) => flag).join("");
   const mapEntries = method(Map.prototype, "entries");
   const setValues = method(Set.prototype, "values");
-  const primitiveOf = [
-    [Boolean, method(Boolean.prototype, "valueOf")],
-    [Number, method(Number.prototype, "valueOf")],
-    [String, method(String.prototype, "valueOf")],
-    [BigInt, method(BigInt.prototype, "valueOf")]
-  ];
+  const primitiveOf = {
+    boolean: method(Boolean.prototype, "valueOf"),
+    number: method(Number.prototype, "valueOf"),
+    string: method(String.prototype, "valueOf"),
+    bigint: method(BigInt.prototype, "valueOf")
+  };
+  // The engine class of each cloneable kind, learned from sample objects so
+  // a value's type is judged by what it is rather than by its prototype.
+  const kindOfClass = new Map();
+  for (const [kind, sample] of [
+    ["ordinary", {}], ["array", []], ["map", new Map()], ["set", new Set()], ["date", new Date(0)],
+    ["regexp", /a/], ["arrayBuffer", new ArrayBuffer(0)], ["sharedArrayBuffer", new SharedArrayBuffer(0)],
+    ["dataView", new DataView(new ArrayBuffer(0))], ["boolean", Object(false)], ["number", Object(0)],
+    ["string", Object("")], ["bigint", Object(0n)], ["error", new Error()], ["domException", new DOMException()]
+  ]) {
+    const id = engineClass(sample);
+    if (!kindOfClass.has(id)) kindOfClass.set(id, kind);
+  }
+  const describe = (value) => {
+    try {
+      return Object.prototype.toString.call(value);
+    } catch {
+      return "This value";
+    }
+  };
+  const copyBuffer = (buffer) => {
+    const output = new ArrayBuffer(bufferByteLength(buffer));
+    new Uint8Array(output).set(new Uint8Array(buffer));
+    return output;
+  };
   const errorTypes = { Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError };
   const uncloneable = (what) => new DOMException(`${what} could not be cloned`, "DataCloneError");
   const assign = (target, key, value) => Object.defineProperty(target, key, {
@@ -578,6 +602,7 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
       transferred.add(buffer);
     }
     const memory = new Map();
+    const pendingTransfers = [];
     const copy = (input) => {
       if (typeof input === "symbol") throw uncloneable(String(input));
       if (typeof input === "function") throw uncloneable(`The function ${input.name || "(anonymous)"}`);
@@ -585,70 +610,94 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
       if (memory.has(input)) return memory.get(input);
       // A proxy's target cannot be cloned through it, and the engine is the
       // only reliable judge of what is a proxy.
-      const kind = objectClass(input);
-      if (kind === "proxy") throw uncloneable("A Proxy");
+      const id = engineClass(input);
+      if (id === -1) throw uncloneable("A Proxy");
+      const typedName = typedArrayName(input);
+      const kind = typedName === undefined ? kindOfClass.get(id) : "typedArray";
       const remember = (output) => {
         memory.set(input, output);
         return output;
       };
-      if (Array.isArray(input)) {
-        const output = remember(new Array(input.length));
-        for (const key of Object.keys(input)) assign(output, key, copy(input[key]));
-        return output;
-      }
-      if (input instanceof Map) {
-        const output = remember(new Map());
-        for (const [key, item] of mapEntries(input)) output.set(copy(key), copy(item));
-        return output;
-      }
-      if (input instanceof Set) {
-        const output = remember(new Set());
-        for (const item of setValues(input)) output.add(copy(item));
-        return output;
-      }
-      if (input instanceof Date) return remember(new Date(dateTime(input)));
-      if (input instanceof RegExp) return remember(new RegExp(regexpSource(input), regexpFlags(input)));
-      if (input instanceof ArrayBuffer) {
-        if (bufferDetached(input)) throw uncloneable("A detached ArrayBuffer");
-        return remember(bufferSlice(input, 0));
-      }
-      // Sharing memory needs a second agent, which this runtime never has.
-      if (input instanceof SharedArrayBuffer) throw uncloneable("A SharedArrayBuffer");
-      const typedName = typedArrayName(input);
-      if (typedName !== undefined) {
-        const buffer = copy(viewBuffer(input));
-        return remember(new typedArrays[typedName](buffer, viewOffset(input), viewLength(input)));
-      }
-      if (input instanceof DataView) {
-        const buffer = copy(dataViewBuffer(input));
-        return remember(new DataView(buffer, dataViewOffset(input), dataViewByteLength(input)));
-      }
-      const boxed = primitiveOf.find(([type]) => input instanceof type);
-      if (boxed !== undefined) return remember(Object(boxed[1](input)));
-      if (input instanceof DOMException) return remember(new DOMException(input.message, input.name));
-      if (input instanceof Error) {
-        const type = Object.hasOwn(errorTypes, input.name) ? errorTypes[input.name] : Error;
-        const output = remember(new type(String(input.message ?? "")));
-        if (typeof input.stack === "string") {
-          Object.defineProperty(output, "stack", { value: input.stack, writable: true, configurable: true });
+      switch (kind) {
+        case "array": {
+          const output = remember(new Array(input.length));
+          for (const key of Object.keys(input)) assign(output, key, copy(input[key]));
+          return output;
         }
-        if ("cause" in input) {
-          Object.defineProperty(output, "cause", { value: copy(input.cause), writable: true, configurable: true });
+        case "map": {
+          const output = remember(new Map());
+          for (const [key, item] of mapEntries(input)) output.set(copy(key), copy(item));
+          return output;
         }
-        return output;
+        case "set": {
+          const output = remember(new Set());
+          for (const item of setValues(input)) output.add(copy(item));
+          return output;
+        }
+        case "date":
+          return remember(new Date(dateTime(input)));
+        case "regexp":
+          return remember(new RegExp(regexpSource(input), regexpFlags(input)));
+        case "arrayBuffer": {
+          if (bufferDetached(input)) throw uncloneable("A detached ArrayBuffer");
+          if (!transferred.has(input)) return remember(copyBuffer(input));
+          // A transferred buffer's bytes are taken after cloning finishes, so
+          // writes made later during cloning are carried over.
+          const output = remember(new ArrayBuffer(bufferByteLength(input)));
+          pendingTransfers.push([input, output]);
+          return output;
+        }
+        case "sharedArrayBuffer":
+          // Sharing memory needs a second agent, which this runtime never has.
+          throw uncloneable("A SharedArrayBuffer");
+        case "typedArray": {
+          const buffer = copy(viewBuffer(input));
+          return remember(new typedArrays[typedName](buffer, viewOffset(input), viewLength(input)));
+        }
+        case "dataView": {
+          const buffer = copy(dataViewBuffer(input));
+          return remember(new DataView(buffer, dataViewOffset(input), dataViewByteLength(input)));
+        }
+        case "boolean":
+        case "number":
+        case "string":
+        case "bigint":
+          return remember(Object(primitiveOf[kind](input)));
+        case "domException":
+          return remember(new DOMException(input.message, input.name));
+        case "error": {
+          if (input instanceof DOMException) return remember(new DOMException(input.message, input.name));
+          const type = Object.hasOwn(errorTypes, input.name) ? errorTypes[input.name] : Error;
+          const output = remember(new type(String(input.message ?? "")));
+          if (typeof input.stack === "string") {
+            Object.defineProperty(output, "stack", { value: input.stack, writable: true, configurable: true });
+          }
+          if ("cause" in input) {
+            Object.defineProperty(output, "cause", { value: copy(input.cause), writable: true, configurable: true });
+          }
+          return output;
+        }
+        case "ordinary": {
+          const output = remember({});
+          for (const key of Object.keys(input)) assign(output, key, copy(input[key]));
+          return output;
+        }
+        default:
+          // Anything else carries engine state beyond its properties, such as
+          // a promise, a weak collection, a generator or an iterator.
+          throw uncloneable(describe(input));
       }
-      // Anything left that carries engine state beyond its properties, such as
-      // a promise, a weak collection, a generator or an iterator, is not an
-      // ordinary object and cannot be cloned.
-      if (kind !== "ordinary") throw uncloneable(Object.prototype.toString.call(input));
-      const output = remember({});
-      for (const key of Object.keys(input)) assign(output, key, copy(input[key]));
-      return output;
     };
     const result = copy(value);
-    // The clone already holds copies of every transferred buffer's bytes, so
-    // detaching the originals completes the transfer; nothing is detached when
-    // cloning fails.
+    for (const buffer of transferred) {
+      if (bufferDetached(buffer)) throw uncloneable("A detached ArrayBuffer");
+    }
+    for (const [original, output] of pendingTransfers) {
+      const length = Math.min(bufferByteLength(original), bufferByteLength(output));
+      new Uint8Array(output).set(new Uint8Array(original, 0, length));
+    }
+    // Detaching the originals completes the transfer; nothing is detached
+    // when cloning fails.
     for (const buffer of transferred) bufferTransfer(buffer);
     return result;
   };
@@ -2271,7 +2320,7 @@ fn install_standard_helpers(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     ctx.globals()
         .set("__gateway_random_bytes", Func::from(random_bytes))?;
     ctx.globals()
-        .set("__gateway_object_class", Func::from(object_class))?;
+        .set("__gateway_engine_class", Func::from(engine_class))?;
     ctx.globals()
         .set("__gateway_url_parse", Func::from(url_parse))?;
     ctx.globals()
@@ -2284,33 +2333,20 @@ fn install_standard_helpers(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         .set("__gateway_form_serialize", Func::from(form_serialize))
 }
 
-/// How the engine represents a value, for `structuredClone`: `"proxy"`, an
-/// `"ordinary"` object whose only state is its properties, or `"other"`.
-///
-/// An object is ordinary when its engine class is the class of a freshly
-/// created plain object, which avoids depending on the engine's internal class
-/// numbering.
-fn object_class<'js>(ctx: Ctx<'js>, value: rquickjs::Value<'js>) -> rquickjs::Result<&'static str> {
+/// The engine class of a value, for choosing how `structuredClone` copies it:
+/// `-1` for a proxy, `0` for a value that is not an object, and otherwise the
+/// engine's class number, which the prelude compares with the classes of
+/// sample objects rather than interpreting.
+fn engine_class(value: rquickjs::Value<'_>) -> i64 {
     if value.is_proxy() {
-        return Ok("proxy");
+        return -1;
     }
     if !value.is_object() {
-        return Ok("other");
+        return 0;
     }
-    let plain = rquickjs::Object::new(ctx)?;
     // SAFETY: `JS_GetClassID` only reads the class recorded in a live value's
-    // header; both values are borrowed for the duration of the calls.
-    let (class, plain_class) = unsafe {
-        (
-            rquickjs::qjs::JS_GetClassID(value.as_raw()),
-            rquickjs::qjs::JS_GetClassID(plain.as_value().as_raw()),
-        )
-    };
-    Ok(if class == plain_class {
-        "ordinary"
-    } else {
-        "other"
-    })
+    // header; the value is borrowed for the duration of the call.
+    i64::from(unsafe { rquickjs::qjs::JS_GetClassID(value.as_raw()) })
 }
 
 /// Parse `input` against an optional `base` as the URL Standard does and
@@ -4361,6 +4397,49 @@ return {
                 "movedDetached": true,
                 "movedCopy": 2,
                 "decoded": "ok",
+            })
+        );
+    }
+
+    /// What a value is decides how it is cloned, not its prototype chain or
+    /// constructors the value controls.
+    #[test]
+    fn structured_clone_follows_intrinsic_types_and_final_transfer_contents() {
+        assert_eq!(
+            evaluate(
+                r#"
+const fakeDate = structuredClone(Object.create(Date.prototype));
+const bareMap = new Map([[1, 2]]);
+Object.setPrototypeOf(bareMap, null);
+const mapCopy = structuredClone(bareMap);
+const victim = new ArrayBuffer(8);
+const source = new ArrayBuffer(2);
+source.constructor = { [Symbol.species]: function () { return victim; } };
+const bufferCopy = structuredClone(source);
+const moved = new Uint8Array([1]).buffer;
+const written = structuredClone(
+  { moved, get update() { new Uint8Array(moved)[0] = 2; return true; } },
+  { transfer: [moved] }
+);
+const error = new DOMException("busy", "InvalidStateError");
+const errorCopy = structuredClone(error);
+return {
+  fakeDatePrototype: Object.getPrototypeOf(fakeDate) === Object.prototype,
+  bareMap: mapCopy instanceof Map && mapCopy.get(1),
+  bufferIndependent: bufferCopy !== victim && bufferCopy.byteLength,
+  transferredFinalByte: new Uint8Array(written.moved)[0],
+  movedDetached: moved.detached,
+  domException: errorCopy instanceof DOMException && `${errorCopy.name}: ${errorCopy.message}`,
+};
+"#
+            ),
+            serde_json::json!({
+                "fakeDatePrototype": true,
+                "bareMap": 2,
+                "bufferIndependent": 2,
+                "transferredFinalByte": 2,
+                "movedDetached": true,
+                "domException": "InvalidStateError: busy",
             })
         );
     }
