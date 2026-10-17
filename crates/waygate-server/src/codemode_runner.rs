@@ -624,14 +624,16 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
           for (const key of Object.keys(input)) assign(output, key, copy(input[key]));
           return output;
         }
+        // Entries are listed before any is copied, as the standard does, so
+        // a getter that changes the source cannot change the clone's members.
         case "map": {
           const output = remember(new Map());
-          for (const [key, item] of mapEntries(input)) output.set(copy(key), copy(item));
+          for (const [key, item] of Array.from(mapEntries(input))) output.set(copy(key), copy(item));
           return output;
         }
         case "set": {
           const output = remember(new Set());
-          for (const item of setValues(input)) output.add(copy(item));
+          for (const item of Array.from(setValues(input))) output.add(copy(item));
           return output;
         }
         case "date":
@@ -667,13 +669,22 @@ const STANDARD_HELPERS_PRELUDE: &str = r#"
           return remember(new DOMException(input.message, input.name));
         case "error": {
           if (input instanceof DOMException) return remember(new DOMException(input.message, input.name));
+          // The standard copies `message` and `cause` only as own data
+          // properties.
+          const own = (key) => {
+            const descriptor = Object.getOwnPropertyDescriptor(input, key);
+            return descriptor !== undefined && "value" in descriptor ? descriptor : undefined;
+          };
           const type = Object.hasOwn(errorTypes, input.name) ? errorTypes[input.name] : Error;
-          const output = remember(new type(String(input.message ?? "")));
-          if (typeof input.stack === "string") {
-            Object.defineProperty(output, "stack", { value: input.stack, writable: true, configurable: true });
+          const message = own("message");
+          const output = remember(new type(message === undefined ? "" : String(message.value)));
+          const stack = own("stack");
+          if (typeof stack?.value === "string") {
+            Object.defineProperty(output, "stack", { value: stack.value, writable: true, configurable: true });
           }
-          if ("cause" in input) {
-            Object.defineProperty(output, "cause", { value: copy(input.cause), writable: true, configurable: true });
+          const cause = own("cause");
+          if (cause !== undefined) {
+            Object.defineProperty(output, "cause", { value: copy(cause.value), writable: true, configurable: true });
           }
           return output;
         }
@@ -4440,6 +4451,44 @@ return {
                 "transferredFinalByte": 2,
                 "movedDetached": true,
                 "domException": "InvalidStateError: busy",
+            })
+        );
+    }
+
+    #[test]
+    fn structured_clone_snapshots_collections_and_reads_own_error_fields() {
+        assert_eq!(
+            evaluate(
+                r#"
+const map = new Map();
+map.set("first", { get value() { map.clear(); return 1; } });
+map.set("second", 2);
+const mapCopy = structuredClone(map);
+class Inherited extends Error {}
+Inherited.prototype.cause = () => "not cloneable";
+const inherited = structuredClone(new Inherited("kept"));
+let ran = false;
+const accessor = new Error("quiet");
+Object.defineProperty(accessor, "cause", { get() { ran = true; return 1; } });
+const accessorCopy = structuredClone(accessor);
+const caused = structuredClone(new Error("outer", { cause: { code: 7 } }));
+return {
+  mapKeys: [...mapCopy.keys()],
+  inheritedMessage: inherited.message,
+  inheritedCause: Object.hasOwn(inherited, "cause"),
+  accessorRan: ran,
+  accessorCause: Object.hasOwn(accessorCopy, "cause"),
+  cause: caused.cause,
+};
+"#
+            ),
+            serde_json::json!({
+                "mapKeys": ["first", "second"],
+                "inheritedMessage": "kept",
+                "inheritedCause": false,
+                "accessorRan": false,
+                "accessorCause": false,
+                "cause": {"code": 7},
             })
         );
     }
