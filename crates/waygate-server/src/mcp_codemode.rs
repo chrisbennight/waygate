@@ -142,20 +142,31 @@ const CANCELLATION_FALLBACK_INTERVAL: Duration = Duration::from_secs(5);
 /// Status polling interval for a run with no cancellation watch.
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const EXECUTION_CANCEL_SETTLE_INTERVAL: Duration = Duration::from_millis(25);
-/// Rolling window of program-facing contracts a binary will continue. Both
-/// stamps advance together whenever the sandbox surface changes, because a
-/// continuation replays the whole program: a binary that does not offer what
-/// the program was submitted against must refuse the row rather than run it
-/// degraded. `execution.input` is such a change — a runner that does not
-/// install it would replay an input-dependent program with no input and take
-/// a different path — so an older binary, which knows nothing of these
-/// numbers, fails the compatibility check instead.
-const LEGACY_SDK_CONTRACT_VERSION: i32 = 2;
-const PREVIOUS_SDK_CONTRACT_VERSION: i32 = 3;
-const SDK_CONTRACT_VERSION: i32 = 4;
-const LEGACY_RUNNER_CONTRACT_VERSION: i32 = 5;
-const PREVIOUS_RUNNER_CONTRACT_VERSION: i32 = 6;
-const RUNNER_CONTRACT_VERSION: i32 = 7;
+/// Program-facing contract stamps. Both advance together whenever the sandbox
+/// surface changes, because a continuation replays the whole program: a binary
+/// that does not offer what the program was submitted against must refuse the
+/// row rather than run it degraded. `execution.input` is such a change — a
+/// runner that does not install it would replay an input-dependent program
+/// with no input and take a different path — so an older binary, which knows
+/// nothing of these numbers, fails the compatibility check instead.
+const SDK_CONTRACT_VERSION: i32 = 5;
+const RUNNER_CONTRACT_VERSION: i32 = 8;
+
+/// Every `(sdk, runner)` stamp this binary continues. Each surface change has
+/// kept earlier programs running unchanged, so a current binary can replay a
+/// program stamped with any of them; a claimed continuation is restamped with
+/// the current pair. Async program bodies are the one narrowing: a program
+/// that used `await` as a name now fails to parse instead of running
+/// differently. A pair leaves this list only when its rows can no longer exist
+/// or its programs can no longer run unchanged.
+const CONTINUABLE_CONTRACTS: [(i32, i32); 6] = [
+    (2, 5),
+    (3, 6),
+    (4, 6),
+    (3, 7),
+    (4, 7),
+    (SDK_CONTRACT_VERSION, RUNNER_CONTRACT_VERSION),
+];
 
 /// Process-wide Code Mode admission shared by every MCP session.
 ///
@@ -1949,28 +1960,18 @@ impl CodeModeTools {
         if source_digest(&source) != execution.source_digest {
             return Err(execution_resume_incompatible("source_changed"));
         }
-        let supported_contracts = matches!(
-            (
-                execution.sdk_contract_version,
-                execution.runner_contract_version,
-            ),
-            (LEGACY_SDK_CONTRACT_VERSION, LEGACY_RUNNER_CONTRACT_VERSION)
-                | (
-                    PREVIOUS_SDK_CONTRACT_VERSION,
-                    PREVIOUS_RUNNER_CONTRACT_VERSION
-                )
-                | (SDK_CONTRACT_VERSION, PREVIOUS_RUNNER_CONTRACT_VERSION)
-                | (PREVIOUS_SDK_CONTRACT_VERSION, RUNNER_CONTRACT_VERSION)
-                | (SDK_CONTRACT_VERSION, RUNNER_CONTRACT_VERSION)
+        let stamped = (
+            execution.sdk_contract_version,
+            execution.runner_contract_version,
         );
-        if !supported_contracts {
-            let reason = if !matches!(
-                execution.sdk_contract_version,
-                LEGACY_SDK_CONTRACT_VERSION | PREVIOUS_SDK_CONTRACT_VERSION | SDK_CONTRACT_VERSION
-            ) {
-                "sdk_contract_changed"
-            } else {
+        if !CONTINUABLE_CONTRACTS.contains(&stamped) {
+            let reason = if CONTINUABLE_CONTRACTS
+                .iter()
+                .any(|(sdk, _)| *sdk == execution.sdk_contract_version)
+            {
                 "runner_contract_changed"
+            } else {
+                "sdk_contract_changed"
             };
             return Err(execution_resume_incompatible(reason));
         }
@@ -3175,8 +3176,8 @@ impl CodeModeTools {
                     .await;
                 return Ok(ExecuteResponse {
                     contract_version: ContractVersion::V1,
-                    sdk_contract_version: SdkContractVersion::V4,
-                    runner_contract_version: RunnerContractVersion::V7,
+                    sdk_contract_version: SdkContractVersion::V5,
+                    runner_contract_version: RunnerContractVersion::V8,
                     execution_id: attempt.execution_id,
                     source_ref,
                     status: ExecutionResponseStatus::WaitingForResume,
@@ -3203,8 +3204,8 @@ impl CodeModeTools {
                     .await;
                 return Ok(ExecuteResponse {
                     contract_version: ContractVersion::V1,
-                    sdk_contract_version: SdkContractVersion::V4,
-                    runner_contract_version: RunnerContractVersion::V7,
+                    sdk_contract_version: SdkContractVersion::V5,
+                    runner_contract_version: RunnerContractVersion::V8,
                     execution_id: attempt.execution_id,
                     source_ref,
                     status: ExecutionResponseStatus::WaitingForApproval,
@@ -3239,8 +3240,8 @@ impl CodeModeTools {
             .await;
         Ok(ExecuteResponse {
             contract_version: ContractVersion::V1,
-            sdk_contract_version: SdkContractVersion::V4,
-            runner_contract_version: RunnerContractVersion::V7,
+            sdk_contract_version: SdkContractVersion::V5,
+            runner_contract_version: RunnerContractVersion::V8,
             execution_id: attempt.execution_id,
             source_ref,
             status: ExecutionResponseStatus::Completed,
@@ -6781,14 +6782,14 @@ enum ContractVersion {
 /// something other than what it ran against.
 #[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
 enum SdkContractVersion {
-    #[serde(rename = "4")]
-    V4,
+    #[serde(rename = "5")]
+    V5,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
 enum RunnerContractVersion {
-    #[serde(rename = "7")]
-    V7,
+    #[serde(rename = "8")]
+    V8,
 }
 
 #[derive(Debug)]
@@ -7373,7 +7374,11 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
              editing them into the source: a program is identified by its exact bytes, so `input` \
              keeps a retained source reusable. `retain_for_seconds` keeps inline, uploaded or skill \
              source reusable by digest, and `source_ref` reports the digest and its retention \
-             state. The runtime has no filesystem, network, process, environment or credential \
+             state. The source is the body of an async function: it may `await`, and it returns \
+             the result. Beyond standard JavaScript only `atob`, `btoa`, `queueMicrotask` and \
+             `performance` are global; Node and browser globals such as `console`, `Buffer`, \
+             `TextDecoder`, `URL`, `crypto`, `setTimeout`, `fetch`, `require` and `Intl` are \
+             absent. The runtime has no filesystem, network, process, environment or credential \
              access. It exposes `connectors[server][operation]({...})` only for operations \
              `codemode.describe` returns to this caller, and each call goes through the gateway's \
              normal authorization, approval, validation, quota, inspection and audit under the same \
@@ -7386,7 +7391,8 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
              `codemode.start` instead. `repeat_after` applies only to those detached starts. \
              Failures return a stable `data.error` code with a message, such as \
              `execution_timeout`, `execution_capacity` or `execution_result_too_large`, or a \
-             `source_` or `skill_script_` code when the source cannot be resolved.",
+             `source_` or `skill_script_` code when the source cannot be resolved. A program \
+             error's message gives positions as `program:line:column`.",
             source_input_schema::<StartParams>(),
         )
         .with_title("Execute Code Mode JavaScript with direct authority")
@@ -7595,6 +7601,12 @@ mod tests {
     use waygate_invocation::InvocationContractAuthority;
 
     use super::*;
+
+    /// The stamp written before async program bodies, which paused executions
+    /// may still carry.
+    const PREVIOUS_CONTRACTS: (i32, i32) = (4, 7);
+    /// The oldest stamp a current binary still continues.
+    const OLDEST_CONTRACTS: (i32, i32) = CONTINUABLE_CONTRACTS[0];
 
     #[test]
     fn malformed_describe_arguments_are_invalid_not_unavailable() {
@@ -13317,8 +13329,8 @@ mod tests {
 
         let sample = super::structured(&ExecuteResponse {
             contract_version: ContractVersion::V1,
-            sdk_contract_version: SdkContractVersion::V4,
-            runner_contract_version: RunnerContractVersion::V7,
+            sdk_contract_version: SdkContractVersion::V5,
+            runner_contract_version: RunnerContractVersion::V8,
             execution_id: uuid::Uuid::now_v7(),
             source_ref: SourceReference {
                 sha256: source_digest("return null;"),
@@ -13335,8 +13347,8 @@ mod tests {
             }),
             artifacts: Vec::new(),
         });
-        assert_eq!(structured(&sample)["sdk_contract_version"], "4");
-        assert_eq!(structured(&sample)["runner_contract_version"], "7");
+        assert_eq!(structured(&sample)["sdk_contract_version"], "5");
+        assert_eq!(structured(&sample)["runner_contract_version"], "8");
         for name in ["codemode.execute", "codemode.resume"] {
             let definition = tool_defs()
                 .into_iter()
@@ -15667,11 +15679,11 @@ mod tests {
     #[test]
     fn responses_advertise_the_contracts_executions_are_stamped_with() {
         assert_eq!(
-            serde_json::to_value(SdkContractVersion::V4).expect("serialize sdk stamp"),
+            serde_json::to_value(SdkContractVersion::V5).expect("serialize sdk stamp"),
             Value::String(SDK_CONTRACT_VERSION.to_string()),
         );
         assert_eq!(
-            serde_json::to_value(RunnerContractVersion::V7).expect("serialize runner stamp"),
+            serde_json::to_value(RunnerContractVersion::V8).expect("serialize runner stamp"),
             Value::String(RUNNER_CONTRACT_VERSION.to_string()),
         );
     }
@@ -15701,8 +15713,8 @@ mod tests {
                 "profile_confinement": task_profile_confinement(&principal),
                 "resumable": true,
             }),
-            sdk_contract_version: PREVIOUS_SDK_CONTRACT_VERSION,
-            runner_contract_version: RUNNER_CONTRACT_VERSION,
+            sdk_contract_version: PREVIOUS_CONTRACTS.0,
+            runner_contract_version: PREVIOUS_CONTRACTS.1,
             retention_until: time::OffsetDateTime::now_utc() + EXECUTION_RETENTION,
         };
         let mut execution =
@@ -15820,8 +15832,8 @@ mod tests {
                 "profile_confinement": task_profile_confinement(&principal),
                 "resumable": false,
             }),
-            sdk_contract_version: SDK_CONTRACT_VERSION,
-            runner_contract_version: PREVIOUS_RUNNER_CONTRACT_VERSION,
+            sdk_contract_version: PREVIOUS_CONTRACTS.0,
+            runner_contract_version: PREVIOUS_CONTRACTS.1,
             retention_until: time::OffsetDateTime::now_utc() + EXECUTION_RETENTION,
         };
         let mut execution =
@@ -15844,10 +15856,7 @@ mod tests {
         assert!(error.message.contains("unknown codemode tool"));
         let persisted = store.current.lock().await.clone().unwrap();
         assert_eq!(persisted.status, ExecutionStatus::WaitingForApproval);
-        assert_eq!(
-            persisted.runner_contract_version,
-            PREVIOUS_RUNNER_CONTRACT_VERSION
-        );
+        assert_eq!(persisted.runner_contract_version, PREVIOUS_CONTRACTS.1);
         assert_eq!(
             persisted.execution_profile["name"],
             "approval_bound_mutation"
@@ -15879,7 +15888,7 @@ mod tests {
                 "resumable": true,
             }),
             sdk_contract_version: SDK_CONTRACT_VERSION,
-            runner_contract_version: LEGACY_RUNNER_CONTRACT_VERSION - 1,
+            runner_contract_version: OLDEST_CONTRACTS.1 - 1,
             retention_until: time::OffsetDateTime::now_utc() + EXECUTION_RETENTION,
         };
         let mut execution =
@@ -15934,7 +15943,7 @@ mod tests {
                 "resumable": true,
             }),
             sdk_contract_version: SDK_CONTRACT_VERSION,
-            runner_contract_version: LEGACY_RUNNER_CONTRACT_VERSION - 1,
+            runner_contract_version: OLDEST_CONTRACTS.1 - 1,
             retention_until: time::OffsetDateTime::now_utc() + EXECUTION_RETENTION,
         };
         let mut execution =
@@ -16365,8 +16374,8 @@ mod tests {
             // Legacy contract versions on the planted row: the claim path
             // stamps the CURRENT versions, so a test asserting them proves
             // the claim genuinely ran instead of restating fixture state.
-            sdk_contract_version: LEGACY_SDK_CONTRACT_VERSION,
-            runner_contract_version: LEGACY_RUNNER_CONTRACT_VERSION,
+            sdk_contract_version: OLDEST_CONTRACTS.0,
+            runner_contract_version: OLDEST_CONTRACTS.1,
             retention_until: time::OffsetDateTime::now_utc() + EXECUTION_RETENTION,
         };
         let mut execution = recorded_execution(&new_execution, status, None);

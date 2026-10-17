@@ -757,7 +757,7 @@
       {
         "name": "codemode.execute",
         "title": "Execute Code Mode JavaScript with direct authority",
-        "description": "Run JavaScript in a fresh, confined runtime and return its JSON-compatible result. Provide exactly one source: inline `source`, an uploaded `source_file`, a retained `source_sha256`, or a `skill_script` URI from the verified Agent Skills catalog. Pass arguments as `input`, which the program reads as `execution.input`, rather than editing them into the source: a program is identified by its exact bytes, so `input` keeps a retained source reusable. `retain_for_seconds` keeps inline, uploaded or skill source reusable by digest, and `source_ref` reports the digest and its retention state. The runtime has no filesystem, network, process, environment or credential access. It exposes `connectors[server][operation]({...})` only for operations `codemode.describe` returns to this caller, and each call goes through the gateway's normal authorization, approval, validation, quota, inspection and audit under the same principal. A program can pace itself with `execution.wait(milliseconds)`, which spends its execution budget, publish intermediate JSON with `execution.emitArtifact(value)`, and checkpoint with `execution.pause(checkpoint)` to continue through `codemode.resume`. A lost worker never replays a program. `codemode.limits` reports the size and time budgets. Invoked as an MCP Task, this returns a durable task once the program is admitted; a client that cannot keep a long call open can use `codemode.start` instead. `repeat_after` applies only to those detached starts. Failures return a stable `data.error` code with a message, such as `execution_timeout`, `execution_capacity` or `execution_result_too_large`, or a `source_` or `skill_script_` code when the source cannot be resolved.",
+        "description": "Run JavaScript in a fresh, confined runtime and return its JSON-compatible result. Provide exactly one source: inline `source`, an uploaded `source_file`, a retained `source_sha256`, or a `skill_script` URI from the verified Agent Skills catalog. Pass arguments as `input`, which the program reads as `execution.input`, rather than editing them into the source: a program is identified by its exact bytes, so `input` keeps a retained source reusable. `retain_for_seconds` keeps inline, uploaded or skill source reusable by digest, and `source_ref` reports the digest and its retention state. The source is the body of an async function: it may `await`, and it returns the result. Beyond standard JavaScript only `atob`, `btoa`, `queueMicrotask` and `performance` are global; Node and browser globals such as `console`, `Buffer`, `TextDecoder`, `URL`, `crypto`, `setTimeout`, `fetch`, `require` and `Intl` are absent. The runtime has no filesystem, network, process, environment or credential access. It exposes `connectors[server][operation]({...})` only for operations `codemode.describe` returns to this caller, and each call goes through the gateway's normal authorization, approval, validation, quota, inspection and audit under the same principal. A program can pace itself with `execution.wait(milliseconds)`, which spends its execution budget, publish intermediate JSON with `execution.emitArtifact(value)`, and checkpoint with `execution.pause(checkpoint)` to continue through `codemode.resume`. A lost worker never replays a program. `codemode.limits` reports the size and time budgets. Invoked as an MCP Task, this returns a durable task once the program is admitted; a client that cannot keep a long call open can use `codemode.start` instead. `repeat_after` applies only to those detached starts. Failures return a stable `data.error` code with a message, such as `execution_timeout`, `execution_capacity` or `execution_result_too_large`, or a `source_` or `skill_script_` code when the source cannot be resolved. A program error's message gives positions as `program:line:column`.",
         "inputSchema": {
           "additionalProperties": false,
           "title": "StartParams",
@@ -908,13 +908,13 @@
               "description": "The caller-facing spelling of the stamps a row carries. These are the same\ntwo numbers as `SDK_CONTRACT_VERSION` and `RUNNER_CONTRACT_VERSION` and must\nadvance with them: a response that advertised the previous contract while\nthe sandbox offered a new one would tell a client the program surface is\nsomething other than what it ran against.",
               "type": "string",
               "enum": [
-                "4"
+                "5"
               ]
             },
             "RunnerContractVersion": {
               "type": "string",
               "enum": [
-                "7"
+                "8"
               ]
             },
             "SourceReference": {
@@ -1776,13 +1776,13 @@
               "description": "The caller-facing spelling of the stamps a row carries. These are the same\ntwo numbers as `SDK_CONTRACT_VERSION` and `RUNNER_CONTRACT_VERSION` and must\nadvance with them: a response that advertised the previous contract while\nthe sandbox offered a new one would tell a client the program surface is\nsomething other than what it ran against.",
               "type": "string",
               "enum": [
-                "4"
+                "5"
               ]
             },
             "RunnerContractVersion": {
               "type": "string",
               "enum": [
-                "7"
+                "8"
               ]
             },
             "SourceReference": {

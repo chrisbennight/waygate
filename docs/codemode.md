@@ -464,6 +464,47 @@ should check for `codemode.result` before starting work that depends on
 retrieving one later, rather than discovering the gap after the execution
 exists.
 
+## Program runtime
+
+A program is the body of an async function. It may use `await`, and its
+`return` value, or the value a returned promise settles to, becomes the result.
+Connector bindings and the `execution` capabilities are synchronous, so
+awaiting their results also works. A program whose promise can never settle,
+because nothing is left to run, fails with `execution_failed` instead of
+returning. Time limits bound promise work exactly as they bound other
+computation.
+
+The engine is QuickJS with current ECMAScript built-ins, for example
+`Object.groupBy`, iterator helpers, the `Set` composition methods,
+`Promise.withResolvers`, `Uint8Array.fromBase64`,
+`Uint8Array.prototype.toBase64`, and `DOMException`. Beyond the language, a
+program has the gateway's `connectors` and `execution` objects and the globals
+`atob`, `btoa`, `queueMicrotask`, and `performance`.
+
+Common Node.js and browser globals are absent:
+
+| Absent | Use instead |
+| --- | --- |
+| `console` | Return the values you need, or publish them with `execution.emitArtifact`. |
+| `TextEncoder`, `TextDecoder` | For valid UTF-8, `decodeURIComponent(escape(atob(text)))` decodes base64 text; it throws on malformed bytes. |
+| `Buffer` | `Uint8Array.fromBase64(text)` and `bytes.toBase64()` for base64 bytes. |
+| `URL`, `URLSearchParams` | String methods and regular expressions. |
+| `crypto` | No replacement; `Math.random` is not suitable for identifiers. |
+| `structuredClone` | `JSON.parse(JSON.stringify(value))` for JSON data. |
+| `setTimeout`, `setInterval` | `execution.wait(milliseconds)`. |
+| `fetch`, `require`, `import`, `process`, `fs` | Connectors. The runtime has no network, module, process, or filesystem access. |
+| `Intl` | Format numbers and dates explicitly; `toLocaleString()` does not localize. |
+
+The regular-expression `v` flag is unreliable in this engine; use `u`.
+
+A program error's message names the error and gives positions in the submitted
+source as `program:line:column`, for example `ReferenceError: total is not
+defined` followed by `at summarize (program:12:5)`. Frames in the gateway's own
+setup code are omitted. A syntax error gives its line, or says it reached the
+end of the program when the source ends inside an unclosed construct. A thrown
+value that is not an `Error` is reported by its type, and by its text when it
+is a primitive.
+
 ## Execution model
 
 The durable lifecycle must represent pauses and uncertainty without reporting a
@@ -745,7 +786,8 @@ caller can recover artifacts committed before the failure.
 
 The runner is a fresh child process for every attempt, so JavaScript globals
 and prototype mutations cannot cross executions. It has a cleared environment,
-no module loader or web/system APIs, bounded source and frame sizes, a
+no module loader or system APIs (the [program runtime](#program-runtime) lists
+the globals it does provide), bounded source and frame sizes, a
 kernel-enforced process address-space ceiling, QuickJS memory and stack limits,
 an interrupt deadline, a parent wall deadline, a process-wide ceiling, an
 independent per-tenant ceiling, and a detached-work
@@ -765,12 +807,13 @@ execution cannot submit a later connector call. Runner protocol version 4 adds
 explicit pause frames and resume context on top of typed failure frames;
 version 5 adds durable artifact emission, and version 6 adds the private
 completed-result spool without changing the JavaScript SDK. SDK version 2
-exposes the artifact capability, and SDK version 3 adds the bounded wait
-primitive. Paused version 1/4, 2/5, or 3/5 executions are atomically upgraded
-to 3/6 when a current worker claims the next attempt; 2/6 and 3/6 remain
-compatible as well. Rolling upgrades therefore preserve continuations while
-an older worker cannot claim an execution that may depend on a newer SDK
-surface.
+exposes the artifact capability, SDK version 3 adds the bounded wait
+primitive, and SDK version 4 with runner version 7 adds `execution.input`. SDK
+version 5 with runner version 8 runs program bodies as async functions. A
+current worker continues executions stamped 2/5, 3/6, 4/6, 3/7, 4/7, or 5/8
+and atomically restamps them with the current pair when it claims the next
+attempt. Rolling upgrades therefore preserve continuations while an older
+worker cannot claim an execution that may depend on a newer SDK surface.
 Success-result contract versioning remains independent.
 
 The initial profile defines these codes: `execution_failed`,

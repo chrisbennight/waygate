@@ -3,10 +3,10 @@
   "reportFormatVersion": 3,
   "expectedToolCount": 38,
   "maximums": {
-    "toolsJsonBytes": 129540,
+    "toolsJsonBytes": 129933,
     "fieldValueBytes.names": 1014,
     "fieldValueBytes.titles": 1247,
-    "fieldValueBytes.descriptions": 21076,
+    "fieldValueBytes.descriptions": 21469,
     "fieldValueBytes.inputSchemas": 27006,
     "fieldValueBytes.outputSchemas": 74615,
     "fieldValueBytes.annotations": 1541,
@@ -14,14 +14,14 @@
     "repeatedStringBytes": 17270,
     "repeatedDescriptionLeadingBlockBytes": 0,
     "repeatedOutputSchemaBytes": 16151,
-    "largestDeclarationBytes": 10827
+    "largestDeclarationBytes": 11220
   },
   "toolMaximums": {
     "codemode.artifact": 1727,
     "codemode.artifacts": 2385,
     "codemode.cancel": 4292,
     "codemode.describe": 6368,
-    "codemode.execute": 10827,
+    "codemode.execute": 11220,
     "codemode.executions": 5688,
     "codemode.limits": 5582,
     "codemode.result": 1506,

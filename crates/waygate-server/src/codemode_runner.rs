@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
 use rquickjs::{
-    function::Func, CatchResultExt, CaughtError, Context as JsContext, Runtime, String as JsString,
+    function::Func, CatchResultExt, CaughtError, CaughtResult, Context as JsContext, Ctx, Promise,
+    Runtime, String as JsString,
 };
 use serde_json::Value;
 
@@ -25,6 +26,27 @@ const EXECUTION_LIMIT: Duration =
 const RESULT_ENVELOPE_OVERHEAD_BYTES: usize = r#"{"result":}"#.len();
 const CONNECTOR_MATERIALIZATION_FAILURE: &str =
     "gateway connector result exceeded runtime materialization capacity";
+/// Closes the async function a program body runs in, then serializes the value
+/// the program settled to with intrinsics captured before the program ran.
+const PROGRAM_EPILOGUE: &str = r#"
+  })();
+  const gatewayResultEnvelope = gatewayObjectCreate(null);
+  gatewayDefineProperty(gatewayResultEnvelope, "result", {
+    value: gatewayProgramResult,
+    enumerable: true
+  });
+  try {
+    return gatewayJsonStringify(gatewayResultEnvelope);
+  } catch {
+    return "{}";
+  }
+})();
+"#;
+/// The name rquickjs gives every evaluated script while its `std` feature,
+/// which would allow choosing one, is off.
+const ENGINE_SCRIPT_NAME: &str = "eval_script";
+/// The name failure positions use for the submitted program.
+const PROGRAM_SCRIPT_NAME: &str = "program";
 
 #[derive(Debug, PartialEq, Eq)]
 struct RunnerExecutionFailure {
@@ -803,7 +825,7 @@ where
                 )
             })?;
 
-        let wrapped = format!(
+        let prelude = format!(
             r#"
 "use strict";
 const gatewayJsonParse = JSON.parse;
@@ -950,30 +972,29 @@ const execution = (() => {{
   }});
   return Object.freeze(generated);
 }})();
-const gatewayProgramResult = (() => {{
-{source}
-}})();
-const gatewayResultEnvelope = gatewayObjectCreate(null);
-gatewayDefineProperty(gatewayResultEnvelope, "result", {{
-  value: gatewayProgramResult,
-  enumerable: true
-}});
-let gatewayEncodedResult;
-try {{
-  gatewayEncodedResult = gatewayJsonStringify(gatewayResultEnvelope);
-}} catch {{
-  gatewayEncodedResult = "{{}}";
-}}
-gatewayEncodedResult;
+(async () => {{
+  const gatewayProgramResult = await (async () => {{
 "#
         );
-        let evaluated = ctx.eval::<Option<JsString<'_>>, _>(wrapped).catch(&ctx);
+        let layout = ProgramLayout::new(&prelude, source);
+        let wrapped = format!("{prelude}{source}{PROGRAM_EPILOGUE}");
+        let evaluated = match ctx.eval::<Promise<'_>, _>(wrapped).catch(&ctx) {
+            Ok(program) => settle_program(&ctx, &program, deadline_reached),
+            Err(error) => ProgramSettlement::Settled(Err(error)),
+        };
         if deadline_reached.load(Ordering::Relaxed) {
             return Err(RunnerExecutionFailure::new(
                 RunnerFailureCode::ExecutionTimeout,
                 "Code Mode execution exceeded its time limit",
             ));
         }
+        let ProgramSettlement::Settled(evaluated) = evaluated else {
+            return Err(RunnerExecutionFailure::new(
+                RunnerFailureCode::ProgramFailed,
+                "Code Mode program never finished: it is waiting on a promise that nothing \
+                 left to run can settle",
+            ));
+        };
         let result_json = evaluated.map_err(|error| {
             let is_stable_connector_error = match &error {
                 CaughtError::Exception(exception) => {
@@ -1005,7 +1026,10 @@ gatewayEncodedResult;
             } else {
                 RunnerExecutionFailure::new(
                     RunnerFailureCode::ProgramFailed,
-                    format!("Code Mode program evaluation failed: {}", error),
+                    format!(
+                        "Code Mode program evaluation failed: {}",
+                        describe_program_error(&error, layout)
+                    ),
                 )
             }
         })?;
@@ -1053,6 +1077,212 @@ gatewayEncodedResult;
         }
         Ok(result)
     })
+}
+
+enum ProgramSettlement<'js> {
+    Settled(CaughtResult<'js, Option<JsString<'js>>>),
+    /// The job queue emptied, or the deadline fired, while the program's
+    /// promise was still pending.
+    Unsettled,
+}
+
+/// Run queued promise jobs until the program's promise settles.
+///
+/// Connector calls, waits and pauses are synchronous host calls, so the only
+/// jobs are the program's own promise reactions. A queue that empties while
+/// the promise is pending can never settle it. The interrupt handler still
+/// bounds every job, and the deadline is checked between jobs because a job
+/// the interrupt aborted reports as executed.
+fn settle_program<'js>(
+    ctx: &Ctx<'js>,
+    program: &Promise<'js>,
+    deadline_reached: &AtomicBool,
+) -> ProgramSettlement<'js> {
+    loop {
+        if let Some(outcome) = program.result::<Option<JsString<'js>>>() {
+            return ProgramSettlement::Settled(outcome.catch(ctx));
+        }
+        if deadline_reached.load(Ordering::Relaxed) || !ctx.execute_pending_job() {
+            return ProgramSettlement::Unsettled;
+        }
+    }
+}
+
+/// Where the submitted source sits inside the generated script.
+///
+/// The prelude ends with a line break, so the program's lines keep their
+/// columns and only their line numbers are offset.
+#[derive(Debug, Clone, Copy)]
+struct ProgramLayout {
+    first_line: usize,
+    last_line: usize,
+}
+
+enum ScriptLocation {
+    Program {
+        line: usize,
+        column: Option<usize>,
+    },
+    /// Past the program's last line: only a parser that ran out of program
+    /// reports a position in the closing code that follows it.
+    AfterProgram,
+    Generated,
+    Other,
+}
+
+impl ProgramLayout {
+    fn new(prelude: &str, source: &str) -> Self {
+        let first_line = prelude.matches('\n').count() + 1;
+        Self {
+            first_line,
+            last_line: first_line + source.matches('\n').count(),
+        }
+    }
+
+    fn locate(&self, location: &str) -> ScriptLocation {
+        let Some(position) = location
+            .strip_prefix(ENGINE_SCRIPT_NAME)
+            .and_then(|position| position.strip_prefix(':'))
+        else {
+            return ScriptLocation::Other;
+        };
+        let (line, column) = match position.split_once(':') {
+            Some((line, column)) => (line, Some(column)),
+            None => (position, None),
+        };
+        let Ok(line) = line.parse::<usize>() else {
+            return ScriptLocation::Other;
+        };
+        let column = match column.map(str::parse::<usize>) {
+            Some(Ok(column)) => Some(column),
+            Some(Err(_)) => return ScriptLocation::Other,
+            None => None,
+        };
+        if line < self.first_line {
+            ScriptLocation::Generated
+        } else if line > self.last_line {
+            ScriptLocation::AfterProgram
+        } else {
+            ScriptLocation::Program {
+                line: line - self.first_line + 1,
+                column,
+            }
+        }
+    }
+
+    /// Restate an engine stack trace in the submitted program's positions.
+    ///
+    /// Frames in the gateway's generated code are dropped because they are
+    /// not the program's to act on; native frames are kept because they name
+    /// the built-in that threw.
+    fn program_stack(&self, stack: &str) -> String {
+        stack
+            .lines()
+            .filter_map(|line| self.program_frame(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn program_frame(&self, line: &str) -> Option<String> {
+        let frame = line.trim_start();
+        let indent = &line[..line.len() - frame.len()];
+        let Some(frame) = frame.strip_prefix("at ") else {
+            return Some(line.to_owned());
+        };
+        if let Some((function, location)) = frame
+            .strip_suffix(')')
+            .and_then(|frame| frame.rsplit_once(" ("))
+        {
+            return match self.locate(location) {
+                ScriptLocation::Program { line, column } => Some(format!(
+                    "{indent}at {function} ({})",
+                    program_position(line, column)
+                )),
+                ScriptLocation::AfterProgram | ScriptLocation::Generated => None,
+                ScriptLocation::Other => Some(line.to_owned()),
+            };
+        }
+        // A frame without a function name is the parser's position. The
+        // engine reports its scanner column rather than the offending token's,
+        // so only the line is given.
+        match self.locate(frame) {
+            ScriptLocation::Program { line, .. } => {
+                Some(format!("{indent}at {}", program_position(line, None)))
+            }
+            ScriptLocation::AfterProgram => Some(format!("{indent}at the end of the program")),
+            ScriptLocation::Generated => None,
+            ScriptLocation::Other => Some(line.to_owned()),
+        }
+    }
+}
+
+/// The JavaScript `typeof` name of a value, which agents recognize, rather than
+/// the engine's tag name.
+fn javascript_type(value: &rquickjs::Value<'_>) -> &'static str {
+    match value.type_of() {
+        rquickjs::Type::Uninitialized | rquickjs::Type::Undefined => "undefined",
+        rquickjs::Type::Null => "null",
+        rquickjs::Type::Bool => "boolean",
+        rquickjs::Type::Int | rquickjs::Type::Float => "number",
+        rquickjs::Type::String => "string",
+        rquickjs::Type::Symbol => "symbol",
+        rquickjs::Type::BigInt => "bigint",
+        rquickjs::Type::Function | rquickjs::Type::Constructor => "function",
+        _ => "object",
+    }
+}
+
+fn program_position(line: usize, column: Option<usize>) -> String {
+    match column {
+        Some(column) => format!("{PROGRAM_SCRIPT_NAME}:{line}:{column}"),
+        None => format!("{PROGRAM_SCRIPT_NAME}:{line}"),
+    }
+}
+
+/// Describe a program failure by its error name, message and the stack frames
+/// that lie in the submitted program.
+///
+/// A thrown value that is not an `Error` is described without serializing it:
+/// a primitive by its text, and an object only by its type, because turning an
+/// object into text could call the program's own `toJSON` or `toString` after
+/// evaluation has ended.
+fn describe_program_error(error: &CaughtError<'_>, layout: ProgramLayout) -> String {
+    let exception = match error {
+        CaughtError::Exception(exception) => exception,
+        CaughtError::Value(value) => {
+            let kind = javascript_type(value);
+            return match kind {
+                "object" | "function" => {
+                    format!("uncaught {kind}; throw an Error to report a message and position")
+                }
+                "null" | "undefined" => format!("uncaught {kind}"),
+                _ => match value.get::<rquickjs::Coerced<String>>() {
+                    Ok(text) => format!("uncaught {kind}: {}", text.0),
+                    Err(_) => format!("uncaught {kind}"),
+                },
+            };
+        }
+        CaughtError::Error(error) => return error.to_string(),
+    };
+    let name = exception
+        .as_object()
+        .get::<_, Option<String>>("name")
+        .ok()
+        .flatten()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Error".to_owned());
+    let mut description = match exception.message() {
+        Some(message) if !message.is_empty() => format!("{name}: {message}"),
+        _ => name,
+    };
+    if let Some(stack) = exception.stack() {
+        let frames = layout.program_stack(&stack);
+        if !frames.is_empty() {
+            description.push('\n');
+            description.push_str(&frames);
+        }
+    }
+    description
 }
 
 /// Routing metadata has its own transport allowance; the public budget counts only arguments.
@@ -2021,5 +2251,284 @@ return "too late";
 
         assert_eq!(error.code, RunnerFailureCode::ProgramFailed);
         assert_eq!(error.message.chars().count(), MAX_FAILURE_MESSAGE_CHARS);
+    }
+
+    type HostCall = fn(&str) -> rquickjs::Result<String>;
+    type HostWait = fn(f64) -> rquickjs::Result<String>;
+
+    fn unused_capabilities() -> ExecutionCapabilities<HostCall, HostCall, HostCall, HostWait> {
+        ExecutionCapabilities {
+            call: |_: &str| -> rquickjs::Result<String> {
+                unreachable!("program makes no connector calls")
+            },
+            pause: |_: &str| -> rquickjs::Result<String> { unreachable!("program does not pause") },
+            artifact: |_: &str| -> rquickjs::Result<String> {
+                unreachable!("program emits no artifacts")
+            },
+            wait: |_: f64| -> rquickjs::Result<String> { unreachable!("program does not wait") },
+            artifacts_available: false,
+        }
+    }
+
+    fn program_failure(source: &str) -> String {
+        let error = execute_with(source, &[], |_| {
+            unreachable!("program makes no connector calls")
+        })
+        .expect_err("program fails");
+        assert_eq!(error.code, RunnerFailureCode::ProgramFailed);
+        error.message
+    }
+
+    #[test]
+    fn a_program_body_can_await_connector_results_and_promises() {
+        let result = execute_with(
+            r#"
+const first = await connectors.email.first({});
+const doubled = await Promise.resolve(first.result * 2);
+return {first: first.result, doubled};
+"#,
+            &bindings(&[("email", "first")]),
+            |_| Ok(serde_json::json!({"ok": {"result": 21}}).to_string()),
+        )
+        .expect("an awaiting program completes");
+
+        assert_eq!(result, serde_json::json!({"first": 21, "doubled": 42}));
+    }
+
+    /// A promise the program returns is the result's value once settled, not
+    /// the promise object, which serializes as an empty object.
+    #[test]
+    fn a_returned_promise_settles_to_its_value() {
+        let result = execute_with("return (async () => ({answer: 5}))();", &[], |_| {
+            unreachable!("program makes no connector calls")
+        })
+        .expect("the returned promise settles");
+
+        assert_eq!(result, serde_json::json!({"answer": 5}));
+    }
+
+    #[test]
+    fn an_awaited_connector_refusal_keeps_its_stable_code() {
+        let refuse = |_: &str| Ok(serde_json::json!({"err": "forbidden: hidden"}).to_string());
+        let caught = execute_with(
+            r#"
+try {
+  await connectors.email.send({});
+  return "sent";
+} catch (error) {
+  return error.code;
+}
+"#,
+            &bindings(&[("email", "send")]),
+            refuse,
+        )
+        .expect("the program handles the refusal");
+        assert_eq!(caught, Value::String("forbidden".to_owned()));
+
+        let error = execute_with(
+            "await connectors.email.send({}); return \"sent\";",
+            &bindings(&[("email", "send")]),
+            refuse,
+        )
+        .expect_err("an unhandled refusal rejects the program");
+        assert_eq!(error.code, RunnerFailureCode::ProgramFailed);
+        assert!(error.message.contains("Error: hidden"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_promise_that_can_never_settle_fails_instead_of_returning() {
+        for source in [
+            "await new Promise(() => {}); return 1;",
+            "return new Promise(() => {});",
+        ] {
+            let message = program_failure(source);
+            assert!(message.contains("never finished"), "{source}: {message}");
+        }
+    }
+
+    #[test]
+    fn the_deadline_bounds_promise_jobs() {
+        for source in [
+            "await null; while (true) {}",
+            "const spin = () => Promise.resolve().then(spin); spin(); \
+             await new Promise(() => {});",
+        ] {
+            let (runtime, deadline_reached) =
+                create_runtime_with_limit(Duration::from_millis(50)).expect("create runtime");
+            let context = JsContext::full(&runtime).expect("create context");
+            let error = execute_in(
+                &context,
+                source,
+                &[],
+                None,
+                &Value::Null,
+                unused_capabilities(),
+                &deadline_reached,
+            )
+            .expect_err("the deadline ends promise jobs");
+
+            assert_eq!(error.code, RunnerFailureCode::ExecutionTimeout, "{source}");
+        }
+    }
+
+    #[test]
+    fn failures_report_positions_in_the_submitted_program() {
+        assert_eq!(
+            program_failure(
+                "const a = 1;\nfunction decode() {\n  return new MissingDecoder().decode(a);\n}\n\
+                 return decode();"
+            ),
+            "Code Mode program evaluation failed: ReferenceError: MissingDecoder is not defined\n    \
+             at decode (program:3:14)\n    at <anonymous> (program:5:8)"
+        );
+        assert_eq!(
+            program_failure("await null;\nnull.property;"),
+            "Code Mode program evaluation failed: TypeError: cannot read property 'property' of \
+             null\n    at <anonymous> (program:2:1)"
+        );
+        assert_eq!(
+            program_failure("const first = 1;\nconst x = ;\nreturn x;"),
+            "Code Mode program evaluation failed: SyntaxError: unexpected token in expression: \
+             ';'\n    at program:2"
+        );
+        let unterminated = program_failure("return {\n  open: true,");
+        assert!(
+            unterminated.starts_with("Code Mode program evaluation failed: SyntaxError: ")
+                && unterminated.ends_with("\n    at the end of the program"),
+            "{unterminated}"
+        );
+    }
+
+    #[test]
+    fn connector_failures_point_at_the_calling_line_not_gateway_code() {
+        let error = execute_with(
+            "const unused = 1;\nreturn connectors.email.send({});",
+            &bindings(&[("email", "send")]),
+            |_| Ok(serde_json::json!({"err": "forbidden: hidden"}).to_string()),
+        )
+        .expect_err("the refusal fails the program");
+
+        assert!(
+            error.message.starts_with(
+                "Code Mode program evaluation failed: Error: hidden\n    at <anonymous> (program:2:"
+            ),
+            "{}",
+            error.message
+        );
+        assert!(
+            !error.message.contains(ENGINE_SCRIPT_NAME),
+            "{}",
+            error.message
+        );
+    }
+
+    /// A thrown value that is not an Error is described without running any of
+    /// the program's code, even code the value itself supplies.
+    #[test]
+    fn thrown_non_error_values_are_described_without_running_program_code() {
+        assert_eq!(
+            program_failure("throw 'plain string';"),
+            "Code Mode program evaluation failed: uncaught string: plain string"
+        );
+        assert_eq!(
+            program_failure("throw 42;"),
+            "Code Mode program evaluation failed: uncaught number: 42"
+        );
+        assert_eq!(
+            program_failure("throw null;"),
+            "Code Mode program evaluation failed: uncaught null"
+        );
+        let called = Arc::new(AtomicBool::new(false));
+        let called_by_connector = called.clone();
+        let error = execute_with(
+            "throw {toString() { connectors.email.send({}); return 'shown'; }, \
+             toJSON() { connectors.email.send({}); return 'shown'; }};",
+            &bindings(&[("email", "send")]),
+            move |_| {
+                called_by_connector.store(true, Ordering::SeqCst);
+                Ok(serde_json::json!({"ok": null}).to_string())
+            },
+        )
+        .expect_err("the thrown object fails the program");
+
+        assert!(!called.load(Ordering::SeqCst));
+        assert_eq!(
+            error.message,
+            "Code Mode program evaluation failed: uncaught object; throw an Error to report a \
+             message and position"
+        );
+    }
+
+    #[test]
+    fn engine_stack_frames_are_restated_in_program_positions() {
+        let layout = ProgramLayout {
+            first_line: 10,
+            last_line: 12,
+        };
+        assert_eq!(
+            layout.program_stack(
+                "    at f (eval_script:11:4)\n    at <anonymous> (eval_script:3:1)\n    at parse \
+                 (native)\n    at <eval> (eval_script:14:2)"
+            ),
+            "    at f (program:2:4)\n    at parse (native)"
+        );
+        assert_eq!(
+            layout.program_stack("    at eval_script:12:40"),
+            "    at program:3"
+        );
+        assert_eq!(
+            layout.program_stack("    at eval_script:13:9"),
+            "    at the end of the program"
+        );
+    }
+
+    /// The Code Mode reference lists the globals a program can rely on and the
+    /// common Node.js and browser globals it cannot. Keep that list and this
+    /// one in step.
+    #[test]
+    fn runtime_globals_match_the_documented_surface() {
+        let result = execute_with(
+            r#"
+return {
+  present: {
+    connectors: typeof connectors,
+    execution: typeof execution,
+    atob: typeof atob,
+    btoa: typeof btoa,
+    queueMicrotask: typeof queueMicrotask,
+    performanceNow: typeof performance.now,
+    fromBase64: typeof Uint8Array.fromBase64,
+    toBase64: typeof Uint8Array.prototype.toBase64,
+    DOMException: typeof DOMException,
+  },
+  absent: {
+    console: typeof console,
+    TextEncoder: typeof TextEncoder,
+    TextDecoder: typeof TextDecoder,
+    URL: typeof URL,
+    URLSearchParams: typeof URLSearchParams,
+    crypto: typeof crypto,
+    structuredClone: typeof structuredClone,
+    Buffer: typeof Buffer,
+    setTimeout: typeof setTimeout,
+    setInterval: typeof setInterval,
+    fetch: typeof fetch,
+    require: typeof require,
+    process: typeof process,
+    Intl: typeof Intl,
+  },
+};
+"#,
+            &[],
+            |_| unreachable!("program makes no connector calls"),
+        )
+        .expect("program executes");
+
+        for (name, kind) in result["present"].as_object().expect("present globals") {
+            assert_ne!(kind, "undefined", "{name} is documented as available");
+        }
+        for (name, kind) in result["absent"].as_object().expect("absent globals") {
+            assert_eq!(kind, "undefined", "{name} is documented as absent");
+        }
     }
 }
