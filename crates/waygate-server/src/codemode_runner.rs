@@ -591,21 +591,42 @@ fn runner_wait(
     }
 }
 
-/// Refuse every host capability once the shared execution deadline has fired.
+/// Whether a program may still use host capabilities.
 ///
+/// Every capability is refused once the shared execution deadline has fired.
 /// QuickJS exceptions are deliberately catchable program errors. The runner's
 /// final deadline check still selects the stable timeout result, while this
 /// guard prevents code in a catch block from reaching a connector, publishing
 /// an artifact, or checkpointing after the operator's budget is exhausted.
-fn require_live_deadline(deadline_reached: &AtomicBool) -> rquickjs::Result<()> {
-    if deadline_reached.load(Ordering::Relaxed) {
-        return Err(rquickjs::Error::new_from_js_message(
-            "execution",
-            "host capability",
-            "execution budget is exhausted",
-        ));
+///
+/// Every capability is also refused once the program's promise has settled.
+/// Reporting a failure reads the thrown value's properties, and a getter or
+/// proxy there runs program code; closing the capabilities first keeps that
+/// code from causing any effect after the program has finished.
+#[derive(Clone)]
+struct HostGate {
+    deadline_reached: Arc<AtomicBool>,
+    settled: Arc<AtomicBool>,
+}
+
+impl HostGate {
+    fn require_open(&self) -> rquickjs::Result<()> {
+        if self.deadline_reached.load(Ordering::Relaxed) {
+            return Err(rquickjs::Error::new_from_js_message(
+                "execution",
+                "host capability",
+                "execution budget is exhausted",
+            ));
+        }
+        if self.settled.load(Ordering::Relaxed) {
+            return Err(rquickjs::Error::new_from_js_message(
+                "execution",
+                "host capability",
+                "the program has finished",
+            ));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -698,14 +719,18 @@ where
         // It therefore covers both that allocation and JSON decoding, while a
         // native transport error never enters the materialization state.
         let connector_materialization_in_progress = Arc::new(AtomicBool::new(false));
-        let call_deadline = deadline_reached.clone();
+        let gate = HostGate {
+            deadline_reached: deadline_reached.clone(),
+            settled: Arc::new(AtomicBool::new(false)),
+        };
+        let call_gate = gate.clone();
         let call_materialization = Arc::clone(&connector_materialization_in_progress);
         ctx.globals()
             .set(
                 "__gateway_call",
                 Func::from(move |request: JsString<'_>| -> rquickjs::Result<String> {
                     call_materialization.store(false, Ordering::Relaxed);
-                    require_live_deadline(&call_deadline)?;
+                    call_gate.require_open()?;
                     let request = request.to_cstring()?;
                     validate_connector_request(request.as_str(), limits().request_bytes)?;
                     let encoded = call(request.as_str())?;
@@ -745,12 +770,12 @@ where
                     "Code Mode runner could not install connector bindings",
                 )
             })?;
-        let pause_deadline = deadline_reached.clone();
+        let pause_gate = gate.clone();
         ctx.globals()
             .set(
                 "__gateway_pause",
                 Func::from(move |checkpoint: JsString<'_>| {
-                    require_live_deadline(&pause_deadline)?;
+                    pause_gate.require_open()?;
                     let checkpoint = checkpoint.to_cstring()?;
                     pause(checkpoint.as_str())
                 }),
@@ -761,12 +786,12 @@ where
                     "Code Mode runner could not install the pause boundary",
                 )
             })?;
-        let artifact_deadline = deadline_reached.clone();
+        let artifact_gate = gate.clone();
         ctx.globals()
             .set(
                 "__gateway_artifact",
                 Func::from(move |value: JsString<'_>| {
-                    require_live_deadline(&artifact_deadline)?;
+                    artifact_gate.require_open()?;
                     let value = value.to_cstring()?;
                     artifact(value.as_str())
                 }),
@@ -777,12 +802,12 @@ where
                     "Code Mode runner could not install artifact emission",
                 )
             })?;
-        let wait_deadline = deadline_reached.clone();
+        let wait_gate = gate.clone();
         ctx.globals()
             .set(
                 "__gateway_wait",
                 Func::from(move |milliseconds: f64| {
-                    require_live_deadline(&wait_deadline)?;
+                    wait_gate.require_open()?;
                     wait(milliseconds)
                 }),
             )
@@ -982,6 +1007,7 @@ const execution = (() => {{
             Ok(program) => settle_program(&ctx, &program, deadline_reached),
             Err(error) => ProgramSettlement::Settled(Err(error)),
         };
+        gate.settled.store(true, Ordering::Relaxed);
         if deadline_reached.load(Ordering::Relaxed) {
             return Err(RunnerExecutionFailure::new(
                 RunnerFailureCode::ExecutionTimeout,
@@ -1135,7 +1161,7 @@ impl ProgramLayout {
         let first_line = prelude.matches('\n').count() + 1;
         Self {
             first_line,
-            last_line: first_line + source.matches('\n').count(),
+            last_line: first_line + engine_line_breaks(source),
         }
     }
 
@@ -1230,6 +1256,26 @@ fn javascript_type(value: &rquickjs::Value<'_>) -> &'static str {
         rquickjs::Type::Function | rquickjs::Type::Constructor => "function",
         _ => "object",
     }
+}
+
+/// Line breaks as the engine counts them between tokens: `\r\n`, a lone `\r`,
+/// `\n`, U+2028 and U+2029 each end a line. Inside block comments and string
+/// literals the engine counts fewer, so a program's last line computed from
+/// this is an upper bound; the positions the engine reports are its own.
+fn engine_line_breaks(source: &str) -> usize {
+    let mut breaks = 0;
+    let mut characters = source.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\r' => {
+                characters.next_if_eq(&'\n');
+                breaks += 1;
+            }
+            '\n' | '\u{2028}' | '\u{2029}' => breaks += 1,
+            _ => {}
+        }
+    }
+    breaks
 }
 
 fn program_position(line: usize, column: Option<usize>) -> String {
@@ -2480,6 +2526,48 @@ try {
             layout.program_stack("    at eval_script:13:9"),
             "    at the end of the program"
         );
+    }
+
+    #[test]
+    fn line_breaks_are_counted_as_the_engine_counts_them() {
+        assert_eq!(engine_line_breaks("a\nb\n"), 2);
+        assert_eq!(engine_line_breaks("a\r\nb"), 1);
+        assert_eq!(engine_line_breaks("a\rb"), 1);
+        assert_eq!(engine_line_breaks("a\u{2028}b\u{2029}c"), 2);
+        for separator in ["\n", "\r", "\r\n", "\u{2028}", "\u{2029}"] {
+            let message = program_failure(&format!(
+                "const a = 1;{separator}return new MissingDecoder(a);"
+            ));
+            assert!(
+                message.ends_with("\n    at <anonymous> (program:2:12)"),
+                "{separator:?}: {message}"
+            );
+        }
+    }
+
+    /// Reporting a failure reads the thrown value, and a getter or proxy can
+    /// run program code during that read. None of it may reach a connector.
+    #[test]
+    fn reporting_a_failure_cannot_reach_host_capabilities() {
+        for source in [
+            "throw { get code() { connectors.email.send({}); return 'forbidden'; } };",
+            "throw new Proxy({}, { get() { connectors.email.send({}); return undefined; } });",
+            "const error = new Error('quiet');\nObject.defineProperty(error, 'message', \
+             { get() { connectors.email.send({}); return 'loud'; } });\nthrow error;",
+            "const error = new Error('quiet');\nObject.defineProperty(error, 'name', \
+             { get() { connectors.email.send({}); return 'LoudError'; } });\nthrow error;",
+        ] {
+            let called = Arc::new(AtomicBool::new(false));
+            let called_by_connector = called.clone();
+            let error = execute_with(source, &bindings(&[("email", "send")]), move |_| {
+                called_by_connector.store(true, Ordering::SeqCst);
+                Ok(serde_json::json!({"ok": null}).to_string())
+            })
+            .expect_err("the thrown value fails the program");
+
+            assert!(!called.load(Ordering::SeqCst), "{source}");
+            assert_eq!(error.code, RunnerFailureCode::ProgramFailed, "{source}");
+        }
     }
 
     /// The Code Mode reference lists the globals a program can rely on and the

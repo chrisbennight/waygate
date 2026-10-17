@@ -503,7 +503,9 @@ defined` followed by `at summarize (program:12:5)`. Frames in the gateway's own
 setup code are omitted. A syntax error gives its line, or says it reached the
 end of the program when the source ends inside an unclosed construct. A thrown
 value that is not an `Error` is reported by its type, and by its text when it
-is a primitive.
+is a primitive. Once the program's promise settles, connector calls, artifact
+emission, pauses, and waits are refused, so code that runs while a failure is
+reported, such as a getter on the thrown value, cannot cause an effect.
 
 ## Execution model
 
