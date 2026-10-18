@@ -2861,7 +2861,7 @@ tools:
 
     #[test]
     fn limits_are_optional_and_bounded_like_the_gateway_wide_settings() {
-        let yaml = "- name: example-search\n  transport: http\n  url: http://example-search.test/mcp\n  tools: []\n";
+        let yaml = "- name: example-search\n  transport: http\n  trust: internal\n  url: http://example-search.test/mcp\n  tools: []\n";
         let defaults = parse_manifest_set(yaml).unwrap();
         assert!(defaults["example-search"].limits.is_none());
         assert!(
