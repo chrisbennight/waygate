@@ -60,6 +60,7 @@ fn manifest(name: &str, url: &str, tools: Vec<ToolClassification>) -> UpstreamMa
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
         long_running_tools: Vec::new(),
+        limits: None,
         name: name.into(),
         transport: Transport::Http,
         protocol: Default::default(),

@@ -15,6 +15,7 @@ fn manifest() -> UpstreamManifest {
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
         long_running_tools: Vec::new(),
+        limits: None,
         name: "example-messages".into(),
         transport: Transport::Http,
         protocol: Default::default(),

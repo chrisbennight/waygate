@@ -343,6 +343,23 @@ pub(super) fn bounded_upstream_error(
     )
 }
 
+/// A tool-call response the gateway stopped reading at the server's limit.
+/// The upstream ran the call but its result was never read, so the outcome is
+/// unknown to the caller and the call is not repeated.
+fn response_too_large_error(server: &str, limit_bytes: usize, trace_id: &str) -> McpError {
+    let phase = ToolCallFailurePhase::DispatchedUnknownOutcome;
+    McpError::internal_error(
+        format!("upstream `{server}` tool-call response exceeded the {limit_bytes}-byte limit"),
+        Some(serde_json::json!({
+            "error": "upstream_response_too_large",
+            "limit_bytes": limit_bytes,
+            "phase": phase.as_str(),
+            "retryable": false,
+            "trace_id": trace_id,
+        })),
+    )
+}
+
 /// A call the downstream caller abandoned. After dispatch its upstream
 /// outcome is unknown, which the phase states.
 fn cancelled_upstream_error(server: &str, phase: ToolCallFailurePhase, trace_id: &str) -> McpError {
@@ -472,6 +489,23 @@ pub(super) async fn finish_call_response(
         isolation,
         connection: conn_guard,
     } = lane;
+    let refused_bytes = match &result {
+        Err(error) => crate::bounded_http_client::response_materialization_limit(&error.source),
+        Ok(_) => None,
+    };
+    if let Some(limit_bytes) = refused_bytes {
+        // The upstream answered and its session is intact; the refusal is the
+        // gateway's own size policy, so it does not count against the breaker.
+        record_failure(server, ToolCallFailurePhase::DispatchedUnknownOutcome);
+        if attempts > 1 {
+            record_retry_recovered(server);
+        }
+        let recovered = permit.success();
+        drop(conn_guard);
+        pool.settle_probe_recovery(server, entry, recovered).await;
+        tracing::warn!(%server, %trace_id, limit_bytes, "upstream tool-call response exceeded its limit and was not read");
+        return Err(response_too_large_error(server, limit_bytes, trace_id));
+    }
     match result {
         Ok(
             response

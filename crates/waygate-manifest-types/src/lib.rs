@@ -268,6 +268,12 @@ pub struct UpstreamManifest {
     /// must also appear in `tools`. Applied on reload without reconnecting.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub long_running_tools: Vec<String>,
+    /// Per-server call timeout and tool-call response size limit. Omission,
+    /// or omission of either field, inherits the gateway-wide setting. Read
+    /// from each call's manifest snapshot, so a reload applies it without
+    /// reconnecting. See [`UpstreamLimits`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<UpstreamLimits>,
     /// Opt-in RFC 8693 token exchange. When set, the gateway swaps the
     /// caller's access token for a downscoped one audienced at this upstream
     /// (Tier A identity chaining). Absence = Tier B (gateway-minted identity
@@ -342,6 +348,40 @@ pub struct UpstreamManifest {
     /// dial fails.
     #[serde(default)]
     pub session: Option<SessionConfig>,
+}
+
+/// Shortest call timeout, in seconds, the gateway accepts other than `0`
+/// (which disables the timeout). Shared by `GATEWAY_UPSTREAM_CALL_TIMEOUT_SECONDS`
+/// and `limits.call_timeout_seconds` so both settings have the same bounds.
+pub const MIN_CALL_TIMEOUT_SECONDS: u64 = 5;
+
+/// Largest tool-call response limit, in bytes, the gateway accepts. Shared by
+/// `GATEWAY_UPSTREAM_CALL_RESPONSE_MAX_BYTES` and
+/// `limits.call_response_max_bytes`, and equal to the largest resource-read
+/// limit.
+pub const MAX_CALL_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Per-upstream bounds on one forwarded call.
+///
+/// Each field is optional and falls back to the gateway-wide setting it
+/// replaces for this server.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamLimits {
+    /// Seconds the gateway waits for one call to this upstream (a tool call,
+    /// resource request or file authorization request) before abandoning and
+    /// cancelling it. Replaces `GATEWAY_UPSTREAM_CALL_TIMEOUT_SECONDS` for this server
+    /// with the same meaning: `0` disables the timeout, and any other value
+    /// must be at least [`MIN_CALL_TIMEOUT_SECONDS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_timeout_seconds: Option<u64>,
+    /// Largest raw response, in bytes, the gateway reads for one tool call
+    /// to this upstream before failing the call. Replaces
+    /// `GATEWAY_UPSTREAM_CALL_RESPONSE_MAX_BYTES` for this server. Must be
+    /// between 1 and [`MAX_CALL_RESPONSE_BYTES`]. Only streamable HTTP can
+    /// enforce it, so other transports refuse the setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_response_max_bytes: Option<u64>,
 }
 
 /// One upstream-owned resource URI space and its gateway classification.
@@ -1386,6 +1426,43 @@ fn validate_operation_classifications(m: &UpstreamManifest) -> Result<(), Upstre
     Ok(())
 }
 
+/// Apply the gateway-wide settings' bounds to a server's `limits` block, so a
+/// value the environment variable would refuse at boot is refused here too.
+fn validate_limits(m: &UpstreamManifest) -> Result<(), UpstreamError> {
+    let Some(limits) = m.limits.as_ref() else {
+        return Ok(());
+    };
+    if limits
+        .call_timeout_seconds
+        .is_some_and(|seconds| seconds != 0 && seconds < MIN_CALL_TIMEOUT_SECONDS)
+    {
+        return Err(UpstreamError::InvalidManifest(format!(
+            "upstream `{}`: `limits.call_timeout_seconds` must be 0, which disables the timeout, \
+             or at least {MIN_CALL_TIMEOUT_SECONDS}",
+            m.name,
+        )));
+    }
+    let Some(bytes) = limits.call_response_max_bytes else {
+        return Ok(());
+    };
+    if !(1..=MAX_CALL_RESPONSE_BYTES).contains(&bytes) {
+        return Err(UpstreamError::InvalidManifest(format!(
+            "upstream `{}`: `limits.call_response_max_bytes` must be between 1 and \
+             {MAX_CALL_RESPONSE_BYTES}",
+            m.name,
+        )));
+    }
+    if !matches!(m.transport, Transport::Http) {
+        return Err(UpstreamError::InvalidManifest(format!(
+            "upstream `{}`: `limits.call_response_max_bytes` applies only to streamable HTTP, \
+             the one transport that can stop reading a response at the limit; omit it for SSE \
+             or stdio transports.",
+            m.name,
+        )));
+    }
+    Ok(())
+}
+
 pub fn validate_manifest_invariants(m: &UpstreamManifest) -> Result<(), UpstreamError> {
     // SSE predates the stateless protocol: the transport is legacy by
     // definition, `protocol: auto` resolves to the legacy handshake at
@@ -1455,6 +1532,7 @@ pub fn validate_manifest_invariants(m: &UpstreamManifest) -> Result<(), Upstream
             )));
         }
     }
+    validate_limits(m)?;
     let singleton = BTreeMap::from([(m.name.clone(), m.clone())]);
     validate_resource_claim_set(&singleton)?;
     validate_operation_classifications(m)?;
@@ -2189,6 +2267,7 @@ tools:
             approval_mode: ApprovalMode::PerCall,
             inline_response_threshold_bytes: None,
             long_running_tools: Vec::new(),
+            limits: None,
             exchange: None,
             auth: None,
             mtls: None,
@@ -2300,6 +2379,89 @@ tools:
             let error = parse_manifest_set(&candidate).unwrap_err().to_string();
             assert!(error.contains(expected), "{entries:?}: {error}");
         }
+    }
+
+    #[test]
+    fn limits_are_optional_and_bounded_like_the_gateway_wide_settings() {
+        let yaml = "- name: example-search\n  transport: http\n  url: http://example-search.test/mcp\n  tools: []\n";
+        let defaults = parse_manifest_set(yaml).unwrap();
+        assert!(defaults["example-search"].limits.is_none());
+        assert!(
+            !serialize_manifest_set(&defaults)
+                .unwrap()
+                .contains("limits"),
+            "an absent block must not add noise to existing manifests"
+        );
+
+        let configured = format!(
+            "{yaml}  limits:\n    call_timeout_seconds: 0\n    call_response_max_bytes: 1048576\n"
+        );
+        let manifests = parse_manifest_set(&configured).unwrap();
+        let limits = manifests["example-search"].limits.clone().unwrap();
+        assert_eq!(
+            limits.call_timeout_seconds,
+            Some(0),
+            "0 disables, as globally"
+        );
+        assert_eq!(limits.call_response_max_bytes, Some(1_048_576));
+        let reparsed = parse_manifest_set(&serialize_manifest_set(&manifests).unwrap()).unwrap();
+        assert_eq!(reparsed["example-search"].limits, Some(limits));
+
+        let floor =
+            format!("{yaml}  limits:\n    call_timeout_seconds: {MIN_CALL_TIMEOUT_SECONDS}\n");
+        parse_manifest_set(&floor).expect("the floor itself is accepted");
+
+        for (block, expected) in [
+            (
+                "    call_timeout_seconds: 4\n",
+                "`limits.call_timeout_seconds` must be 0",
+            ),
+            ("    call_timeout_seconds: -1\n", "example-search"),
+            (
+                "    call_response_max_bytes: 0\n",
+                "`limits.call_response_max_bytes` must be between",
+            ),
+            (
+                "    call_response_max_bytes: 1073741825\n",
+                "must be between 1 and 1073741824",
+            ),
+            (
+                "    call_response_max_byte: 1024\n",
+                "unknown field `call_response_max_byte`",
+            ),
+        ] {
+            let candidate = format!("{yaml}  limits:\n{block}");
+            let error = parse_manifest_set(&candidate).unwrap_err().to_string();
+            assert!(error.contains(expected), "{block:?}: {error}");
+            assert!(error.contains("example-search"), "{block:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn call_response_limit_is_refused_where_the_transport_cannot_enforce_it() {
+        let mut manifest = base_manifest();
+        manifest.limits = Some(UpstreamLimits {
+            call_timeout_seconds: Some(30),
+            call_response_max_bytes: Some(4096),
+        });
+        validate_manifest_invariants(&manifest).expect("streamable HTTP enforces the limit");
+
+        manifest.transport = Transport::Sse;
+        let error = validate_manifest_invariants(&manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("applies only to streamable HTTP"), "{error}");
+
+        manifest.transport = Transport::Stdio;
+        manifest.url = None;
+        manifest.command = Some(vec!["example-server".into()]);
+        validate_manifest_invariants(&manifest).expect_err("stdio cannot enforce it either");
+
+        manifest.limits = Some(UpstreamLimits {
+            call_timeout_seconds: Some(30),
+            call_response_max_bytes: None,
+        });
+        validate_manifest_invariants(&manifest).expect("every transport honors the timeout");
     }
 
     #[test]

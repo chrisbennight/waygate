@@ -172,6 +172,7 @@ async fn discovery_latency_and_database_queries() {
             approval_mode: Default::default(),
             inline_response_threshold_bytes: None,
             long_running_tools: Vec::new(),
+            limits: None,
             tools: tools
                 .iter()
                 .map(|t| ToolClassification::new(t.name.as_ref(), RiskTier::Low, false, false))

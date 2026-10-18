@@ -10,6 +10,7 @@ use crate::database::DatabasePoolConfig;
 use crate::file_transfer_config::FileTransferConfig;
 use waygate_upstream::{Transport, UpstreamManifest};
 
+mod call_response;
 mod codemode;
 mod codemode_limits;
 pub use codemode::{CodeModeCapacityLimits, CodeModeResultStorage};
@@ -233,10 +234,10 @@ pub struct Config {
     /// 300s (5 minutes). Floor 5s. `0` disables the timeout entirely
     /// (`None`) — only safe when every upstream is known to respond
     /// bounded-fast. Set via `GATEWAY_UPSTREAM_CALL_TIMEOUT_SECONDS`. The
-    /// global value applies to every upstream and every tool; if you have
-    /// one outlier that needs longer (e.g. an agentic synthesis tool), set
-    /// the global to its envelope rather than a per-tool default — there is
-    /// no per-tool override today.
+    /// global value applies to every upstream and every tool; an upstream
+    /// that needs a different envelope (e.g. an agentic synthesis tool) sets
+    /// `limits.call_timeout_seconds` in its manifest, with the same floor
+    /// and `0` meaning. There is no per-tool override.
     pub upstream_call_timeout: Option<Duration>,
     /// Raw response-body budget for one native `resources/read`. The bound is
     /// enforced by the streamable-HTTP client before rmcp deserializes the
@@ -244,6 +245,12 @@ pub struct Config {
     /// separate file-transfer limit because the MCP response carries only a
     /// bounded descriptor.
     pub resource_response_max_bytes: usize,
+    /// Raw response-body limit for one upstream `tools/call` over streamable
+    /// HTTP, enforced while the response arrives so an oversized one fails
+    /// the call without being read into memory. Default 64 MiB; maximum
+    /// 1 GiB. A manifest's `limits.call_response_max_bytes` overrides it for
+    /// that server. Set via `GATEWAY_UPSTREAM_CALL_RESPONSE_MAX_BYTES`.
+    pub upstream_call_response_max_bytes: usize,
     /// Gateway file storage, response-delivery threshold, retention, and admission.
     pub file_transfer: FileTransferConfig,
     pub upstream_task_retention_seconds: u64,
@@ -784,10 +791,11 @@ impl Config {
         let upstream_call_timeout = waygate_core::env::duration_secs_zero_disables(
             "GATEWAY_UPSTREAM_CALL_TIMEOUT_SECONDS",
             300,
-            5,
+            waygate_upstream::MIN_CALL_TIMEOUT_SECONDS,
             "use 0 to disable",
         )?;
         let resource_response_max_bytes = resource_response::from_env()?;
+        let upstream_call_response_max_bytes = call_response::from_env()?;
         let file_transfer = FileTransferConfig::from_env(database_url.is_some())?;
 
         // HITL grant sweeper cadence + retention.
@@ -979,6 +987,7 @@ impl Config {
             mcp_ping_interval,
             upstream_call_timeout,
             resource_response_max_bytes,
+            upstream_call_response_max_bytes,
             file_transfer,
             upstream_task_retention_seconds: waygate_core::env::u64_in(
                 "GATEWAY_UPSTREAM_TASK_RETENTION_SECONDS",
@@ -1678,6 +1687,7 @@ mod tests {
             mcp_ping_interval: None,
             upstream_call_timeout: None,
             resource_response_max_bytes: waygate_mcp::DEFAULT_RESOURCE_RESPONSE_MAX_BYTES,
+            upstream_call_response_max_bytes: waygate_upstream::DEFAULT_CALL_RESPONSE_MAX_BYTES,
             file_transfer: crate::file_transfer_config::FileTransferConfig {
                 storage_dir: None,
                 retention: crate::file_transfer_config::FileRetention::DEFAULT,

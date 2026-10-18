@@ -53,6 +53,7 @@ pub(super) async fn dispatch_once(
     capabilities: Option<&ClientCapabilities>,
     file_output: bool,
     cleartext_control_plane: bool,
+    response_limit: Option<usize>,
     timeout: Option<Duration>,
     cancellation: &CancellationToken,
 ) -> Result<DispatchResponse, dispatch::ToolCallAttemptError> {
@@ -60,7 +61,7 @@ pub(super) async fn dispatch_once(
         .map(|task| &task.capabilities)
         .or(capabilities)
         .map(task_capabilities);
-    let meta = if file_output {
+    let mut meta = if file_output {
         Some(file_transfers::client_capability_meta(
             mirrored.as_ref().unwrap_or(&service.service().capabilities),
             waygate_mcp::files::FileOperation::Download,
@@ -76,6 +77,15 @@ pub(super) async fn dispatch_once(
             meta
         })
     };
+    // The streamable-HTTP client reads this private value and stops reading
+    // the response at that many bytes; task requests carry it too, because a
+    // completed task returns the tool's result.
+    if let Some(limit) = response_limit {
+        meta.get_or_insert_default().insert(
+            waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY.to_owned(),
+            serde_json::json!(limit),
+        );
+    }
     let Some(task) = task else {
         return dispatch::call_tool_once_with_meta(service, params, meta, timeout, cancellation)
             .await

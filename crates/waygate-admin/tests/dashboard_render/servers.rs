@@ -186,6 +186,7 @@ pub(crate) fn bundle_content_with_stdio() -> String {
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
         long_running_tools: Vec::new(),
+        limits: None,
         name: "local-stdio".into(),
         transport: Transport::Stdio,
         protocol: Default::default(),

@@ -310,8 +310,10 @@ do not account for a failure, this side is the next place to look, not the last.
   Check the returned error and configured budget when diagnosing a timeout.
 - **Forwarded upstream operations** are bounded by
   `GATEWAY_UPSTREAM_CALL_TIMEOUT_SECONDS`, a deployment environment setting
-  applied to every forwarded `tools/call`, `resources/list` and `resources/read`
-  with no per-tool or per-resource override. It exists so a wedged upstream
+  applied to every forwarded `tools/call`, `resources/list` and `resources/read`.
+  An upstream's manifest can replace it for that server with
+  `limits.call_timeout_seconds`; there is no per-tool or per-resource
+  override. It exists so a wedged upstream
   stream cannot hold a call open indefinitely; on an upstream with a
   `session.concurrency` limit, each hung call also holds one of its places.
 

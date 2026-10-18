@@ -91,6 +91,11 @@ reconnecting the upstream; calls already admitted keep their captured server
 override or effective global default.
 Changing the global environment variable requires a gateway restart.
 
+The gateway first receives the result under the tool-call response limit,
+`GATEWAY_UPSTREAM_CALL_RESPONSE_MAX_BYTES` (64 MiB by default) or the server's
+[`limits.call_response_max_bytes`](agents/upstreams.md#per-server-call-limits).
+A larger response fails the call instead of becoming a file.
+
 This threshold controls automatic file delivery of otherwise inline structured
 results. Native upstream files and retained connector responses keep their
 existing delivery rules. Code Mode materialization keeps its separate limits.

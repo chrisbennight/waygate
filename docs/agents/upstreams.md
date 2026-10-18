@@ -313,7 +313,8 @@ This document covers:
   `url` / `command`, `auth` (bearer-env), `exchange` (RFC 8693 token
   exchange config), `tools` (per-tool classification), `resources`
   (URI-prefix ownership and risk classification), `session`
-  (per-upstream connection-pool tuning). `protocol` defaults to `auto`:
+  (per-upstream connection-pool tuning), `limits` (the
+  [per-server call limits](#per-server-call-limits)). `protocol` defaults to `auto`:
   probe with `server/discover`, and fall back to the legacy `initialize`
   handshake if that probe fails at all. `protocol: legacy` skips the probe
   and is the operator escape hatch for an upstream known to be older, or
@@ -661,11 +662,65 @@ receive request in the connection pool. Do not add a generic read timeout to the
 receive client; quiet streams are valid unless an upstream protocol declares a
 heartbeat contract.
 
+## Per-server call limits
+
+The optional `limits` block bounds each call to one upstream. Both fields are
+optional, and an omitted field inherits the gateway-wide setting:
+
+```yaml
+name: example-search
+transport: http
+url: http://example-search:8080/mcp
+limits:
+  call_timeout_seconds: 900
+  call_response_max_bytes: 268435456
+tools:
+  - name: search
+    risk: low
+```
+
+- `call_timeout_seconds` replaces `GATEWAY_UPSTREAM_CALL_TIMEOUT_SECONDS`
+  (default 300) for this server, with the same meaning and bounds: `0`
+  disables the timeout, and any other value must be at least 5. It bounds tool
+  calls, resource requests and file authorization requests. A tool call that
+  reaches it is cancelled as [upstream call cancellation](#upstream-call-cancellation)
+  describes.
+- `call_response_max_bytes` replaces `GATEWAY_UPSTREAM_CALL_RESPONSE_MAX_BYTES`
+  (default 67108864, 64 MiB) for this server, and must be between 1 and
+  1073741824 (1 GiB). It counts the raw bytes of the upstream's HTTP response
+  to one `tools/call`, or to a task request that returns a tool's result: a
+  JSON body, or every byte of the event stream, including progress or log
+  notifications sent on it. The gateway stops reading at the limit, so an
+  oversized response is never held in memory. The call fails with
+  `data.error = "upstream_response_too_large"`, `limit_bytes`,
+  `phase: "dispatched_unknown_outcome"`, `retryable: false` and `trace_id`,
+  and the message names the server and the limit. The upstream has already
+  run the call, so the gateway does not repeat it, and the refusal does not
+  count against the upstream's circuit breaker. An upstream error that only
+  looks like this refusal is returned unchanged as the upstream's error. A
+  result within the limit can still be delivered as a gateway file under the
+  [inline response threshold](../file-transfer.md#large-structured-tool-responses)
+  rules.
+
+Only the streamable-HTTP client can stop reading one response at a byte count.
+A legacy SSE session delivers every response on one long-lived stream, and
+stdio reads whole lines from the child process, so neither transport is bounded
+by the response limit, and a manifest that sets `call_response_max_bytes` on
+either is refused at load. If an upstream closes a call's event stream and the
+SDK resumes it on a new one, the resumed stream is bounded only by the SDK's
+16 MiB limit on each event.
+
+Load-time validation names the upstream in every refusal. The pool reads
+`limits` from each call's manifest snapshot, so a reload applies a change to
+the next call without reconnecting and reports it with the other response
+settings; a call already in progress keeps the limits it started with.
+
 ## Upstream call cancellation
 
 The gateway stops waiting for an upstream `tools/call` when its call deadline
-(`GATEWAY_UPSTREAM_CALL_TIMEOUT_SECONDS`) expires or when the downstream request
-is abandoned. A request is abandoned when a 2026-07-28 client closes its
+(`GATEWAY_UPSTREAM_CALL_TIMEOUT_SECONDS`, or the server's
+`limits.call_timeout_seconds`) expires or when the downstream request is
+abandoned. A request is abandoned when a 2026-07-28 client closes its
 response stream, when a client sends `notifications/cancelled`, or when the MCP
 transport shuts down. A 2025-11-25 client that only disconnects does not cancel
 its call, because that version says a disconnection is not a cancellation.

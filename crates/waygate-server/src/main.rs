@@ -423,6 +423,7 @@ async fn gateway_main() -> anyhow::Result<()> {
         (None, _) => UpstreamPool::connect(manifests).await,
     }
     .with_call_timeout(cfg.upstream_call_timeout)
+    .with_call_response_max_bytes(cfg.upstream_call_response_max_bytes)
     .with_reconnect_policy(cfg.upstream_reconnect_base, cfg.upstream_reconnect_ceiling)
     // Share the gateway's `SharedEvidence` with the upstream pool so
     // reconnect outcomes produce `UpstreamHealth`-category audit rows

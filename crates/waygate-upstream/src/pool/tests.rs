@@ -69,6 +69,7 @@ fn shape_manifest(transport: Transport, concurrency: Option<usize>) -> UpstreamM
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
         long_running_tools: Vec::new(),
+        limits: None,
         name: "x".into(),
         transport,
         protocol: Default::default(),
@@ -342,6 +343,7 @@ fn pool_with_manifest_tool() -> UpstreamPool {
             approval_mode: Default::default(),
             inline_response_threshold_bytes: None,
             long_running_tools: Vec::new(),
+            limits: None,
             name: "example-messages".into(),
             transport: Transport::Http,
             protocol: Default::default(),
@@ -370,6 +372,7 @@ fn annotation_native_tool_facts_stay_conservative_until_policy_enforcement() {
             approval_mode: Default::default(),
             inline_response_threshold_bytes: None,
             long_running_tools: Vec::new(),
+            limits: None,
             name: "komodo".into(),
             transport: Transport::Http,
             protocol: Default::default(),
@@ -491,6 +494,86 @@ async fn long_running_tools_follow_the_live_manifest_without_reconnecting() {
 }
 
 #[tokio::test]
+async fn call_limits_follow_the_live_manifest_without_reconnecting() {
+    let pool = pool_with_manifest_tool()
+        .with_call_timeout(Some(Duration::from_secs(300)))
+        .with_call_response_max_bytes(4096);
+    let live = |pool: &UpstreamPool| {
+        pool.manifests()
+            .into_iter()
+            .find(|manifest| manifest.name == "example-messages")
+            .expect("configured server")
+    };
+    assert_eq!(
+        pool.call_timeout_for(&live(&pool)),
+        Some(Duration::from_secs(300))
+    );
+    assert_eq!(pool.call_response_limit_for(&live(&pool)), Some(4096));
+
+    let mut manifests: BTreeMap<_, _> = pool
+        .manifests()
+        .into_iter()
+        .map(|manifest| (manifest.name.clone(), manifest))
+        .collect();
+    for (limits, timeout, response_limit) in [
+        (
+            Some(crate::UpstreamLimits {
+                call_timeout_seconds: Some(7),
+                call_response_max_bytes: Some(1024),
+            }),
+            Some(Duration::from_secs(7)),
+            Some(1024),
+        ),
+        (
+            Some(crate::UpstreamLimits {
+                call_timeout_seconds: Some(0),
+                call_response_max_bytes: None,
+            }),
+            None,
+            Some(4096),
+        ),
+        (None, Some(Duration::from_secs(300)), Some(4096)),
+    ] {
+        manifests
+            .get_mut("example-messages")
+            .expect("configured server")
+            .limits = limits.clone();
+        let report = pool.reload_manifests(&manifests).await;
+        assert_eq!(report.response_policy_updated, ["example-messages"]);
+        assert!(
+            report.redialed.is_empty() && report.redial_failed.is_empty(),
+            "limits are request-path policy, not connection shape: {report:?}"
+        );
+        assert_eq!(live(&pool).limits, limits);
+        assert_eq!(pool.call_timeout_for(&live(&pool)), timeout, "{limits:?}");
+        assert_eq!(
+            pool.call_response_limit_for(&live(&pool)),
+            response_limit,
+            "{limits:?}"
+        );
+    }
+
+    let disabled_globally = pool.with_call_timeout(None);
+    let mut overridden = live(&disabled_globally);
+    overridden.limits = Some(crate::UpstreamLimits {
+        call_timeout_seconds: Some(30),
+        call_response_max_bytes: None,
+    });
+    assert_eq!(
+        disabled_globally.call_timeout_for(&overridden),
+        Some(Duration::from_secs(30)),
+        "a server's timeout applies even when the gateway-wide one is disabled"
+    );
+    for transport in [Transport::Sse, Transport::Stdio] {
+        assert_eq!(
+            disabled_globally.call_response_limit_for(&shape_manifest(transport, None)),
+            None,
+            "only streamable HTTP carries the limit to an enforcing transport"
+        );
+    }
+}
+
+#[tokio::test]
 async fn resolve_invocation_tool_prefers_catalog_live() {
     // Catalog says Low/no-side-effects/pii; manifest says
     // High/side_effects. The catalog Live result must win when its version is
@@ -603,6 +686,7 @@ async fn catalog_transition_fence_tracks_generation_without_erasing_catalog_over
                 approval_mode: Default::default(),
                 inline_response_threshold_bytes: None,
                 long_running_tools: Vec::new(),
+                limits: None,
                 name: "example-messages".into(),
                 transport: Transport::Http,
                 protocol: Default::default(),
@@ -1439,6 +1523,7 @@ fn manifest_with(tier_a_required: bool) -> UpstreamManifest {
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
         long_running_tools: Vec::new(),
+        limits: None,
         name: "example-messages".into(),
         transport: Transport::Http,
         protocol: Default::default(),
@@ -2771,6 +2856,7 @@ async fn boot_dial_timeout_bounds_a_hung_upstream() {
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
         long_running_tools: Vec::new(),
+        limits: None,
         name: "hung".into(),
         transport: Transport::Stdio,
         protocol: Default::default(),
