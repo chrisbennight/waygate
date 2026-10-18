@@ -1769,7 +1769,7 @@ mod tests {
                 serde_json::json!(["internal", true, [], true]),
             ),
             (
-                "name: search\ntransport: http\nurl: https://search.example.test/mcp\n",
+                "name: search\ntransport: http\ntrust: external\nurl: https://search.example.test/mcp\n",
                 serde_json::json!(["external", false, [], false]),
             ),
         ];
