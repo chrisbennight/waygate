@@ -15,6 +15,15 @@ use ReviewError as CatalogError;
 /// of a version or an exact review approval, whichever is newer. The unlocked
 /// comparison and the locked observation share it, so they cannot disagree
 /// about which approval is current.
+/// The largest contract, in bytes of PostgreSQL's JSONB text, that a review
+/// stores for comparison. A larger first observation without an approval
+/// baseline is held for review because it cannot be compared later.
+macro_rules! max_stored_contract_bytes {
+    () => {
+        "262144"
+    };
+}
+
 macro_rules! latest_approval {
     () => {
         "(SELECT approval_hash FROM (
@@ -237,6 +246,32 @@ impl PgCatalogStore {
             .await
     }
 
+    /// Whether [`Self::observe`] would hold a first observation of `contract`
+    /// for review, read without writing. A first observation without an
+    /// approval baseline is held only when the contract is too large to store
+    /// for comparison. `None` means the tool has no catalog identity yet, so
+    /// observation would record nothing.
+    pub async fn first_observation_requires_review(
+        &self,
+        tenant: &str,
+        server: &str,
+        tool: &str,
+        contract: &Value,
+    ) -> Result<Option<bool>, CatalogError> {
+        Ok(sqlx::query_scalar(concat!(
+            "SELECT octet_length($4::jsonb::text) > ",
+            max_stored_contract_bytes!(),
+            " FROM mcp_tools t JOIN mcp_servers s ON s.id=t.server_id
+             WHERE s.tenant_id=$1 AND s.name=$2 AND t.name=$3"
+        ))
+        .bind(tenant)
+        .bind(server)
+        .bind(tool)
+        .bind(contract)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     /// Annotation admission seeds the approval for a first observation. Later
     /// observations use durable catalog activation and exact review decisions;
     /// a live session's manifest can lag either source of accepted changes.
@@ -365,10 +400,11 @@ impl PgCatalogStore {
         // Use PostgreSQL's representation so the bound matches the table's
         // constraint, including JSONB whitespace. Retain identity and refusal
         // even when the comparison itself cannot be stored.
-        let contract: Value = sqlx::query_scalar(
-            "SELECT CASE WHEN octet_length($1::jsonb::text) <= 262144
-             THEN $1::jsonb ELSE 'null'::jsonb END",
-        )
+        let contract: Value = sqlx::query_scalar(concat!(
+            "SELECT CASE WHEN octet_length($1::jsonb::text) <= ",
+            max_stored_contract_bytes!(),
+            " THEN $1::jsonb ELSE 'null'::jsonb END"
+        ))
         .bind(contract)
         .fetch_one(&mut *tx)
         .await?;

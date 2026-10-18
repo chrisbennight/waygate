@@ -342,12 +342,24 @@ impl UpstreamPool {
             return review_decision_admission(&review, &hash, protected);
         }
         if !effects.records() {
-            // Only the call path records a first observation. That
-            // observation admits the contract it records unless the contract
-            // is too large to store, and a tool with no catalog identity yet
-            // is refused by the catalog check that follows, so leave the
-            // decision to that check rather than write.
-            return Admission::Admitted;
+            // Only the call path records a first observation. Read the
+            // decision that observation would leave, without writing it.
+            return match store
+                .first_observation_requires_review(
+                    waygate_core::TenantId::DEFAULT,
+                    server,
+                    tool,
+                    &value,
+                )
+                .await
+            {
+                Ok(Some(true)) => Admission::Refused(ToolRefusal::ReviewRequired),
+                Ok(Some(false)) => Admission::Admitted,
+                // Observation records nothing until catalog reconciliation
+                // has created the tool's identity.
+                Ok(None) => Admission::Refused(ToolRefusal::NotInCatalog),
+                Err(_) => Admission::Unavailable(TemporaryUnavailability::ReviewUnavailable),
+            };
         }
         if store
             .observe(

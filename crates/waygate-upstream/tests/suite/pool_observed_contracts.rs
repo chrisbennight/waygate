@@ -1066,6 +1066,62 @@ async fn refusal_report_states_review_decisions_without_writing() {
     server_task.abort();
 }
 
+/// A first observation too large to store for comparison is held for review.
+/// The refusal report reports that hold, as the call path decides it, without
+/// recording the observation.
+#[tokio::test]
+async fn refusal_report_holds_an_oversized_first_observation_for_review() {
+    use waygate_catalog::tool_reviews::PgCatalogStore;
+    use waygate_mcp::catalog::{ResolvedInvocationTool, ToolRefusal};
+    use waygate_upstream::ToolBlock;
+    let Some(db) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let mut tool = annotated_tool();
+    tool.description = Some("x".repeat(300_000).into());
+    let descriptor = Arc::new(std::sync::RwLock::new(tool));
+    let (addr, server_task) = serve_changing_contract(descriptor).await;
+    let mut manifest = manifest_at(addr, ClassificationMode::Manifest);
+    manifest.name = format!("refusals-{}", uuid::Uuid::new_v4());
+    let name = manifest.name.clone();
+    // Attached before the catalog knows the server, so nothing is seeded.
+    let pool = UpstreamPool::connect(BTreeMap::from([(name.clone(), manifest.clone())]))
+        .await
+        .with_quarantine_threshold(waygate_upstream::pool::QuarantineThreshold::All)
+        .with_tool_reviews(Arc::new(PgCatalogStore::new(db.clone())))
+        .await;
+    import_manifest_server(&db, &manifest).await;
+    assert!(review_state(&db, &name).await.0.is_empty());
+
+    let report = pool.refusals("default", |server| server == name).await;
+    assert_eq!(
+        report[0]
+            .tools
+            .iter()
+            .map(|blocked| (blocked.tool.as_str(), blocked.block))
+            .collect::<Vec<_>>(),
+        vec![("stable", ToolBlock::Refused(ToolRefusal::ReviewRequired))],
+    );
+    assert!(
+        review_state(&db, &name).await.0.is_empty(),
+        "the report records no observation"
+    );
+    assert!(matches!(
+        pool.resolve_invocation_tool("default", &name, "stable")
+            .await,
+        ResolvedInvocationTool::Refused {
+            reason: ToolRefusal::ReviewRequired,
+            ..
+        }
+    ));
+    assert_eq!(
+        review_state(&db, &name).await.0.len(),
+        1,
+        "the call path records the observation the report left alone"
+    );
+    server_task.abort();
+}
+
 /// The call path records a protected contract's first observation; the
 /// refusal report reaches the same decision without recording it.
 #[tokio::test]
