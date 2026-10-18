@@ -277,7 +277,8 @@ that describe it. Preserve these properties when changing the pages:
 - **Tools** falls back to manifest classifications only for a server with no
   connected lane, and marks those rows not connected. A connected server whose
   published list is empty contributes no rows; a notice reports its blocked
-  count instead.
+  count instead, linked to that server's Blocked tools view for viewers who
+  pass its admin gate.
 - A failed catalog reconcile after a reload keeps the manifest config-health
   signal degraded, so the Servers page's stale-configuration banner shows it
   until a reconcile succeeds.

@@ -214,10 +214,8 @@ pub(crate) async fn tools_page_withholds_a_connected_server_that_publishes_no_to
     let health = pool.health_snapshot().await;
     assert!(health[0].connected_lanes > 0, "the fixture lanes connect");
     assert_eq!(health[0].published_tool_count, 0);
-    let app = dashboard_router(
-        Arc::new(base_admin_state_with_pool(pool)),
-        DashboardAuth::Disabled,
-    );
+    let state = Arc::new(base_admin_state_with_pool(pool));
+    let app = dashboard_router(state.clone(), DashboardAuth::Disabled);
 
     let (status, body) = body_of(app.clone(), "/tools").await;
     assert_eq!(status, StatusCode::OK);
@@ -230,7 +228,13 @@ pub(crate) async fn tools_page_withholds_a_connected_server_that_publishes_no_to
         body.contains("none of its 2 classified tools are published"),
         "{body}"
     );
-    assert!(body.contains(">2 blocked</span>"), "{body}");
+    // The development administrator passes the Blocked page's gate, so the
+    // count links to that server's blocked tools.
+    assert!(
+        body.contains(r#"href="/admin/tools/blocked?server=example-messages">2 blocked</a>"#),
+        "{body}"
+    );
+    assert!(body.contains(r#"<a href="/admin/tools/blocked">Blocked tools</a>"#));
     assert!(!body.contains(">not connected</span>"));
 
     // Filtering to the withheld server keeps the selection and the notice.
@@ -240,7 +244,40 @@ pub(crate) async fn tools_page_withholds_a_connected_server_that_publishes_no_to
         body.contains(r#"<option value="example-messages" selected>example-messages (0)</option>"#),
         "{body}"
     );
-    assert!(body.contains(">2 blocked</span>"));
+    assert!(body.contains(
+        r#"href="/admin/t/default/tools/blocked?server=example-messages">2 blocked</a>"#
+    ));
     assert!(body.contains(r#"<a href="/admin/t/default/servers">Servers</a>"#));
+
+    // A viewer without the admin gate sees the count without the links.
+    let mut request = axum::http::Request::builder()
+        .uri("/tools")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(waygate_oidc::Principal {
+        sub: "viewer@example.com".into(),
+        email: None,
+        groups: vec![],
+        issuer: "https://idp.example.com".into(),
+        scopes: vec!["mcp:read".into()],
+        tenant: waygate_core::TenantId::parse("default").expect("tenant id"),
+        auth_method: waygate_oidc::AuthMethod::Oauth,
+        raw_token: None,
+        roles: vec![],
+        scim: None,
+        enrichment_blocked: None,
+        api_key_profile_restrictions: None,
+    });
+    let response = tower::ServiceExt::oneshot(waygate_admin::dashboard::router(state), request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 512 * 1024)
+        .await
+        .unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(body.contains(">2 blocked</span>"), "{body}");
+    assert!(!body.contains("tools/blocked?server="), "{body}");
+    assert!(!body.contains(">Blocked tools</a>"), "{body}");
     server.abort();
 }
