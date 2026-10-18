@@ -2187,7 +2187,7 @@ impl UpstreamPool {
                     let current_tool = session_tools
                         .iter()
                         .find(|tool| tool.name.as_ref() == tool_name);
-                    let Ok(mut decisions) = self
+                    let Ok(mut observed) = self
                         .observe_tool_reviews(
                             &entry,
                             server,
@@ -2206,7 +2206,7 @@ impl UpstreamPool {
                             tool_name,
                             current_tool,
                             current_manifest.classification_mode,
-                            decisions.remove(tool_name),
+                            observed.decisions.remove(tool_name),
                         )
                         .await
                     {

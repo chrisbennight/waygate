@@ -322,6 +322,9 @@ struct CatalogPublication<'a> {
     classification_mode: crate::ClassificationMode,
     previous_tools: &'a [Tool],
     live_tools: Option<&'a [Tool]>,
+    /// Durable drift events recorded for this publication, by tool name, so
+    /// its Activity rows can name them.
+    drift_events: &'a HashMap<String, uuid::Uuid>,
 }
 
 /// Whether two manifests agree on EVERY field a [`UpstreamPool::redial_entry`]
@@ -1343,17 +1346,16 @@ impl UpstreamPool {
                 common_tool_catalog(&catalogs, classification_mode)
             };
             let review_manifest = entry.manifest_snapshot();
-            if self
+            let Ok(observed) = self
                 .observe_tool_reviews(entry, name, &review_manifest, &common_live_tools, false)
                 .await
-                .is_err()
-            {
+            else {
                 tracing::warn!(server = %name, "catalog refresh refused: tool review storage unavailable");
                 if let Some(claim) = claim {
                     release_reconnect_claim(name, entry, claim, true);
                 }
                 return;
-            }
+            };
             self.publish_classifications_to(
                 entry,
                 dialed[publish_index]
@@ -1362,6 +1364,7 @@ impl UpstreamPool {
                 name,
                 CatalogPublication {
                     source: "reconnect",
+                    drift_events: &observed.drift_events,
                     classifications: &classifications,
                     classification_mode,
                     previous_tools: &previous_tools,
@@ -1877,15 +1880,16 @@ impl UpstreamPool {
         // (`!needs_redial`) also moves these fields, so it too trips the CAS and
         // we defer to it rather than overwrite it.
         let review_manifest = entry.manifest_snapshot();
+        let mut drift_events = HashMap::new();
         for conn in dialed.iter().filter_map(Option::as_ref) {
-            if self
+            let Ok(observed) = self
                 .observe_tool_reviews(entry, name, &review_manifest, &conn.live_tools, false)
                 .await
-                .is_err()
-            {
+            else {
                 tracing::warn!(server = %name, "replacement session refused: tool review storage unavailable");
                 return RedialOutcome::Failed;
-            }
+            };
+            drift_events.extend(observed.drift_events);
         }
         {
             let mut manifest_guard = entry.manifest.write().expect("manifest lock poisoned");
@@ -1945,6 +1949,7 @@ impl UpstreamPool {
                 name,
                 CatalogPublication {
                     source: source.publish_label(),
+                    drift_events: &drift_events,
                     classifications: &classifications,
                     classification_mode,
                     previous_tools: &previous_tools,
@@ -2220,6 +2225,7 @@ impl UpstreamPool {
             classification_mode,
             previous_tools,
             live_tools,
+            drift_events,
         } = publication;
         let live_tools = live_tools.unwrap_or(&conn.live_tools);
         // Serving-session replacement is one synchronous catalog publication;
@@ -2272,6 +2278,7 @@ impl UpstreamPool {
                 .expect("upstream quarantine lock poisoned");
             for report in &mut drift {
                 report.quarantined = quarantine.contains(&report.tool);
+                report.drift_event = drift_events.get(&report.tool).copied();
             }
         }
         if !drift.is_empty() {
@@ -2298,7 +2305,7 @@ impl UpstreamPool {
     async fn detect_drift_on_rebuilt_entry(&self, entry: &UpstreamEntry, name: &str) {
         for slot in &entry.slots {
             if let Some(conn) = slot.conn.read().await.as_ref() {
-                if self
+                let drift_events = match self
                     .observe_tool_reviews(
                         entry,
                         name,
@@ -2307,10 +2314,13 @@ impl UpstreamPool {
                         false,
                     )
                     .await
-                    .is_err()
                 {
-                    tracing::warn!(server = %name, "rebuilt tool review observation failed; admission will refuse unobserved contracts");
-                }
+                    Ok(observed) => observed.drift_events,
+                    Err(_) => {
+                        tracing::warn!(server = %name, "rebuilt tool review observation failed; admission will refuse unobserved contracts");
+                        HashMap::new()
+                    }
+                };
                 let mut drift = entry.record_observed_schemas(
                     name,
                     &conn.live_tools,
@@ -2324,6 +2334,7 @@ impl UpstreamPool {
                         .expect("upstream quarantine lock poisoned");
                     for report in &mut drift {
                         report.quarantined = quarantine.contains(&report.tool);
+                        report.drift_event = drift_events.get(&report.tool).copied();
                     }
                 }
                 if !drift.is_empty() {
@@ -2629,6 +2640,7 @@ impl UpstreamPool {
                                 name,
                                 CatalogPublication {
                                     source: "reload",
+                                    drift_events: &HashMap::new(),
                                     classifications: &guard.tools,
                                     classification_mode: guard.classification_mode,
                                     previous_tools: &previous_tools,

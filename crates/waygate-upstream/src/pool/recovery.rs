@@ -230,7 +230,7 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
                     )
                     .await
                     .ok()
-                    .map(|mut decisions| decisions.remove(setup.tool_name)),
+                    .map(|mut observed| observed.decisions.remove(setup.tool_name)),
                 Err(_) => None,
             };
             match session_tools {

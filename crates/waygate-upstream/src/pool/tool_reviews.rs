@@ -25,6 +25,16 @@ pub(super) fn review_contract(
     }
 }
 
+/// What one pass of [`UpstreamPool::observe_tool_reviews`] left in place,
+/// keyed by tool name.
+#[derive(Default)]
+pub(super) struct ReviewObservations {
+    /// Admission decisions. A tool absent here has no recorded review.
+    pub(super) decisions: HashMap<String, ReviewDecision>,
+    /// Durable drift events recorded by this pass.
+    pub(super) drift_events: HashMap<String, uuid::Uuid>,
+}
+
 impl UpstreamPool {
     pub(super) fn runtime_quarantine_threshold(&self) -> QuarantineThreshold {
         if self.tool_reviews.is_some() {
@@ -96,9 +106,9 @@ impl UpstreamPool {
     }
 
     /// Record each tool's observed contract and refresh the local refusal
-    /// cache. Returns the admission decision each observation left in place,
-    /// keyed by tool name, so a caller admitting the call needs no second read;
-    /// a tool absent from the result has no recorded review.
+    /// cache. Returns what each observation left in place, so a caller
+    /// admitting the call needs no second read, and a caller that audits the
+    /// change itself (`emit_evidence = false`) can name the drift event.
     pub(super) async fn observe_tool_reviews(
         &self,
         entry: &UpstreamEntry,
@@ -106,10 +116,10 @@ impl UpstreamPool {
         manifest: &UpstreamManifest,
         tools: &[Tool],
         emit_evidence: bool,
-    ) -> Result<HashMap<String, ReviewDecision>, waygate_catalog::tool_reviews::ReviewError> {
-        let mut decisions = HashMap::new();
+    ) -> Result<ReviewObservations, waygate_catalog::tool_reviews::ReviewError> {
+        let mut observed = ReviewObservations::default();
         let Some(store) = self.tool_reviews.as_ref() else {
-            return Ok(decisions);
+            return Ok(observed);
         };
         for tool in tools {
             let annotation_mode =
@@ -159,7 +169,12 @@ impl UpstreamPool {
                 waygate_telemetry::metrics::set_tool_quarantined(name, quarantined.len() as i64);
             }
             if let Some(decision) = observation.decision {
-                decisions.insert(tool.name.to_string(), decision);
+                observed.decisions.insert(tool.name.to_string(), decision);
+            }
+            if let Some(drift_event) = observation.drift_event {
+                observed
+                    .drift_events
+                    .insert(tool.name.to_string(), drift_event);
             }
             if observation.changed && emit_evidence {
                 if let (Some(evidence), Some(review)) = (
@@ -185,7 +200,7 @@ impl UpstreamPool {
                 }
             }
         }
-        Ok(decisions)
+        Ok(observed)
     }
 
     /// Verify the reviewed identity against every connected lane's raw catalog.
