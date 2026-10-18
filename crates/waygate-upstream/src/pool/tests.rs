@@ -1305,6 +1305,41 @@ async fn a_catalog_server_block_outranks_live_contract_reasons() {
     }
 }
 
+/// A catalog transition that has not converged is temporary for a live
+/// server, but a quarantined or retired server stays reported as blocked.
+#[tokio::test]
+async fn a_catalog_server_block_outranks_a_converging_transition() {
+    let catalog: waygate_catalog::SharedCatalogStore = Arc::new(ScriptedCatalog {
+        outcome: std::sync::Mutex::new(Some(waygate_catalog::ResolvedTool::Quarantined {
+            server_name: "example-messages".into(),
+            tool_name: "send_message".into(),
+            retired: false,
+        })),
+        err: false,
+        ..Default::default()
+    });
+    let manifest_set = |risk| {
+        let mut manifest = manifest_with(false);
+        manifest.tools = vec![ToolClassification::new("send_message", risk, true, false)];
+        BTreeMap::from([("example-messages".to_owned(), manifest)])
+    };
+    let pool = UpstreamPool::from_manifests_disconnected(manifest_set(RiskTier::High))
+        .with_catalog(catalog);
+    // A governance-only edit leaves the tool's catalog facts unsettled.
+    pool.reload_manifests(&manifest_set(RiskTier::Medium)).await;
+    assert!(pool
+        .catalog_transition_state("example-messages", "send_message")
+        .is_some_and(|transition| transition.pending));
+
+    assert_eq!(
+        refusal_reason(
+            pool.resolve_invocation_tool("default", "example-messages", "send_message")
+                .await
+        ),
+        Ok(ToolRefusal::ServerQuarantined),
+    );
+}
+
 #[tokio::test]
 async fn resolved_side_effects_reports_resolver_facts_and_defaults_conservative() {
     // Ready snapshot: the derived side-effect fact is returned as-is

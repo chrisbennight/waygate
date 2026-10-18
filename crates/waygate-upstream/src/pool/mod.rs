@@ -1480,7 +1480,36 @@ impl UpstreamCatalog for UpstreamPool {
     ///   distinguished from withdrawal.
     ///
     /// When no `CatalogStore` is wired, this is just `tool_facts`.
+    ///
+    /// A server the catalog has quarantined or retired outranks every
+    /// per-tool and temporary reason, so a caller who may see the server
+    /// learns that it is blocked rather than that a tool is missing or that a
+    /// retry might help. An unreadable catalog leaves the original reason.
     async fn resolve_invocation_tool(
+        &self,
+        tenant: &str,
+        server: &str,
+        tool_name: &str,
+    ) -> ResolvedInvocationTool {
+        let resolved = self.resolve_tool_contract(tenant, server, tool_name).await;
+        match resolved {
+            ResolvedInvocationTool::Ready(_)
+            | ResolvedInvocationTool::Refused {
+                reason: ToolRefusal::ServerQuarantined | ToolRefusal::ServerRetired,
+                ..
+            } => resolved,
+            other => self
+                .catalog_server_block(tenant, server, tool_name)
+                .await
+                .unwrap_or(other),
+        }
+    }
+}
+
+impl UpstreamPool {
+    /// [`UpstreamCatalog::resolve_invocation_tool`] before a server-wide
+    /// catalog block is given precedence.
+    async fn resolve_tool_contract(
         &self,
         tenant: &str,
         server: &str,
@@ -1504,14 +1533,11 @@ impl UpstreamCatalog for UpstreamPool {
                     %tenant, %server, tool = %tool_name,
                     "tool is in-process quarantined (drift-triggered); refusing dispatch",
                 );
-                return match self.catalog_server_block(tenant, server, tool_name).await {
-                    Some(block) => block,
-                    None => ResolvedInvocationTool::refused(
-                        server,
-                        tool_name,
-                        ToolRefusal::DriftQuarantined,
-                    ),
-                };
+                return ResolvedInvocationTool::refused(
+                    server,
+                    tool_name,
+                    ToolRefusal::DriftQuarantined,
+                );
             }
             let admission = admission::entry_tool_admission(entry, manifest, tool_name).await;
             if let Some(refusal) = admission.refusal(server, tool_name) {
@@ -1519,10 +1545,7 @@ impl UpstreamCatalog for UpstreamPool {
                     %tenant, %server, tool = %tool_name, ?admission,
                     "tool is not admitted by the current classification mode and behavior hash",
                 );
-                return match self.catalog_server_block(tenant, server, tool_name).await {
-                    Some(block) => block,
-                    None => refusal,
-                };
+                return refusal;
             }
         }
         let published =
