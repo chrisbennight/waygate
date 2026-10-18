@@ -132,6 +132,10 @@ struct UpstreamEntry {
     /// re-probe / SIGHUP / admin reconnect paths all skip it — otherwise
     /// auto-rediscover would silently re-dial a retired upstream.
     removed: AtomicBool,
+    /// Whether the operator has been told, and not since contradicted, that
+    /// this upstream offers resources its manifest declares no prefix for.
+    /// See [`UpstreamEntry::report_undeclared_resources`].
+    undeclared_resources_reported: AtomicBool,
     /// In-process behavior-hash baseline keyed by tool name.
     /// Populated by [`record_observed_schemas`] at the publish
     /// points (boot, reconnect, reload). On a subsequent publish where
@@ -829,6 +833,7 @@ impl UpstreamPool {
             manifest: StdRwLock::new(manifest),
             reconnect_notify,
             removed: AtomicBool::new(false),
+            undeclared_resources_reported: AtomicBool::new(false),
             observed_schemas: StdMutex::new(HashMap::new()),
             quarantined: StdRwLock::new(HashSet::new()),
             last_reload_gen: AtomicU64::new(initial_gen),
@@ -849,6 +854,20 @@ impl UpstreamPool {
                 );
                 break;
             }
+        }
+        // With no lane up there is nothing to judge yet; the first reconnect
+        // that installs one reports instead.
+        let mut connected = false;
+        let mut resource_capability_advertised = false;
+        for slot in &entry.slots {
+            if let Some(conn) = slot.conn.read().await.as_ref() {
+                connected = true;
+                resource_capability_advertised |= conn.resource_capability_advertised;
+            }
+        }
+        if connected {
+            let manifest = entry.manifest.read().expect("manifest lock poisoned");
+            entry.report_undeclared_resources(&manifest, resource_capability_advertised);
         }
         entry
     }
@@ -887,6 +906,7 @@ impl UpstreamPool {
                     manifest: StdRwLock::new(manifest),
                     reconnect_notify: reconnect_notify.clone(),
                     removed: AtomicBool::new(false),
+                    undeclared_resources_reported: AtomicBool::new(false),
                     observed_schemas: StdMutex::new(HashMap::new()),
                     quarantined: StdRwLock::new(HashSet::new()),
                     last_reload_gen: AtomicU64::new(0),
@@ -1201,7 +1221,6 @@ async fn dial(
     let negotiated_protocol = peer_info.as_ref().map(|i| i.protocol_version.to_string());
     let resource_capability_advertised =
         peer_info.is_some_and(|i| i.capabilities.resources.is_some());
-    resources::warn_if_resources_undeclared(manifest, resource_capability_advertised);
     Ok(Connection {
         client: connected.service,
         network_destination: connected.network_destination,

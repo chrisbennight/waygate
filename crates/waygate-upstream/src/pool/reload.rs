@@ -1450,6 +1450,15 @@ impl UpstreamPool {
                     **guard = conn.take();
                 }
             }
+            if installable.iter().any(|install| *install) {
+                let resource_capability_advertised = guards.iter().any(|guard| {
+                    guard
+                        .as_ref()
+                        .is_some_and(|conn| conn.resource_capability_advertised)
+                });
+                let manifest = entry.manifest.read().expect("manifest lock poisoned");
+                entry.report_undeclared_resources(&manifest, resource_capability_advertised);
+            }
         }
 
         if breaker_open {
@@ -2060,6 +2069,14 @@ impl UpstreamPool {
                 }
             }
         }
+        if redialed > 0 {
+            let resource_capability_advertised = guards.iter().any(|guard| {
+                guard
+                    .as_ref()
+                    .is_some_and(|conn| conn.resource_capability_advertised)
+            });
+            entry.report_undeclared_resources(new, resource_capability_advertised);
+        }
         // Linearize recovery of the shared failure budget with the lane swap.
         // A call cannot fail on a newly installed lane until its writer drops,
         // so no post-commit breaker transition can be erased here.
@@ -2620,7 +2637,7 @@ impl UpstreamPool {
                         // success paths below commit the complete new manifest
                         // and a failure keeps these old claims.
                         guard.resources = new_manifest.resources.clone();
-                        super::resources::warn_if_resources_undeclared(
+                        entry.report_undeclared_resources(
                             &guard,
                             classification_guards.iter().any(|conn_guard| {
                                 conn_guard

@@ -2493,3 +2493,107 @@ async fn a_reload_that_moves_the_server_applies_its_policy_with_the_new_connecti
         "the moved server must receive no identity token",
     );
 }
+
+/// Counts, on the current thread, only the warning that an upstream offers
+/// resources its manifest declares no prefix for.
+struct UndeclaredResourceWarnings(Arc<AtomicUsize>);
+
+impl tracing::Subscriber for UndeclaredResourceWarnings {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Message(bool);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message"
+                    && format!("{value:?}").contains("declares no resource prefix")
+                {
+                    self.0 = true;
+                }
+            }
+        }
+        let mut message = Message(false);
+        event.record(&mut message);
+        if message.0 {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+fn catalog_operator() -> waygate_oidc::Principal {
+    waygate_oidc::Principal {
+        sub: "catalog-operator".into(),
+        email: None,
+        groups: vec![],
+        issuer: "https://auth.example.test".into(),
+        scopes: vec!["mcp:admin".into()],
+        tenant: waygate_core::TenantId::default(),
+        auth_method: waygate_oidc::AuthMethod::Oauth,
+        raw_token: None,
+        roles: vec![],
+        scim: None,
+        enrichment_blocked: None,
+        api_key_profile_restrictions: None,
+    }
+}
+
+#[tokio::test]
+async fn undeclared_resources_are_reported_when_it_becomes_true_not_per_connection() {
+    let (addr, _) = spawn_mock_upstream().await;
+    let warnings = Arc::new(AtomicUsize::new(0));
+    let _subscriber =
+        tracing::subscriber::set_default(UndeclaredResourceWarnings(warnings.clone()));
+    // Another test thread may have registered the warning's callsite while no
+    // subscriber wanted it; recompute interest now that this one exists.
+    tracing::callsite::rebuild_interest_cache();
+
+    let undeclared = legacy(manifest(addr, Some(SessionIsolation::Reuse)));
+    let pool =
+        UpstreamPool::connect(BTreeMap::from([("mock".to_owned(), undeclared.clone())])).await;
+    assert!(pool.resource_capability_advertised("mock").await);
+    assert_eq!(
+        warnings.load(Ordering::SeqCst),
+        1,
+        "connecting an upstream that offers undeclared resources reports it",
+    );
+
+    for _ in 0..2 {
+        pool.refresh_server_catalog("mock", &catalog_operator())
+            .await
+            .expect("fresh session");
+    }
+    assert_eq!(
+        warnings.load(Ordering::SeqCst),
+        1,
+        "fresh sessions to the same upstream repeat nothing new",
+    );
+
+    let mut declared = undeclared.clone();
+    declared.resources = vec![ResourceClassification {
+        uri_prefix: "mock://".to_owned(),
+        risk: RiskTier::Low,
+    }];
+    pool.reload_manifests(&BTreeMap::from([("mock".to_owned(), declared)]))
+        .await;
+    assert_eq!(
+        warnings.load(Ordering::SeqCst),
+        1,
+        "a declaration clears it"
+    );
+
+    pool.reload_manifests(&BTreeMap::from([("mock".to_owned(), undeclared)]))
+        .await;
+    assert_eq!(
+        warnings.load(Ordering::SeqCst),
+        2,
+        "removing the last declaration makes it true again",
+    );
+}

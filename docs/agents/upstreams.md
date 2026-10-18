@@ -555,8 +555,10 @@ This document covers:
   URI: a listing is the upstream's own claim, so an upstream that listed
   another upstream's URI could otherwise receive its reads. An upstream that
   declares nothing has no readable resources, and the gateway logs a warning
-  when such an upstream connects while advertising the MCP Resources
-  capability. Declare a prefix for every upstream whose resources should be
+  when such an upstream first connects while advertising the MCP Resources
+  capability. Reconnects and fresh sessions do not repeat it; a reload that
+  removes the last declaration or rebuilds the upstream's connections reports
+  it again. Declare a prefix for every upstream whose resources should be
   readable before upgrading a deployment that relied on undeclared reads.
   `resources/list` preserves upstream order and collapses metadata-free empty
   upstream pages inside the current gateway request, so upstreams with no
