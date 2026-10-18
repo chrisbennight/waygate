@@ -1123,6 +1123,9 @@ struct ServerRow {
     /// gateway-signed identity token, which is sent only when the gateway
     /// also has a signing key; null with no runtime entry.
     receives_identity_token: Option<bool>,
+    /// Optional claims (`email`, `groups`) the identity token carries when
+    /// sent; empty when withheld or subject-only; null with no runtime entry.
+    identity_token_claims: Option<Vec<String>>,
     /// Whether tool calls carry trace context and baggage; null with no
     /// runtime entry.
     receives_trace_context: Option<bool>,
@@ -1165,6 +1168,13 @@ fn server_row(
         owner: s.owner,
         trust: manifest.map(|m| m.trust.as_str().to_owned()),
         receives_identity_token: manifest.map(|m| m.identity_token_policy().send_header),
+        identity_token_claims: manifest.map(|m| {
+            m.identity_token_policy()
+                .sent_claims()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        }),
         receives_trace_context: manifest.map(|m| m.forwards_trace_context()),
     }
 }
@@ -1730,6 +1740,56 @@ mod tests {
         assert_eq!(row["drift_quarantined_tool_count"], 2);
         assert_eq!(row["rejected_output_schema_count"], 0);
         assert_eq!(row["rejected_output_schemas"], serde_json::json!([]));
+    }
+
+    /// The row reports the effective forwarding settings, including which
+    /// optional claims the identity token carries.
+    #[test]
+    fn server_row_reports_the_effective_forwarding_settings() {
+        let catalog = || waygate_catalog::CatalogServerSummary {
+            id: Uuid::nil(),
+            tenant_id: "default".into(),
+            name: "search".into(),
+            transport: "http".into(),
+            status: waygate_catalog::CatalogServerStatus::Live,
+            visibility: waygate_catalog::CatalogVisibility::TenantOnly,
+            owner: None,
+        };
+        let manifest = |yaml: &str| {
+            waygate_upstream::parse_manifest_document(yaml.as_bytes()).expect("test manifest")
+        };
+        let cases = [
+            (
+                "name: search\ntransport: http\ntrust: internal\nurl: http://search/mcp\n",
+                serde_json::json!(["internal", true, ["email", "groups"], true]),
+            ),
+            (
+                "name: search\ntransport: http\ntrust: internal\nurl: http://search/mcp\n\
+                 identity:\n  claims: []\n",
+                serde_json::json!(["internal", true, [], true]),
+            ),
+            (
+                "name: search\ntransport: http\nurl: https://search.example.test/mcp\n",
+                serde_json::json!(["external", false, [], false]),
+            ),
+        ];
+        for (yaml, expected) in cases {
+            let m = manifest(yaml);
+            let row = serde_json::to_value(server_row(catalog(), None, Some(&m)))
+                .expect("serialize observable server row");
+            assert_eq!(
+                serde_json::json!([
+                    row["trust"],
+                    row["receives_identity_token"],
+                    row["identity_token_claims"],
+                    row["receives_trace_context"]
+                ]),
+                expected,
+                "{yaml}"
+            );
+        }
+        let unloaded = serde_json::to_value(server_row(catalog(), None, None)).unwrap();
+        assert!(unloaded["identity_token_claims"].is_null());
     }
 
     #[test]

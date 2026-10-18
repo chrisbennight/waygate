@@ -447,6 +447,22 @@ pub struct IdentityTokenPolicy {
 }
 
 impl IdentityTokenPolicy {
+    /// The optional claims the token carries when it is sent, by manifest
+    /// name; empty when the token is withheld or carries the subject only.
+    pub fn sent_claims(&self) -> Vec<&'static str> {
+        if !self.send_header {
+            return Vec::new();
+        }
+        let mut claims = Vec::new();
+        if self.include_email {
+            claims.push("email");
+        }
+        if self.include_groups {
+            claims.push("groups");
+        }
+        claims
+    }
+
     /// The policy for an internal server with no overrides: send the header
     /// with every optional claim.
     pub const FULL: Self = Self {
@@ -3954,6 +3970,22 @@ mod trust_tests {
         .expect("an empty claim list sends the subject only");
         let policy = m.identity_token_policy();
         assert!(policy.send_header && !policy.include_email && !policy.include_groups);
+    }
+
+    #[test]
+    fn sent_claims_lists_the_optional_claims_only_when_the_token_is_sent() {
+        assert_eq!(IdentityTokenPolicy::FULL.sent_claims(), ["email", "groups"]);
+        let subject_only = IdentityTokenPolicy {
+            send_header: true,
+            include_email: false,
+            include_groups: false,
+        };
+        assert!(subject_only.sent_claims().is_empty());
+        let withheld = IdentityTokenPolicy {
+            send_header: false,
+            ..IdentityTokenPolicy::FULL
+        };
+        assert!(withheld.sent_claims().is_empty());
     }
 
     #[test]
