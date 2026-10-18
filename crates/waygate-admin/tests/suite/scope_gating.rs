@@ -97,6 +97,9 @@ fn disconnected_manifest(name: &str) -> UpstreamManifest {
         auth: None,
         mtls: None,
         tier_c_peer: None,
+        trust: waygate_upstream::TrustLevel::Internal,
+        identity: None,
+        forward_trace_context: None,
         session: None,
     }
 }

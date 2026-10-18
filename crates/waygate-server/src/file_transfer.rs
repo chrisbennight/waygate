@@ -3920,6 +3920,9 @@ mod tests {
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,
+            trust: waygate_upstream::TrustLevel::Internal,
+            identity: None,
+            forward_trace_context: None,
             session: Some(serde_json::from_value(json!({"isolation": isolation})).unwrap()),
         };
         Arc::new(UpstreamPool::connect(BTreeMap::from([("printable".to_owned(), manifest)])).await)

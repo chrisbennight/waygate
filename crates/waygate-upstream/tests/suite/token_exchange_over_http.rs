@@ -164,6 +164,7 @@ async fn token_exchange_injects_bearer_and_caches() {
         stored_upstream_subject_token: None,
         exchanged_bearer: None,
         tier_c_audience: None,
+        token_policy: waygate_upstream::IdentityTokenPolicy::FULL,
     });
 
     let uri: Arc<str> = format!("http://{up_addr}/mcp").into();
@@ -250,6 +251,7 @@ async fn exchange_skipped_when_raw_token_missing() {
         stored_upstream_subject_token: None,
         exchanged_bearer: None,
         tier_c_audience: None,
+        token_policy: waygate_upstream::IdentityTokenPolicy::FULL,
     });
 
     let uri: Arc<str> = format!("http://{up_addr}/mcp").into();

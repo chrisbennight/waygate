@@ -51,6 +51,7 @@ fn manifest_with_bearer_env_auth_parses() {
     let yaml = r#"
 name: example
 transport: http
+trust: internal
 url: https://example.test/mcp
 auth:
   bearer_env: EXAMPLE_BEARER
@@ -71,6 +72,7 @@ fn manifest_without_auth_field_defaults_to_none() {
     let yaml = r#"
 name: example
 transport: http
+trust: internal
 url: http://example.test/mcp
 tools:
   - name: ping

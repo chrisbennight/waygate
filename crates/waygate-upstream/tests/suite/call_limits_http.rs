@@ -34,8 +34,8 @@ use tokio::sync::Notify;
 use waygate_mcp::catalog::{ToolCallMrtr, UpstreamCatalog};
 use waygate_mcp::protocol::RiskTier;
 use waygate_upstream::{
-    SessionConfig, SessionIsolation, SessionScope, ToolClassification, Transport, UpstreamLimits,
-    UpstreamManifest, UpstreamPool, UpstreamProtocol,
+    SessionConfig, SessionIsolation, SessionScope, ToolClassification, Transport, TrustLevel,
+    UpstreamLimits, UpstreamManifest, UpstreamPool, UpstreamProtocol,
 };
 
 /// Text length of the `large` tool's result; its serialized response is a
@@ -236,6 +236,10 @@ fn manifest(
         mtls: None,
         tier_a_required: false,
         tier_c_peer: None,
+        // A loopback test upstream is part of the deployment.
+        trust: TrustLevel::Internal,
+        identity: None,
+        forward_trace_context: None,
         session: Some(SessionConfig {
             concurrency: Some(1),
             isolation: Some(if legacy {

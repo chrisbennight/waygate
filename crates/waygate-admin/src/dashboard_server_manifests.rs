@@ -1461,7 +1461,7 @@ mod tests {
     fn canonical_disk_hash_matches_post_mirror_disk_hash() {
         // Non-canonical: a leading comment, fields out of order, a blank line.
         let noncanonical = "# my upstreams\n- url: http://a/mcp\n  name: a\n  \
-             transport: http\n\n- name: b\n  transport: http\n  url: http://b/mcp\n";
+             transport: http\n  trust: internal\n\n- name: b\n  transport: http\n  trust: internal\n  url: http://b/mcp\n";
 
         // What the turnstile CASes the pointer to.
         let cas_hash = canonical_disk_hash(noncanonical).expect("valid manifest set");
@@ -1480,7 +1480,7 @@ mod tests {
             "the CAS/notify hash must equal the post-mirror on-disk hash",
         );
         let replacement = waygate_upstream::parse_manifest_set(
-            "- name: c\n  transport: http\n  url: http://c/mcp\n",
+            "- name: c\n  transport: http\n  trust: internal\n  url: http://c/mcp\n",
         )
         .unwrap();
         waygate_upstream::write_manifest_set_to_dir_from_base(&dir, &replacement, &cas_hash)
@@ -1501,8 +1501,8 @@ mod tests {
     /// equivalent draft is a no-op CAS, not a spurious advance).
     #[test]
     fn canonical_disk_hash_is_serialization_invariant() {
-        let a = "- name: x\n  transport: http\n  url: http://x/mcp\n";
-        let b = "# comment\n- url: http://x/mcp\n  transport: http\n  name: x\n";
+        let a = "- name: x\n  transport: http\n  trust: internal\n  url: http://x/mcp\n";
+        let b = "# comment\n- url: http://x/mcp\n  transport: http\n  trust: internal\n  name: x\n";
         assert_eq!(
             canonical_disk_hash(a).unwrap(),
             canonical_disk_hash(b).unwrap(),

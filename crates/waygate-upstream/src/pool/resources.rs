@@ -428,6 +428,7 @@ impl UpstreamPool {
                 stored_upstream_subject_token: None,
                 exchanged_bearer: None,
                 tier_c_audience: None,
+                token_policy: snapshot.identity_token_policy(),
             }),
             _ => None,
         };

@@ -56,9 +56,10 @@ pub use waygate_manifest_types::{
     enforce_no_prod_stdio, load_manifests, manifest_write_in_progress, parse_manifest_document,
     parse_manifest_set, serialize_manifest_set, valid_env_passthrough_name,
     validate_manifest_invariants, write_manifest_set_to_dir, write_manifest_set_to_dir_from_base,
-    ApprovalMode, ClassificationMode, ExchangeConfig, MtlsConfig, OperationClassification,
-    ResourceClassification, SessionConfig, SessionIsolation, SessionScope, ToolClassification,
-    Transport, UpstreamAuth, UpstreamError, UpstreamLimits, UpstreamManifest, UpstreamProtocol,
+    ApprovalMode, ClassificationMode, ExchangeConfig, IdentityClaim, IdentityForwarding,
+    IdentityTokenPolicy, MtlsConfig, OperationClassification, ResourceClassification,
+    SessionConfig, SessionIsolation, SessionScope, ToolClassification, Transport, TrustLevel,
+    UpstreamAuth, UpstreamError, UpstreamLimits, UpstreamManifest, UpstreamProtocol,
     MANIFEST_WRITE_MARKER, MAX_CALL_RESPONSE_BYTES, MIN_CALL_TIMEOUT_SECONDS,
 };
 

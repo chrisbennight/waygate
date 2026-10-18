@@ -538,9 +538,10 @@ mod tests {
 
     #[tokio::test]
     async fn admitted_safe_call_bounds_a_dial_failure_to_one_recovery_attempt() {
-        let manifest: UpstreamManifest =
-            serde_yaml::from_str("name: provider-neutral\ntransport: http\nprotocol: legacy\n")
-                .expect("manifest fixture parses");
+        let manifest: UpstreamManifest = serde_yaml::from_str(
+            "name: provider-neutral\ntransport: http\ntrust: internal\nprotocol: legacy\n",
+        )
+        .expect("manifest fixture parses");
 
         let failure = match dial_per_call(PerCallDial {
             snapshot: &manifest,

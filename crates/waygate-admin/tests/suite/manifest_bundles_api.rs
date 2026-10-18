@@ -36,7 +36,9 @@ use waygate_upstream::pool::UpstreamPool;
 /// A valid manifest-set YAML document (one upstream) for the given
 /// version — the form `parse_manifest_set` accepts.
 fn manifest_yaml(version: i32) -> String {
-    format!("- name: u{version}\n  transport: http\n  url: http://u{version}/mcp\n")
+    format!(
+        "- name: u{version}\n  transport: http\n  trust: internal\n  url: http://u{version}/mcp\n"
+    )
 }
 
 /// In-memory manifest-store fake. `present` toggles whether
@@ -290,7 +292,9 @@ async fn endpoints_503_without_store() {
         (
             "POST",
             "/api/v1/server_manifests",
-            Some(r#"{"content":"- name: a\n  transport: http\n  url: http://a/mcp\n"}"#),
+            Some(
+                r#"{"content":"- name: a\n  transport: http\n  trust: internal\n  url: http://a/mcp\n"}"#,
+            ),
         ),
         (
             "POST",
@@ -403,7 +407,7 @@ async fn validate_accepts_valid_set() {
     let resp = app
         .oneshot(admin_post(
             "/api/v1/server_manifests/validate",
-            r#"{"content":"- name: a\n  transport: http\n  url: http://a/mcp\n"}"#,
+            r#"{"content":"- name: a\n  transport: http\n  trust: internal\n  url: http://a/mcp\n"}"#,
         ))
         .await
         .unwrap();
@@ -436,7 +440,7 @@ async fn validate_rejects_duplicate_names() {
     let resp = app
         .oneshot(admin_post(
             "/api/v1/server_manifests/validate",
-            r#"{"content":"- name: dup\n  transport: http\n  url: http://a/mcp\n- name: dup\n  transport: http\n  url: http://b/mcp\n"}"#,
+            r#"{"content":"- name: dup\n  transport: http\n  trust: internal\n  url: http://a/mcp\n- name: dup\n  transport: http\n  trust: internal\n  url: http://b/mcp\n"}"#,
         ))
         .await
         .unwrap();
@@ -450,7 +454,7 @@ async fn create_draft_returns_201() {
     let resp = app
         .oneshot(admin_post(
             "/api/v1/server_manifests",
-            r#"{"content":"- name: example-messages\n  transport: http\n  url: http://example-messages/mcp\n","author":"alice"}"#,
+            r#"{"content":"- name: example-messages\n  transport: http\n  trust: internal\n  url: http://example-messages/mcp\n","author":"alice"}"#,
         ))
         .await
         .unwrap();
@@ -544,7 +548,7 @@ async fn create_and_publish_emit_admin_mutation_evidence() {
     app.clone()
         .oneshot(admin_post(
             "/api/v1/server_manifests",
-            r#"{"content":"- name: example-messages\n  transport: http\n  url: http://example-messages/mcp\n"}"#,
+            r#"{"content":"- name: example-messages\n  transport: http\n  trust: internal\n  url: http://example-messages/mcp\n"}"#,
         ))
         .await
         .unwrap();

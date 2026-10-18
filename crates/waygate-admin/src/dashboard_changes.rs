@@ -2053,7 +2053,7 @@ mod tests {
     #[test]
     fn ledger_only_manifest_effect_reports_no_fleet_activation() {
         let impact = crate::manifest_impact::ManifestImpactReport::ledger_only(
-            "- name: tenant-local\n  transport: http\n  url: http://tenant-local/mcp\n",
+            "- name: tenant-local\n  transport: http\n  trust: internal\n  url: http://tenant-local/mcp\n",
         );
         assert!(replay_summary(&impact).contains("does not activate"));
 

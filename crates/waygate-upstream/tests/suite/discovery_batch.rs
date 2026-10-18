@@ -205,6 +205,9 @@ async fn fixture(
         mtls: None,
         tier_a_required: false,
         tier_c_peer: None,
+        trust: waygate_upstream::TrustLevel::Internal,
+        identity: None,
+        forward_trace_context: None,
         session: None,
     };
     let pool = UpstreamPool::connect(BTreeMap::from([("scale".into(), manifest)]))

@@ -18,8 +18,9 @@ pub struct ReloadReport {
     #[serde(skip)]
     pub(super) catalog_generation: u64,
     pub classifications_updated: Vec<String>,
-    /// Upstreams whose hot-reloadable identity-chaining fields changed
-    /// (`exchange` / `tier_a_required` / `tier_c_peer`). These are applied
+    /// Upstreams whose hot-reloadable identity fields changed (`exchange` /
+    /// `tier_a_required` / `tier_c_peer` and the forwarding policy `trust` /
+    /// `identity` / `forward_trace_context`). These are applied
     /// in place like classifications. Tracked separately so a bundle that
     /// touches only these is not mis-reported as a no-op.
     pub identity_updated: Vec<String>,
@@ -430,6 +431,17 @@ pub(super) fn redial_committed_fields_eq(a: &UpstreamManifest, b: &UpstreamManif
         && a.exchange == b.exchange
         && a.tier_a_required == b.tier_a_required
         && a.tier_c_peer == b.tier_c_peer
+        && forwarding_policy_eq(a, b)
+}
+
+/// Whether two manifests send an upstream the same caller information: the
+/// trust classification and the identity and trace overrides it defaults.
+/// Read per request from the stored manifest, so a change must reach the
+/// stored manifest exactly when the connection it governs does.
+fn forwarding_policy_eq(a: &UpstreamManifest, b: &UpstreamManifest) -> bool {
+    a.trust == b.trust
+        && a.identity == b.identity
+        && a.forward_trace_context == b.forward_trace_context
 }
 
 fn descriptors_by_name(tools: &[Tool]) -> BTreeMap<&str, &Tool> {
@@ -2015,6 +2027,9 @@ impl UpstreamPool {
             manifest_guard.exchange = new.exchange.clone();
             manifest_guard.tier_a_required = new.tier_a_required;
             manifest_guard.tier_c_peer = new.tier_c_peer;
+            manifest_guard.trust = new.trust;
+            manifest_guard.identity = new.identity.clone();
+            manifest_guard.forward_trace_context = new.forward_trace_context;
         }
 
         let mut redialed = 0usize;
@@ -2661,8 +2676,13 @@ impl UpstreamPool {
                         catalog_change.commit();
                     }
                     // The hot-reloadable identity-chaining fields (exchange /
-                    // tier_a_required / tier_c_peer) are runtime-tunable per-call
-                    // reads — BUT they are COUPLED to the auth shape: the loader
+                    // tier_a_required / tier_c_peer) and the forwarding policy
+                    // (trust / identity / forward_trace_context) are
+                    // runtime-tunable per-call reads. The forwarding policy says
+                    // what this connection's requests may carry, so it moves with
+                    // the connection it governs: in place here, or with the shape
+                    // in a re-dial. The chaining fields are COUPLED to the auth
+                    // shape as well: the loader
                     // makes `exchange` and `tier_c_peer` mutually exclusive with
                     // `auth.bearer_env`, and `tier_a_required` needs `exchange`. A
                     // reload that moves between bearer_env and exchange/tier_c
@@ -2692,7 +2712,8 @@ impl UpstreamPool {
                     // `!transport_changed` gate below also excludes it.
                     let identity_changed = guard.exchange != new_manifest.exchange
                         || guard.tier_a_required != new_manifest.tier_a_required
-                        || guard.tier_c_peer != new_manifest.tier_c_peer;
+                        || guard.tier_c_peer != new_manifest.tier_c_peer
+                        || !forwarding_policy_eq(&guard, new_manifest);
                     if !transport_changed {
                         // Retry policy is request-path configuration, not
                         // connection shape. Apply the exact session block in
@@ -2708,6 +2729,9 @@ impl UpstreamPool {
                         guard.exchange = new_manifest.exchange.clone();
                         guard.tier_a_required = new_manifest.tier_a_required;
                         guard.tier_c_peer = new_manifest.tier_c_peer;
+                        guard.trust = new_manifest.trust;
+                        guard.identity = new_manifest.identity.clone();
+                        guard.forward_trace_context = new_manifest.forward_trace_context;
                     }
                     (
                         needs_redial,
