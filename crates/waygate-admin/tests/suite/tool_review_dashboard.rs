@@ -74,7 +74,7 @@ async fn acceptance_workflow(
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
-    use waygate_mcp::catalog::{ResolvedInvocationTool, UpstreamCatalog};
+    use waygate_mcp::catalog::{ResolvedInvocationTool, ToolRefusal, UpstreamCatalog};
     let Some(db) = waygate_test_support::pg::audit_pool_or_skip().await else {
         return;
     };
@@ -486,7 +486,10 @@ async fn acceptance_workflow(
             matches!(
                 pool.resolve_invocation_tool("default", &server, "sibling")
                     .await,
-                ResolvedInvocationTool::Quarantined { .. }
+                ResolvedInvocationTool::Refused {
+                    reason: ToolRefusal::ReviewRequired,
+                    ..
+                }
             ),
             "oversized sibling must stay refused while the reviewed tool recovers"
         );
@@ -637,7 +640,10 @@ async fn acceptance_workflow(
         assert!(matches!(
             pool.resolve_invocation_tool("default", &server, "search")
                 .await,
-            ResolvedInvocationTool::Quarantined { .. }
+            ResolvedInvocationTool::Refused {
+                reason: ToolRefusal::ReviewRequired,
+                ..
+            }
         ));
         let oversized = store
             .get("default", &server, "search")

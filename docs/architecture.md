@@ -178,7 +178,7 @@ The hot path for one tool call:
 <!-- invocation-stages:begin -->
 | Order | Stage ID | Status | Responsibility |
 | --- | --- | --- | --- |
-| 1 | `resolve_tool` | `active` | Admit one immutable tool snapshot carrying governed facts, authority, catalog identity, schema hash, and schemas; refuse quarantine before dispatch. |
+| 1 | `resolve_tool` | `active` | Admit one immutable tool snapshot carrying governed facts, authority, catalog identity, schema hash, and schemas; refuse an unknown, withheld, or blocked tool before dispatch. |
 | 2 | `validate_input` | `active` | Require the admitted input schema to have the MCP object root, compile it, and validate request arguments before authorization, quota, approval, evidence, or dispatch. |
 | 3 | `extract_facts` | `active` | Assemble typed Policy Information Point facts from the principal and resolved classification. |
 | 4 | `authorize` | `active` | Authorize the call with Cedar and stop on deny or step-up. |
@@ -211,9 +211,25 @@ the catalog only after boot reconciles the exact accepted manifest set; that
 attachment is authoritative, so a catalog miss or read failure refuses dispatch
 rather than reviving a withdrawn tool through manifest fallback. Transitional
 and catalog-less compositions retain their explicit non-authoritative manifest
-behavior. An authoritative miss is an intentional lifecycle block; a catalog
-store failure is reported as retryable `catalog_unavailable`, not as a policy
-denial. The catalog output schema travels uncompiled through Cedar and profile
+behavior.
+
+Stage 1 separates refusals from temporary conditions. A refusal, such as an
+authoritative miss, a name the manifest does not classify, an unapproved
+annotation contract, or a tool held for change review, returns one
+INVALID_PARAMS `tool_unavailable` error that names only the requested tool and
+a trace id, so a caller cannot tell a withheld tool from an absent one. A
+quarantined or retired server is reported as `forbidden` only to a caller whose
+credential profile and Cedar server-discovery decision let it see that server,
+the checks `tools/list` applies; anyone else receives `tool_unavailable`. A
+catalog or review store failure, a manifest or catalog update in progress, or a
+server with no connected session to check the contract against is reported as
+retryable `catalog_unavailable`, not as a refusal, to a caller who may see that
+server; anyone else again receives `tool_unavailable`. The log line and audit row
+record the precise reason as `refused:<code>` or `unavailable:<code>`, using
+the codes of `ToolRefusal` and `TemporaryUnavailability` in
+[`catalog.rs`](../crates/waygate-mcp/src/catalog.rs).
+
+The catalog output schema travels uncompiled through Cedar and profile
 authorization so a denied caller cannot distinguish malformed catalog state.
 Stage 6 then compiles it and stores the resulting
 `Arc<jsonschema::Validator>` in the snapshot before quota or any later

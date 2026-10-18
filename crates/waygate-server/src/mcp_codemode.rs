@@ -8030,20 +8030,22 @@ mod tests {
         fn quarantine(&mut self, server: &str, tool: &str) {
             Arc::make_mut(&mut self.snapshots).insert(
                 (server.to_owned(), tool.to_owned()),
-                ResolvedInvocationTool::Quarantined {
-                    server: server.to_owned(),
-                    tool: tool.to_owned(),
-                },
+                ResolvedInvocationTool::refused(
+                    server,
+                    tool,
+                    waygate_mcp::catalog::ToolRefusal::DriftQuarantined,
+                ),
             );
         }
 
         fn unavailable(&mut self, server: &str, tool: &str) {
             Arc::make_mut(&mut self.snapshots).insert(
                 (server.to_owned(), tool.to_owned()),
-                ResolvedInvocationTool::Unavailable {
-                    server: server.to_owned(),
-                    tool: tool.to_owned(),
-                },
+                ResolvedInvocationTool::unavailable(
+                    server,
+                    tool,
+                    waygate_mcp::catalog::TemporaryUnavailability::CatalogUnavailable,
+                ),
             );
         }
 
@@ -8104,7 +8106,7 @@ mod tests {
         fn contract_identity(&self, server: &str, tool: &str) -> InvocationContractIdentity {
             match &self.snapshots[&(server.to_owned(), tool.to_owned())] {
                 ResolvedInvocationTool::Ready(snapshot) => snapshot.contract_identity(),
-                ResolvedInvocationTool::Quarantined { .. } => {
+                ResolvedInvocationTool::Refused { .. } => {
                     panic!("test contract must be admitted")
                 }
                 ResolvedInvocationTool::Unavailable { .. } => {
@@ -8236,9 +8238,12 @@ mod tests {
                 .snapshots
                 .get(&(server.to_owned(), tool_name.to_owned()))
                 .cloned()
-                .unwrap_or_else(|| ResolvedInvocationTool::Quarantined {
-                    server: server.to_owned(),
-                    tool: tool_name.to_owned(),
+                .unwrap_or_else(|| {
+                    ResolvedInvocationTool::refused(
+                        server,
+                        tool_name,
+                        waygate_mcp::catalog::ToolRefusal::NotInCatalog,
+                    )
                 });
             if matches!(&resolved, ResolvedInvocationTool::Unavailable { .. }) {
                 self.error_generation.fetch_add(1, Ordering::AcqRel);

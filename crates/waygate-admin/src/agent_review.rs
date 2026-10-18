@@ -33,7 +33,7 @@ use uuid::Uuid;
 
 use waygate_authz::PolicySnapshot;
 use waygate_invocation::{InvocationRequest, InvocationResponse, SharedInvocation};
-use waygate_mcp::catalog::ResolvedInvocationTool;
+use waygate_mcp::catalog::{ResolvedInvocationTool, TemporaryUnavailability};
 use waygate_mcp::UpstreamCatalog;
 use waygate_oidc::{AuthMethod, Principal, Scope};
 use waygate_upstream::UpstreamPool;
@@ -520,11 +520,17 @@ async fn gather_tool_classes(pool: &UpstreamPool, tenant: &str) -> Result<Vec<To
                 .await
             {
                 ResolvedInvocationTool::Ready(snapshot) => snapshot.facts().clone(),
-                ResolvedInvocationTool::Quarantined { .. } => continue,
-                ResolvedInvocationTool::Unavailable { server, tool } => {
+                ResolvedInvocationTool::Unavailable {
+                    server,
+                    tool,
+                    reason: TemporaryUnavailability::CatalogUnavailable,
+                } => {
                     tracing::warn!(%server, %tool, "classification audit: catalog unavailable");
                     return Err(());
                 }
+                // Not callable now, so there is no classification to audit.
+                ResolvedInvocationTool::Refused { .. }
+                | ResolvedInvocationTool::Unavailable { .. } => continue,
             };
             out.push(ToolClass {
                 server: m.name.clone(),

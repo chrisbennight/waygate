@@ -17,7 +17,9 @@ use serde_json::{json, Map, Value};
 
 use waygate_authz::{CedarEngine, CedarGate};
 use waygate_mcp::authz::{SharedAuthz, ToolFacts};
-use waygate_mcp::catalog::{SharedCatalog, UpstreamCatalog};
+use waygate_mcp::catalog::{
+    InvocationToolSnapshot, ResolvedInvocationTool, SharedCatalog, ToolRefusal, UpstreamCatalog,
+};
 use waygate_mcp::protocol::RiskTier;
 use waygate_mcp::GatewayServer;
 use waygate_oidc::Principal;
@@ -327,4 +329,164 @@ async fn tools_list_shows_everything_for_admin() {
 
     assert!(names.contains(&"example-messages.contacts.list"));
     assert!(names.contains(&"example-messages.messages.send"));
+}
+
+/// The fixture catalog, except that it refuses `example-messages.retired_tool`
+/// for `reason`, as the pool does when it will not run a name.
+struct RefusingCatalog {
+    inner: FakeCatalog,
+    reason: ToolRefusal,
+}
+
+#[async_trait]
+impl UpstreamCatalog for RefusingCatalog {
+    async fn list_servers(&self) -> Vec<String> {
+        self.inner.list_servers().await
+    }
+
+    async fn list_tools(&self, server: &str) -> Result<Vec<Tool>, McpError> {
+        self.inner.list_tools(server).await
+    }
+
+    async fn call_tool(
+        &self,
+        _server: &str,
+        _tool_name: &str,
+        _args: Option<Map<String, Value>>,
+        _principal: Option<&Principal>,
+        _admitted: Option<&waygate_mcp::catalog::InvocationContractIdentity>,
+    ) -> Result<CallToolResult, McpError> {
+        panic!("a refused tool must never be dispatched")
+    }
+
+    fn tool_facts(&self, server: &str, tool_name: &str) -> ToolFacts {
+        self.inner.tool_facts(server, tool_name)
+    }
+
+    async fn resolve_invocation_tool(
+        &self,
+        _tenant: &str,
+        server: &str,
+        tool_name: &str,
+    ) -> ResolvedInvocationTool {
+        if tool_name == "retired_tool" {
+            ResolvedInvocationTool::refused(server, tool_name, self.reason)
+        } else {
+            ResolvedInvocationTool::Ready(InvocationToolSnapshot::manifest_fallback(
+                self.tool_facts(server, tool_name),
+                true,
+            ))
+        }
+    }
+}
+
+fn refusing_server(reason: ToolRefusal, engine: CedarEngine) -> GatewayServer {
+    let gate: SharedAuthz = Arc::new(CedarGate::new(Arc::new(engine)));
+    let catalog: SharedCatalog = Arc::new(RefusingCatalog {
+        inner: FakeCatalog {
+            server: "example-messages".into(),
+            low_tool: "contacts.list".into(),
+            high_tool: "messages.send".into(),
+            step_up_tool: "delete_dataset".into(),
+        },
+        reason,
+    });
+    GatewayServer::with_authz(catalog, gate)
+}
+
+fn fixture_engine() -> CedarEngine {
+    CedarEngine::load_dir(&policies_dir()).expect("load fixture policies")
+}
+
+/// A policy set that permits calls but grants no `SearchTools`, so no
+/// principal may discover any server.
+fn call_only_engine() -> CedarEngine {
+    CedarEngine::from_source(r#"permit (principal, action == Action::"CallTool", resource);"#)
+        .expect("parse call-only policy")
+}
+
+/// Call `example-messages.retired_tool` and return the error's code, message,
+/// and data, with the per-request trace id checked and removed.
+async fn refusal(server: &GatewayServer, caller: &Principal) -> (i32, String, Value) {
+    let err = server
+        .dispatch_tool_call(
+            CallToolRequestParams::new("example-messages.retired_tool"),
+            Some(caller),
+        )
+        .await
+        .expect_err("a refused tool must refuse the call");
+    let mut data = err.data.expect("structured error data");
+    let trace_id = data
+        .as_object_mut()
+        .expect("object data")
+        .remove("trace_id")
+        .expect("refusal carries a trace id");
+    assert!(trace_id.as_str().is_some_and(|id| !id.is_empty()));
+    (err.code.0, err.message.to_string(), data)
+}
+
+#[tokio::test]
+async fn absent_and_withheld_tools_are_indistinguishable_to_the_caller() {
+    let user = principal("carol", &["mcp-users"]);
+    let absent = refusal(
+        &refusing_server(ToolRefusal::NotInCatalog, fixture_engine()),
+        &user,
+    )
+    .await;
+    assert_eq!(absent.0, rmcp::model::ErrorCode::INVALID_PARAMS.0);
+    assert_eq!(
+        absent.2,
+        json!({"error": "tool_unavailable", "tool": "example-messages.retired_tool"})
+    );
+
+    for reason in [
+        ToolRefusal::Unclassified,
+        ToolRefusal::NotAdmitted,
+        ToolRefusal::LanesDisagree,
+        ToolRefusal::DriftQuarantined,
+        ToolRefusal::ReviewRequired,
+        ToolRefusal::KeptBlocked,
+        ToolRefusal::ApprovalPending,
+    ] {
+        assert_eq!(
+            refusal(&refusing_server(reason, fixture_engine()), &user).await,
+            absent,
+            "{reason:?} must not be distinguishable from an absent tool",
+        );
+    }
+    // A blocked server the caller's policy does not let it discover is
+    // reported exactly like an absent tool, so the error reveals nothing
+    // about the hidden server.
+    for reason in [ToolRefusal::ServerQuarantined, ToolRefusal::ServerRetired] {
+        assert_eq!(
+            refusal(&refusing_server(reason, call_only_engine()), &user).await,
+            absent,
+            "{reason:?} on an undiscoverable server",
+        );
+    }
+}
+
+#[tokio::test]
+async fn quarantined_server_is_forbidden_to_a_caller_the_policy_lets_discover_it() {
+    // The fixture set permits `SearchTools` for every authenticated principal.
+    let user = principal("carol", &["mcp-users"]);
+    let (code, message, data) = refusal(
+        &refusing_server(ToolRefusal::ServerQuarantined, fixture_engine()),
+        &user,
+    )
+    .await;
+    assert_eq!(code, rmcp::model::ErrorCode::INVALID_REQUEST.0);
+    assert_eq!(
+        message,
+        "forbidden: example-messages.retired_tool — server quarantined"
+    );
+    assert_eq!(
+        data,
+        json!({
+            "error": "forbidden",
+            "reason": "server quarantined",
+            "policy_ids": [],
+            "reasons": [],
+        })
+    );
 }

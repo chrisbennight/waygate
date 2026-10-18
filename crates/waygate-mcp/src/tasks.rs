@@ -150,9 +150,11 @@ pub(crate) fn invocation_error(error: waygate_invocation::InvocationError) -> rm
             reason,
             policy_ids,
             reasons,
-        } => serde_json::json!({
-            "error": "forbidden", "reason": reason, "policy_ids": policy_ids, "reasons": reasons,
-        }),
+            trace_id,
+        } => crate::server::forbidden_data(&reason, &policy_ids, &reasons, trace_id.as_deref()),
+        InvocationError::ToolUnavailable { tool, trace_id } => {
+            return crate::server::tool_unavailable_error(&tool, &trace_id)
+        }
         InvocationError::ApprovalRequired {
             tool,
             reason,

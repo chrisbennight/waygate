@@ -674,9 +674,12 @@ A refused or failed connector call throws an `Error` whose `code` property is
 a stable snake_case discriminator; the message is human-readable detail that
 may change between releases, so programs branch on `error.code`, never on
 message text. Pipeline refusals carry the invocation pipeline's stable kinds
-(`forbidden`, `input_schema_violation`, `rate_limited`,
+(`forbidden`, `tool_unavailable`, `input_schema_violation`, `rate_limited`,
 `response_inspection_blocked`, `connector_result_too_large`,
-`step_up_required`, `upstream`, …); the broker
+`step_up_required`, `upstream`, …). `tool_unavailable` is the same code
+`codemode.describe` uses for an unknown tool: the operation is absent or no
+longer available to the caller, and a fresh `codemode.search` finds current
+tools. The broker
 adds `binding_unavailable` (the call id is not in this execution's admitted
 bindings). A
 prefix that is not lowercase snake_case is not a code: the full text becomes

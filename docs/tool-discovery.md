@@ -23,7 +23,13 @@ caller's credential profile, server-discovery decision, current catalog
 admission state, and per-tool Cedar decision before ranking. A denied,
 quarantined, retired, or profile-restricted record is therefore absent before
 document frequencies, result counts, and cursors are computed. Unknown and
-invisible selectors have one `tool_unavailable` response shape.
+invisible selectors have one `tool_unavailable` response shape. At invocation,
+`tools/call` on a name the gateway does not hold, or one its catalog refuses
+(unclassified, unapproved, or held for review, for example), returns one
+INVALID_PARAMS `tool_unavailable` error carrying only the name and a trace id.
+Only a caller who may discover a quarantined or retired server is told that the
+server is blocked. A catalog-admitted tool that Cedar policy denies is still
+reported as `forbidden` at invocation.
 Risk, side-effect, PII, approval, and step-up classifications stay inside the
 gateway; discovery search and inspection, and Code Mode search and describe,
 do not return them. Invocation evaluates them at the authoritative call
@@ -170,9 +176,10 @@ catalog-read-error generation: an authoritative per-tool store failure
 invalidates the whole projection instead of silently turning one failed lookup
 into an omitted tool and a valid cursor.
 An overlapping publication causes a bounded retry and sustained churn returns
-a retryable, fail-closed error. Invocation distinguishes intentional lifecycle
-blocks from store outages; the latter returns a typed retryable
-`catalog_unavailable` error rather than a policy denial. This is the ordinary
+a retryable, fail-closed error. Invocation distinguishes refusals from
+temporary conditions such as store outages; the latter return a typed retryable
+`catalog_unavailable` error rather than a refusal to a caller who may see the
+server. This is the ordinary
 [sequence-counter consistency pattern](https://docs.kernel.org/locking/seqlock.html):
 readers reject an in-progress or changed generation rather than exposing a
 mixed snapshot. A standard `tools/list` continuation is served from the view

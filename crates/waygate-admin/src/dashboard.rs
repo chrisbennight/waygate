@@ -816,10 +816,10 @@ pub(crate) async fn record_server_action(
 /// and the server-side guard through this one helper keeps them aligned
 /// with the pipeline by construction.
 ///
-/// A quarantined/retired server or unavailable authoritative catalog is
-/// surfaced as High + side-effecting so the guard conservatively requires
-/// confirmation and the UI warns; the subsequent `invoke` returns the
-/// lifecycle or retryable outage refusal. This never *under*-confirms.
+/// A refused or temporarily unavailable tool is surfaced as High +
+/// side-effecting so the guard conservatively requires confirmation and the
+/// UI warns; the subsequent `invoke` returns the refusal or the retryable
+/// unavailability error. This never *under*-confirms.
 pub(crate) async fn resolve_pipeline_facts(
     state: &AdminState,
     tenant: &str,
@@ -835,7 +835,7 @@ pub(crate) async fn resolve_pipeline_facts(
             let facts = snapshot.facts();
             (facts.risk, facts.side_effects, facts.pii)
         }
-        waygate_mcp::catalog::ResolvedInvocationTool::Quarantined { .. }
+        waygate_mcp::catalog::ResolvedInvocationTool::Refused { .. }
         | waygate_mcp::catalog::ResolvedInvocationTool::Unavailable { .. } => (
             RiskTier::High,
             true,

@@ -413,8 +413,7 @@ async fn create_grant(
             .await
         {
             ResolvedInvocationTool::Ready(snapshot) => snapshot,
-            ResolvedInvocationTool::Quarantined { .. }
-            | ResolvedInvocationTool::Unavailable { .. } => {
+            ResolvedInvocationTool::Refused { .. } | ResolvedInvocationTool::Unavailable { .. } => {
                 return Err(ApiError::Conflict(
                     "tool contract is unavailable for approval; refresh and retry".into(),
                 ));

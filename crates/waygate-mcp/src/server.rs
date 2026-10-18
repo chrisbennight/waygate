@@ -3133,6 +3133,46 @@ fn tool_call_response(
     }
 }
 
+/// The structured `data` of a `forbidden` refusal. `trace_id` is present only
+/// for a refusal that no policy explains.
+pub(crate) fn forbidden_data(
+    reason: &str,
+    policy_ids: &[String],
+    reasons: &[String],
+    trace_id: Option<&str>,
+) -> serde_json::Value {
+    let mut data = serde_json::json!({
+        "error": "forbidden",
+        "reason": reason,
+        "policy_ids": policy_ids,
+        "reasons": reasons,
+    });
+    if let Some(trace_id) = trace_id {
+        data["trace_id"] = serde_json::Value::from(trace_id);
+    }
+    data
+}
+
+/// The one error for a tool name that does not exist or that the gateway
+/// withholds from the caller. It depends only on the requested name and the
+/// trace id, so a withheld tool is indistinguishable from an absent one.
+/// INVALID_PARAMS matches how clients treat an unknown tool name: refresh the
+/// tool list rather than retry.
+pub(crate) fn tool_unavailable_error(tool: &str, trace_id: &str) -> McpError {
+    McpError::new(
+        rmcp::model::ErrorCode::INVALID_PARAMS,
+        format!(
+            "unknown or unavailable tool `{tool}`; refresh the tool list. When available to \
+             this client, gateway-discovery.search and codemode.search find current tools."
+        ),
+        Some(serde_json::json!({
+            "error": "tool_unavailable",
+            "tool": tool,
+            "trace_id": trace_id,
+        })),
+    )
+}
+
 /// The MCP error a direct `tools/call` returns for `error` on
 /// `server.tool_name`, without the approval `input_required` projection that
 /// only a connected caller can answer. Background executors use it to record
@@ -3143,6 +3183,7 @@ pub fn tool_call_error(error: InvocationError, server: &str, tool_name: &str) ->
             reason,
             policy_ids,
             reasons,
+            trace_id,
         } => {
             // "Explain this denial":
             // surface Cedar's `policy_ids` + per-policy
@@ -3154,17 +3195,15 @@ pub fn tool_call_error(error: InvocationError, server: &str, tool_name: &str) ->
             // re-running the gate offline. The
             // human-readable `message` stays unchanged
             // for clients that don't parse `data`.
-            let data = serde_json::json!({
-                "error": "forbidden",
-                "reason": reason,
-                "policy_ids": policy_ids,
-                "reasons": reasons,
-            });
+            let data = forbidden_data(&reason, &policy_ids, &reasons, trace_id.as_deref());
             McpError::new(
                 rmcp::model::ErrorCode::INVALID_REQUEST,
                 format!("forbidden: {server}.{tool_name} — {reason}"),
                 Some(data),
             )
+        }
+        InvocationError::ToolUnavailable { tool, trace_id } => {
+            tool_unavailable_error(&tool, &trace_id)
         }
         InvocationError::StepUpRequired {
             required_scope,

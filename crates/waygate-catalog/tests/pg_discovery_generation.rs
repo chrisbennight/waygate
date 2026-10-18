@@ -190,7 +190,14 @@ async fn batched_resolution_preserves_tenant_lifecycle_and_review_decisions_in_b
         1,
         "review decisions are read as one batch"
     );
-    assert_eq!(states.get(&names[1]), Some(&("changed".to_owned(), true)));
+    assert_eq!(
+        states.get(&names[1]),
+        Some(&waygate_catalog::tool_reviews::ReviewDecision {
+            observed_hash: "changed".to_owned(),
+            quarantined: true,
+            kept_blocked: false,
+        })
+    );
     assert!(
         !states.contains_key(&names[0]),
         "unobserved names stay distinct from acceptance"

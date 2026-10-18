@@ -250,13 +250,15 @@ pub struct OperationClassification {
 ///   approval-grants mint endpoint also refuses (404) rather than
 ///   minting a grant for a tool in this state.
 /// - `Quarantined`: the owning server has been administratively
-///   pulled out of dispatch (status `quarantined` or `retired`).
-///   This is an *authoritative deny*, distinct from
+///   pulled out of dispatch (status `quarantined`, or `retired` when
+///   `retired` is set). This is an *authoritative deny*, distinct from
 ///   `PendingApproval`: the per-call path refuses the call and —
 ///   critically — does **not** fall back to manifest metadata, so
 ///   an operator's quarantine actually takes the server offline.
 /// - `NotFound`: no matching `(tenant, server.tool)` in the
-///   catalog. The per-call path returns an unknown-tool error.
+///   catalog. An authoritative catalog attachment refuses the call
+///   with the same unknown-tool error as any other unavailable tool;
+///   a transitional attachment falls back to the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ResolvedTool {
@@ -273,6 +275,9 @@ pub enum ResolvedTool {
     Quarantined {
         server_name: String,
         tool_name: String,
+        /// `true` when the server status is `retired` rather than
+        /// `quarantined`. Both block every call identically.
+        retired: bool,
     },
     NotFound,
 }

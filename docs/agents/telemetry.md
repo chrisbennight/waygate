@@ -79,7 +79,7 @@ The table distinguishes emitted categories from reserved enum values:
 
 | Category | Recorded today? | Notes |
 |----------|-----------------|-------|
-| `Invocation` | ✅ tool-call dispatch (Allow / Deny / StepUpRequired / ExecutionError) | Governed final outcomes and security refusals use chained best effort. Fail-closed mode also adds required pre-call evidence for side-effecting tools. |
+| `Invocation` | ✅ tool-call dispatch (Allow / Deny / StepUpRequired / ExecutionError) | Governed final outcomes and security refusals use chained best effort. Fail-closed mode also adds required pre-call evidence for side-effecting tools. A tool the catalog refuses records `Denied` with `reason` `refused:<code>` (for example `refused:not_in_catalog` or `refused:server_quarantined`); a temporary condition records `ExecutionError` with `unavailable:<code>` (for example `unavailable:catalog_converging`). Callers see neither code. |
 | `PolicyReload` | ✅ on every SIGHUP that touches the Cedar engine | Success and failure both recorded. |
 | `ManifestReload` | ✅ on every SIGHUP that loads `servers/*.yaml` | Success (with a compact added / removed / redialed / redial_failed / classifications_updated / identity_updated summary in `reason`) and parse failure both recorded; no-op reloads still record so operators can see "SIGHUP fired, nothing changed." |
 | `ApiKeyLifecycle` | ✅ on `/admin/identities` mint / rename / revoke | `action` carries `ApiKeyMinted` / `ApiKeyRenamed` / `ApiKeyRevoked`; `reason` carries a compact key-identity summary (sub, name, scopes, actor, id). Revokes against an already-revoked row still record so the activity feed shows the operator's intent. Tracing → OTel and DB row → activity feed are written together. |
