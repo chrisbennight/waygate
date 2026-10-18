@@ -352,12 +352,13 @@ fn identity_cell_wait() -> &'static HistogramVec {
     M.get_or_init(|| {
         register_histogram_vec_with_registry!(
             "mcp_identity_cell_wait_seconds",
-            "Time a call_tool waited to acquire a server's per-upstream call \
-             serializer (the IdentityCell mutex). High values quantify the \
-             per-upstream serialization bottleneck.",
+            "Time a forwarded upstream call waited to be admitted to its \
+             server: under the server's session.concurrency limit, or for a \
+             pooled session on a stdio or bounded reuse server. Near zero \
+             unless such a server is saturated.",
             &["server"],
-            // Contention should be ~0 when uncontended; widen up to a few
-            // seconds to catch a wedged call holding the lock.
+            // Admission should be ~0 when uncontended; widen up to a few
+            // seconds to catch a wedged call holding a bounded server's place.
             vec![0.0001, 0.001, 0.005, 0.025, 0.1, 0.5, 1.0, 2.5, 5.0],
             registry()
         )
@@ -370,8 +371,9 @@ fn identity_cell_depth() -> &'static IntGaugeVec {
     M.get_or_init(|| {
         register_int_gauge_vec_with_registry!(
             "mcp_identity_cell_queue_depth",
-            "Calls currently waiting on or holding a server's per-upstream call \
-             serializer. A depth > 1 means calls to that upstream are serializing.",
+            "Forwarded upstream calls currently admitted to or waiting on a \
+             server. Above a bounded server's session.concurrency limit, the \
+             excess calls are waiting.",
             &["server"],
             registry()
         )

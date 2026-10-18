@@ -881,7 +881,7 @@ pub(crate) async fn server_config_fragment(
             .as_ref()
             .and_then(|s| s.concurrency)
             .map(|c| c.to_string())
-            .unwrap_or_else(|| "default".to_string()),
+            .unwrap_or_else(|| "no limit".to_string()),
     };
     let endpoint = match (&manifest.url, &manifest.command) {
         (Some(u), _) => u.clone(),
@@ -1507,7 +1507,7 @@ pub(crate) struct ServerSessionFragment {
     /// (vs no store / stdio) — drives the step-up re-authorize link.
     pub(crate) admin_required: bool,
     pub(crate) base_hash: String,
-    /// Current `session.concurrency` ("" when inherited/default).
+    /// Current `session.concurrency` ("" when unset: no limit).
     pub(crate) concurrency: String,
     /// Current resolved/selected isolation: "" (inherit) / "per_call" / "reuse".
     pub(crate) isolation: &'static str,

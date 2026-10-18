@@ -2175,10 +2175,11 @@ async fn quarantined_tool_stays_hidden_and_uncallable_without_principal() {
             server: &str,
             tool_name: &str,
         ) -> waygate_mcp::catalog::ResolvedInvocationTool {
-            waygate_mcp::catalog::ResolvedInvocationTool::Quarantined {
-                server: server.to_owned(),
-                tool: tool_name.to_owned(),
-            }
+            waygate_mcp::catalog::ResolvedInvocationTool::refused(
+                server,
+                tool_name,
+                waygate_mcp::catalog::ToolRefusal::DriftQuarantined,
+            )
         }
     }
 
@@ -2802,6 +2803,78 @@ async fn builtin_unknown_tool_does_not_fall_through_to_upstream() {
     assert!(
         format!("{err}").contains("unknown tool: gateway-admin.bogus"),
         "got: {err}"
+    );
+    assert!(fake.last_call.lock().await.is_none());
+}
+
+/// Answers every resolution as a name the catalog does not hold, as the
+/// pool does for a tool an upstream no longer serves.
+struct RetiredNameCatalog(Arc<FakeCatalog>);
+
+#[async_trait]
+impl UpstreamCatalog for RetiredNameCatalog {
+    async fn list_servers(&self) -> Vec<String> {
+        self.0.list_servers().await
+    }
+
+    async fn list_tools(&self, server: &str) -> Result<Vec<Tool>, McpError> {
+        self.0.list_tools(server).await
+    }
+
+    async fn call_tool(
+        &self,
+        server: &str,
+        tool_name: &str,
+        args: Option<Map<String, Value>>,
+        principal: Option<&Principal>,
+        admitted: Option<&waygate_mcp::catalog::InvocationContractIdentity>,
+    ) -> Result<CallToolResult, McpError> {
+        self.0
+            .call_tool(server, tool_name, args, principal, admitted)
+            .await
+    }
+
+    async fn resolve_invocation_tool(
+        &self,
+        _tenant: &str,
+        server: &str,
+        tool_name: &str,
+    ) -> waygate_mcp::catalog::ResolvedInvocationTool {
+        waygate_mcp::catalog::ResolvedInvocationTool::refused(
+            server,
+            tool_name,
+            waygate_mcp::catalog::ToolRefusal::NotInCatalog,
+        )
+    }
+}
+
+#[tokio::test]
+async fn retired_upstream_tool_name_is_unknown_not_quarantined() {
+    // A client holding a stale tool list calls a per-server tool that no
+    // longer exists. It is an unknown name: INVALID_PARAMS with the
+    // `tool_unavailable` discriminator and a trace id, never `forbidden`.
+    let fake = FakeCatalog::new(vec![("garage".into(), vec![tool("buckets.list", "list")])]);
+    let server = GatewayServer::new(Arc::new(RetiredNameCatalog(fake.clone())))
+        .with_builtin_tools(Arc::new(StubBuiltin));
+
+    let err = server
+        .dispatch_tool_call(CallToolRequestParams::new("garage.searchTools"), None)
+        .await
+        .expect_err("a retired tool name is refused");
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.starts_with(
+            "unknown or unavailable tool `garage.searchTools`; refresh the tool list."
+        ),
+        "got: {}",
+        err.message
+    );
+    let data = err.data.expect("structured data");
+    assert_eq!(data["error"], "tool_unavailable");
+    assert_eq!(data["tool"], "garage.searchTools");
+    assert!(
+        data["trace_id"].as_str().is_some_and(|id| !id.is_empty()),
+        "{data}"
     );
     assert!(fake.last_call.lock().await.is_none());
 }

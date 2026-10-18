@@ -644,7 +644,10 @@ async fn catalog_transition_fence_tracks_generation_without_erasing_catalog_over
     assert!(matches!(
         pool.resolve_invocation_tool("default", "example-messages", "send")
             .await,
-        ResolvedInvocationTool::Quarantined { .. }
+        ResolvedInvocationTool::Unavailable {
+            reason: TemporaryUnavailability::CatalogConverging,
+            ..
+        }
     ));
 
     let second = pool.reload_manifests(&manifest_set(RiskTier::Low)).await;
@@ -730,7 +733,10 @@ async fn shared_catalog_generation_fences_a_replica_with_an_older_manifest() {
     assert!(matches!(
         pool.resolve_invocation_tool("default", "example-messages", "send")
             .await,
-        ResolvedInvocationTool::Quarantined { .. }
+        ResolvedInvocationTool::Unavailable {
+            reason: TemporaryUnavailability::CatalogConverging,
+            ..
+        }
     ));
 }
 
@@ -763,7 +769,20 @@ async fn authoritative_catalog_refuses_not_found_instead_of_reviving_manifest_to
     assert!(matches!(
         pool.resolve_invocation_tool("default", "example-messages", "send")
             .await,
-        ResolvedInvocationTool::Quarantined { .. }
+        ResolvedInvocationTool::Refused {
+            reason: ToolRefusal::NotInCatalog,
+            ..
+        }
+    ));
+    // An unknown server under the authoritative catalog is the same refusal,
+    // not a fallback to default facts.
+    assert!(matches!(
+        pool.resolve_invocation_tool("default", "garage", "searchTools")
+            .await,
+        ResolvedInvocationTool::Refused {
+            reason: ToolRefusal::NotInCatalog,
+            ..
+        }
     ));
 }
 
@@ -794,7 +813,7 @@ async fn resolve_invocation_tool_falls_back_on_pending_approval() {
     );
 }
 
-/// Strict mode ON → `PendingApproval` returns Quarantined
+/// Strict mode ON → `PendingApproval` is refused as `ApprovalPending`
 /// instead of falling back, so a un-approved schema can't be
 /// dispatched against. This is the right end-state once the
 /// catalog is reliably populated; operators opt in via env.
@@ -815,9 +834,14 @@ async fn resolve_invocation_tool_strict_mode_refuses_pending_approval() {
         .resolve_invocation_tool("default", "example-messages", "send")
         .await
     {
-        ResolvedInvocationTool::Quarantined { server, tool } => {
+        ResolvedInvocationTool::Refused {
+            server,
+            tool,
+            reason,
+        } => {
             assert_eq!(server, "example-messages");
             assert_eq!(tool, "send");
+            assert_eq!(reason, ToolRefusal::ApprovalPending);
         }
         ResolvedInvocationTool::Ready(_) => {
             panic!("strict mode must refuse PendingApproval, not fall back to manifest")
@@ -926,8 +950,11 @@ async fn authoritative_catalog_reports_store_error_as_retryable_unavailability()
     assert!(matches!(
         pool.resolve_invocation_tool("default", "example-messages", "send")
             .await,
-        ResolvedInvocationTool::Unavailable { server, tool }
-            if server == "example-messages" && tool == "send"
+        ResolvedInvocationTool::Unavailable {
+            server,
+            tool,
+            reason: TemporaryUnavailability::CatalogUnavailable,
+        } if server == "example-messages" && tool == "send"
     ));
     assert_eq!(pool.discovery_error_generation(), 1);
 }
@@ -956,7 +983,7 @@ fn uuid_nil() -> uuid::Uuid {
 }
 
 /// Unwrap the listable-facts arm; panic if the catalog signalled a
-/// quarantine (the tests that exercise the block assert on it
+/// refusal (the tests that exercise the block assert on it
 /// directly instead).
 fn expect_facts(r: ResolvedInvocationTool) -> ToolFacts {
     expect_snapshot(r).facts().clone()
@@ -965,11 +992,19 @@ fn expect_facts(r: ResolvedInvocationTool) -> ToolFacts {
 fn expect_snapshot(r: ResolvedInvocationTool) -> InvocationToolSnapshot {
     match r {
         ResolvedInvocationTool::Ready(snapshot) => snapshot,
-        ResolvedInvocationTool::Quarantined { server, tool } => {
-            panic!("expected Facts, got Quarantined {{ {server}, {tool} }}")
+        ResolvedInvocationTool::Refused {
+            server,
+            tool,
+            reason,
+        } => {
+            panic!("expected Facts, got Refused {{ {server}, {tool}, {reason:?} }}")
         }
-        ResolvedInvocationTool::Unavailable { server, tool } => {
-            panic!("expected Facts, got Unavailable {{ {server}, {tool} }}")
+        ResolvedInvocationTool::Unavailable {
+            server,
+            tool,
+            reason,
+        } => {
+            panic!("expected Facts, got Unavailable {{ {server}, {tool}, {reason:?} }}")
         }
     }
 }
@@ -980,30 +1015,329 @@ async fn resolve_invocation_tool_quarantined_does_not_fall_back() {
     // manifest fallback — that's the whole point of the quarantine
     // admin endpoint. The result is an authoritative block, even
     // though the manifest still classifies example-messages.send.
+    for (retired, expected) in [
+        (false, ToolRefusal::ServerQuarantined),
+        (true, ToolRefusal::ServerRetired),
+    ] {
+        let catalog: waygate_catalog::SharedCatalogStore = Arc::new(ScriptedCatalog {
+            outcome: std::sync::Mutex::new(Some(waygate_catalog::ResolvedTool::Quarantined {
+                server_name: "example-messages".into(),
+                tool_name: "send".into(),
+                retired,
+            })),
+            err: false,
+            ..Default::default()
+        });
+        let pool = pool_with_manifest_tool().with_catalog(catalog);
+        match pool
+            .resolve_invocation_tool("default", "example-messages", "send")
+            .await
+        {
+            ResolvedInvocationTool::Refused {
+                server,
+                tool,
+                reason,
+            } => {
+                assert_eq!(server, "example-messages");
+                assert_eq!(tool, "send");
+                assert_eq!(reason, expected);
+            }
+            ResolvedInvocationTool::Ready(_) => {
+                panic!("quarantine must not fall back to manifest facts")
+            }
+            ResolvedInvocationTool::Unavailable { .. } => {
+                panic!("quarantine is a lifecycle state, not catalog unavailability")
+            }
+        }
+    }
+}
+
+/// A streamable-HTTP MCP upstream that lists the same tools on every session.
+#[derive(Clone)]
+struct ListedToolsUpstream(Arc<Vec<Tool>>);
+
+impl rmcp::ServerHandler for ListedToolsUpstream {
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        rmcp::model::ServerConfig::new(
+            rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+        )
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, McpError> {
+        Ok(rmcp::model::ListToolsResult::with_all_items(
+            self.0.as_ref().clone(),
+        ))
+    }
+}
+
+/// Connect a pool to a live upstream named `garage` that lists `live` and
+/// whose manifest classifies `classified`.
+async fn pool_connected_to(
+    mode: crate::ClassificationMode,
+    live: Vec<Tool>,
+    classified: Vec<ToolClassification>,
+) -> UpstreamPool {
+    use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService,
+    };
+    let handler = ListedToolsUpstream(Arc::new(live));
+    let service = StreamableHttpService::new(
+        move || Ok(handler.clone()),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default().with_legacy_session_mode(true),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test upstream");
+    let url = format!("http://{}/mcp", listener.local_addr().expect("address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, axum::Router::new().nest_service("/mcp", service)).await;
+    });
+    let mut manifest = manifest_with(false);
+    manifest.name = "garage".into();
+    manifest.url = Some(url);
+    manifest.classification_mode = mode;
+    manifest.tools = classified;
+    let pool = UpstreamPool::connect(BTreeMap::from([("garage".to_owned(), manifest)])).await;
+    assert!(
+        pool.is_connected("garage").await,
+        "fixture upstream connects"
+    );
+    pool
+}
+
+fn refusal_reason(resolved: ResolvedInvocationTool) -> Result<ToolRefusal, String> {
+    match resolved {
+        ResolvedInvocationTool::Refused { reason, .. } => Ok(reason),
+        ResolvedInvocationTool::Ready(_) => Err("Ready".into()),
+        ResolvedInvocationTool::Unavailable { reason, .. } => Err(format!("{reason:?}")),
+    }
+}
+
+/// A stale client cache can name a tool the upstream no longer serves, such
+/// as a retired adapter. That is an absent tool, not a quarantine, and an
+/// advertised name with no classification is distinguishable for operators.
+#[tokio::test]
+async fn manifest_mode_refuses_unclassified_and_absent_names_with_their_reasons() {
+    let pool = pool_connected_to(
+        crate::ClassificationMode::Manifest,
+        vec![live("read"), live("extra")],
+        vec![classification("read")],
+    )
+    .await;
+
+    expect_snapshot(
+        pool.resolve_invocation_tool("default", "garage", "read")
+            .await,
+    );
+    assert_eq!(
+        refusal_reason(
+            pool.resolve_invocation_tool("default", "garage", "extra")
+                .await
+        ),
+        Ok(ToolRefusal::Unclassified),
+    );
+    assert_eq!(
+        refusal_reason(
+            pool.resolve_invocation_tool("default", "garage", "searchTools")
+                .await
+        ),
+        Ok(ToolRefusal::NotInCatalog),
+    );
+}
+
+#[tokio::test]
+async fn annotation_mode_refuses_unlisted_unclassified_and_unapproved_names() {
+    let mut unapproved = classification("read");
+    unapproved.approved_behavior_hash = Some("0".repeat(64));
+    let pool = pool_connected_to(
+        crate::ClassificationMode::McpAnnotations,
+        vec![
+            annotation_native_live("read"),
+            annotation_native_live("extra"),
+        ],
+        vec![unapproved],
+    )
+    .await;
+
+    let cases = [
+        ("searchTools", ToolRefusal::NotInCatalog),
+        ("extra", ToolRefusal::Unclassified),
+        ("read", ToolRefusal::NotAdmitted),
+    ];
+    for (tool, expected) in cases {
+        assert_eq!(
+            refusal_reason(
+                pool.resolve_invocation_tool("default", "garage", tool)
+                    .await
+            ),
+            Ok(expected),
+            "{tool}",
+        );
+    }
+    // Discovery's batch reader applies the same rules to the same names.
+    let names: Vec<String> = cases.iter().map(|(tool, _)| (*tool).to_owned()).collect();
+    let batch = pool
+        .resolve_discovery_tools("default", "garage", &names)
+        .await
+        .expect("discovery batch");
+    for ((tool, expected), resolved) in cases.into_iter().zip(batch) {
+        assert_eq!(refusal_reason(resolved), Ok(expected), "batch {tool}");
+    }
+}
+
+/// With no connected session an annotation-mode name cannot be checked
+/// against its approved contract. That clears when the upstream reconnects,
+/// so it is retryable unavailability rather than a refusal.
+#[tokio::test]
+async fn annotation_mode_without_a_connected_lane_is_temporarily_unavailable() {
+    let mut manifest = manifest_with(false);
+    manifest.classification_mode = crate::ClassificationMode::McpAnnotations;
+    let mut approved = classification("send_message");
+    approved.approved_behavior_hash = Some("a".repeat(64));
+    manifest.tools = vec![approved];
+    let pool = UpstreamPool::from_manifests_disconnected(BTreeMap::from([(
+        "example-messages".to_owned(),
+        manifest,
+    )]));
+
+    assert!(matches!(
+        pool.resolve_invocation_tool("default", "example-messages", "send_message")
+            .await,
+        ResolvedInvocationTool::Unavailable {
+            reason: TemporaryUnavailability::NoConnectedLane,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn in_process_drift_quarantine_is_its_own_refusal() {
+    let pool = pool_with_one_upstream("send", RiskTier::High);
+    pool.entries
+        .load()
+        .get("example-messages")
+        .expect("entry")
+        .quarantined
+        .write()
+        .expect("upstream quarantine lock poisoned")
+        .insert("send".to_owned());
+
+    assert_eq!(
+        refusal_reason(
+            pool.resolve_invocation_tool("default", "example-messages", "send")
+                .await
+        ),
+        Ok(ToolRefusal::DriftQuarantined),
+    );
+}
+
+/// A server the catalog has quarantined or retired is reported as blocked
+/// even when the live contract check would refuse the tool for its own
+/// reason or call it temporarily unavailable, so a caller is never told to
+/// retry a call that only an administrator can unblock.
+#[tokio::test]
+async fn a_catalog_server_block_outranks_live_contract_reasons() {
+    let quarantined_catalog = |retired| -> waygate_catalog::SharedCatalogStore {
+        Arc::new(ScriptedCatalog {
+            outcome: std::sync::Mutex::new(Some(waygate_catalog::ResolvedTool::Quarantined {
+                server_name: "example-messages".into(),
+                tool_name: "send_message".into(),
+                retired,
+            })),
+            err: false,
+            ..Default::default()
+        })
+    };
+    for (retired, expected) in [
+        (false, ToolRefusal::ServerQuarantined),
+        (true, ToolRefusal::ServerRetired),
+    ] {
+        // No connected session: the live check alone reports a temporary state.
+        let mut manifest = manifest_with(false);
+        manifest.classification_mode = crate::ClassificationMode::McpAnnotations;
+        let mut approved = classification("send_message");
+        approved.approved_behavior_hash = Some("a".repeat(64));
+        manifest.tools = vec![approved];
+        let disconnected = UpstreamPool::from_manifests_disconnected(BTreeMap::from([(
+            "example-messages".to_owned(),
+            manifest,
+        )]))
+        .with_catalog(quarantined_catalog(retired));
+        assert_eq!(
+            refusal_reason(
+                disconnected
+                    .resolve_invocation_tool("default", "example-messages", "send_message")
+                    .await
+            ),
+            Ok(expected),
+            "disconnected, retired={retired}",
+        );
+
+        // An in-process drift quarantine is a per-tool reason.
+        let drifted = pool_with_one_upstream("send_message", RiskTier::High)
+            .with_catalog(quarantined_catalog(retired));
+        drifted
+            .entries
+            .load()
+            .get("example-messages")
+            .expect("entry")
+            .quarantined
+            .write()
+            .expect("upstream quarantine lock poisoned")
+            .insert("send_message".to_owned());
+        assert_eq!(
+            refusal_reason(
+                drifted
+                    .resolve_invocation_tool("default", "example-messages", "send_message")
+                    .await
+            ),
+            Ok(expected),
+            "drift quarantined, retired={retired}",
+        );
+    }
+}
+
+/// A catalog transition that has not converged is temporary for a live
+/// server, but a quarantined or retired server stays reported as blocked.
+#[tokio::test]
+async fn a_catalog_server_block_outranks_a_converging_transition() {
     let catalog: waygate_catalog::SharedCatalogStore = Arc::new(ScriptedCatalog {
         outcome: std::sync::Mutex::new(Some(waygate_catalog::ResolvedTool::Quarantined {
             server_name: "example-messages".into(),
-            tool_name: "send".into(),
+            tool_name: "send_message".into(),
+            retired: false,
         })),
         err: false,
         ..Default::default()
     });
-    let pool = pool_with_manifest_tool().with_catalog(catalog);
-    match pool
-        .resolve_invocation_tool("default", "example-messages", "send")
-        .await
-    {
-        ResolvedInvocationTool::Quarantined { server, tool } => {
-            assert_eq!(server, "example-messages");
-            assert_eq!(tool, "send");
-        }
-        ResolvedInvocationTool::Ready(_) => {
-            panic!("quarantine must not fall back to manifest facts")
-        }
-        ResolvedInvocationTool::Unavailable { .. } => {
-            panic!("quarantine is a lifecycle state, not catalog unavailability")
-        }
-    }
+    let manifest_set = |risk| {
+        let mut manifest = manifest_with(false);
+        manifest.tools = vec![ToolClassification::new("send_message", risk, true, false)];
+        BTreeMap::from([("example-messages".to_owned(), manifest)])
+    };
+    let pool = UpstreamPool::from_manifests_disconnected(manifest_set(RiskTier::High))
+        .with_catalog(catalog);
+    // A governance-only edit leaves the tool's catalog facts unsettled.
+    pool.reload_manifests(&manifest_set(RiskTier::Medium)).await;
+    assert!(pool
+        .catalog_transition_state("example-messages", "send_message")
+        .is_some_and(|transition| transition.pending));
+
+    assert_eq!(
+        refusal_reason(
+            pool.resolve_invocation_tool("default", "example-messages", "send_message")
+                .await
+        ),
+        Ok(ToolRefusal::ServerQuarantined),
+    );
 }
 
 #[tokio::test]
@@ -1023,6 +1357,7 @@ async fn resolved_side_effects_reports_resolver_facts_and_defaults_conservative(
         outcome: std::sync::Mutex::new(Some(waygate_catalog::ResolvedTool::Quarantined {
             server_name: "example-messages".into(),
             tool_name: "send".into(),
+            retired: false,
         })),
         err: false,
         ..Default::default()
@@ -2110,6 +2445,10 @@ fn resolve_isolation_defaults_paranoid_and_forces_stdio_reuse() {
 }
 
 fn entry_with_slots(n: usize) -> Arc<UpstreamEntry> {
+    entry_with_lanes(n, false)
+}
+
+fn entry_with_lanes(n: usize, bounded: bool) -> Arc<UpstreamEntry> {
     let slots = (0..n)
         .map(|_| ConnectionSlot {
             conn: RwLock::new(None),
@@ -2118,7 +2457,7 @@ fn entry_with_slots(n: usize) -> Arc<UpstreamEntry> {
         .collect();
     Arc::new(UpstreamEntry {
         manifest: StdRwLock::new(manifest_with(false)),
-        slots: lanes::ConnectionSlots::new(slots),
+        slots: lanes::ConnectionSlots::new(slots, bounded),
         session_mutation: Mutex::new(()),
         forwards_identity: false,
         breaker: Breaker::new(BreakerConfig::default()),
@@ -2313,6 +2652,109 @@ async fn a_waiting_checkout_does_not_stall_on_a_busy_slot_being_reconnected() {
     drop(dispatching);
     drop(busy);
     reconnect.await.unwrap();
+}
+
+/// Only stdio and an explicit `session.concurrency` bound the calls in flight;
+/// an HTTP/SSE upstream is unbounded by default, including with a `session`
+/// block that leaves `concurrency` unset.
+#[test]
+fn calls_are_bounded_only_by_stdio_or_explicit_concurrency() {
+    let session = |concurrency| crate::SessionConfig {
+        concurrency,
+        isolation: None,
+        scope: None,
+        retry_on_setup_failure: None,
+    };
+    for transport in [Transport::Http, Transport::Sse] {
+        let mut network = manifest_with(false);
+        network.transport = transport;
+        assert!(!lanes::calls_bounded(&network));
+        network.session = Some(session(None));
+        assert!(!lanes::calls_bounded(&network));
+        network.session = Some(session(Some(3)));
+        assert!(lanes::calls_bounded(&network));
+    }
+    let mut stdio = manifest_with(false);
+    stdio.transport = Transport::Stdio;
+    assert!(lanes::calls_bounded(&stdio));
+}
+
+fn admitted_now<'a>(
+    entry: &'a UpstreamEntry,
+    isolation: crate::SessionIsolation,
+) -> lanes::CallLane<'a> {
+    use futures::FutureExt;
+
+    entry
+        .admit(isolation)
+        .now_or_never()
+        .expect("admission must not wait")
+}
+
+/// An unbounded upstream admits more per-call calls than it has slots, all at
+/// once, and they leave every slot free for a reuse call.
+#[tokio::test]
+async fn unbounded_per_call_admission_never_waits_or_takes_a_slot() {
+    use crate::SessionIsolation;
+
+    let entry = entry_with_lanes(2, false);
+    let shared: Vec<_> = (0..8)
+        .map(|_| admitted_now(&entry, SessionIsolation::PerCall))
+        .collect();
+    assert!(shared
+        .iter()
+        .all(|lane| lane.isolation == SessionIsolation::PerCall));
+    let first = admitted_now(&entry, SessionIsolation::Reuse);
+    let second = admitted_now(&entry, SessionIsolation::Reuse);
+    assert_eq!(first.isolation, SessionIsolation::Reuse);
+    assert_eq!(second.isolation, SessionIsolation::Reuse);
+    assert!(
+        !std::ptr::eq(first.slot, second.slot),
+        "reuse calls hold distinct slots"
+    );
+}
+
+/// On an unbounded upstream a reuse call that finds every slot busy runs on
+/// its own session instead of waiting, and a freed slot is reused again.
+#[tokio::test]
+async fn unbounded_reuse_admission_runs_per_call_when_every_slot_is_busy() {
+    use crate::SessionIsolation;
+
+    let entry = entry_with_lanes(1, false);
+    let held = admitted_now(&entry, SessionIsolation::Reuse);
+    assert_eq!(held.isolation, SessionIsolation::Reuse);
+    let overflow = admitted_now(&entry, SessionIsolation::Reuse);
+    assert_eq!(overflow.isolation, SessionIsolation::PerCall);
+    drop(held);
+    let reused = admitted_now(&entry, SessionIsolation::Reuse);
+    assert_eq!(reused.isolation, SessionIsolation::Reuse);
+    drop(overflow);
+}
+
+/// A bounded upstream admits no more calls than its slots, of either
+/// isolation, and admits a waiting call once one finishes.
+#[tokio::test]
+async fn bounded_admission_caps_calls_in_flight() {
+    use crate::SessionIsolation;
+
+    for isolation in [SessionIsolation::PerCall, SessionIsolation::Reuse] {
+        let entry = entry_with_lanes(2, true);
+        let first = admitted_now(&entry, isolation);
+        let second = admitted_now(&entry, isolation);
+        let waiting = {
+            let entry = entry.clone();
+            tokio::spawn(async move { entry.admit(isolation).await.isolation })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "the third call waits for a permit");
+        drop(first);
+        let admitted = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("a finished call admits the next")
+            .unwrap();
+        assert_eq!(admitted, isolation, "a bounded call keeps its isolation");
+        drop(second);
+    }
 }
 
 /// Regression for the 2026-06-10 prod boot deadlock: a stdio upstream that
@@ -2786,11 +3228,14 @@ fn entry_with_classification(tool_name: &str, risk: RiskTier) -> Arc<UpstreamEnt
         .tools
         .push(ToolClassification::new(tool_name, risk, false, false));
     Arc::new(UpstreamEntry {
+        slots: lanes::ConnectionSlots::new(
+            vec![ConnectionSlot {
+                conn: RwLock::new(None),
+                in_use: Mutex::new(()),
+            }],
+            lanes::calls_bounded(&manifest),
+        ),
         manifest: StdRwLock::new(manifest),
-        slots: lanes::ConnectionSlots::new(vec![ConnectionSlot {
-            conn: RwLock::new(None),
-            in_use: Mutex::new(()),
-        }]),
         session_mutation: Mutex::new(()),
         forwards_identity: false,
         breaker: Breaker::new(BreakerConfig::default()),
@@ -3386,13 +3831,25 @@ async fn annotation_generation_mismatch_fails_closed() {
 
     let hash_mismatch = resolve_with(live_def(&"b".repeat(64), "high"), approved.clone()).await;
     assert!(
-        matches!(hash_mismatch, ResolvedInvocationTool::Quarantined { .. }),
+        matches!(
+            hash_mismatch,
+            ResolvedInvocationTool::Unavailable {
+                reason: TemporaryUnavailability::CatalogConverging,
+                ..
+            }
+        ),
         "a catalog row from another behavior generation must fail closed",
     );
 
     let risk_mismatch = resolve_with(live_def(&approved, "low"), approved.clone()).await;
     assert!(
-        matches!(risk_mismatch, ResolvedInvocationTool::Quarantined { .. }),
+        matches!(
+            risk_mismatch,
+            ResolvedInvocationTool::Unavailable {
+                reason: TemporaryUnavailability::CatalogConverging,
+                ..
+            }
+        ),
         "an unchanged hash must not wave through a risk-only generation split",
     );
 
@@ -3816,7 +4273,13 @@ async fn classification_mode_split_fails_closed() {
         .resolve_invocation_tool("default", "example-messages", "send")
         .await;
     assert!(
-        matches!(resolved, ResolvedInvocationTool::Quarantined { .. }),
+        matches!(
+            resolved,
+            ResolvedInvocationTool::Unavailable {
+                reason: TemporaryUnavailability::CatalogConverging,
+                ..
+            }
+        ),
         "an annotation-imported row must not overlay a legacy-mode tool",
     );
 
@@ -3856,7 +4319,13 @@ async fn classification_mode_split_fails_closed() {
         )
         .await;
     assert!(
-        matches!(resolved, ResolvedInvocationTool::Quarantined { .. }),
+        matches!(
+            resolved,
+            ResolvedInvocationTool::Unavailable {
+                reason: TemporaryUnavailability::CatalogConverging,
+                ..
+            }
+        ),
         "a legacy-imported row must not lend facts to an annotation-mode tool",
     );
 }
@@ -3979,7 +4448,13 @@ async fn annotation_empty_published_contract_fails_closed() {
         )
         .await;
     assert!(
-        matches!(empty, ResolvedInvocationTool::Quarantined { .. }),
+        matches!(
+            empty,
+            ResolvedInvocationTool::Unavailable {
+                reason: TemporaryUnavailability::CatalogConverging,
+                ..
+            }
+        ),
         "an empty published contract must fail closed in annotation mode",
     );
 
@@ -4047,7 +4522,13 @@ async fn annotation_mixed_generation_published_contract_fails_closed() {
         )
         .await;
     assert!(
-        matches!(stale, ResolvedInvocationTool::Quarantined { .. }),
+        matches!(
+            stale,
+            ResolvedInvocationTool::Unavailable {
+                reason: TemporaryUnavailability::CatalogConverging,
+                ..
+            }
+        ),
         "a published contract from another generation must fail closed",
     );
 }

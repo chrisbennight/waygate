@@ -16,7 +16,7 @@ use rmcp::ErrorData as McpError;
 use serde::Serialize;
 use serde_json::{json, Value};
 use waygate_mcp::catalog::{
-    InvocationContractIdentity, InvocationToolSnapshot, ResolvedInvocationTool,
+    InvocationContractIdentity, InvocationToolSnapshot, ResolvedInvocationTool, ToolRefusal,
 };
 use waygate_mcp::{
     rank_visible_tools, AllowAllGate, AuthorizedCatalog, BuiltinCatalog, BuiltinRegistry,
@@ -95,10 +95,7 @@ impl UpstreamCatalog for FixtureCatalog {
         tool_name: &str,
     ) -> ResolvedInvocationTool {
         self.snapshot(server, tool_name).map_or_else(
-            || ResolvedInvocationTool::Unavailable {
-                server: server.to_owned(),
-                tool: tool_name.to_owned(),
-            },
+            || ResolvedInvocationTool::refused(server, tool_name, ToolRefusal::NotInCatalog),
             ResolvedInvocationTool::Ready,
         )
     }

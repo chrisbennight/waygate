@@ -548,16 +548,18 @@ impl CatalogStore for PgCatalogStore {
                 // so it's unit-testable without a live Postgres: a
                 // quarantined server with an un-imported tool must still
                 // block, not fall through to NotFound → manifest fallback.
-                match classify_row(
+                let row_class = classify_row(
                     &server_status,
                     tool_id.is_some(),
                     schema_hash.is_some(),
                     risk.is_some(),
-                ) {
-                    RowClass::Quarantined => {
+                );
+                match row_class {
+                    RowClass::Quarantined | RowClass::Retired => {
                         return Ok(ResolvedTool::Quarantined {
                             server_name,
                             tool_name,
+                            retired: matches!(row_class, RowClass::Retired),
                         })
                     }
                     RowClass::NotFound => return Ok(ResolvedTool::NotFound),
@@ -1352,6 +1354,7 @@ enum RowClass {
     Live,
     PendingApproval,
     Quarantined,
+    Retired,
     NotFound,
 }
 
@@ -1374,8 +1377,10 @@ fn classify_row(
     has_approved_version: bool,
     has_classification: bool,
 ) -> RowClass {
-    if server_status == "quarantined" || server_status == "retired" {
-        return RowClass::Quarantined;
+    match server_status {
+        "quarantined" => return RowClass::Quarantined,
+        "retired" => return RowClass::Retired,
+        _ => {}
     }
     // Server exists and isn't blocked, but this tool isn't catalogued
     // yet → NotFound lets the per-call path use the manifest fallback
@@ -1503,7 +1508,7 @@ mod tests {
         );
         assert_eq!(
             classify_row("retired", false, false, false),
-            RowClass::Quarantined,
+            RowClass::Retired,
         );
         // Even fully-catalogued, quarantine still wins.
         assert_eq!(

@@ -43,7 +43,7 @@ use waygate_mcp::authz::ToolFacts;
 use waygate_mcp::catalog::{
     AdmittedResourceReadError, CallToolResultProcessing, InvocationContractIdentity,
     InvocationToolSnapshot, ResolvedInvocationTool, ResourceClaim, ResourceReadAdmission,
-    ResourceRoutingSnapshot, ToolCallMrtr, UpstreamCatalog,
+    ResourceRoutingSnapshot, TemporaryUnavailability, ToolCallMrtr, ToolRefusal, UpstreamCatalog,
 };
 use waygate_mcp::files::{
     AuthorizeDownloadParams, AuthorizeDownloadResult, AuthorizeUploadParams, AuthorizeUploadResult,
@@ -79,27 +79,17 @@ impl ExchangeBundle {
     }
 }
 
-/// A single configured upstream and its (optional) live client.
-///
-/// `identity_cell` is `Some` only when the pool was built with an issuer and
-/// the transport is HTTP — it's the mailbox the `IdentityForwardingClient`
-/// reads from before each HTTP request. `call_serializer` gates concurrent
-/// `call_tool` invocations for the same upstream so two callers can't race on
-/// writing the cell.
-/// One independently-dialed connection lane to an upstream. An
-/// entry holds a small pool of these so concurrent calls to
-/// the same upstream run in parallel instead of serializing on a single
-/// connection. Each slot owns its **own** [`IdentityCell`], so a call
-/// that has checked out a slot can write the cell without racing any
-/// other call — the per-slot `in_use` mutex grants that exclusivity for
-/// the duration of the dispatch, replacing the old per-entry
-/// `call_serializer`.
+/// One independently-dialed, long-lived connection lane to an upstream. An
+/// entry holds a small pool of these. A `Reuse` call runs on a lane's session,
+/// and each lane owns its **own** [`IdentityCell`], so a call that has checked
+/// out a lane can write the cell without racing any other call — the per-slot
+/// `in_use` mutex grants that exclusivity for the duration of the dispatch. A
+/// `PerCall` call dials its own session and only reads a lane's connection.
 struct ConnectionSlot {
     conn: RwLock<Option<Connection>>,
     /// Held for a call's exclusive use of the slot. Acquiring it is the
     /// "checkout"; while held, no other call touches this slot's
-    /// connection or its identity cell. At pool size 1 this is exactly
-    /// the old per-upstream `call_serializer`.
+    /// connection or its identity cell.
     in_use: Mutex<()>,
 }
 
@@ -110,9 +100,9 @@ struct UpstreamEntry {
     /// time; a reload that changes them re-dials or rebuilds the entry live.
     manifest: StdRwLock<UpstreamManifest>,
     /// Connection pool for this upstream. Always ≥ 1 slot. Network
-    /// transports (HTTP/SSE) get `pool_size` slots so calls parallelize;
-    /// stdio is forced to 1 (a single child process). All slots dial the
-    /// same upstream and carry identical tool lists.
+    /// transports (HTTP/SSE) get `pool_size` slots, or `session.concurrency`
+    /// when set; stdio is forced to 1 (a single child process). All slots
+    /// dial the same upstream and carry identical tool lists.
     slots: lanes::ConnectionSlots,
     /// Serializes reconnect and forced catalog refresh for this upstream. Calls
     /// keep using the current slot connections while a replacement dials, but
@@ -483,7 +473,7 @@ pub struct UpstreamPool {
     /// When an observed-drift event fires for a tool that meets
     /// this threshold (by risk tier OR `side_effects`), the tool is added to the
     /// per-entry quarantine set and subsequent `resolve_invocation_tool`
-    /// returns `ResolvedInvocationTool::Quarantined`. `Off` (default) leaves
+    /// refuses it as `ToolRefusal::DriftQuarantined`. `Off` (default) leaves
     /// drift recorded but never auto-blocking.
     /// Read at construction from `GATEWAY_QUARANTINE_ON_DRIFT_RISK`.
     quarantine_threshold: QuarantineThreshold,
@@ -492,7 +482,7 @@ pub struct UpstreamPool {
     /// triggers the transitional manifest fallback — operators get a
     /// WARN but calls proceed against the manifest-classified facts.
     /// When `true`, `PendingApproval` is treated as a hard refusal
-    /// (returns `ResolvedInvocationTool::Quarantined`) — the right behavior
+    /// (`ToolRefusal::ApprovalPending`) — the right behavior
     /// once the catalog is reliably populated and an un-approved
     /// schema means "do not dispatch." Read at construction from
     /// `GATEWAY_CATALOG_STRICT_PENDING_APPROVAL`. Transitional catalog
@@ -597,9 +587,9 @@ fn quarantine_threshold_from_env() -> QuarantineThreshold {
     }
 }
 
-/// Default per-upstream connection-pool size for network transports.
-/// Four lanes covers typical concurrent-user fan-out to one upstream
-/// without opening an unreasonable number of sockets per server.
+/// Default per-upstream connection-pool size for network transports: the
+/// long-lived lanes kept open to each upstream. It does not limit calls in
+/// flight; only an explicit `session.concurrency` does.
 const DEFAULT_UPSTREAM_POOL_SIZE: usize = 4;
 
 /// Default per-upstream `call_tool` timeout. Long enough to absorb a slow
@@ -849,10 +839,13 @@ impl UpstreamPool {
                 let entry = Arc::new(UpstreamEntry {
                     // One empty slot — disconnected fixtures never dial,
                     // and the pool size is irrelevant with no issuer.
-                    slots: lanes::ConnectionSlots::new(vec![ConnectionSlot {
-                        conn: RwLock::new(None),
-                        in_use: Mutex::new(()),
-                    }]),
+                    slots: lanes::ConnectionSlots::new(
+                        vec![ConnectionSlot {
+                            conn: RwLock::new(None),
+                            in_use: Mutex::new(()),
+                        }],
+                        lanes::calls_bounded(&manifest),
+                    ),
                     session_mutation: Mutex::new(()),
                     forwards_identity: false,
                     breaker: Breaker::new_with_open_notify(
@@ -980,8 +973,8 @@ impl UpstreamPool {
     }
 
     /// Opt into strict mode for catalog `PendingApproval`.
-    /// When enabled, `resolve_invocation_tool` returns
-    /// `ResolvedInvocationTool::Quarantined` on a `PendingApproval` instead of
+    /// When enabled, `resolve_invocation_tool` refuses a `PendingApproval`
+    /// tool as `ToolRefusal::ApprovalPending` instead of
     /// falling back to the manifest classification (the transitional
     /// behavior, kept for `false`). Tests use this to exercise the
     /// strict-mode branch without setting the
@@ -1466,19 +1459,50 @@ impl UpstreamCatalog for UpstreamPool {
     /// When a `CatalogStore` is wired, consult
     /// `resolve_tool(tenant, "server.tool")` first:
     /// - `Live` → retain the catalog identity, admitted schemas, and classification.
-    /// - `Quarantined` → return `ResolvedInvocationTool::Quarantined`, an
-    ///   authoritative block. The caller refuses dispatch / hides the
-    ///   tool and does **not** fall back to the manifest — otherwise an
-    ///   operator's quarantine would have no effect on a
-    ///   manifest-backed upstream.
+    /// - `Quarantined` → refuse as `ToolRefusal::ServerQuarantined` or
+    ///   `ServerRetired`, an authoritative block. The caller refuses
+    ///   dispatch / hides the tool and does **not** fall back to the
+    ///   manifest — otherwise an operator's quarantine would have no effect
+    ///   on a manifest-backed upstream.
     /// - `PendingApproval` follows the configured strict-mode contract.
     /// - `NotFound` / DB error fall back only for a transitional catalog
-    ///   attachment. An authoritative attachment refuses them because boot
-    ///   already reconciled the exact serving set and absence or unreadability
-    ///   cannot safely be distinguished from withdrawal.
+    ///   attachment. An authoritative attachment refuses a miss as
+    ///   `ToolRefusal::NotInCatalog` and reports a read failure as
+    ///   `TemporaryUnavailability::CatalogUnavailable`, because boot already
+    ///   reconciled the exact serving set and a miss cannot safely be
+    ///   distinguished from withdrawal.
     ///
     /// When no `CatalogStore` is wired, this is just `tool_facts`.
+    ///
+    /// A server the catalog has quarantined or retired outranks every
+    /// per-tool and temporary reason, so a caller who may see the server
+    /// learns that it is blocked rather than that a tool is missing or that a
+    /// retry might help. An unreadable catalog leaves the original reason.
     async fn resolve_invocation_tool(
+        &self,
+        tenant: &str,
+        server: &str,
+        tool_name: &str,
+    ) -> ResolvedInvocationTool {
+        let resolved = self.resolve_tool_contract(tenant, server, tool_name).await;
+        match resolved {
+            ResolvedInvocationTool::Ready(_)
+            | ResolvedInvocationTool::Refused {
+                reason: ToolRefusal::ServerQuarantined | ToolRefusal::ServerRetired,
+                ..
+            } => resolved,
+            other => self
+                .catalog_server_block(tenant, server, tool_name)
+                .await
+                .unwrap_or(other),
+        }
+    }
+}
+
+impl UpstreamPool {
+    /// [`UpstreamCatalog::resolve_invocation_tool`] before a server-wide
+    /// catalog block is given precedence.
+    async fn resolve_tool_contract(
         &self,
         tenant: &str,
         server: &str,
@@ -1502,20 +1526,19 @@ impl UpstreamCatalog for UpstreamPool {
                     %tenant, %server, tool = %tool_name,
                     "tool is in-process quarantined (drift-triggered); refusing dispatch",
                 );
-                return ResolvedInvocationTool::Quarantined {
-                    server: server.to_owned(),
-                    tool: tool_name.to_owned(),
-                };
+                return ResolvedInvocationTool::refused(
+                    server,
+                    tool_name,
+                    ToolRefusal::DriftQuarantined,
+                );
             }
-            if !admission::entry_tool_is_admitted(entry, manifest, tool_name).await {
+            let admission = admission::entry_tool_admission(entry, manifest, tool_name).await;
+            if let Some(refusal) = admission.refusal(server, tool_name) {
                 tracing::info!(
-                    %tenant, %server, tool = %tool_name,
+                    %tenant, %server, tool = %tool_name, ?admission,
                     "tool is not admitted by the current classification mode and behavior hash",
                 );
-                return ResolvedInvocationTool::Quarantined {
-                    server: server.to_owned(),
-                    tool: tool_name.to_owned(),
-                };
+                return refusal;
             }
         }
         let published =
@@ -1585,7 +1608,10 @@ impl UpstreamPool {
         // would silently apply to upstream tools the operator never audited.
         // Runs before the breaker so a flood of calls to a typo'd tool name
         // can't drain the failure budget on a healthy upstream.
-        if !admission::entry_tool_is_admitted(&entry, &entry.manifest_snapshot(), tool_name).await {
+        if !admission::entry_tool_admission(&entry, &entry.manifest_snapshot(), tool_name)
+            .await
+            .is_admitted()
+        {
             return Err(McpError::invalid_params(
                 format!("upstream `{server}` has no admitted tool `{tool_name}`"),
                 None,
@@ -1804,31 +1830,35 @@ impl UpstreamPool {
             }
         };
 
-        // Check out a connection slot for this call. Holding the
-        // checkout's `in_use` lock makes the slot's connection AND its
-        // identity cell this call's alone for the dispatch — so concurrent
-        // calls to the same upstream run on different slots in parallel
-        // instead of serializing on one connection (the old per-upstream
-        // `call_serializer`). The cell lives inside the slot's `Connection`,
-        // so it always matches the live client and is never shared across
-        // slots — no cross-caller identity clobbering.
+        // Resolve session isolation for this upstream. `PerCall` (the
+        // HTTP/SSE default) dials a FRESH upstream session for this call and
+        // drops it afterwards, so no state from a prior call — or a different
+        // principal — can survive on a reused session (a property MCP does
+        // not guarantee). `Reuse` runs the call on a checked-out slot's
+        // long-lived session; the checkout's `in_use` lock makes the slot's
+        // connection AND its identity cell this call's alone for the
+        // dispatch, so no caller's identity reaches another's call.
         //
-        // The metrics measure the checkout: `wait` is the time to get
-        // a free slot (≈0 when a lane is idle), `queue_depth` the number of
-        // calls contending on this upstream's pool (> pool_size ⇒ saturated).
+        // Admission limits calls in flight only where the upstream is bounded
+        // (stdio, or an explicit `session.concurrency`), and may run a `Reuse`
+        // call `PerCall` when every slot is busy — see `UpstreamEntry::admit`.
+        // The metrics measure admission: `wait` is the time to be admitted
+        // (≈0 unless the upstream is bounded and saturated), `queue_depth`
+        // the number of calls admitted or waiting on this upstream.
         waygate_telemetry::metrics::identity_cell_queue_inc(server);
         let _depth_guard = SerializerDepthGuard {
             server: server.to_owned(),
         };
         let wait_start = std::time::Instant::now();
-        let checkout = entry.checkout().await;
+        let lane = entry.admit(resolve_isolation(&snapshot)).await;
+        let isolation = lane.isolation;
         waygate_telemetry::metrics::record_identity_cell_wait(
             server,
             wait_start.elapsed().as_secs_f64(),
         );
 
         // The `snapshot` above — and the Tier-A/Tier-C gates
-        // + per-call IdentityContext built from it — predate this checkout. A
+        // + per-call IdentityContext built from it — predate admission. A
         // live re-dial commits its new shape AND identity atomically under the
         // slot conn write locks, so a call that snapshotted before the swap and
         // dispatched after it could otherwise run on the freshly-installed
@@ -1851,14 +1881,6 @@ impl UpstreamPool {
             .map(|p| p.tenant.as_str())
             .unwrap_or(waygate_core::TenantId::DEFAULT);
 
-        // Resolve session isolation for this upstream. `PerCall` (the
-        // HTTP/SSE default) dials a FRESH upstream session for this call and
-        // drops it afterwards, so no state from a prior call — or a different
-        // principal — can survive on a reused session (a property MCP does
-        // not guarantee). `Reuse` runs the call on the checked-out slot's
-        // long-lived session. Either way the checkout's `in_use` lock bounds
-        // this upstream's concurrency.
-        let isolation = resolve_isolation(&snapshot);
         let call_deadline = self
             .call_timeout
             .and_then(|duration| tokio::time::Instant::now().checked_add(duration));
@@ -1879,8 +1901,8 @@ impl UpstreamPool {
                 // us and the `snapshot` we dial + gate from stays current.
                 // The ephemeral session itself does not use this
                 // connection — the lock is purely the re-dial barrier.
-                let conn_guard = checkout.slot.conn.read().await;
-                // First honor the boot slot's health: if no free slot holds a
+                let conn_guard = lane.slot.conn.read().await;
+                // First honor the boot slot's health: if no slot holds a
                 // live connection, the upstream was unreachable at the last
                 // probe — report "not connected" (as `Reuse` does, counting
                 // against the breaker) instead of attempting a doomed
@@ -1894,7 +1916,7 @@ impl UpstreamPool {
                     ));
                 };
                 // Re-check the tombstone AFTER the per-call setup awaits
-                // (identity/session build + slot checkout): a hot remove may have
+                // (identity/session build + admission): a hot remove may have
                 // tombstoned this entry since the early check in `call_tool_inner`.
                 // We hold the slot's conn READ lock here, which the remove drain's
                 // WRITE-lock barrier must wait on — so if `removed` is set we refuse
@@ -2015,7 +2037,7 @@ impl UpstreamPool {
                 }
             }
             SessionIsolation::Reuse => {
-                let conn_guard = checkout.slot.conn.read().await;
+                let conn_guard = lane.slot.conn.read().await;
                 let Some(conn) = conn_guard.as_ref() else {
                     // Not-connected counts against the breaker so a
                     // persistently down upstream trips open instead of
@@ -2148,7 +2170,7 @@ impl UpstreamPool {
                             );
                             permit.failure();
                             drop(conn_guard);
-                            self.mark_slot_down(server, &entry, checkout.slot, error_class)
+                            self.mark_slot_down(server, &entry, lane.slot, error_class)
                                 .await;
                             return Err(dispatch::bounded_upstream_error(
                                 server,
@@ -2265,7 +2287,7 @@ impl UpstreamPool {
             self,
             server,
             &entry,
-            dispatch::CallLaneGuard::new(checkout.slot, isolation, conn_guard),
+            dispatch::CallLaneGuard::new(lane.slot, isolation, conn_guard),
             permit,
             inner_result,
             dispatch::CallAttemptContext {

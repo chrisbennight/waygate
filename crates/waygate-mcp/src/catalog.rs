@@ -544,9 +544,9 @@ pub trait UpstreamCatalog: Send + Sync + 'static {
     /// already async.
     ///
     /// Returns [`ResolvedInvocationTool`], not bare [`ToolFacts`], so the catalog
-    /// can signal an authoritative `Quarantined` block. The dispatch
-    /// path turns that into a refusal; the discovery paths drop the tool
-    /// from the listing. A quarantine therefore both hides the tool and
+    /// can signal an authoritative refusal or a temporary condition. The
+    /// dispatch path turns either into an error; the discovery paths drop the
+    /// tool from the listing. A refusal therefore both hides the tool and
     /// blocks the call, instead of being silently rehabilitated by the
     /// manifest fallback.
     async fn resolve_invocation_tool(
@@ -1521,13 +1521,127 @@ impl InvocationToolSnapshot {
 }
 
 /// Outcome of [`UpstreamCatalog::resolve_invocation_tool`]: one admitted
-/// snapshot, an intentional lifecycle block, or retryable catalog
-/// unavailability.
+/// snapshot, a refusal with its reason, or a temporary condition that a retry
+/// can outlast.
 #[derive(Debug, Clone)]
 pub enum ResolvedInvocationTool {
     Ready(InvocationToolSnapshot),
-    Quarantined { server: String, tool: String },
-    Unavailable { server: String, tool: String },
+    /// The gateway will not run the tool. Discovery hides it and invocation
+    /// refuses it without falling back to manifest facts.
+    Refused {
+        server: String,
+        tool: String,
+        reason: ToolRefusal,
+    },
+    /// The tool cannot be resolved until `reason` clears. Invocation returns
+    /// the retryable `catalog_unavailable` error rather than a refusal.
+    Unavailable {
+        server: String,
+        tool: String,
+        reason: TemporaryUnavailability,
+    },
+}
+
+impl ResolvedInvocationTool {
+    pub fn refused(server: &str, tool: &str, reason: ToolRefusal) -> Self {
+        Self::Refused {
+            server: server.to_owned(),
+            tool: tool.to_owned(),
+            reason,
+        }
+    }
+
+    pub fn unavailable(server: &str, tool: &str, reason: TemporaryUnavailability) -> Self {
+        Self::Unavailable {
+            server: server.to_owned(),
+            tool: tool.to_owned(),
+            reason,
+        }
+    }
+}
+
+/// Why the gateway refuses to run a named tool.
+///
+/// The [`code`](Self::code) is recorded in logs and audit records only. A
+/// caller receives one `tool_unavailable` error for every per-tool reason and
+/// for a name that does not exist, so an error never confirms that a withheld
+/// tool exists. A server-wide block is reported as such only to a caller who
+/// may discover that server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolRefusal {
+    /// The governed catalog has quarantined the owning server.
+    ServerQuarantined,
+    /// The governed catalog has retired the owning server.
+    ServerRetired,
+    /// No such tool: the authoritative catalog has no record of it, which
+    /// includes an unknown server, or no connected session advertises it.
+    NotInCatalog,
+    /// A connected session advertises the name, but no manifest
+    /// classification admits it.
+    Unclassified,
+    /// The advertised annotations or action metadata are invalid, or their
+    /// behavior hash is not the approved one.
+    NotAdmitted,
+    /// Some connected sessions advertise the name and others do not.
+    LanesDisagree,
+    /// Contract drift quarantined the tool in this process; no durable
+    /// tool-change review is configured.
+    DriftQuarantined,
+    /// The tool's current contract awaits tool-change review.
+    ReviewRequired,
+    /// An operator reviewed the changed contract and kept it blocked.
+    KeptBlocked,
+    /// The catalog holds no approved version and strict pending-approval mode
+    /// refuses the manifest fallback.
+    ApprovalPending,
+}
+
+impl ToolRefusal {
+    /// Stable identifier for logs, audit records, and administrator search.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ServerQuarantined => "server_quarantined",
+            Self::ServerRetired => "server_retired",
+            Self::NotInCatalog => "not_in_catalog",
+            Self::Unclassified => "unclassified",
+            Self::NotAdmitted => "not_admitted",
+            Self::LanesDisagree => "lanes_disagree",
+            Self::DriftQuarantined => "drift_quarantined",
+            Self::ReviewRequired => "review_required",
+            Self::KeptBlocked => "kept_blocked",
+            Self::ApprovalPending => "approval_pending",
+        }
+    }
+}
+
+/// Why a tool cannot be resolved at the moment, although it may become callable
+/// without operator action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemporaryUnavailability {
+    /// The authoritative governed catalog could not be read.
+    CatalogUnavailable,
+    /// A manifest or catalog update is in progress, or the manifest and the
+    /// catalog currently hold different generations of the tool's contract.
+    CatalogConverging,
+    /// The tool-change review store could not be read or written.
+    ReviewUnavailable,
+    /// No session to the server is connected, so the live contract that
+    /// admission checks cannot be read. Invocation reports this for an
+    /// annotation-mode server; discovery serves nothing from any server in
+    /// this state.
+    NoConnectedLane,
+}
+
+impl TemporaryUnavailability {
+    /// Stable identifier for logs, audit records, and administrator search.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::CatalogUnavailable => "catalog_unavailable",
+            Self::CatalogConverging => "catalog_converging",
+            Self::ReviewUnavailable => "review_unavailable",
+            Self::NoConnectedLane => "no_connected_lane",
+        }
+    }
 }
 
 pub type SharedCatalog = Arc<dyn UpstreamCatalog>;

@@ -506,6 +506,7 @@ impl DefaultInvocationService {
                         reason,
                         policy_ids,
                         reasons,
+                        trace_id: None,
                     },
                     false,
                 ));
@@ -644,6 +645,7 @@ impl DefaultInvocationService {
             reason,
             policy_ids: Vec::new(),
             reasons: Vec::new(),
+            trace_id: None,
         }
     }
 }

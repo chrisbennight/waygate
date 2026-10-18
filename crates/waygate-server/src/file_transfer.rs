@@ -5526,7 +5526,7 @@ mod tests {
                 waygate_mcp::catalog::ResolvedInvocationTool::Ready(snapshot) => {
                     snapshot.contract_identity()
                 }
-                waygate_mcp::catalog::ResolvedInvocationTool::Quarantined { .. } => {
+                waygate_mcp::catalog::ResolvedInvocationTool::Refused { .. } => {
                     panic!("test import tool is admitted")
                 }
                 waygate_mcp::catalog::ResolvedInvocationTool::Unavailable { .. } => {

@@ -141,9 +141,9 @@ pub(crate) async fn evaluate(
         .await
     {
         ResolvedInvocationTool::Ready(snapshot) => snapshot,
-        // The pipeline owns both the lifecycle refusal and the retryable
-        // authoritative-catalog outage shape.
-        ResolvedInvocationTool::Quarantined { .. } | ResolvedInvocationTool::Unavailable { .. } => {
+        // The pipeline owns both the refusal, whose caller error depends on
+        // server visibility, and the retryable unavailability shape.
+        ResolvedInvocationTool::Refused { .. } | ResolvedInvocationTool::Unavailable { .. } => {
             return GateDecision::Pass
         }
     };
@@ -876,21 +876,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quarantined_tools_pass_through_for_the_pipeline_refusal_shape() {
-        let h = harness(
-            deny_verdict(),
-            ResolvedInvocationTool::Quarantined {
-                server: "sig".into(),
-                tool: "send".into(),
-            },
-            None,
-        );
-        let resp = app(&h)
-            .oneshot(call_req("sig.send", true))
-            .await
-            .expect("dispatch");
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(h.inner_hits.load(Ordering::SeqCst), 1);
+    async fn refused_and_unavailable_tools_pass_through_for_the_pipeline_shape() {
+        use waygate_mcp::catalog::{TemporaryUnavailability, ToolRefusal};
+        // The caller's error for a refusal depends on whether it may
+        // discover the server, and a temporary condition stays retryable;
+        // only the pipeline decides either.
+        for resolution in [
+            ResolvedInvocationTool::refused("sig", "send", ToolRefusal::ServerQuarantined),
+            ResolvedInvocationTool::refused("sig", "send", ToolRefusal::NotInCatalog),
+            ResolvedInvocationTool::unavailable(
+                "sig",
+                "send",
+                TemporaryUnavailability::CatalogConverging,
+            ),
+        ] {
+            let h = harness(deny_verdict(), resolution.clone(), None);
+            let resp = app(&h)
+                .oneshot(call_req("sig.send", true))
+                .await
+                .expect("dispatch");
+            assert_eq!(resp.status(), StatusCode::OK, "{resolution:?}");
+            assert_eq!(h.inner_hits.load(Ordering::SeqCst), 1, "{resolution:?}");
+        }
     }
 
     #[tokio::test]

@@ -61,6 +61,31 @@ pub struct ToolReview {
     pub decided_at: Option<OffsetDateTime>,
 }
 
+/// The admission-relevant part of one stored tool review.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewDecision {
+    pub observed_hash: String,
+    pub quarantined: bool,
+    /// An operator acknowledged the quarantined candidate and kept it
+    /// blocked. A later observation of a changed contract reopens review.
+    pub kept_blocked: bool,
+}
+
+/// Selects the [`ReviewDecision`] columns of `tool_contract_reviews r`.
+macro_rules! decision_columns {
+    () => {
+        "r.observed_hash, r.quarantined, (r.quarantined AND r.decided_at IS NOT NULL) AS kept_blocked"
+    };
+}
+
+fn decision_from_row(row: &sqlx::postgres::PgRow) -> ReviewDecision {
+    ReviewDecision {
+        observed_hash: row.get("observed_hash"),
+        quarantined: row.get("quarantined"),
+        kept_blocked: row.get("kept_blocked"),
+    }
+}
+
 impl PgCatalogStore {
     /// Admission reads only the decision, never the stored comparison payloads.
     pub async fn review_state(
@@ -68,9 +93,18 @@ impl PgCatalogStore {
         tenant: &str,
         server: &str,
         tool: &str,
-    ) -> Result<Option<(String, bool)>, CatalogError> {
-        Ok(sqlx::query_as("SELECT r.observed_hash,r.quarantined FROM tool_contract_reviews r JOIN mcp_tools t ON t.id=r.tool_id JOIN mcp_servers s ON s.id=t.server_id WHERE s.tenant_id=$1 AND s.name=$2 AND t.name=$3")
-            .bind(tenant).bind(server).bind(tool).fetch_optional(&self.pool).await?)
+    ) -> Result<Option<ReviewDecision>, CatalogError> {
+        let row = sqlx::query(concat!(
+            "SELECT ",
+            decision_columns!(),
+            " FROM tool_contract_reviews r JOIN mcp_tools t ON t.id=r.tool_id JOIN mcp_servers s ON s.id=t.server_id WHERE s.tenant_id=$1 AND s.name=$2 AND t.name=$3"
+        ))
+        .bind(tenant)
+        .bind(server)
+        .bind(tool)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(decision_from_row))
     }
     /// Read only admission decisions for a bounded discovery batch. Missing
     /// names have no recorded observation; comparison payloads stay in storage.
@@ -79,7 +113,7 @@ impl PgCatalogStore {
         tenant: &str,
         server: &str,
         names: &[String],
-    ) -> Result<std::collections::HashMap<String, (String, bool)>, CatalogError> {
+    ) -> Result<std::collections::HashMap<String, ReviewDecision>, CatalogError> {
         if names.len() > crate::TOOL_RESOLUTION_BATCH_SIZE {
             return Err(CatalogError::InvalidInput(
                 "tool review batch exceeds 256 names".into(),
@@ -88,19 +122,21 @@ impl PgCatalogStore {
         if names.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let rows: Vec<(String, String, bool)> = sqlx::query_as(
-            "SELECT t.name,r.observed_hash,r.quarantined FROM tool_contract_reviews r
+        let rows = sqlx::query(concat!(
+            "SELECT t.name, ",
+            decision_columns!(),
+            " FROM tool_contract_reviews r
              JOIN mcp_tools t ON t.id=r.tool_id JOIN mcp_servers s ON s.id=t.server_id
-             WHERE s.tenant_id=$1 AND s.name=$2 AND t.name=ANY($3)",
-        )
+             WHERE s.tenant_id=$1 AND s.name=$2 AND t.name=ANY($3)"
+        ))
         .bind(tenant)
         .bind(server)
         .bind(names)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
-            .into_iter()
-            .map(|(name, hash, quarantined)| (name, (hash, quarantined)))
+            .iter()
+            .map(|row| (row.get("name"), decision_from_row(row)))
             .collect())
     }
 
@@ -244,13 +280,15 @@ impl PgCatalogStore {
         contract: &Value,
         block_changes: bool,
         approved_hash: Option<&str>,
-    ) -> Result<(bool, Option<(String, bool)>), CatalogError> {
+    ) -> Result<(bool, Option<ReviewDecision>), CatalogError> {
         // An observation that matches the stored decision changes nothing.
         // Confirm that from one unlocked snapshot, so observing an unchanged
         // contract neither writes nor waits behind catalog reconciliation.
         // Any difference takes the locked path, which reads again and decides.
         let current = sqlx::query(concat!(
-            "SELECT r.observed_hash, r.approved_hash, r.quarantined,
+            "SELECT ",
+            decision_columns!(),
+            ", r.approved_hash,
              CASE WHEN $4 THEN ",
             latest_approval!(),
             " END AS durable_approval
@@ -269,7 +307,7 @@ impl PgCatalogStore {
             let approved_hash = durable_approval.as_deref().or(approved_hash);
             let observed_hash: String = current.get("observed_hash");
             if observed_hash == hash && !baseline_needs_repair(&current, hash, approved_hash) {
-                return Ok((false, Some((observed_hash, current.get("quarantined")))));
+                return Ok((false, Some(decision_from_row(&current))));
             }
         }
         let mut tx = self.pool.begin().await?;
@@ -403,14 +441,19 @@ impl PgCatalogStore {
             .execute(&mut *tx)
             .await?;
         }
-        let decision: (String, bool) = sqlx::query_as(
-            "SELECT observed_hash, quarantined FROM tool_contract_reviews WHERE tool_id=$1",
-        )
+        let decision = sqlx::query(concat!(
+            "SELECT ",
+            decision_columns!(),
+            " FROM tool_contract_reviews r WHERE r.tool_id=$1"
+        ))
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok((old != hash || repair_baseline, Some(decision)))
+        Ok((
+            old != hash || repair_baseline,
+            Some(decision_from_row(&decision)),
+        ))
     }
 
     pub async fn get(

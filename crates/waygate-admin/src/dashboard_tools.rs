@@ -750,6 +750,7 @@ fn invocation_error_kind(e: &waygate_mcp::InvocationError) -> &'static str {
     match e {
         E::InvalidArguments(_) => "invalid_arguments",
         E::Forbidden { .. } => "forbidden",
+        E::ToolUnavailable { .. } => "tool_unavailable",
         E::StepUpRequired { .. } => "step_up_required",
         E::Upstream(_) => "upstream",
         E::AuditUnavailable(_) => "audit_unavailable",

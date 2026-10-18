@@ -5,41 +5,144 @@
 
 use super::*;
 
-/// Re-check annotation-native admission on the dispatch path. Publication
-/// normally filters the same contract, but this independent gate prevents
-/// a stale client cache from reaching a tool whose reviewed behavior hash no
-/// longer matches.
-pub(super) async fn entry_tool_is_admitted(
+/// One admission decision and, when it does not admit, why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Admission {
+    Admitted,
+    Refused(ToolRefusal),
+    Unavailable(TemporaryUnavailability),
+}
+
+impl Admission {
+    pub(super) fn is_admitted(self) -> bool {
+        matches!(self, Self::Admitted)
+    }
+
+    /// The resolution this decision forces, or `None` when it admits.
+    pub(super) fn refusal(self, server: &str, tool: &str) -> Option<ResolvedInvocationTool> {
+        match self {
+            Self::Admitted => None,
+            Self::Refused(reason) => Some(ResolvedInvocationTool::refused(server, tool, reason)),
+            Self::Unavailable(reason) => {
+                Some(ResolvedInvocationTool::unavailable(server, tool, reason))
+            }
+        }
+    }
+}
+
+/// Re-check admission on the dispatch path. Publication normally filters the
+/// same contract, but this independent gate prevents a stale client cache
+/// from reaching a name the manifest does not classify or, in annotation
+/// mode, a tool whose reviewed behavior hash no longer matches.
+pub(super) async fn entry_tool_admission(
     entry: &UpstreamEntry,
     manifest: &crate::UpstreamManifest,
     tool_name: &str,
-) -> bool {
+) -> Admission {
+    let classification = manifest.tools.iter().find(|tool| tool.name == tool_name);
     if matches!(
         manifest.classification_mode,
         crate::ClassificationMode::Manifest
     ) {
-        return manifest.tools.iter().any(|tool| tool.name == tool_name);
+        if classification.is_some() {
+            return Admission::Admitted;
+        }
+        // Manifest admission is by name alone. The live sessions only tell
+        // an advertised but unclassified name apart from one nobody serves.
+        for slot in &entry.slots {
+            let connection = slot.conn.read().await;
+            if connection.as_ref().is_some_and(|connection| {
+                connection
+                    .live_tools
+                    .iter()
+                    .any(|tool| tool.name.as_ref() == tool_name)
+            }) {
+                return Admission::Refused(ToolRefusal::Unclassified);
+            }
+        }
+        return Admission::Refused(ToolRefusal::NotInCatalog);
     }
-    let mut found = false;
+    let mut tally = LaneTally::default();
     for slot in &entry.slots {
         let connection = slot.conn.read().await;
         let Some(connection) = connection.as_ref() else {
             continue;
         };
-        found = true;
-        // EVERY connected lane must admit the name, on its COMPLETE live
-        // catalog. A lane that omits the name is a cross-lane disagreement:
-        // publication intersects lanes, so the name would be absent from
-        // the published contract Stage 1 reads — executing it anyway (from
-        // a lane that does advertise it) would bind no schemas or security
-        // metadata. And a single pre-selected descriptor would hide
-        // same-name duplicates, leaving the executable contract ambiguous.
-        // Fail closed on either disagreement.
-        if !tool_is_admitted_in_catalog(manifest, &connection.live_tools, tool_name) {
-            return false;
+        let mut matching = connection
+            .live_tools
+            .iter()
+            .filter(|tool| tool.name.as_ref() == tool_name)
+            .peekable();
+        let advertised = matching.peek().is_some();
+        tally.record_lane(advertised.then(|| {
+            matching
+                .all(|tool| tool_is_admitted(classification, manifest.classification_mode, tool))
+        }));
+    }
+    tally.annotation_admission(classification.is_some())
+}
+
+/// What the connected sessions advertise under one name, gathered one lane at
+/// a time, for annotation-mode admission.
+///
+/// EVERY connected lane must admit the name, on its COMPLETE live catalog. A
+/// lane that omits the name is a cross-lane disagreement: publication
+/// intersects lanes, so the name would be absent from the published contract
+/// Stage 1 reads — executing it anyway (from a lane that does advertise it)
+/// would bind no schemas or security metadata. And a single pre-selected
+/// descriptor would hide same-name duplicates, leaving the executable
+/// contract ambiguous. Fail closed on either disagreement.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct LaneTally {
+    connected: bool,
+    advertised: bool,
+    omitted: bool,
+    every_descriptor_admitted: bool,
+}
+
+impl Default for LaneTally {
+    fn default() -> Self {
+        Self {
+            connected: false,
+            advertised: false,
+            omitted: false,
+            every_descriptor_admitted: true,
         }
     }
-    found
+}
+
+impl LaneTally {
+    /// Record one connected lane: `None` when it does not advertise the name,
+    /// otherwise whether every descriptor it advertises under the name is
+    /// admitted.
+    pub(super) fn record_lane(&mut self, descriptors_admitted: Option<bool>) {
+        self.connected = true;
+        match descriptors_admitted {
+            None => self.omitted = true,
+            Some(admitted) => {
+                self.advertised = true;
+                self.every_descriptor_admitted &= admitted;
+            }
+        }
+    }
+
+    /// The decision once every connected lane is recorded. `classified` is
+    /// whether the manifest has an entry for the name.
+    pub(super) fn annotation_admission(self, classified: bool) -> Admission {
+        if !self.connected {
+            Admission::Unavailable(TemporaryUnavailability::NoConnectedLane)
+        } else if !self.advertised {
+            Admission::Refused(ToolRefusal::NotInCatalog)
+        } else if self.omitted {
+            Admission::Refused(ToolRefusal::LanesDisagree)
+        } else if !classified {
+            Admission::Refused(ToolRefusal::Unclassified)
+        } else if !self.every_descriptor_admitted {
+            Admission::Refused(ToolRefusal::NotAdmitted)
+        } else {
+            Admission::Admitted
+        }
+    }
 }
 
 /// Validate one named tool against a specific manifest generation and live

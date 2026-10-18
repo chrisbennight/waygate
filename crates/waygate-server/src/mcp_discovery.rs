@@ -847,10 +847,11 @@ mod tests {
                     InvocationToolSnapshot::manifest_fallback(facts, true)
                         .with_published_definition(Some(definition)),
                 ),
-                None => ResolvedInvocationTool::Unavailable {
-                    server: server.to_owned(),
-                    tool: tool_name.to_owned(),
-                },
+                None => ResolvedInvocationTool::refused(
+                    server,
+                    tool_name,
+                    waygate_mcp::catalog::ToolRefusal::NotInCatalog,
+                ),
             }
         }
     }

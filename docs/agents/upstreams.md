@@ -386,8 +386,21 @@ This document covers:
   Until then each such call pays one refused handshake.
   Migration therefore stays observable without a probe on every call. A `protocol` change is a
   connection-shape change: reloads re-dial it. The `session` block carries
-  `concurrency` (overrides the global `GATEWAY_UPSTREAM_POOL_SIZE`) and
-  `isolation` (`per_call` | `reuse`). Isolation defaults to the **safe**
+  `concurrency` and `isolation` (`per_call` | `reuse`).
+
+  **The gateway does not limit calls in flight to an upstream unless the
+  upstream asks for it.** Without `concurrency`, every call is admitted at
+  once: a `per_call` call shares a pooled lane only for its tool view, and a
+  `reuse` call that finds every pooled session busy runs on its own fresh
+  session rather than waiting. Set `concurrency` on an upstream that cannot
+  manage its own load; it becomes the most calls in flight to that upstream,
+  later calls wait in arrival order, and it also replaces the global
+  `GATEWAY_UPSTREAM_POOL_SIZE` as that upstream's pooled lane count. stdio
+  serves one call at a time regardless. Per-tenant, per-principal,
+  per-server and per-tool request rates are governed separately by opt-in
+  rate-limit policies.
+
+  Isolation defaults to the **safe**
   posture: `per_call` for HTTP/SSE (a fresh upstream session per call, so
   no cross-call or cross-principal state can leak through a reused session
   — a property MCP does not guarantee), and `reuse` for stdio (a child
@@ -395,6 +408,16 @@ This document covers:
   HTTP/SSE upstream you trust to drain per-session state between calls, to
   save the per-call `initialize` round-trip. stdio always reuses,
   regardless of the field.
+
+  **The gateway closes its lanes when it shuts down.** A stateful upstream
+  holds a session for each lane until the gateway deletes it, and an upstream
+  with a fixed session table refuses new sessions while that table is full.
+  Graceful shutdown therefore closes every pooled lane once in-flight calls
+  have drained, so the next gateway process is not refused while the old
+  sessions wait for their idle expiry. Size such an upstream's table for twice
+  its lanes, because a catalog refresh dials the replacement lanes before it
+  closes the current ones, plus the per-call sessions it serves concurrently —
+  and set `concurrency` to bound those, because without it nothing does.
 
   **Measure that round-trip before trading it for a wider trust boundary.**
   What `per_call` costs depends on the upstream and the path to it, so read it
@@ -508,7 +531,7 @@ This document covers:
   Legacy collision enumeration includes only live lanes whose initialization
   advertised the MCP Resources capability. A tool-only upstream remains
   transport-eligible for its tools without being treated as a resource owner.
-  The pool retains its normal circuit breaker, lane limit, timeout,
+  The pool retains its normal circuit breaker, concurrency limit, timeout,
   tombstone, and session-isolation behavior. A Code Mode tool result that names
   a session-retained resource is the exception to independent resource
   checkout: after URI authorization, its bounded `resources/read` runs on the

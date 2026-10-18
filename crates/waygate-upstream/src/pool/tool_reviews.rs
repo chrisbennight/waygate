@@ -1,8 +1,9 @@
 //! Persist observed contracts before serving replacement sessions. Durable
 //! review is an additional refusal gate; it never grants catalog admission.
 
+use super::admission::Admission;
 use super::*;
-use waygate_catalog::tool_reviews::PgCatalogStore;
+use waygate_catalog::tool_reviews::{PgCatalogStore, ReviewDecision};
 
 pub(super) fn review_contract(
     tool: &Tool,
@@ -105,7 +106,7 @@ impl UpstreamPool {
         manifest: &UpstreamManifest,
         tools: &[Tool],
         emit_evidence: bool,
-    ) -> Result<HashMap<String, (String, bool)>, waygate_catalog::tool_reviews::ReviewError> {
+    ) -> Result<HashMap<String, ReviewDecision>, waygate_catalog::tool_reviews::ReviewError> {
         let mut decisions = HashMap::new();
         let Some(store) = self.tool_reviews.as_ref() else {
             return Ok(decisions);
@@ -145,12 +146,12 @@ impl UpstreamPool {
                     ),
                 )
                 .await?;
-            if let Some((_, blocked)) = decision.as_ref() {
+            if let Some(decision) = decision.as_ref() {
                 let mut quarantined = entry
                     .quarantined
                     .write()
                     .expect("upstream quarantine lock poisoned");
-                if *blocked {
+                if decision.quarantined {
                     quarantined.insert(tool.name.to_string());
                 } else {
                     quarantined.remove(tool.name.as_ref());
@@ -229,8 +230,21 @@ impl UpstreamPool {
         contract: Option<&Tool>,
         mode: crate::ClassificationMode,
     ) -> bool {
+        self.review_admission(server, tool, contract, mode)
+            .await
+            .is_admitted()
+    }
+
+    /// The durable review decision for `tool`, read from the store.
+    pub(super) async fn review_admission(
+        &self,
+        server: &str,
+        tool: &str,
+        contract: Option<&Tool>,
+        mode: crate::ClassificationMode,
+    ) -> Admission {
         let Some(store) = self.tool_reviews.as_ref() else {
-            return true;
+            return Admission::Admitted;
         };
         let review = match store
             .review_state(waygate_core::TenantId::DEFAULT, server, tool)
@@ -243,10 +257,10 @@ impl UpstreamPool {
                     tool,
                     "tool review storage unavailable; refusing admission"
                 );
-                return false;
+                return Admission::Unavailable(TemporaryUnavailability::ReviewUnavailable);
             }
         };
-        self.review_allows_with(server, tool, contract, mode, review)
+        self.review_admission_with(server, tool, contract, mode, review)
             .await
     }
 
@@ -258,8 +272,23 @@ impl UpstreamPool {
         tool: &str,
         contract: Option<&Tool>,
         mode: crate::ClassificationMode,
-        review: Option<(String, bool)>,
+        review: Option<ReviewDecision>,
     ) -> bool {
+        self.review_admission_with(server, tool, contract, mode, review)
+            .await
+            .is_admitted()
+    }
+
+    /// [`Self::review_admission`] for a review decision the caller already
+    /// read.
+    pub(super) async fn review_admission_with(
+        &self,
+        server: &str,
+        tool: &str,
+        contract: Option<&Tool>,
+        mode: crate::ClassificationMode,
+        review: Option<ReviewDecision>,
+    ) -> Admission {
         let protected = self.entries.load().get(server).is_some_and(|entry| {
             let manifest = entry.manifest_snapshot();
             manifest
@@ -273,34 +302,38 @@ impl UpstreamPool {
                     )
                 })
         });
-        self.review_allows_from_state(server, tool, contract, mode, protected, review)
+        self.review_admission_from_state(server, tool, contract, mode, protected, review)
             .await
     }
 
     /// Apply the same decision to a row fetched alone or in a discovery batch.
     /// A missing protected observation keeps the existing first-observation
     /// reconciliation path; normal publication has already recorded it.
-    pub(super) async fn review_allows_from_state(
+    pub(super) async fn review_admission_from_state(
         &self,
         server: &str,
         tool: &str,
         contract: Option<&Tool>,
         mode: crate::ClassificationMode,
         protected: bool,
-        review: Option<(String, bool)>,
-    ) -> bool {
+        review: Option<ReviewDecision>,
+    ) -> Admission {
         let Some(store) = self.tool_reviews.as_ref() else {
-            return true;
+            return Admission::Admitted;
         };
         if !protected && review.is_none() {
-            return true;
+            return Admission::Admitted;
         }
         let Some(contract) = contract else {
-            return false;
+            // Review compares the live contract, and no connected session
+            // advertises one, so the tool is not served now. Dispatch-time
+            // callers hold a connection lock, so this does not probe the
+            // other lanes to tell a disconnected server apart.
+            return Admission::Refused(ToolRefusal::NotInCatalog);
         };
         let (hash, value) = review_contract(contract, mode);
-        if let Some((observed_hash, quarantined)) = review {
-            return !quarantined && (observed_hash == hash || !protected);
+        if let Some(review) = review {
+            return review_decision_admission(&review, &hash, protected);
         }
         if store
             .observe(
@@ -314,22 +347,41 @@ impl UpstreamPool {
             .await
             .is_err()
         {
-            return false;
+            return Admission::Unavailable(TemporaryUnavailability::ReviewUnavailable);
         }
         match store
             .review_state(waygate_core::TenantId::DEFAULT, server, tool)
             .await
         {
-            Ok(Some((observed_hash, quarantined))) => !quarantined && observed_hash == hash,
-            Ok(None) => false,
+            Ok(Some(review)) => review_decision_admission(&review, &hash, true),
+            // Observation records nothing until catalog reconciliation has
+            // created the tool's identity.
+            Ok(None) => Admission::Refused(ToolRefusal::NotInCatalog),
             Err(_) => {
                 tracing::warn!(
                     server,
                     tool,
                     "tool review storage unavailable; refusing admission"
                 );
-                false
+                Admission::Unavailable(TemporaryUnavailability::ReviewUnavailable)
             }
         }
+    }
+}
+
+/// Admit the live contract `hash` against a stored review. A quarantined
+/// review refuses whether or not the operator has decided; an unrecorded
+/// change to a protected contract awaits review.
+fn review_decision_admission(review: &ReviewDecision, hash: &str, protected: bool) -> Admission {
+    if review.quarantined {
+        Admission::Refused(if review.kept_blocked {
+            ToolRefusal::KeptBlocked
+        } else {
+            ToolRefusal::ReviewRequired
+        })
+    } else if review.observed_hash == hash || !protected {
+        Admission::Admitted
+    } else {
+        Admission::Refused(ToolRefusal::ReviewRequired)
     }
 }

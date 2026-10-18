@@ -35,6 +35,7 @@ impl waygate_invocation::InvocationService for CountingInvocation {
             reason: "stub denied".into(),
             policy_ids: vec![],
             reasons: vec![],
+            trace_id: None,
         })
     }
 }
