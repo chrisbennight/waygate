@@ -1450,15 +1450,6 @@ impl UpstreamPool {
                     **guard = conn.take();
                 }
             }
-            if installable.iter().any(|install| *install) {
-                let resource_capability_advertised = guards.iter().any(|guard| {
-                    guard
-                        .as_ref()
-                        .is_some_and(|conn| conn.resource_capability_advertised)
-                });
-                let manifest = entry.manifest.read().expect("manifest lock poisoned");
-                entry.report_undeclared_resources(&manifest, resource_capability_advertised);
-            }
         }
 
         if breaker_open {
@@ -1469,6 +1460,18 @@ impl UpstreamPool {
                     **guard = None;
                 }
             }
+        }
+        // Judged from the lanes that will actually serve after this commit,
+        // so a stale lane the cleanup above just cleared cannot keep the
+        // condition looking true.
+        if healed > 0 {
+            let resource_capability_advertised = guards.iter().any(|guard| {
+                guard
+                    .as_ref()
+                    .is_some_and(|conn| conn.resource_capability_advertised)
+            });
+            let manifest = entry.manifest.read().expect("manifest lock poisoned");
+            entry.report_undeclared_resources(&manifest, resource_capability_advertised);
         }
         // Sampled under the guards that installed the healed lanes, for the
         // same reason as the re-dial path.
