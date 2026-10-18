@@ -23,7 +23,8 @@ These signals answer different questions and have different persistence guarante
    server is quarantined, retired, pending approval, or missing from the
    catalog, linked to the Catalog control that resolves it where one exists.
    **Tools** lists a connected server that publishes none of its tools with
-   its blocked count instead of presenting those tools as callable.
+   its blocked count instead of presenting those tools as callable; for an
+   administrator the count links to the Blocked tools page.
    `triage_digest` combines durable signals for an observation-capable caller;
    an admin can choose the appropriate recovery action after diagnosis.
 
@@ -51,6 +52,24 @@ partial results. Try a shorter window after a timeout or cancellation; retry
 later after a connection failure. The gateway logs the failure category and
 elapsed time without query arguments. PostgreSQL enforces a transaction-local
 statement timeout, and interrupted connections are retired from the pool.
+
+## Find every blocked tool
+
+A caller whose tool call is refused sees only that the tool is unavailable.
+The dashboard's **Tools → Blocked** page, which requires the `mcp:admin`
+scope, lists every tool the gateway currently refuses to run or holds as
+temporarily unavailable. For each it gives the reason in plain English, the
+`refused:<code>` or `unavailable:<code>` reason Activity records for such a
+call, where the state applies, and a link to the dashboard control that
+resolves it when your tenant owns that control. A drift quarantine held only
+in one gateway's memory is marked as applying to that copy of the gateway
+until it restarts. Temporary states have no control; they should clear on
+their own.
+
+The Overview attention queue shows the number of blocked tools when it is not
+zero, and the Activity detail of a refused call links to the page for that
+server. The page applies the same checks a call would, and reading it changes
+nothing.
 
 ## Inspect rejected output schemas
 

@@ -35,6 +35,7 @@
     <dl>
         <dt>outcome</dt><dd>{{ outcome }}</dd>
         {% match reason %}{% when Some with (r) %}<dt>reason</dt><dd>{{ r }}</dd>{% when None %}{% endmatch %}
+        {% match blocked_url %}{% when Some with (u) %}<dt>blocked tools</dt><dd><a href="{{ u }}">See why the tool is blocked and how to resolve it</a></dd>{% when None %}{% endmatch %}
         {% if !policy_ids.is_empty() %}<dt>policies</dt><dd>{{ policy_ids.join(", ") }}</dd>{% endif %}
     </dl>
 </section>

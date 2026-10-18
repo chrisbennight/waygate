@@ -4,7 +4,7 @@
 //! identity re-check, and the shared session catalog reader live together
 //! without growing the pool's transport and lifecycle module.
 
-use super::admission::Admission;
+use super::admission::{Admission, Effects};
 use super::*;
 
 /// Manifest-derived governance facts for one tool, computed against an
@@ -90,6 +90,7 @@ pub(super) fn operation_classifications(
     facts: &ToolFacts,
     annotation_mode: bool,
     operations: Vec<waygate_catalog::OperationClassification>,
+    effects: Effects,
 ) -> Vec<waygate_mcp::catalog::OperationClassification> {
     operations
         .into_iter()
@@ -110,7 +111,7 @@ pub(super) fn operation_classifications(
             let within = facts.risk.covers(catalog_risk_to_tier(&o.risk))
                 && (facts.side_effects || !o.side_effects)
                 && (facts.pii || !o.pii);
-            if !within {
+            if !within && effects.records() {
                 tracing::warn!(
                     tool = %facts.name,
                     operation = %o.value,
@@ -538,7 +539,14 @@ impl UpstreamPool {
             }
         };
         let review = self
-            .review_admission_with(server, tool, advertised, mode, reads.review)
+            .review_admission_with(
+                server,
+                tool,
+                advertised,
+                mode,
+                reads.review,
+                Effects::Record,
+            )
             .await;
         Some(DiscoveryReads {
             review,
@@ -571,10 +579,14 @@ impl UpstreamPool {
         tool_name: &str,
         inputs: SnapshotInputs,
     ) -> ResolvedInvocationTool {
-        self.resolve_snapshot_with_reads(tenant, server, tool_name, inputs, None)
+        self.resolve_snapshot_with_reads(tenant, server, tool_name, inputs, None, Effects::Record)
             .await
     }
 
+    /// [`Self::resolve_snapshot_from`] with reads the caller already took.
+    /// `effects` decides whether a decision is logged and whether an
+    /// authoritative catalog read failure is signalled to discovery; it never
+    /// changes the decision.
     pub(super) async fn resolve_snapshot_with_reads(
         &self,
         tenant: &str,
@@ -582,7 +594,9 @@ impl UpstreamPool {
         tool_name: &str,
         inputs: SnapshotInputs,
         reads: Option<DiscoveryReads>,
+        effects: Effects,
     ) -> ResolvedInvocationTool {
+        let record = effects.records();
         let SnapshotInputs {
             manifest_facts,
             annotation_mode,
@@ -607,6 +621,7 @@ impl UpstreamPool {
                     tool_name,
                     published.advertised_definition.as_ref(),
                     mode,
+                    effects,
                 )
                 .await
             }
@@ -625,10 +640,12 @@ impl UpstreamPool {
             .map(|reads| reads.transition)
             .unwrap_or_else(|| self.catalog_transition_state(server, tool_name));
         if catalog_transition.is_some_and(|transition| transition.pending) {
-            tracing::warn!(
-                %tenant, %server, tool = %tool_name,
-                "manifest authorization inputs are awaiting catalog convergence; unavailable",
-            );
+            if record {
+                tracing::warn!(
+                    %tenant, %server, tool = %tool_name,
+                    "manifest authorization inputs are awaiting catalog convergence; unavailable",
+                );
+            }
             return ResolvedInvocationTool::unavailable(
                 server,
                 tool_name,
@@ -648,13 +665,15 @@ impl UpstreamPool {
         // rather than flowing into validation, authorization, or Code Mode
         // discovery as a snapshot no single generation ever admitted.
         if annotation_mode && published.behavior_hash != approved_behavior_hash {
-            tracing::warn!(
-                %tenant, %server, tool = %tool_name,
-                published = ?published.behavior_hash,
-                approved = ?approved_behavior_hash,
-                "published contract is not the approved behavior generation; \
-                 refusing until the published inventory converges",
-            );
+            if record {
+                tracing::warn!(
+                    %tenant, %server, tool = %tool_name,
+                    published = ?published.behavior_hash,
+                    approved = ?approved_behavior_hash,
+                    "published contract is not the approved behavior generation; \
+                     refusing until the published inventory converges",
+                );
+            }
             return ResolvedInvocationTool::unavailable(
                 server,
                 tool_name,
@@ -662,11 +681,13 @@ impl UpstreamPool {
             );
         }
         if annotation_mode && published.input_schema.is_none() {
-            tracing::warn!(
-                %tenant, %server, tool = %tool_name,
-                "annotation mode has no published contract for an admitted tool; \
-                 refusing until the published inventory converges with the manifest",
-            );
+            if record {
+                tracing::warn!(
+                    %tenant, %server, tool = %tool_name,
+                    "annotation mode has no published contract for an admitted tool; \
+                     refusing until the published inventory converges with the manifest",
+                );
+            }
             return ResolvedInvocationTool::unavailable(
                 server,
                 tool_name,
@@ -685,11 +706,13 @@ impl UpstreamPool {
             match claims_facts(approval_mode, manifest_facts, &published) {
                 Ok(derived) => derived,
                 Err(error) => {
-                    tracing::warn!(
-                        %tenant, %server, tool = %tool_name,
-                        error_class = %error,
-                        "admitted annotation metadata could not produce policy facts; refused",
-                    );
+                    if record {
+                        tracing::warn!(
+                            %tenant, %server, tool = %tool_name,
+                            error_class = %error,
+                            "admitted annotation metadata could not produce policy facts; refused",
+                        );
+                    }
                     return ResolvedInvocationTool::refused(
                         server,
                         tool_name,
@@ -721,8 +744,12 @@ impl UpstreamPool {
                         facts: ToolFacts,
                         approval_known: bool| {
             let definition = published.definition.take();
-            let operations =
-                operation_classifications(&facts, annotation_mode, manifest_operations.clone());
+            let operations = operation_classifications(
+                &facts,
+                annotation_mode,
+                manifest_operations.clone(),
+                effects,
+            );
             let snapshot = if annotation_mode {
                 InvocationToolSnapshot::manifest_fallback_with_annotation_claims(
                     facts,
@@ -760,10 +787,12 @@ impl UpstreamPool {
         if catalog_transition_after != catalog_transition
             || catalog_transition_after.is_some_and(|transition| transition.pending)
         {
-            tracing::warn!(
-                %tenant, %server, tool = %tool_name,
-                "manifest/catalog generation changed during resolution; unavailable",
-            );
+            if record {
+                tracing::warn!(
+                    %tenant, %server, tool = %tool_name,
+                    "manifest/catalog generation changed during resolution; unavailable",
+                );
+            }
             return ResolvedInvocationTool::unavailable(
                 server,
                 tool_name,
@@ -783,12 +812,14 @@ impl UpstreamPool {
                 // an annotation tool. Refuse either split.
                 let catalog_annotation_mode = def.classification_mode == "mcp_annotations";
                 if catalog_annotation_mode != annotation_mode {
-                    tracing::warn!(
-                        %tenant, %server, tool = %tool_name,
-                        catalog_mode = %def.classification_mode,
-                        live_annotation_mode = annotation_mode,
-                        "catalog row and live manifest disagree on classification mode;                          refusing until both authorities activate the same generation",
-                    );
+                    if record {
+                        tracing::warn!(
+                            %tenant, %server, tool = %tool_name,
+                            catalog_mode = %def.classification_mode,
+                            live_annotation_mode = annotation_mode,
+                            "catalog row and live manifest disagree on classification mode;                          refusing until both authorities activate the same generation",
+                        );
+                    }
                     return ResolvedInvocationTool::unavailable(
                         server,
                         tool_name,
@@ -808,16 +839,18 @@ impl UpstreamPool {
                     && (approved_behavior_hash.as_deref() != Some(&def.schema_hash)
                         || catalog_risk_to_tier(&def.risk) != manifest_facts.risk)
                 {
-                    tracing::warn!(
-                        %tenant, %server, tool = %tool_name,
-                        catalog_version = %def.schema_hash,
-                        approved = ?approved_behavior_hash,
-                        catalog_risk = %def.risk,
-                        manifest_risk = ?manifest_facts.risk,
-                        "catalog identity or risk does not match the manifest-approved \
-                         generation; refusing until both authorities activate the same \
-                         contract generation",
-                    );
+                    if record {
+                        tracing::warn!(
+                            %tenant, %server, tool = %tool_name,
+                            catalog_version = %def.schema_hash,
+                            approved = ?approved_behavior_hash,
+                            catalog_risk = %def.risk,
+                            manifest_risk = ?manifest_facts.risk,
+                            "catalog identity or risk does not match the manifest-approved \
+                             generation; refusing until both authorities activate the same \
+                             contract generation",
+                        );
+                    }
                     return ResolvedInvocationTool::unavailable(
                         server,
                         tool_name,
@@ -837,13 +870,15 @@ impl UpstreamPool {
                         .as_deref()
                         .is_some_and(|hash| hash != def.schema_hash)
                 {
-                    tracing::warn!(
-                        %tenant, %server, tool = %tool_name,
-                        catalog_version = %def.schema_hash,
-                        manifest_version = ?manifest_version_hash,
-                        "catalog row was produced from a different manifest generation; \
-                         refusing until this replica and the shared catalog converge",
-                    );
+                    if record {
+                        tracing::warn!(
+                            %tenant, %server, tool = %tool_name,
+                            catalog_version = %def.schema_hash,
+                            manifest_version = ?manifest_version_hash,
+                            "catalog row was produced from a different manifest generation; \
+                             refusing until this replica and the shared catalog converge",
+                        );
+                    }
                     return ResolvedInvocationTool::unavailable(
                         server,
                         tool_name,
@@ -898,7 +933,8 @@ impl UpstreamPool {
                     facts.requires_approval_known = true;
                     facts
                 };
-                let operations = operation_classifications(&facts, annotation_mode, def.operations);
+                let operations =
+                    operation_classifications(&facts, annotation_mode, def.operations, effects);
                 let snapshot = if annotation_mode {
                     InvocationToolSnapshot::catalog_with_annotation_claims(
                         facts,
@@ -932,11 +968,13 @@ impl UpstreamPool {
                 )
             }
             Ok(waygate_catalog::ResolvedTool::Quarantined { retired, .. }) => {
-                tracing::info!(
-                    %tenant, %server, tool = %tool_name, retired,
-                    "catalog server is quarantined/retired; refusing dispatch \
-                     (no manifest fallback)",
-                );
+                if record {
+                    tracing::info!(
+                        %tenant, %server, tool = %tool_name, retired,
+                        "catalog server is quarantined/retired; refusing dispatch \
+                         (no manifest fallback)",
+                    );
+                }
                 server_block_refusal(server, tool_name, retired)
             }
             Ok(waygate_catalog::ResolvedTool::PendingApproval { .. }) => {
@@ -944,62 +982,74 @@ impl UpstreamPool {
                     // Strict mode is the right end-state once the
                     // catalog is reliably populated — an un-approved
                     // schema means "do not dispatch."
-                    tracing::info!(
-                        %tenant, %server, tool = %tool_name,
-                        "catalog returned PendingApproval and strict mode is on; refusing dispatch",
-                    );
+                    if record {
+                        tracing::info!(
+                            %tenant, %server, tool = %tool_name,
+                            "catalog returned PendingApproval and strict mode is on; refusing dispatch",
+                        );
+                    }
                     return ResolvedInvocationTool::refused(
                         server,
                         tool_name,
                         ToolRefusal::ApprovalPending,
                     );
                 }
-                tracing::warn!(
-                    %tenant, %server, tool = %tool_name,
-                    "catalog has tool but no approved version (PendingApproval); \
-                     falling back to manifest classification during transition",
-                );
+                if record {
+                    tracing::warn!(
+                        %tenant, %server, tool = %tool_name,
+                        "catalog has tool but no approved version (PendingApproval); \
+                         falling back to manifest classification during transition",
+                    );
+                }
                 ResolvedInvocationTool::Ready(fallback(&mut published, manifest_facts, true))
             }
             Ok(waygate_catalog::ResolvedTool::NotFound) => {
                 if self.catalog_authoritative {
-                    tracing::warn!(
-                        %tenant, %server, tool = %tool_name,
-                        "tool is absent from the authoritative governed catalog; refusing dispatch",
-                    );
+                    if record {
+                        tracing::warn!(
+                            %tenant, %server, tool = %tool_name,
+                            "tool is absent from the authoritative governed catalog; refusing dispatch",
+                        );
+                    }
                     return ResolvedInvocationTool::refused(
                         server,
                         tool_name,
                         ToolRefusal::NotInCatalog,
                     );
                 }
-                tracing::warn!(
-                    %tenant, %server, tool = %tool_name,
-                    "tool not in governed catalog; falling back to manifest \
-                     classification (run --import-manifests to populate the catalog)",
-                );
+                if record {
+                    tracing::warn!(
+                        %tenant, %server, tool = %tool_name,
+                        "tool not in governed catalog; falling back to manifest \
+                         classification (run --import-manifests to populate the catalog)",
+                    );
+                }
                 ResolvedInvocationTool::Ready(fallback(&mut published, manifest_facts, true))
             }
             Err(e) => {
                 if self.catalog_authoritative {
-                    self.catalog_read_error_generation
-                        .fetch_add(1, Ordering::AcqRel);
-                    tracing::warn!(
-                        %tenant, %server, tool = %tool_name, error = %e,
-                        "authoritative governed catalog lookup failed; refusing dispatch",
-                    );
+                    if record {
+                        self.catalog_read_error_generation
+                            .fetch_add(1, Ordering::AcqRel);
+                        tracing::warn!(
+                            %tenant, %server, tool = %tool_name, error = %e,
+                            "authoritative governed catalog lookup failed; refusing dispatch",
+                        );
+                    }
                     return ResolvedInvocationTool::unavailable(
                         server,
                         tool_name,
                         TemporaryUnavailability::CatalogUnavailable,
                     );
                 }
-                tracing::warn!(
-                    %tenant, %server, tool = %tool_name, error = %e,
-                    "catalog resolve_tool failed; falling back to manifest classification \
-                     (HITL `requires_approval_known=false` — `check_approval` will \
-                     refuse this non-authoritative snapshot)",
-                );
+                if record {
+                    tracing::warn!(
+                        %tenant, %server, tool = %tool_name, error = %e,
+                        "catalog resolve_tool failed; falling back to manifest classification \
+                         (HITL `requires_approval_known=false` — `check_approval` will \
+                         refuse this non-authoritative snapshot)",
+                    );
+                }
                 // Explicitly mark the HITL signal as UNTRUSTED so
                 // `check_approval`
                 // doesn't silently dispatch a tool that the catalog
@@ -1132,7 +1182,11 @@ impl UpstreamPool {
     }
 }
 
-fn server_block_refusal(server: &str, tool: &str, retired: bool) -> ResolvedInvocationTool {
+pub(super) fn server_block_refusal(
+    server: &str,
+    tool: &str,
+    retired: bool,
+) -> ResolvedInvocationTool {
     ResolvedInvocationTool::refused(
         server,
         tool,

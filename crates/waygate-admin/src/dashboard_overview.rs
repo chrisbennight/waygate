@@ -423,6 +423,23 @@ pub(crate) async fn overview(
         }
     }
 
+    // Same gate and tenant scope as the Blocked tools page it links to.
+    if let Some(blocked) =
+        crate::dashboard_blocked_tools::blocked_tool_count(&state, user_principal)
+            .await
+            .filter(|blocked| *blocked > 0)
+    {
+        attention_items.push(AttentionItem {
+            severity: "warn",
+            label: format!(
+                "{blocked} blocked tool{}",
+                if blocked == 1 { "" } else { "s" }
+            ),
+            hint: "The gateway refuses these tools or holds them as temporarily unavailable.",
+            href: nav_for_attention(crate::dashboard_blocked_tools::BLOCKED_TOOLS_PATH),
+        });
+    }
+
     // Figures + "what changed" feed. One 48h hourly
     // histogram feeds all three deltas so they agree on the window;
     // the feed is three cheap category-filtered queries merged by

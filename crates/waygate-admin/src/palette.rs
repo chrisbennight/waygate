@@ -368,6 +368,12 @@ const PAGES: &[(&str, &str, &str, &str)] = &[
         "Governed catalog — servers registry + recent drift events",
     ),
     (
+        "Blocked tools",
+        "/tools/blocked",
+        "alert-triangle",
+        "Tools the gateway refuses to run, why, and how to resolve each",
+    ),
+    (
         "LLM Models",
         "/llm_models",
         "box",

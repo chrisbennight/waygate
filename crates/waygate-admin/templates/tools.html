@@ -57,13 +57,15 @@
                 is connected, but its manifest classifies no tools, so none are published.
             {% else %}
                 is connected, but none of its {{ w.classified }} classified tool{% if w.classified != 1 %}s are{% else %} is{% endif %} published.
-                <span class="chip chip--bad">{{ w.classified }} blocked</span>
+                {% if blocked_links %}<a class="chip chip--bad" href="{{ self.chrome.nav_url(w.blocked_tools_url().as_str()) }}">{{ w.classified }} blocked</a>{% else %}<span class="chip chip--bad">{{ w.classified }} blocked</span>{% endif %}
             {% endif %}
         </li>
     {% endfor %}
     </ul>
     <p class="muted">
-        Blocked tools are not callable. <a href="{{ self.chrome.nav_url("/servers") }}">Servers</a>
+        Blocked tools are not callable. {% if blocked_links %}<a href="{{ self.chrome.nav_url("/tools/blocked") }}">Blocked tools</a>
+        lists each one with its reason and the control that resolves it;
+        {% endif %}<a href="{{ self.chrome.nav_url("/servers") }}">Servers</a>
         shows each server's tool review and catalog status.
     </p>
 </section>
