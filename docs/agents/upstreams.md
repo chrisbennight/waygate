@@ -53,8 +53,11 @@ not receive the token's `groups` claim. Tier A token exchange and Tier C peer
 assertions keep working on either classification; a Tier C peer assertion is
 still sent on `Authorization` when the `X-MCP-Identity` copy is withheld. Trace
 forwarding also applies to stdio servers, because trace context travels in the
-request body. The classification and its effective identity and trace settings
-appear in `GET /api/v1/servers` and in the `server` resource read through
+request body. A reload applies a change to these settings without
+reconnecting; when the same reload also changes the connection, such as the
+URL, the new settings take effect together with the new connection. The
+classification and its effective identity and trace settings appear in
+`GET /api/v1/servers` and in the `server` resource read through
 `gateway-observe`.
 
 Upgrading: classify every server that should keep receiving identity, trace
