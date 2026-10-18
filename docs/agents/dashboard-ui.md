@@ -259,6 +259,29 @@ skill action executors. Decision history is committed with the review state;
 the admin mutation recorder additionally emits the required evidence event.
 See [distribution review](../skill-distribution-review.md).
 
+## Refusal visibility
+
+An administrator must be able to find why a tool was refused from the pages
+that describe it. Preserve these properties when changing the pages:
+
+- **Activity** filters by exact tool, exact audit reason, and exact trace ID
+  alongside outcome, server, principal, category, PII, and time window. The
+  form, active-filter chips, derived links, and saved views carry every filter,
+  and `waygate_storage::AuditQuery` applies them in SQL and in its in-memory
+  `matches` twin. Exact matches are bounded by the tenant and time window.
+- **Servers** joins each configured server to the Catalog tab's
+  `list_servers` view, for admin viewers only. A non-live lifecycle
+  (quarantined, retired, pending approval, or no visible catalog row) renders
+  as a chip beside runtime health, linked to the Catalog row's control when the
+  viewer's tenant owns the row. Retired has no control.
+- **Tools** falls back to manifest classifications only for a server with no
+  connected lane, and marks those rows not connected. A connected server whose
+  published list is empty contributes no rows; a notice reports its blocked
+  count instead.
+- A failed catalog reconcile after a reload keeps the manifest config-health
+  signal degraded, so the Servers page's stale-configuration banner shows it
+  until a reconcile succeeds.
+
 ## When to reach for more JS
 
 | Pattern | Approach | Notes |

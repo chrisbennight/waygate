@@ -486,6 +486,14 @@ impl AuditEvent {
         self
     }
 
+    /// Record the trace id the caller was given. The trace-stamping recorder
+    /// keeps an id that is already set, so the row matches the caller's
+    /// reference even without an OpenTelemetry context.
+    pub fn with_trace_id(mut self, trace_id: impl Into<String>) -> Self {
+        self.trace_id = Some(trace_id.into());
+        self
+    }
+
     pub fn with_policies(mut self, ids: Vec<String>) -> Self {
         self.policy_ids = ids;
         self

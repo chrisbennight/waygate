@@ -461,6 +461,30 @@ impl UpstreamPool {
     /// generation still matches the one they were read under. `None` sends
     /// the caller down the uncached path, which reads again and reports any
     /// failure itself.
+    /// The governed catalog's block on `server`, when it has quarantined or
+    /// retired it. A server-wide block outranks the reason a live contract
+    /// check gives, so a caller who may see the server learns that it is
+    /// blocked rather than that a tool is missing or that a retry might help.
+    /// An unreadable catalog yields `None` and the caller keeps its own reason.
+    pub(super) async fn catalog_server_block(
+        &self,
+        tenant: &str,
+        server: &str,
+        tool: &str,
+    ) -> Option<ResolvedInvocationTool> {
+        match self
+            .catalog
+            .as_ref()?
+            .resolve_tool(tenant, &format!("{server}.{tool}"))
+            .await
+        {
+            Ok(waygate_catalog::ResolvedTool::Quarantined { retired, .. }) => {
+                Some(server_block_refusal(server, tool, retired))
+            }
+            _ => None,
+        }
+    }
+
     pub(super) async fn admission_reads(
         &self,
         tenant: &str,
@@ -951,15 +975,7 @@ impl UpstreamPool {
                          (no manifest fallback)",
                     );
                 }
-                ResolvedInvocationTool::refused(
-                    server,
-                    tool_name,
-                    if retired {
-                        ToolRefusal::ServerRetired
-                    } else {
-                        ToolRefusal::ServerQuarantined
-                    },
-                )
+                server_block_refusal(server, tool_name, retired)
             }
             Ok(waygate_catalog::ResolvedTool::PendingApproval { .. }) => {
                 if self.catalog_strict_pending_approval {
@@ -1164,6 +1180,22 @@ impl UpstreamPool {
         // hint is captured at dial/refresh time, not on this read.
         listed.map(|l| l.tools)
     }
+}
+
+pub(super) fn server_block_refusal(
+    server: &str,
+    tool: &str,
+    retired: bool,
+) -> ResolvedInvocationTool {
+    ResolvedInvocationTool::refused(
+        server,
+        tool,
+        if retired {
+            ToolRefusal::ServerRetired
+        } else {
+            ToolRefusal::ServerQuarantined
+        },
+    )
 }
 
 #[cfg(test)]

@@ -1637,3 +1637,156 @@ pub(crate) async fn classifications_show_enforced_facts_in_annotation_mode() {
         "annotation mode must not offer the legacy side-effects checkbox: {body}"
     );
 }
+
+// ---- catalog lifecycle beside runtime health -------------------------------
+
+/// The rendered `<tr>` for configured server `name`.
+fn server_row<'a>(body: &'a str, name: &str) -> &'a str {
+    let anchor = format!(r#"?server={name}">{name}</a>"#);
+    let start = body
+        .find(&anchor)
+        .unwrap_or_else(|| panic!("no row for {name}"));
+    let end = body[start..]
+        .find(r#"<tr class="cfg-row""#)
+        .map(|offset| start + offset)
+        .expect("row is followed by its config panel");
+    &body[start..end]
+}
+
+fn catalog_server(
+    id: Uuid,
+    tenant: &str,
+    name: &str,
+    status: waygate_catalog::CatalogServerStatus,
+    visibility: waygate_catalog::CatalogVisibility,
+) -> waygate_catalog::CatalogServerSummary {
+    waygate_catalog::CatalogServerSummary {
+        id,
+        tenant_id: tenant.into(),
+        name: name.into(),
+        transport: "http".into(),
+        status,
+        visibility,
+        owner: None,
+    }
+}
+
+/// A server can answer its health checks while the governed catalog blocks
+/// every tool. Each configured server shows a non-live catalog lifecycle next
+/// to its runtime status, linked to the Catalog control that resolves it when
+/// this tenant owns the row; retired has no control and shows none.
+#[tokio::test]
+pub(crate) async fn servers_page_shows_catalog_lifecycle_and_resolving_link() {
+    use waygate_catalog::{CatalogServerStatus as S, CatalogVisibility as V};
+    let quarantined = Uuid::from_u128(0xa1);
+    let retired = Uuid::from_u128(0xa2);
+    let pending = Uuid::from_u128(0xa3);
+    let foreign = Uuid::from_u128(0xa4);
+    let shadowed = Uuid::from_u128(0xa5);
+    let catalog: waygate_catalog::SharedCatalogStore = Arc::new(
+        crate::governance_pages::ApprovalsFakeCatalog::with_servers(vec![
+            catalog_server(
+                quarantined,
+                "default",
+                "docs",
+                S::Quarantined,
+                V::TenantOnly,
+            ),
+            catalog_server(retired, "default", "legacy", S::Retired, V::TenantOnly),
+            catalog_server(
+                Uuid::from_u128(0xa0),
+                "default",
+                "live-docs",
+                S::Live,
+                V::TenantOnly,
+            ),
+            catalog_server(
+                pending,
+                "default",
+                "pending-docs",
+                S::Proposed,
+                V::TenantOnly,
+            ),
+            catalog_server(foreign, "other", "shared", S::Quarantined, V::Global),
+            // The tenant's own live row shadows another tenant's global row.
+            catalog_server(shadowed, "other", "live-docs", S::Quarantined, V::Global),
+        ]),
+    );
+    let manifests: BTreeMap<String, UpstreamManifest> = [
+        "docs",
+        "legacy",
+        "live-docs",
+        "pending-docs",
+        "shared",
+        "unlisted",
+    ]
+    .into_iter()
+    .map(|name| {
+        let mut manifest = example_messages_manifest();
+        manifest.name = name.into();
+        (name.to_owned(), manifest)
+    })
+    .collect();
+    let pool = Arc::new(UpstreamPool::from_manifests_disconnected(manifests));
+    let app = dashboard_router(
+        crate::governance_pages::state_with_catalog_pool(catalog, pool),
+        DashboardAuth::Disabled,
+    );
+    let (status, body) = body_of(app, "/t/default/servers").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let docs = server_row(&body, "docs");
+    assert!(
+        docs.contains("down"),
+        "runtime health still renders: {docs}"
+    );
+    assert!(docs.contains("catalog: quarantined"), "{docs}");
+    assert!(
+        docs.contains(&format!(
+            r#"<a href="/admin/t/default/catalog#srv-{quarantined}">Propose unquarantine</a>"#
+        )),
+        "a quarantined row links to the Catalog proposal control: {docs}"
+    );
+
+    let legacy = server_row(&body, "legacy");
+    assert!(legacy.contains("catalog: retired"), "{legacy}");
+    assert!(
+        !legacy.contains("/catalog#srv-"),
+        "retired has no resolving control: {legacy}"
+    );
+
+    let pending_row = server_row(&body, "pending-docs");
+    assert!(
+        pending_row.contains("catalog: pending approval"),
+        "{pending_row}"
+    );
+    assert!(pending_row.contains(&format!(
+        r#"<a href="/admin/t/default/catalog#srv-{pending}">Approve</a>"#
+    )));
+
+    let shared = server_row(&body, "shared");
+    assert!(shared.contains("catalog: quarantined"), "{shared}");
+    assert!(
+        !shared.contains(&format!("#srv-{foreign}")),
+        "another tenant's row offers no control: {shared}"
+    );
+
+    let unlisted = server_row(&body, "unlisted");
+    assert!(unlisted.contains("catalog: not in catalog"), "{unlisted}");
+
+    let live = server_row(&body, "live-docs");
+    assert!(
+        !live.contains("catalog:"),
+        "a live row shows runtime health only: {live}"
+    );
+    assert!(!body.contains(&format!("#srv-{shadowed}")));
+}
+
+/// Without a catalog store the page reports runtime health only.
+#[tokio::test]
+pub(crate) async fn servers_page_without_catalog_store_shows_no_lifecycle() {
+    let app = dashboard_router(state_with_manifests().await, DashboardAuth::Disabled);
+    let (status, body) = body_of(app, "/t/default/servers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!server_row(&body, "example-messages").contains("catalog:"));
+}

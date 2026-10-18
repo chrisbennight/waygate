@@ -111,6 +111,80 @@ impl ReconcileLatch {
 
 pub(crate) static CATALOG_RECONCILE_LATCH: ReconcileLatch = ReconcileLatch::new();
 
+/// Run the catalog reconcile an applied reload owes and settle its fences.
+///
+/// A reconcile is owed when the reload changed the served set, the latch is
+/// due, or the pool still holds an unsettled generation fence. `reconcile` is
+/// `None` when no catalog database is configured. Success settles the pool
+/// fence and the latch generation `observed` before the reload read disk;
+/// failure re-arms the latch so the next tick retries even without a manifest
+/// change. Returns the configuration-health detail of a failure.
+#[cfg(unix)]
+pub(crate) async fn reconcile_owed_catalog<R, Fut>(
+    pool: &UpstreamPool,
+    report: &waygate_upstream::ReloadReport,
+    observed: u64,
+    reconcile: Option<R>,
+    trigger: &str,
+) -> Option<String>
+where
+    R: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<waygate_catalog::ImportStats>>,
+{
+    let reconcile = reconcile?;
+    if report.is_noop() && !CATALOG_RECONCILE_LATCH.due() && !pool.catalog_reconcile_pending() {
+        return None;
+    }
+    match reconcile().await {
+        Ok(stats) => {
+            pool.settle_catalog_reconcile(report);
+            CATALOG_RECONCILE_LATCH.settle(observed);
+            tracing::info!(
+                servers = stats.servers,
+                tools = stats.tools,
+                "catalog reconciled from reloaded manifest set ({trigger})",
+            );
+            None
+        }
+        Err(e) => {
+            CATALOG_RECONCILE_LATCH.arm();
+            tracing::error!(
+                error = %e,
+                "catalog reconcile on reload FAILED (existing catalog preserved; \
+                 the next tick retries even without a manifest change)",
+            );
+            Some(format!(
+                "catalog reconcile failed after the manifest reload ({}) — the gateway \
+                 serves the reloaded set, but tools whose catalog facts have not converged \
+                 are refused until a retry succeeds",
+                e.root_cause()
+            ))
+        }
+    }
+}
+
+/// Publish manifest configuration health for an applied, unsuperseded
+/// reload. A ledger recovery or a failed catalog reconcile keeps it degraded,
+/// so the Servers page banner stays up until the cause clears; only a clean
+/// on-disk load whose owed reconcile succeeded reads healthy.
+#[cfg(unix)]
+pub(crate) fn publish_reload_health(
+    config_health: &waygate_upstream::ConfigHealth,
+    served: usize,
+    recovered: Option<String>,
+    catalog_failure: Option<String>,
+) {
+    match (recovered, catalog_failure) {
+        (None, None) => {
+            config_health.set_healthy(format!("{served} upstream(s) live from servers/*.yaml"))
+        }
+        (Some(detail), None) | (None, Some(detail)) => config_health.set_degraded(detail),
+        (Some(recovered), Some(failure)) => {
+            config_health.set_degraded(format!("{recovered}; {failure}"))
+        }
+    }
+}
+
 /// Background task that reloads on-disk policies + upstream manifests on
 /// SIGHUP. Errors during reload are logged and the previous state is kept
 /// — a botched policy file must never lock the operator out of the gateway.
@@ -993,48 +1067,31 @@ pub(crate) async fn reload_manifests_only(deps: &ReloadDeps) {
             // reflect the WINNING reload, whose own tick records them.
             if !report.superseded && report.resource_shape_restart_required.is_empty() {
                 let disk_loaded_cleanly = recovered.is_none();
-                match recovered {
-                    None => deps.config_health.set_healthy(format!(
-                        "{} upstream(s) live from servers/*.yaml",
-                        manifests.len()
-                    )),
-                    Some(detail) => deps.config_health.set_degraded(detail),
-                }
                 // Reconcile the tool-facts catalog from the served set on a
                 // change-detected doorbell/poll reload, so a classification
                 // change written to the live NFS dir takes effect
                 // without a restart (authz reads catalog facts ahead of the
                 // manifest fallback). Non-fatal + DB-pool-gated + change-gated,
                 // where a prior failed reconcile keeps the gate open until a
-                // retry succeeds — identical to the SIGHUP path.
-                if !report.is_noop()
-                    || CATALOG_RECONCILE_LATCH.due()
-                    || deps.pool.catalog_reconcile_pending()
-                {
-                    if let Some(catalog_pool) = deps.db_pool.as_ref() {
-                        match import_cmd::reconcile_catalog_from_manifests(catalog_pool, &manifests)
-                            .await
-                        {
-                            Ok(stats) => {
-                                deps.pool.settle_catalog_reconcile(&report);
-                                CATALOG_RECONCILE_LATCH.settle(reconcile_observed);
-                                tracing::info!(
-                                    servers = stats.servers,
-                                    tools = stats.tools,
-                                    "catalog reconciled from reloaded manifest set (doorbell/poll)",
-                                )
-                            }
-                            Err(e) => {
-                                CATALOG_RECONCILE_LATCH.arm();
-                                tracing::error!(
-                                    error = %e,
-                                    "catalog reconcile on reload FAILED (existing catalog preserved; \
-                                     the next tick retries even without a manifest change)",
-                                )
-                            }
-                        }
-                    }
-                }
+                // retry succeeds — identical to the SIGHUP path. Health is
+                // published after the attempt, so a retry that fails again
+                // never briefly reads healthy or restarts the stale age.
+                let catalog_failure = reconcile_owed_catalog(
+                    &deps.pool,
+                    &report,
+                    reconcile_observed,
+                    deps.db_pool.as_ref().map(|catalog_pool| {
+                        || import_cmd::reconcile_catalog_from_manifests(catalog_pool, &manifests)
+                    }),
+                    "doorbell/poll",
+                )
+                .await;
+                publish_reload_health(
+                    &deps.config_health,
+                    manifests.len(),
+                    recovered,
+                    catalog_failure,
+                );
                 // Re-sync the turnstile pointer to disk after a clean
                 // reload, so an out-of-band servers/*.yaml edit this replica just
                 // picked up (via the doorbell/poll) doesn't leave the pointer
@@ -1432,19 +1489,7 @@ pub(crate) async fn reload_once(deps: &ReloadDeps) {
             // — so the catalog, ledger, pointer, and fleet/audit state only ever
             // reflect the WINNING reload.
             if !report.superseded && report.resource_shape_restart_required.is_empty() {
-                // Refresh the config-health signal from the resolved source: a
-                // clean on-disk reload is healthy and clears any prior stale
-                // banner; a ledger recovery (on-disk set unreadable) stays
-                // DEGRADED even though the reload applied — the running set may be
-                // stale until servers/*.yaml is fixed.
                 let disk_loaded_cleanly = recovered.is_none();
-                match recovered {
-                    None => config_health.set_healthy(format!(
-                        "{} upstream(s) live from servers/*.yaml",
-                        manifests.len()
-                    )),
-                    Some(detail) => config_health.set_degraded(detail),
-                }
                 // The tool-facts catalog tracks the served set on a CHANGE-detected
                 // reload, not only at boot, so a classification change written to
                 // the live NFS servers dir takes
@@ -1453,34 +1498,22 @@ pub(crate) async fn reload_once(deps: &ReloadDeps) {
                 // existing catalog and arms the pending flag, so the NEXT tick
                 // retries even when its pool reload reports no change. Gated on
                 // the DB pool and on change-or-pending (no per-tick DB churn).
-                if !report.is_noop()
-                    || CATALOG_RECONCILE_LATCH.due()
-                    || pool.catalog_reconcile_pending()
-                {
-                    if let Some(catalog_pool) = deps.db_pool.as_ref() {
-                        match import_cmd::reconcile_catalog_from_manifests(catalog_pool, &manifests)
-                            .await
-                        {
-                            Ok(stats) => {
-                                pool.settle_catalog_reconcile(&report);
-                                CATALOG_RECONCILE_LATCH.settle(reconcile_observed);
-                                tracing::info!(
-                                    servers = stats.servers,
-                                    tools = stats.tools,
-                                    "catalog reconciled from reloaded manifest set (SIGHUP)",
-                                )
-                            }
-                            Err(e) => {
-                                CATALOG_RECONCILE_LATCH.arm();
-                                tracing::error!(
-                                    error = %e,
-                                    "catalog reconcile on reload FAILED (existing catalog preserved; \
-                                     the next tick retries even without a manifest change)",
-                                )
-                            }
-                        }
-                    }
-                }
+                let catalog_failure = reconcile_owed_catalog(
+                    pool,
+                    &report,
+                    reconcile_observed,
+                    deps.db_pool.as_ref().map(|catalog_pool| {
+                        || import_cmd::reconcile_catalog_from_manifests(catalog_pool, &manifests)
+                    }),
+                    "SIGHUP",
+                )
+                .await;
+                // Refresh the config-health signal from the resolved source and
+                // the reconcile: a clean on-disk reload whose catalog converged is
+                // healthy and clears any prior stale banner; a ledger recovery
+                // (on-disk set unreadable) or a failed reconcile stays DEGRADED
+                // even though the reload applied.
+                publish_reload_health(config_health, manifests.len(), recovered, catalog_failure);
                 // Reconcile the turnstile pointer on a clean SIGHUP reload
                 // too — SIGHUP is exactly how an operator applies an
                 // out-of-band servers/*.yaml edit, so the pointer must re-sync

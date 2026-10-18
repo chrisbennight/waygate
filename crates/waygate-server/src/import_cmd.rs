@@ -522,13 +522,13 @@ fn to_import_server(m: &UpstreamManifest) -> ImportServer {
     if m.tier_c_peer.is_some() {
         rt.insert("tier_c_peer".into(), serde_json::json!(m.tier_c_peer));
     }
-    // `session` (today the `concurrency` pool-size override) is
+    // `session` (including the `concurrency` limit) is
     // connection-shaping — it sizes the slot pool at dial time.
     // Without round-tripping
     // it through `runtime_target`, a `--import-manifests` pass
-    // would store catalog metadata lacking the override, so any
-    // runtime-target-backed dial would silently fall back to the
-    // global `GATEWAY_UPSTREAM_POOL_SIZE`. Same regression shape
+    // would store catalog metadata lacking the limit, so any
+    // runtime-target-backed dial would silently admit unlimited
+    // calls on the global `GATEWAY_UPSTREAM_POOL_SIZE`. Same regression shape
     // as the auth / exchange / mtls / tier_c_peer round-trips
     // above; only emitted when present so the JSONB stays minimal
     // for upstreams on the global default.

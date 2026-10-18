@@ -1239,6 +1239,107 @@ async fn in_process_drift_quarantine_is_its_own_refusal() {
     );
 }
 
+/// A server the catalog has quarantined or retired is reported as blocked
+/// even when the live contract check would refuse the tool for its own
+/// reason or call it temporarily unavailable, so a caller is never told to
+/// retry a call that only an administrator can unblock.
+#[tokio::test]
+async fn a_catalog_server_block_outranks_live_contract_reasons() {
+    let quarantined_catalog = |retired| -> waygate_catalog::SharedCatalogStore {
+        Arc::new(ScriptedCatalog {
+            outcome: std::sync::Mutex::new(Some(waygate_catalog::ResolvedTool::Quarantined {
+                server_name: "example-messages".into(),
+                tool_name: "send_message".into(),
+                retired,
+            })),
+            err: false,
+            ..Default::default()
+        })
+    };
+    for (retired, expected) in [
+        (false, ToolRefusal::ServerQuarantined),
+        (true, ToolRefusal::ServerRetired),
+    ] {
+        // No connected session: the live check alone reports a temporary state.
+        let mut manifest = manifest_with(false);
+        manifest.classification_mode = crate::ClassificationMode::McpAnnotations;
+        let mut approved = classification("send_message");
+        approved.approved_behavior_hash = Some("a".repeat(64));
+        manifest.tools = vec![approved];
+        let disconnected = UpstreamPool::from_manifests_disconnected(BTreeMap::from([(
+            "example-messages".to_owned(),
+            manifest,
+        )]))
+        .with_catalog(quarantined_catalog(retired));
+        assert_eq!(
+            refusal_reason(
+                disconnected
+                    .resolve_invocation_tool("default", "example-messages", "send_message")
+                    .await
+            ),
+            Ok(expected),
+            "disconnected, retired={retired}",
+        );
+
+        // An in-process drift quarantine is a per-tool reason.
+        let drifted = pool_with_one_upstream("send_message", RiskTier::High)
+            .with_catalog(quarantined_catalog(retired));
+        drifted
+            .entries
+            .load()
+            .get("example-messages")
+            .expect("entry")
+            .quarantined
+            .write()
+            .expect("upstream quarantine lock poisoned")
+            .insert("send_message".to_owned());
+        assert_eq!(
+            refusal_reason(
+                drifted
+                    .resolve_invocation_tool("default", "example-messages", "send_message")
+                    .await
+            ),
+            Ok(expected),
+            "drift quarantined, retired={retired}",
+        );
+    }
+}
+
+/// A catalog transition that has not converged is temporary for a live
+/// server, but a quarantined or retired server stays reported as blocked.
+#[tokio::test]
+async fn a_catalog_server_block_outranks_a_converging_transition() {
+    let catalog: waygate_catalog::SharedCatalogStore = Arc::new(ScriptedCatalog {
+        outcome: std::sync::Mutex::new(Some(waygate_catalog::ResolvedTool::Quarantined {
+            server_name: "example-messages".into(),
+            tool_name: "send_message".into(),
+            retired: false,
+        })),
+        err: false,
+        ..Default::default()
+    });
+    let manifest_set = |risk| {
+        let mut manifest = manifest_with(false);
+        manifest.tools = vec![ToolClassification::new("send_message", risk, true, false)];
+        BTreeMap::from([("example-messages".to_owned(), manifest)])
+    };
+    let pool = UpstreamPool::from_manifests_disconnected(manifest_set(RiskTier::High))
+        .with_catalog(catalog);
+    // A governance-only edit leaves the tool's catalog facts unsettled.
+    pool.reload_manifests(&manifest_set(RiskTier::Medium)).await;
+    assert!(pool
+        .catalog_transition_state("example-messages", "send_message")
+        .is_some_and(|transition| transition.pending));
+
+    assert_eq!(
+        refusal_reason(
+            pool.resolve_invocation_tool("default", "example-messages", "send_message")
+                .await
+        ),
+        Ok(ToolRefusal::ServerQuarantined),
+    );
+}
+
 #[tokio::test]
 async fn resolved_side_effects_reports_resolver_facts_and_defaults_conservative() {
     // Ready snapshot: the derived side-effect fact is returned as-is
@@ -2344,6 +2445,10 @@ fn resolve_isolation_defaults_paranoid_and_forces_stdio_reuse() {
 }
 
 fn entry_with_slots(n: usize) -> Arc<UpstreamEntry> {
+    entry_with_lanes(n, false)
+}
+
+fn entry_with_lanes(n: usize, bounded: bool) -> Arc<UpstreamEntry> {
     let slots = (0..n)
         .map(|_| ConnectionSlot {
             conn: RwLock::new(None),
@@ -2352,7 +2457,7 @@ fn entry_with_slots(n: usize) -> Arc<UpstreamEntry> {
         .collect();
     Arc::new(UpstreamEntry {
         manifest: StdRwLock::new(manifest_with(false)),
-        slots: lanes::ConnectionSlots::new(slots),
+        slots: lanes::ConnectionSlots::new(slots, bounded),
         session_mutation: Mutex::new(()),
         forwards_identity: false,
         breaker: Breaker::new(BreakerConfig::default()),
@@ -2547,6 +2652,109 @@ async fn a_waiting_checkout_does_not_stall_on_a_busy_slot_being_reconnected() {
     drop(dispatching);
     drop(busy);
     reconnect.await.unwrap();
+}
+
+/// Only stdio and an explicit `session.concurrency` bound the calls in flight;
+/// an HTTP/SSE upstream is unbounded by default, including with a `session`
+/// block that leaves `concurrency` unset.
+#[test]
+fn calls_are_bounded_only_by_stdio_or_explicit_concurrency() {
+    let session = |concurrency| crate::SessionConfig {
+        concurrency,
+        isolation: None,
+        scope: None,
+        retry_on_setup_failure: None,
+    };
+    for transport in [Transport::Http, Transport::Sse] {
+        let mut network = manifest_with(false);
+        network.transport = transport;
+        assert!(!lanes::calls_bounded(&network));
+        network.session = Some(session(None));
+        assert!(!lanes::calls_bounded(&network));
+        network.session = Some(session(Some(3)));
+        assert!(lanes::calls_bounded(&network));
+    }
+    let mut stdio = manifest_with(false);
+    stdio.transport = Transport::Stdio;
+    assert!(lanes::calls_bounded(&stdio));
+}
+
+fn admitted_now<'a>(
+    entry: &'a UpstreamEntry,
+    isolation: crate::SessionIsolation,
+) -> lanes::CallLane<'a> {
+    use futures::FutureExt;
+
+    entry
+        .admit(isolation)
+        .now_or_never()
+        .expect("admission must not wait")
+}
+
+/// An unbounded upstream admits more per-call calls than it has slots, all at
+/// once, and they leave every slot free for a reuse call.
+#[tokio::test]
+async fn unbounded_per_call_admission_never_waits_or_takes_a_slot() {
+    use crate::SessionIsolation;
+
+    let entry = entry_with_lanes(2, false);
+    let shared: Vec<_> = (0..8)
+        .map(|_| admitted_now(&entry, SessionIsolation::PerCall))
+        .collect();
+    assert!(shared
+        .iter()
+        .all(|lane| lane.isolation == SessionIsolation::PerCall));
+    let first = admitted_now(&entry, SessionIsolation::Reuse);
+    let second = admitted_now(&entry, SessionIsolation::Reuse);
+    assert_eq!(first.isolation, SessionIsolation::Reuse);
+    assert_eq!(second.isolation, SessionIsolation::Reuse);
+    assert!(
+        !std::ptr::eq(first.slot, second.slot),
+        "reuse calls hold distinct slots"
+    );
+}
+
+/// On an unbounded upstream a reuse call that finds every slot busy runs on
+/// its own session instead of waiting, and a freed slot is reused again.
+#[tokio::test]
+async fn unbounded_reuse_admission_runs_per_call_when_every_slot_is_busy() {
+    use crate::SessionIsolation;
+
+    let entry = entry_with_lanes(1, false);
+    let held = admitted_now(&entry, SessionIsolation::Reuse);
+    assert_eq!(held.isolation, SessionIsolation::Reuse);
+    let overflow = admitted_now(&entry, SessionIsolation::Reuse);
+    assert_eq!(overflow.isolation, SessionIsolation::PerCall);
+    drop(held);
+    let reused = admitted_now(&entry, SessionIsolation::Reuse);
+    assert_eq!(reused.isolation, SessionIsolation::Reuse);
+    drop(overflow);
+}
+
+/// A bounded upstream admits no more calls than its slots, of either
+/// isolation, and admits a waiting call once one finishes.
+#[tokio::test]
+async fn bounded_admission_caps_calls_in_flight() {
+    use crate::SessionIsolation;
+
+    for isolation in [SessionIsolation::PerCall, SessionIsolation::Reuse] {
+        let entry = entry_with_lanes(2, true);
+        let first = admitted_now(&entry, isolation);
+        let second = admitted_now(&entry, isolation);
+        let waiting = {
+            let entry = entry.clone();
+            tokio::spawn(async move { entry.admit(isolation).await.isolation })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "the third call waits for a permit");
+        drop(first);
+        let admitted = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("a finished call admits the next")
+            .unwrap();
+        assert_eq!(admitted, isolation, "a bounded call keeps its isolation");
+        drop(second);
+    }
 }
 
 /// Regression for the 2026-06-10 prod boot deadlock: a stdio upstream that
@@ -3020,11 +3228,14 @@ fn entry_with_classification(tool_name: &str, risk: RiskTier) -> Arc<UpstreamEnt
         .tools
         .push(ToolClassification::new(tool_name, risk, false, false));
     Arc::new(UpstreamEntry {
+        slots: lanes::ConnectionSlots::new(
+            vec![ConnectionSlot {
+                conn: RwLock::new(None),
+                in_use: Mutex::new(()),
+            }],
+            lanes::calls_bounded(&manifest),
+        ),
         manifest: StdRwLock::new(manifest),
-        slots: lanes::ConnectionSlots::new(vec![ConnectionSlot {
-            conn: RwLock::new(None),
-            in_use: Mutex::new(()),
-        }]),
         session_mutation: Mutex::new(()),
         forwards_identity: false,
         breaker: Breaker::new(BreakerConfig::default()),
@@ -4676,7 +4887,17 @@ async fn refusal_report_matches_the_call_path_for_catalog_states() {
     ];
     for (case, pool, expected) in cases {
         let report = report_matches_call_path(&pool, "garage", &names).await;
-        // Admission refuses the unclassified name before the catalog is read.
+        // Admission refuses the unclassified name before the catalog is read,
+        // but a quarantined or retired server outranks that reason too.
+        let server_block = matches!(
+            expected,
+            ToolBlock::Refused(ToolRefusal::ServerQuarantined | ToolRefusal::ServerRetired)
+        );
+        let unclassified = if server_block {
+            expected
+        } else {
+            ToolBlock::Refused(ToolRefusal::Unclassified)
+        };
         let blocks: Vec<_> = report
             .tools
             .iter()
@@ -4685,7 +4906,7 @@ async fn refusal_report_matches_the_call_path_for_catalog_states() {
         assert_eq!(
             blocks,
             vec![
-                ("extra", ToolBlock::Refused(ToolRefusal::Unclassified)),
+                ("extra", unclassified),
                 ("ghost", expected),
                 ("read", expected),
             ],
@@ -4741,25 +4962,59 @@ async fn refusal_report_matches_the_call_path_for_catalog_states() {
 /// for the same refusal.
 #[tokio::test]
 async fn refusal_report_logs_records_and_signals_nothing() {
-    let sink = Arc::new(waygate_mcp::audit::InMemorySink::new());
-    let mut manifest = manifest_with(false);
-    manifest.tools.push(classification("send"));
-    let pool = UpstreamPool::from_manifests_disconnected(BTreeMap::from([(
-        "example-messages".to_owned(),
-        manifest,
-    )]))
-    .with_evidence(sink.clone())
-    .with_authoritative_catalog(scripted(None, true));
-    pool.entries
-        .load()
-        .get("example-messages")
-        .expect("entry")
-        .quarantined
-        .write()
-        .expect("upstream quarantine lock poisoned")
-        .insert("send".to_owned());
+    // A drift-quarantined tool and one whose catalog read fails: the call
+    // path logs each and signals discovery about the failure.
+    let refusing_pool = |sink: Arc<waygate_mcp::audit::InMemorySink>| {
+        let mut manifest = manifest_with(false);
+        manifest.tools.push(classification("send"));
+        let pool = UpstreamPool::from_manifests_disconnected(BTreeMap::from([(
+            "example-messages".to_owned(),
+            manifest,
+        )]))
+        .with_evidence(sink)
+        .with_authoritative_catalog(scripted(None, true));
+        pool.entries
+            .load()
+            .get("example-messages")
+            .expect("entry")
+            .quarantined
+            .write()
+            .expect("upstream quarantine lock poisoned")
+            .insert("send".to_owned());
+        pool
+    };
     let events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let _subscriber = tracing::subscriber::set_default(CountingSubscriber(events.clone()));
+
+    // Control first, on an identical pool: this subscriber must observe the
+    // call path's log events, or "the report logs nothing" below would pass
+    // vacuously. A test on another thread can register those log callsites
+    // while no subscriber wants them, caching them as disabled, so rebuild
+    // the cache and retry a bounded number of times. Once observed, later
+    // rebuilds include this subscriber and cannot disable them again.
+    let control = refusing_pool(Arc::new(waygate_mcp::audit::InMemorySink::new()));
+    let mut observed = 0;
+    for _ in 0..20 {
+        events.store(0, Ordering::SeqCst);
+        tracing::callsite::rebuild_interest_cache();
+        for tool in ["send", "send_message"] {
+            assert!(!matches!(
+                control
+                    .resolve_invocation_tool("default", "example-messages", tool)
+                    .await,
+                ResolvedInvocationTool::Ready(_)
+            ));
+        }
+        observed = events.load(Ordering::SeqCst);
+        if observed >= 2 {
+            break;
+        }
+    }
+    assert!(observed >= 2, "the call path logs: {observed} events");
+
+    let sink = Arc::new(waygate_mcp::audit::InMemorySink::new());
+    let pool = refusing_pool(sink.clone());
+    events.store(0, Ordering::SeqCst);
     let error_generation = pool.discovery_error_generation();
 
     let report = server_report(&pool, "example-messages").await;
@@ -4781,7 +5036,7 @@ async fn refusal_report_logs_records_and_signals_nothing() {
     assert_eq!(pool.discovery_error_generation(), error_generation);
     assert!(sink.snapshot().await.is_empty(), "no audit record");
 
-    // The call path, given the same state, logs both and signals the failure.
+    // The call path, given the same state, signals the failure.
     for tool in ["send", "send_message"] {
         assert!(!matches!(
             pool.resolve_invocation_tool("default", "example-messages", tool)
@@ -4789,7 +5044,6 @@ async fn refusal_report_logs_records_and_signals_nothing() {
             ResolvedInvocationTool::Ready(_)
         ));
     }
-    assert!(events.load(Ordering::SeqCst) >= 2, "the call path logs");
     assert_ne!(pool.discovery_error_generation(), error_generation);
 }
 

@@ -1163,3 +1163,153 @@ pub(crate) async fn activity_rows_omit_an_absent_operation() {
         "an absent operation must render nothing at all"
     );
 }
+
+// ---- exact tool / reason / trace filters -----------------------------------
+
+/// Three refusal-shaped rows that differ in tool, reason, and trace id, plus
+/// the default fixture row whose reason only contains a refusal word.
+fn refusal_rows() -> Vec<AuditRow> {
+    let mut quarantined = sample_row("denied", Some("example-messages"), Some("high"));
+    quarantined.tool = Some("send_msg".into());
+    quarantined.reason = Some("refused:server_quarantined".into());
+    quarantined.trace_id = Some("4bf92f3577b34da6a3ce929d0e0e4736".into());
+    quarantined.principal_sub = Some("agent-quarantined".into());
+    quarantined.principal_email = None;
+    let mut drifted = sample_row("denied", Some("example-messages"), Some("low"));
+    drifted.tool = Some("list_contacts".into());
+    drifted.reason = Some("refused:drift_quarantined".into());
+    drifted.trace_id = Some("00f067aa0ba902b7a3ce929d0e0e4736".into());
+    drifted.principal_sub = Some("agent-drifted".into());
+    drifted.principal_email = None;
+    let mut other = sample_row("success", Some("example-messages"), Some("low"));
+    other.tool = Some("send_msg_batch".into());
+    other.reason = Some("refused:server_quarantined (copied)".into());
+    other.trace_id = Some("4bf92f3577b34da6".into());
+    other.principal_sub = Some("agent-other".into());
+    other.principal_email = None;
+    vec![quarantined, drifted, other]
+}
+
+async fn refusal_state() -> Arc<AdminState> {
+    let audit: Arc<dyn AuditReader> = Arc::new(MemoryAudit {
+        rows: refusal_rows(),
+    });
+    state_with_audit_reader(audit).await
+}
+
+/// Each new filter is an exact match against the whole recorded value: a
+/// longer tool name, a reason that merely contains the value, and a trace id
+/// prefix are all excluded.
+#[tokio::test]
+pub(crate) async fn activity_rows_filter_by_exact_tool_reason_and_trace_id() {
+    let app = dashboard_router(refusal_state().await, DashboardAuth::Disabled);
+    for (query, expected) in [
+        ("tool=send_msg", "agent-quarantined"),
+        ("reason=refused%3Adrift_quarantined", "agent-drifted"),
+        (
+            "trace_id=4bf92f3577b34da6a3ce929d0e0e4736",
+            "agent-quarantined",
+        ),
+        (
+            "tool=send_msg&reason=refused%3Aserver_quarantined&trace_id=4bf92f3577b34da6a3ce929d0e0e4736",
+            "agent-quarantined",
+        ),
+    ] {
+        let (status, body) = body_of(app.clone(), &format!("/activity/rows?{query}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body.matches("data-audit-id=").count(),
+            1,
+            "?{query} must select exactly one row: {body}"
+        );
+        assert!(body.contains(expected), "?{query} selected the wrong row");
+    }
+    let (_, body) = body_of(app, "/activity/rows?reason=refused%3Aserver").await;
+    assert!(
+        body.contains("No events match these filters"),
+        "a reason fragment must match nothing"
+    );
+}
+
+/// The filter form, active-filter chips, and every derived link carry the new
+/// filters inside the tenant prefix.
+#[tokio::test]
+pub(crate) async fn activity_page_renders_tool_reason_and_trace_filters_tenant_prefixed() {
+    let app = dashboard_router(refusal_state().await, DashboardAuth::Disabled);
+    let (status, body) = body_of(
+        app,
+        "/t/default/activity?tool=send_msg&reason=refused%3Aserver_quarantined&trace_id=4bf92f3577b34da6a3ce929d0e0e4736",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // The form inputs re-populate from the URL.
+    for (id, value) in [
+        ("f-tool", "send_msg"),
+        ("f-reason", "refused:server_quarantined"),
+        ("f-trace", "4bf92f3577b34da6a3ce929d0e0e4736"),
+    ] {
+        let start = body
+            .find(&format!(r#"id="{id}""#))
+            .unwrap_or_else(|| panic!("{id} input missing"));
+        let input = &body[start..start + body[start..].find('>').unwrap()];
+        assert!(
+            input.contains(&format!(r#"value="{value}""#)),
+            "{id} must re-populate: {input}"
+        );
+    }
+    assert!(body.contains(r#"action="/admin/t/default/activity""#));
+    // One chip per filter, each clearing only itself inside the tenant mount.
+    assert!(body.contains("tool: send_msg"), "tool chip missing");
+    assert!(
+        body.contains("reason: refused:server_quarantined"),
+        "reason chip missing"
+    );
+    assert!(
+        body.contains("trace: 4bf92f3577b34da6a3ce929d0e0e4736"),
+        "trace chip missing"
+    );
+    let amp = |url: &str| url.replace('&', "&#38;");
+    for clear in [
+        "/admin/t/default/activity?reason=refused%3Aserver_quarantined&trace_id=4bf92f3577b34da6a3ce929d0e0e4736",
+        "/admin/t/default/activity?tool=send_msg&trace_id=4bf92f3577b34da6a3ce929d0e0e4736",
+        "/admin/t/default/activity?tool=send_msg&reason=refused%3Aserver_quarantined",
+    ] {
+        assert!(
+            body.contains(&format!(r#"href="{}""#, amp(clear)))
+                || body.contains(&format!(r#"href="{}""#, clear.replace('&', "&amp;"))),
+            "chip clear link {clear} missing"
+        );
+    }
+    // The live-tail toggle keeps the filters too.
+    let live = "/admin/t/default/activity?tool=send_msg&reason=refused%3Aserver_quarantined&trace_id=4bf92f3577b34da6a3ce929d0e0e4736&live=1";
+    assert!(
+        body.contains(&amp(live)) || body.contains(&live.replace('&', "&amp;")),
+        "live-tail toggle must carry the filters"
+    );
+    assert_eq!(body.matches("data-audit-id=").count(), 1);
+}
+
+/// A saved view stores and restores the new filters with the others.
+#[tokio::test]
+pub(crate) async fn activity_saved_view_restores_tool_reason_and_trace_filters() {
+    let view = crate::activity_live::seeded_saved_view(
+        "quarantine-refusals",
+        serde_json::json!({
+            "tool": "send_msg",
+            "reason": "refused:server_quarantined",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        }),
+    );
+    let state = crate::activity_live::state_with_saved_views(vec![view]).await;
+    let app = dashboard_router(state, DashboardAuth::Disabled);
+    let (status, body) = body_of(app, "/t/default/activity?load_view=quarantine-refusals").await;
+    assert_eq!(status, StatusCode::OK);
+    for value in [
+        r#"name="tool" value="send_msg""#,
+        r#"name="reason" value="refused:server_quarantined""#,
+        r#"name="trace_id" value="4bf92f3577b34da6a3ce929d0e0e4736""#,
+    ] {
+        assert!(body.contains(value), "saved-view form must carry {value}");
+    }
+    assert!(body.contains("reason: refused:server_quarantined"));
+}

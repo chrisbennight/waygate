@@ -23,11 +23,13 @@ caller's credential profile, server-discovery decision, current catalog
 admission state, and per-tool Cedar decision before ranking. A denied,
 quarantined, retired, or profile-restricted record is therefore absent before
 document frequencies, result counts, and cursors are computed. Unknown and
-invisible selectors have one `tool_unavailable` response shape. Invocation
-follows the same rule: `tools/call` on a name the gateway does not hold, or
-withholds from the caller, returns one INVALID_PARAMS `tool_unavailable` error
-carrying only the name and a trace id. Only a caller who may discover a quarantined or
-retired server is told that the server is blocked.
+invisible selectors have one `tool_unavailable` response shape. At invocation,
+`tools/call` on a name the gateway does not hold, or one its catalog refuses
+(unclassified, unapproved, or held for review, for example), returns one
+INVALID_PARAMS `tool_unavailable` error carrying only the name and a trace id.
+Only a caller who may discover a quarantined or retired server is told that the
+server is blocked. A catalog-admitted tool that Cedar policy denies is still
+reported as `forbidden` at invocation.
 Risk, side-effect, PII, approval, and step-up classifications stay inside the
 gateway; discovery search and inspection, and Code Mode search and describe,
 do not return them. Invocation evaluates them at the authoritative call
@@ -325,7 +327,9 @@ Use this recovery sequence:
    `POST /api/v1/servers/{name}/quarantine/clear`) before refreshing and
    rechecking. This runtime action is distinct from restoring a durable
    quarantined catalog row, which requires the governed
-   `catalog.server.unquarantine` change. When no runtime quarantine is present,
+   `catalog.server.unquarantine` change; the dashboard's Servers page marks
+   such a server with a catalog chip linked to that control. When no runtime
+   quarantine is present,
    refresh the source through the dashboard,
    `POST /api/v1/servers/{name}/catalog/refresh`, or
    `gateway-control.refresh_server_catalog`.

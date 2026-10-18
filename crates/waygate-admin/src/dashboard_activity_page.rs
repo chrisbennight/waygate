@@ -45,6 +45,16 @@ pub struct ActivityFilters {
     /// non-empty value.
     #[serde(default)]
     pub(crate) pii: Option<String>,
+    /// Exact tool name (unqualified, as recorded in `audit_log.tool`).
+    #[serde(default)]
+    pub(crate) tool: Option<String>,
+    /// Exact `audit_log.reason`, such as a refusal reason copied from an
+    /// event. Matches the whole string; a fragment matches nothing.
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+    /// Exact `audit_log.trace_id`, the identifier a refused caller receives.
+    #[serde(default)]
+    pub(crate) trace_id: Option<String>,
     /// Relative time-window. `15m | 1h | 24h | 7d | 30d`.
     /// Empty/unknown ⇒ no filter; the page is a browser, not
     /// an API, so unparseable values are silently dropped
@@ -153,6 +163,9 @@ impl ActivityFilters {
             principal: norm(self.principal),
             category: norm(self.category),
             pii,
+            tool: norm(self.tool),
+            reason: norm(self.reason),
+            trace_id: norm(self.trace_id),
             since,
             after_id: self.after_id,
             since_id: norm(self.since_id),
@@ -190,6 +203,9 @@ impl ActivityFilters {
             principal: str_field(j, "principal"),
             category: str_field(j, "category"),
             pii: str_field(j, "pii"),
+            tool: str_field(j, "tool"),
+            reason: str_field(j, "reason"),
+            trace_id: str_field(j, "trace_id"),
             since: str_field(j, "since"),
             after_id: None,
             since_id: None,
@@ -214,6 +230,9 @@ impl ActivityFilters {
             "principal": self.principal.clone().unwrap_or_default(),
             "category": self.category.clone().unwrap_or_default(),
             "pii": self.pii.clone().unwrap_or_default(),
+            "tool": self.tool.clone().unwrap_or_default(),
+            "reason": self.reason.clone().unwrap_or_default(),
+            "trace_id": self.trace_id.clone().unwrap_or_default(),
             "since": self.since.clone().unwrap_or_default(),
         })
     }
@@ -240,6 +259,15 @@ impl ActivityFilters {
         }
         if let Some(v) = &self.pii {
             s.push_str(&format!("&pii={}", urlencode(v)));
+        }
+        if let Some(v) = &self.tool {
+            s.push_str(&format!("&tool={}", urlencode(v)));
+        }
+        if let Some(v) = &self.reason {
+            s.push_str(&format!("&reason={}", urlencode(v)));
+        }
+        if let Some(v) = &self.trace_id {
+            s.push_str(&format!("&trace_id={}", urlencode(v)));
         }
         // The default 24h window is the implicit baseline — omit it from
         // derived URLs (chips, live-tail / compare / pagination fragments) so
@@ -374,6 +402,9 @@ impl ActivityFilters {
             // The Activity feed shows all evidence rows, including the
             // fail-closed `pre_call` rows; only the Decision Log excludes them.
             reason_ne: None,
+            tool: self.tool.clone(),
+            reason: self.reason.clone(),
+            trace_id: self.trace_id.clone(),
         }
     }
 }
@@ -474,6 +505,11 @@ struct ActivityPage {
     /// Current Principal text-input value — same reasoning as
     /// `server`.
     principal: Option<String>,
+    /// Current Tool, Reason, and Trace id text-input values — same
+    /// reasoning as `server`.
+    tool: Option<String>,
+    reason: Option<String>,
+    trace_id: Option<String>,
     /// Current Outcome selection so the `<select>` re-renders
     /// with the right `<option selected>` after the form's GET
     /// round-trip. The filter form is a plain GET (not an
@@ -860,6 +896,9 @@ pub(crate) async fn activity_page(
         pii: filters.pii.clone(),
         server: filters.server.clone(),
         principal: filters.principal.clone(),
+        tool: filters.tool.clone(),
+        reason: filters.reason.clone(),
+        trace_id: filters.trace_id.clone(),
         outcome: filters.outcome.clone(),
         risk: filters.risk.clone(),
         saved_views,
@@ -1160,6 +1199,12 @@ pub(crate) struct SaveSavedViewForm {
     #[serde(default)]
     pii: String,
     #[serde(default)]
+    tool: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    trace_id: String,
+    #[serde(default)]
     since: String,
 }
 
@@ -1224,6 +1269,9 @@ pub(crate) async fn save_activity_view(
         principal: Some(body.principal),
         category: Some(body.category),
         pii: Some(body.pii),
+        tool: Some(body.tool),
+        reason: Some(body.reason),
+        trace_id: Some(body.trace_id),
         since: Some(body.since),
         after_id: None,
         since_id: None,
@@ -1791,6 +1839,9 @@ fn build_active_filter_chips(
             "principal" => without.principal = None,
             "category" => without.category = None,
             "pii" => without.pii = None,
+            "tool" => without.tool = None,
+            "reason" => without.reason = None,
+            "trace_id" => without.trace_id = None,
             "since" => without.since = None,
             _ => {}
         }
@@ -1838,10 +1889,17 @@ fn build_active_filter_chips(
         &filters.pii
     );
     maybe_chip!("server", |v: &str| format!("server: {v}"), &filters.server);
+    maybe_chip!("tool", |v: &str| format!("tool: {v}"), &filters.tool);
     maybe_chip!(
         "principal",
         |v: &str| format!("principal contains: {v}"),
         &filters.principal
+    );
+    maybe_chip!("reason", |v: &str| format!("reason: {v}"), &filters.reason);
+    maybe_chip!(
+        "trace_id",
+        |v: &str| format!("trace: {v}"),
+        &filters.trace_id
     );
     // The active time window renders as a chip only when it differs from the
     // default 24h view — the default isn't a user-applied filter, so a

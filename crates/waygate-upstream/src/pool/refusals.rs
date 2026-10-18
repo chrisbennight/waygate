@@ -140,20 +140,36 @@ impl UpstreamPool {
                 None => None,
             };
             for (name, transition) in chunk.iter().zip(transitions) {
+                let catalog_row = catalog
+                    .as_mut()
+                    .map(|rows| rows.next().expect("one catalog result per name"));
+                // The call path gives a quarantined or retired server
+                // precedence over every other reason; this batch's catalog
+                // row is the same read it would take.
+                let server_block = match &catalog_row {
+                    Some(Ok(waygate_catalog::ResolvedTool::Quarantined { retired, .. })) => {
+                        Some(*retired)
+                    }
+                    _ => None,
+                };
                 let reads = BatchReads {
                     review: reviews
                         .as_ref()
                         .map(|reviews| reviews.get(name).cloned())
                         .map_err(|_| ()),
-                    catalog: catalog
-                        .as_mut()
-                        .map(|rows| rows.next().expect("one catalog result per name")),
+                    catalog: catalog_row,
                     transition,
                 };
-                let block = match self
+                let resolved = self
                     .admit(tenant, server, name, AdmissionSource::Status(reads))
-                    .await
-                {
+                    .await;
+                let resolved = match server_block {
+                    Some(retired) if super::defers_to_server_block(&resolved) => {
+                        super::contract_binding::server_block_refusal(server, name, retired)
+                    }
+                    _ => resolved,
+                };
+                let block = match resolved {
                     ResolvedInvocationTool::Ready(_) => continue,
                     ResolvedInvocationTool::Refused { reason, .. } => ToolBlock::Refused(reason),
                     ResolvedInvocationTool::Unavailable { reason, .. } => {

@@ -82,6 +82,140 @@ struct ServerRow {
     /// Each entry identifies the tool and rejected root type so an operator
     /// can inspect the cause without filtering the activity log.
     rejected_output_schemas: Vec<crate::servers::OutputSchemaRejectionView>,
+    /// Governed-catalog lifecycle when it is not `live`. Runtime health says
+    /// whether the upstream answers; this says whether the gateway serves its
+    /// tools, so a reachable but blocked server never reads only "ok".
+    catalog: Option<CatalogLifecycleView>,
+}
+
+/// A configured server's catalog state that blocks or holds its tools.
+struct CatalogLifecycleView {
+    /// `quarantined`, `retired`, `pending approval`, `not in catalog`, or
+    /// `status unavailable`.
+    label: &'static str,
+    /// Chip modifier (`bad` or `warn`). The label always names the state, so
+    /// color is never its only signal.
+    tone: &'static str,
+    /// What the state means for callers and how it clears.
+    detail: &'static str,
+    /// The Catalog tab control that resolves the state. Present only when the
+    /// viewer's tenant owns the row and the Catalog tab offers a control.
+    action: Option<CatalogActionLink>,
+}
+
+struct CatalogActionLink {
+    /// Tenant-aware Catalog tab URL anchored at the server's row.
+    href: String,
+    label: &'static str,
+}
+
+/// The governed-catalog rows this page joins to configured servers.
+enum CatalogRows {
+    /// No catalog store is configured, or the viewer lacks the admin scope the
+    /// Catalog tab requires; the page shows runtime health only.
+    NotRead,
+    /// The catalog read failed, so no row's lifecycle can be stated.
+    Unavailable,
+    /// Visible rows by server name. An own-tenant row shadows a global row of
+    /// the same name, the precedence invocation resolution applies.
+    Read(std::collections::BTreeMap<String, waygate_catalog::CatalogServerSummary>),
+}
+
+/// Read the catalog through the Catalog tab's `list_servers` view: rows owned
+/// by `tenant` plus global rows, across every lifecycle state.
+async fn read_catalog_rows(state: &AdminState, is_admin: bool, tenant: &str) -> CatalogRows {
+    if !is_admin {
+        return CatalogRows::NotRead;
+    }
+    let Some(store) = state.servers.catalog.get() else {
+        return CatalogRows::NotRead;
+    };
+    match store.list_servers(tenant).await {
+        Ok(rows) => {
+            let mut by_name = std::collections::BTreeMap::new();
+            for row in rows {
+                if row.tenant_id == tenant || !by_name.contains_key(&row.name) {
+                    by_name.insert(row.name.clone(), row);
+                }
+            }
+            CatalogRows::Read(by_name)
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                tenant = %tenant,
+                "servers page: catalog list_servers failed",
+            );
+            CatalogRows::Unavailable
+        }
+    }
+}
+
+/// The lifecycle chip for configured server `name`, or `None` when its
+/// catalog row is live or the catalog was not read. `catalog_url` is the
+/// tenant-aware Catalog tab URL.
+fn catalog_lifecycle(
+    rows: &CatalogRows,
+    name: &str,
+    tenant: &str,
+    catalog_url: &str,
+) -> Option<CatalogLifecycleView> {
+    use waygate_catalog::CatalogServerStatus as Status;
+    let rows = match rows {
+        CatalogRows::NotRead => return None,
+        CatalogRows::Unavailable => {
+            return Some(CatalogLifecycleView {
+                label: "status unavailable",
+                tone: "warn",
+                detail: "The governed catalog could not be read; see gateway logs.",
+                action: None,
+            })
+        }
+        CatalogRows::Read(rows) => rows,
+    };
+    let Some(row) = rows.get(name) else {
+        return Some(CatalogLifecycleView {
+            label: "not in catalog",
+            tone: "bad",
+            detail: "No catalog row is visible to this tenant, so calls to its tools are \
+                     refused. Reload manifests imports configured servers into the catalog.",
+            action: None,
+        });
+    };
+    let link = |label| {
+        (row.tenant_id == tenant).then(|| CatalogActionLink {
+            href: format!("{catalog_url}#srv-{}", row.id),
+            label,
+        })
+    };
+    match row.status {
+        Status::Live => None,
+        Status::Quarantined => Some(CatalogLifecycleView {
+            label: "quarantined",
+            tone: "bad",
+            detail: "Discovery hides this server and calls to its tools are refused. An \
+                     approved unquarantine change restores it; a quarantine applied because \
+                     the server was missing from the manifest set clears when Reload \
+                     manifests next reconciles the catalog.",
+            action: link("Propose unquarantine"),
+        }),
+        Status::Retired => Some(CatalogLifecycleView {
+            label: "retired",
+            tone: "bad",
+            detail: "Discovery hides this server and calls to its tools are refused. No \
+                     dashboard control restores a retired server.",
+            action: None,
+        }),
+        Status::Proposed | Status::Approved => Some(CatalogLifecycleView {
+            label: "pending approval",
+            tone: "warn",
+            detail: "The catalog has not approved this server. With \
+                     GATEWAY_CATALOG_STRICT_PENDING_APPROVAL enabled its tools are refused \
+                     until an administrator approves it; otherwise they are served from \
+                     manifest classifications in the meantime.",
+            action: link("Approve"),
+        }),
+    }
 }
 
 pub(crate) async fn servers_page(
@@ -97,6 +231,11 @@ pub(crate) async fn servers_page(
         crate::tenant_ctx::nav_url(tenant_ctx.as_ref().map(|Extension(c)| c), "/tools");
     let config_base =
         crate::tenant_ctx::nav_url(tenant_ctx.as_ref().map(|Extension(c)| c), "/servers/config");
+    let catalog_url =
+        crate::tenant_ctx::nav_url(tenant_ctx.as_ref().map(|Extension(c)| c), "/catalog");
+    // Same tenant and admin gate as the Catalog tab, which this view links to.
+    let read_tenant = principal_tenant(user.as_ref());
+    let catalog_rows = read_catalog_rows(&state, is_admin, read_tenant).await;
     let mut servers = Vec::new();
     for status in state.upstreams.status_snapshot().await {
         let m = status.manifest;
@@ -128,9 +267,11 @@ pub(crate) async fn servers_page(
             } else {
                 (None, false)
             };
+        let catalog = catalog_lifecycle(&catalog_rows, &m.name, read_tenant, &catalog_url);
         servers.push(ServerRow {
             pending_reviews,
             review_unavailable,
+            catalog,
             name: m.name,
             transport: transport_str(&m.transport),
             runtime_status: health.runtime_state.as_str(),
@@ -742,7 +883,7 @@ pub(crate) async fn server_config_fragment(
             .as_ref()
             .and_then(|s| s.concurrency)
             .map(|c| c.to_string())
-            .unwrap_or_else(|| "default".to_string()),
+            .unwrap_or_else(|| "no limit".to_string()),
     };
     let endpoint = match (&manifest.url, &manifest.command) {
         (Some(u), _) => u.clone(),
@@ -1368,7 +1509,7 @@ pub(crate) struct ServerSessionFragment {
     /// (vs no store / stdio) — drives the step-up re-authorize link.
     pub(crate) admin_required: bool,
     pub(crate) base_hash: String,
-    /// Current `session.concurrency` ("" when inherited/default).
+    /// Current `session.concurrency` ("" when unset: no limit).
     pub(crate) concurrency: String,
     /// Current resolved/selected isolation: "" (inherit) / "per_call" / "reuse".
     pub(crate) isolation: &'static str,

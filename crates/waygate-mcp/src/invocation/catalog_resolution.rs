@@ -43,7 +43,8 @@ impl DefaultInvocationService {
                 ctx.audit_event("CallTool", AuditOutcome::Denied)
                     .with_principal(ctx.principal)
                     .with_tool(server, tool)
-                    .with_reason(format!("refused:{}", reason.code())),
+                    .with_reason(format!("refused:{}", reason.code()))
+                    .with_trace_id(trace_id.as_str()),
             )
             .await;
         let server_block = match reason {
@@ -94,7 +95,8 @@ impl DefaultInvocationService {
                 ctx.audit_event("CallTool", AuditOutcome::ExecutionError)
                     .with_principal(ctx.principal)
                     .with_tool(server, tool)
-                    .with_reason(format!("unavailable:{}", reason.code())),
+                    .with_reason(format!("unavailable:{}", reason.code()))
+                    .with_trace_id(trace_id.as_str()),
             )
             .await;
         // A retryable answer would confirm that the server exists, so a
@@ -106,7 +108,9 @@ impl DefaultInvocationService {
             };
         }
         InvocationError::Upstream(ErrorData::internal_error(
-            "the governed tool catalog is unavailable; retry the request",
+            format!(
+                "the governed tool catalog is unavailable; retry the request (trace id {trace_id})"
+            ),
             Some(serde_json::json!({
                 "error": "catalog_unavailable",
                 "retryable": true,
