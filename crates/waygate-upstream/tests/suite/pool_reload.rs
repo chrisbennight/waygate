@@ -297,7 +297,10 @@ async fn resource_reload_invalidates_an_earlier_read_admission() {
     let admitted = ResourceReadAdmission {
         generation: pool.resource_routing_snapshot().await.generation,
         server: "example-messages".into(),
-        claim: None,
+        claim: waygate_mcp::catalog::ResourceClaim {
+            uri_prefix: "example-messages://attachment/".to_owned(),
+            risk: RiskTier::High,
+        },
     };
 
     let mut example_messages = manifest(
@@ -335,7 +338,13 @@ async fn resource_reload_invalidates_an_earlier_read_admission() {
 
 #[tokio::test]
 async fn resource_eligibility_reload_invalidates_an_earlier_read_admission() {
-    let alpha = manifest("alpha", "http://unused.test/alpha", vec![]);
+    // alpha declares the prefix the admission names, so only the stale
+    // generation can refuse the read below.
+    let mut alpha = manifest("alpha", "http://unused.test/alpha", vec![]);
+    alpha.resources = vec![ResourceClassification {
+        uri_prefix: "shared://resource/".to_owned(),
+        risk: RiskTier::Low,
+    }];
     let mut gated = manifest("gated", "http://unused.test/gated", vec![]);
     gated.tier_c_peer = Some(uuid::Uuid::from_u128(0x967));
     let pool = UpstreamPool::from_manifests_disconnected(BTreeMap::from([
@@ -346,7 +355,10 @@ async fn resource_eligibility_reload_invalidates_an_earlier_read_admission() {
     let admitted = ResourceReadAdmission {
         generation: old_generation,
         server: "alpha".into(),
-        claim: None,
+        claim: waygate_mcp::catalog::ResourceClaim {
+            uri_prefix: "shared://resource/".to_owned(),
+            risk: RiskTier::Low,
+        },
     };
 
     let newly_eligible = manifest("gated", "http://unused.test/gated", vec![]);
@@ -361,7 +373,7 @@ async fn resource_eligibility_reload_invalidates_an_earlier_read_admission() {
     assert_eq!(
         pool.resource_routing_snapshot().await.generation,
         old_generation + 1,
-        "a newly eligible legacy server can change ambiguity and must stale old admissions",
+        "an eligibility change advances the routing generation and stales old admissions",
     );
     let error = pool
         .read_resource_admitted(

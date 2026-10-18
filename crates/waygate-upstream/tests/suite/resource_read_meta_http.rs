@@ -113,6 +113,7 @@ async fn spawn_upstream() -> (String, Observed, tokio::task::JoinHandle<()>) {
 async fn connect(url: &str, protocol: &str) -> Arc<UpstreamPool> {
     let manifest: UpstreamManifest = serde_json::from_value(json!({
         "name": "meta", "transport": "http", "url": url, "protocol": protocol, "tools": [],
+        "resources": [{"uri_prefix": "meta://", "risk": "low"}],
     }))
     .unwrap();
     let pool = UpstreamPool::connect(BTreeMap::from([("meta".into(), manifest)])).await;
@@ -152,7 +153,10 @@ async fn pool_reads_send_only_the_gateway_file_promise_and_still_bound_the_respo
         let admission = ResourceReadAdmission {
             generation: routing.generation,
             server: "meta".to_owned(),
-            claim: None,
+            claim: waygate_mcp::catalog::ResourceClaim {
+                uri_prefix: "meta://".to_owned(),
+                risk: waygate_mcp::protocol::RiskTier::Low,
+            },
         };
 
         let mut meta = RequestMetaObject::new();

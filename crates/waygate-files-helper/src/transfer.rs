@@ -1,6 +1,7 @@
 //! Redeeming a grant and moving the bytes.
 //!
-//! Two signed requests, in this order: trade the opaque handle for a short-lived
+//! Two signed requests, in this order: trade the grant — named by its opaque
+//! handle, or by the file URI it was prepared for — for a short-lived
 //! credential, then carry the bytes under it. Keeping them separate means a
 //! rejected grant costs nothing — it is refused before the file is opened —
 //! and it keeps both legs on shapes an off-the-shelf client library already
@@ -52,23 +53,61 @@ pub fn upload(
     let upload_url = wire::check_address(&prepared.upload.url, origin, "upload.url")?;
 
     let client = client()?;
-    let credential = redeem(
+    let redeemed = redeem(
         &client,
         &prepared.credential_exchange,
         &exchange_url,
-        &prepared.grant_handle,
+        Selection::Handle(&prepared.grant_handle),
         key,
     )?;
+    send_file(
+        &client,
+        &prepared.upload,
+        &upload_url,
+        &redeemed.credential,
+        source,
+        &prepared.file.uri,
+        key,
+    )?;
+    Ok(prepared.file.uri)
+}
 
+/// Upload against the grant `prepare_upload` made for this key and `uri`,
+/// without the prepare result. The content type comes from the gateway's
+/// record of that grant.
+pub fn upload_by_uri(uri: &str, source: &Path, gateway: &Url, key: &HelperKey) -> Result<String> {
+    let (client, credential, file) = redeem_by_uri(uri, "upload", gateway, key)?;
+    let descriptor = TransferDescriptor::fixed(gateway, "PUT", file.mime_type.clone());
+    let upload_url = wire::check_address(&descriptor.url, &gateway.origin(), "upload address")?;
+    send_file(
+        &client,
+        &descriptor,
+        &upload_url,
+        &credential,
+        source,
+        uri,
+        key,
+    )?;
+    Ok(file.uri)
+}
+
+fn send_file(
+    client: &Client,
+    descriptor: &TransferDescriptor,
+    upload_url: &Url,
+    credential: &str,
+    source: &Path,
+    file_uri: &str,
+    key: &HelperKey,
+) -> Result<()> {
     // Opened only once the grant is known good, so an expired or already-spent
-    // handle costs a small refused request rather than a started transfer.
+    // grant costs a small refused request rather than a started transfer.
     let file = std::fs::File::open(source).with_context(|| format!("open {}", source.display()))?;
     let length = file
         .metadata()
         .with_context(|| format!("stat {}", source.display()))?
         .len();
 
-    let descriptor = &prepared.upload;
     let mut request = client
         .request(method(&descriptor.method)?, upload_url.clone())
         .header(
@@ -80,7 +119,7 @@ pub fn upload(
             key.proof(
                 &descriptor.method,
                 upload_url.as_str(),
-                Some(&credential),
+                Some(credential),
                 OffsetDateTime::now_utc(),
             )?,
         );
@@ -92,10 +131,9 @@ pub fn upload(
         .body(Body::sized(file, length))
         .timeout(TRANSFER_TIMEOUT)
         .send()
-        .map_err(|error| upload_send_error(error, &prepared.file.uri))?;
-    check_status(response, "upload", Some(&prepared.file.uri))?;
-
-    Ok(prepared.file.uri)
+        .map_err(|error| upload_send_error(error, file_uri))?;
+    check_status(response, "upload", Some(file_uri))?;
+    Ok(())
 }
 
 fn upload_send_error(error: reqwest::Error, file_uri: &str) -> anyhow::Error {
@@ -126,15 +164,58 @@ pub fn download(
     let download_url = wire::check_address(&prepared.download.url, origin, "download.url")?;
 
     let client = client()?;
-    let credential = redeem(
+    let redeemed = redeem(
         &client,
         &prepared.credential_exchange,
         &exchange_url,
-        &prepared.grant_handle,
+        Selection::Handle(&prepared.grant_handle),
         key,
     )?;
+    receive_file(
+        &client,
+        &prepared.download,
+        &download_url,
+        &redeemed.credential,
+        &prepared.file,
+        destination,
+        key,
+    )?;
+    Ok(prepared.file.uri)
+}
 
-    let descriptor: &TransferDescriptor = &prepared.download;
+/// Download against the grant `prepare_download` made for this key and `uri`,
+/// without the prepare result. The size and digest to verify come from the
+/// gateway at redemption rather than from the caller's context.
+pub fn download_by_uri(
+    uri: &str,
+    destination: &Path,
+    gateway: &Url,
+    key: &HelperKey,
+) -> Result<String> {
+    let (client, credential, file) = redeem_by_uri(uri, "download", gateway, key)?;
+    let descriptor = TransferDescriptor::fixed(gateway, "GET", None);
+    let download_url = wire::check_address(&descriptor.url, &gateway.origin(), "download address")?;
+    receive_file(
+        &client,
+        &descriptor,
+        &download_url,
+        &credential,
+        &file,
+        destination,
+        key,
+    )?;
+    Ok(file.uri)
+}
+
+fn receive_file(
+    client: &Client,
+    descriptor: &TransferDescriptor,
+    download_url: &Url,
+    credential: &str,
+    declared: &FileValue,
+    destination: &Path,
+    key: &HelperKey,
+) -> Result<()> {
     let response = client
         .request(method(&descriptor.method)?, download_url.clone())
         .header(
@@ -146,7 +227,7 @@ pub fn download(
             key.proof(
                 &descriptor.method,
                 download_url.as_str(),
-                Some(&credential),
+                Some(credential),
                 OffsetDateTime::now_utc(),
             )?,
         )
@@ -161,34 +242,91 @@ pub fn download(
     let outcome = (|| -> Result<()> {
         let mut file = std::fs::File::create(&staged)
             .with_context(|| format!("create {}", staged.display()))?;
-        let measured = copy_measured(&mut response, &mut file, prepared.file.size)?;
+        let measured = copy_measured(&mut response, &mut file, declared.size)?;
         file.sync_all().context("flush the downloaded file")?;
-        verify(&prepared.file, &measured)
+        verify(declared, &measured)
     })();
     if let Err(e) = outcome {
         return Err(discard_staged(e, &staged));
     }
 
-    publish(&staged, destination)?;
-
-    Ok(prepared.file.uri)
+    publish(&staged, destination)
 }
 
-/// Trade the opaque handle for a short-lived credential bound to our key.
+/// How the exchange request picks the grant to redeem.
+enum Selection<'a> {
+    /// The opaque handle from a relayed prepare result.
+    Handle(&'a str),
+    /// The grant prepared for this key, this gateway file, and this direction.
+    File {
+        uri: &'a str,
+        direction: &'static str,
+    },
+}
+
+/// A redeemed grant: the short-lived credential, and the gateway's own record
+/// of the file it covers.
+struct Redeemed {
+    credential: String,
+    file: Option<FileValue>,
+}
+
+/// Redeem the grant prepared for this key and `uri`. Returns the credential
+/// and the gateway's description of the file, which must be the one asked for.
+fn redeem_by_uri(
+    uri: &str,
+    direction: &'static str,
+    gateway: &Url,
+    key: &HelperKey,
+) -> Result<(Client, String, FileValue)> {
+    if !uri.starts_with("mcp-file://") {
+        bail!("--uri must be the mcp-file:// address returned by the gateway, not {uri}");
+    }
+    let exchange = CredentialExchange::fixed(gateway);
+    let exchange_url = wire::check_address(
+        &exchange.url,
+        &gateway.origin(),
+        "credential exchange address",
+    )?;
+    let client = client()?;
+    let redeemed = redeem(
+        &client,
+        &exchange,
+        &exchange_url,
+        Selection::File { uri, direction },
+        key,
+    )?;
+    let file = redeemed
+        .file
+        .context("the gateway did not describe the file it authorized; update the gateway")?;
+    if file.uri != uri {
+        bail!("the gateway authorized {} instead of {uri}", file.uri);
+    }
+    Ok((client, redeemed.credential, file))
+}
+
+/// Trade the grant for a short-lived credential bound to our key.
 fn redeem(
     client: &Client,
     exchange: &CredentialExchange,
     url: &Url,
-    handle: &str,
+    selection: Selection<'_>,
     key: &HelperKey,
-) -> Result<String> {
+) -> Result<Redeemed> {
     let proof = key.proof(
         &exchange.method,
         url.as_str(),
         None,
         OffsetDateTime::now_utc(),
     )?;
-    let body = serde_json::json!({ exchange.grant_handle_field.as_str(): handle });
+    let body = match selection {
+        Selection::Handle(handle) => {
+            serde_json::json!({ exchange.grant_handle_field.as_str(): handle })
+        }
+        Selection::File { uri, direction } => {
+            serde_json::json!({ "file_uri": uri, "direction": direction })
+        }
+    };
 
     let response = client
         .request(method(&exchange.method)?, url.clone())
@@ -196,13 +334,13 @@ fn redeem(
         .json(&body)
         .timeout(CREDENTIAL_EXCHANGE_TIMEOUT)
         .send()
-        .context("exchange the grant handle for a transfer credential")?;
+        .context("exchange the grant for a transfer credential")?;
     let response = check_status(response, "credential exchange", None)?;
 
-    let payload: serde_json::Value = response
+    let mut payload: serde_json::Value = response
         .json()
         .context("credential exchange response is not JSON")?;
-    payload
+    let credential = payload
         .get(&exchange.access_token_field)
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
@@ -211,7 +349,15 @@ fn redeem(
                 "credential exchange response has no `{}` field",
                 exchange.access_token_field
             )
-        })
+        })?;
+    let file = match payload.get_mut("file").map(serde_json::Value::take) {
+        Some(file) => Some(
+            serde_json::from_value(file)
+                .context("credential exchange response has an unreadable `file` description")?,
+        ),
+        None => None,
+    };
+    Ok(Redeemed { credential, file })
 }
 
 /// Move a verified download onto its destination, owning the staged file
@@ -724,6 +870,7 @@ mod tests {
     fn declared(size: Option<u64>, digest: Option<(&str, &str)>) -> FileValue {
         FileValue {
             uri: "mcp-file://gateway/abc".to_owned(),
+            mime_type: None,
             size,
             digest: digest.map(|(algorithm, value)| crate::wire::Digest {
                 algorithm: algorithm.to_owned(),

@@ -549,31 +549,36 @@ This document covers:
   not overlap anywhere in the loaded manifest set, and `mcp-file:` is reserved
   for the independent file-transfer plane. Put the resource kind before an
   opaque handle (for example `browser://screenshot/{handle}/{name}`) so a
-  stable prefix can classify it. Existing resource-serving upstreams that
-  declare no claims remain compatible: when no claim matches, the gateway
-  falls back to bounded catalog enumeration and assigns the legacy low risk.
+  stable prefix can classify it. Declarations are the only source of
+  resource ownership. A URI no declaration covers is refused as not
+  advertised, and no upstream is asked what it lists to decide who owns a
+  URI: a listing is the upstream's own claim, so an upstream that listed
+  another upstream's URI could otherwise receive its reads. An upstream that
+  declares nothing has no readable resources, and the gateway logs a warning
+  when such an upstream connects while advertising the MCP Resources
+  capability. Declare a prefix for every upstream whose resources should be
+  readable before upgrading a deployment that relied on undeclared reads.
   `resources/list` preserves upstream order and collapses metadata-free empty
   upstream pages inside the current gateway request, so upstreams with no
   resources do not consume client pagination slots. Resource-bearing pages and
   empty pages with meaningful `_meta` remain individually observable. Its
   opaque cursor carries one 50-upstream-page budget across the full downstream
-  pagination sequence, while each request retains a 30-second deadline.
-  `resources/templates/list` aggregates complete template catalogs from
-  visible upstreams under the same fleet-wide limit; the gateway therefore
-  returns no downstream cursor. Undeclared `resources/read` owner resolution
-  has its own 50-page / 30-second request-wide budget across the fleet. A
-  visible upstream that cannot list its resources stops the lookup, because
-  skipping it could hide a second owner. When the lookup cannot finish, the
-  read is not sent and the caller receives
+  pagination sequence, while each request retains a 30-second deadline. Only
+  upstreams that declare a prefix are asked to list, and each page keeps only
+  the resources under that upstream's own declarations, so a listing never
+  advertises a URI that is unreadable or routes elsewhere.
+  `resources/templates/list` aggregates complete template catalogs from those
+  upstreams under the same fleet-wide limit, keeping only templates whose
+  literal start is under the serving upstream's declarations; the gateway
+  therefore returns no downstream cursor. Owner resolution for a read consults
+  only declarations and has a 30-second deadline; if it misses the deadline,
+  the read is not sent and the caller receives
   `data.error = "resource_owner_lookup_failed"` with `retryable` and
-  `trace_id`; the cause, which can name another upstream and its connection
-  state, is recorded only in the audit row and the log under that trace id.
-  Declaring the owner's prefix routes its reads directly, so they no longer
-  depend on the health of other upstreams. Reads reject a URI advertised by
-  multiple legacy upstreams instead of guessing an owner. A declared prefix remains reserved even when its owner is hidden from
-  the caller, so that URI space never falls through to a visible legacy server.
+  `trace_id`, recorded in the audit row and the log under that trace id. A
+  declared prefix remains reserved even when its owner is hidden from the
+  caller, so that URI space is never served by another upstream.
   Resolution carries a fleet-wide routing generation into dispatch; a reload
-  that changes claims or legacy membership invalidates the admission and the
+  that changes claims or the upstream set invalidates the admission and the
   read returns `data.error = "resource_routing_changed"` so the caller retries
   from resolution instead of reaching an upstream under stale ownership or
   risk. Original resource URIs are not rewritten. Caller profile restrictions and the server-level
@@ -599,9 +604,8 @@ This document covers:
   default): only its bounded descriptor crosses the MCP response path. Textual
   resource contents run through the configured response-inspector chain before
   file staging; blob contents deliberately remain outside text inspection.
-  Legacy collision enumeration includes only live lanes whose initialization
-  advertised the MCP Resources capability. A tool-only upstream remains
-  transport-eligible for its tools without being treated as a resource owner.
+  A tool-only upstream remains transport-eligible for its tools without being
+  treated as a resource owner.
   The pool retains its normal circuit breaker, concurrency limit, timeout,
   tombstone, and session-isolation behavior. A Code Mode tool result that names
   a session-retained resource is the exception to independent resource

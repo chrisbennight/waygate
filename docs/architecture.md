@@ -158,13 +158,13 @@ The hot path for one tool call:
    `ReadResource` authorization. Tool-confined profiles expose no native
    resources, and reads authorize a `Resource` entity carrying the exact URI.
    Resource declarations bind a literal URI prefix to one upstream and a risk
-   tier, allowing direct routing and ordinary step-up policy. Undeclared
-   upstreams retain bounded catalog-enumeration fallback for compatibility.
-   Resolution always completes before authorization and fails closed on URI
-   collisions. As with a tool call, a forwarded `resources/read` carries only
-   request metadata the gateway sets, never the caller's `_meta`; its
-   response budget bounds the upstream response inside the gateway and is not
-   sent.
+   tier, allowing direct routing and ordinary step-up policy. They are the
+   only source of resource ownership: a URI no declaration covers is not
+   routed, and an upstream's own listing never makes it an owner. Resolution
+   always completes before authorization and fails closed on URI collisions.
+   As with a tool call, a forwarded `resources/read` carries only request
+   metadata the gateway sets, never the caller's `_meta`; its response budget
+   bounds the upstream response inside the gateway and is not sent.
    An opt-in client schema profile adapts only the authorized `tools/list`
    copies before pagination. Invocation snapshots and inspection/Code Mode
    contracts keep the complete constraints; see
