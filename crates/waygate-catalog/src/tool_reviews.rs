@@ -493,11 +493,13 @@ impl PgCatalogStore {
             }
             let fields = (previous_contract.is_object() && contract.is_object())
                 .then(|| changed_fields(&previous_contract, &contract));
+            // Stamp the event under the tool lock, not at transaction start, so
+            // event order follows observation order for return detection.
             let event = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO catalog_drift_events
-                 (id,tenant_id,tool_id,observed_hash,approved_hash,severity,previous_hash,changed_fields)
-                 SELECT $1,$2,tool_id,observed_hash,approved_hash,$3,$5,$6
+                 (id,tenant_id,tool_id,observed_hash,approved_hash,severity,previous_hash,changed_fields,observed_at)
+                 SELECT $1,$2,tool_id,observed_hash,approved_hash,$3,$5,$6,clock_timestamp()
                  FROM tool_contract_reviews WHERE tool_id=$4",
             )
             .bind(event)
