@@ -14,9 +14,11 @@
 //!    from the status chip.
 //! 2. **Recent drift events** — the last 200 rows from
 //!    `catalog_drift_events` for the tenant. Each event names
-//!    the tool whose schema_hash drifted from the approved
-//!    version, plus a severity chip (info / warn / critical)
-//!    that maps to the auto-quarantine decision.
+//!    the server and tool whose contract changed, which contract
+//!    fields changed, whether it returned to an earlier
+//!    definition, and whether the change was accepted or blocked.
+//!    Each row links to the event's before/after comparison under
+//!    Tool changes.
 //!
 //! ## What's NOT here (deferred)
 //!
@@ -32,9 +34,6 @@
 //!   in-page (admin-only, own-tenant rows). A quarantined row instead queues
 //!   the governed `catalog.server.unquarantine` change for an eligible admin to
 //!   approve. `retire` stays at `POST /api/v1/catalog/servers/{id}/...` for now.
-//! - **Tool / version detail drawer.** Per-server drill-down
-//!   to the per-tool view with schema diffs is not yet
-//!   implemented.
 //!
 //! ## Tenant scoping
 //!
@@ -52,7 +51,7 @@
 //! without `mcp:admin` (or a peer-asserted principal) sees
 //! the insufficient-scope card; the store fetches are skipped
 //! entirely so no catalog data — including the per-tenant
-//! server names and the operator-confidential drift hashes —
+//! server names and the operator-confidential drift history —
 //! enters the rendered HTML.
 
 use std::collections::BTreeSet;
@@ -66,9 +65,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use time::OffsetDateTime;
 use uuid::Uuid;
-use waygate_catalog::{
-    CatalogServerStatus, CatalogServerSummary, DriftEvent, DriftSeverity, SharedCatalogStore,
-};
+use waygate_catalog::{CatalogServerStatus, CatalogServerSummary, DriftEvent, SharedCatalogStore};
 use waygate_oidc::{AuthMethod, Principal, Scope};
 
 use crate::auth::CsrfToken;
@@ -150,19 +147,16 @@ struct ServerRow {
 
 struct DriftRow {
     id: Uuid,
-    tool_id: Uuid,
-    /// Pre-truncated to 12 chars + ellipsis for the table
-    /// view. Full hash on hover via `title` (set by the
-    /// template).
-    observed_hash_short: String,
-    observed_hash: String,
-    /// `Some` when the drift was against a known approved
-    /// hash; `None` for the first observation of a never-
-    /// before-seen tool (the schema arrived but no version
-    /// was ever approved). Rendered as an em-dash for None.
-    approved_hash_short: Option<String>,
-    approved_hash: Option<String>,
-    severity: &'static str,
+    /// The event's own page, which compares the two definitions.
+    url: String,
+    server: String,
+    tool: String,
+    /// Which contract fields changed, in words.
+    summary: String,
+    /// Outcome label and its chip class.
+    outcome: (&'static str, &'static str),
+    /// The tool returned to a definition recorded before this event.
+    returned: bool,
     observed_at_abs: String,
 }
 
@@ -411,16 +405,27 @@ fn server_row(s: CatalogServerSummary, read_tenant: &str) -> ServerRow {
 }
 
 fn drift_row(d: DriftEvent) -> DriftRow {
-    let observed_short = short_hash(&d.observed_hash);
-    let approved_short = d.approved_hash.as_deref().map(short_hash);
+    let summary = match (&d.changed_fields, &d.previous_hash) {
+        (Some(fields), _) if !fields.is_empty() => format!(
+            "{} changed",
+            fields
+                .iter()
+                .map(|field| crate::dashboard_tool_reviews::field_label(field))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        (Some(_), _) => "Definition changed".into(),
+        (None, None) => "Definition changed; earlier definition not recorded".into(),
+        (None, Some(_)) => "Definition changed; comparison unavailable".into(),
+    };
     DriftRow {
         id: d.id,
-        tool_id: d.tool_id,
-        observed_hash_short: observed_short,
-        observed_hash: d.observed_hash,
-        approved_hash_short: approved_short,
-        approved_hash: d.approved_hash,
-        severity: drift_severity_str(d.severity),
+        url: crate::dashboard_tool_reviews::event_url(d.id),
+        server: d.server,
+        tool: d.tool,
+        summary,
+        outcome: crate::dashboard_tool_reviews::drift_outcome(d.severity),
+        returned: d.earlier_recorded_at.is_some(),
         observed_at_abs: format_ts_abs(d.observed_at),
     }
 }
@@ -443,25 +448,6 @@ fn catalog_visibility_str(v: waygate_catalog::CatalogVisibility) -> &'static str
         waygate_catalog::CatalogVisibility::Global => "global",
         waygate_catalog::CatalogVisibility::TenantOnly => "tenant",
     }
-}
-
-fn drift_severity_str(s: DriftSeverity) -> &'static str {
-    match s {
-        DriftSeverity::Info => "info",
-        DriftSeverity::Warn => "warn",
-        DriftSeverity::Critical => "critical",
-    }
-}
-
-/// First 12 hex chars + ellipsis. Schema hashes are typically
-/// 64-char hex; the full hash is on hover via the template's
-/// `title=` attribute, so the short form is for at-a-glance
-/// "did the same drift fire twice in a row?" pattern recognition.
-fn short_hash(h: &str) -> String {
-    if h.len() <= 12 {
-        return h.to_owned();
-    }
-    format!("{}…", &h[..12])
 }
 
 #[cfg(test)]
@@ -536,30 +522,6 @@ mod tests {
     }
 
     #[test]
-    fn drift_severity_strings_match_db_constraints() {
-        assert_eq!(drift_severity_str(DriftSeverity::Info), "info");
-        assert_eq!(drift_severity_str(DriftSeverity::Warn), "warn");
-        assert_eq!(drift_severity_str(DriftSeverity::Critical), "critical");
-    }
-
-    #[test]
-    fn short_hash_truncates_with_ellipsis_for_long_hashes() {
-        let full = "abcdef0123456789abcdef0123456789";
-        let short = short_hash(full);
-        assert_eq!(short, "abcdef012345…");
-        assert!(short.starts_with("abcdef"), "must preserve the prefix");
-    }
-
-    #[test]
-    fn short_hash_passes_through_short_strings() {
-        // A 12-char-or-shorter hash isn't useful in production
-        // but the helper shouldn't add the ellipsis if there's
-        // nothing to truncate.
-        assert_eq!(short_hash("short"), "short");
-        assert_eq!(short_hash("abcdef012345"), "abcdef012345");
-    }
-
-    #[test]
     fn empty_drift_state_links_to_tool_change_review() {
         let page = CatalogPage {
             chrome: PageChrome {
@@ -584,6 +546,58 @@ mod tests {
         assert!(html.contains("href=\"/admin/servers/tool-changes\""));
         assert!(html.contains("Review quarantined tool changes"));
         assert!(!html.contains("No drift in the last 30 days"));
+    }
+
+    #[test]
+    fn drift_rows_name_the_tool_and_link_to_its_change() {
+        let event =
+            |previous: Option<&str>, fields: Option<Vec<&str>>, returned: bool| DriftEvent {
+                id: Uuid::new_v4(),
+                tenant_id: "default".into(),
+                tool_id: Uuid::new_v4(),
+                server: "fetchlayer".into(),
+                tool: "tiktok_user_profile".into(),
+                observed_hash: "b".repeat(64),
+                approved_hash: Some("b".repeat(64)),
+                previous_hash: previous.map(str::to_owned),
+                changed_fields: fields.map(|f| f.into_iter().map(str::to_owned).collect()),
+                earlier_recorded_at: returned.then(OffsetDateTime::now_utc),
+                severity: waygate_catalog::DriftSeverity::Info,
+                observed_at: OffsetDateTime::now_utc(),
+            };
+        let current = event(Some("a"), Some(vec!["description", "inputSchema"]), true);
+        let legacy = event(None, None, false);
+        let url = crate::dashboard_tool_reviews::event_url(current.id);
+        let page = CatalogPage {
+            chrome: PageChrome {
+                title: "Catalog",
+                env: "test",
+                user: None,
+                theme: None,
+                nav: Vec::new(),
+                tenant_ctx: None,
+                csrf_token: String::new(),
+            },
+            store_configured: true,
+            insufficient_scope: false,
+            servers: Vec::new(),
+            drift_events: vec![drift_row(current), drift_row(legacy)],
+            drift_truncated: false,
+            servers_load_error: false,
+            drift_load_error: false,
+        };
+        let html = page.render().expect("catalog page renders");
+        assert!(html.contains("tiktok_user_profile"));
+        assert!(html.contains("fetchlayer"));
+        assert!(html.contains("Description, Input schema changed"));
+        assert!(html.contains("returned to an earlier definition"));
+        assert!(html.contains("Accepted automatically"));
+        assert!(html.contains("Definition changed; earlier definition not recorded"));
+        assert!(html.contains(&format!("href=\"/admin{url}\">View change</a>")));
+        assert!(
+            !html.contains(&"b".repeat(64)),
+            "hashes stay on the event page"
+        );
     }
 
     /// Fake catalog store whose `approved_servers` is live-only (mirroring the

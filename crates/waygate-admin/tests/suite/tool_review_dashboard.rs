@@ -951,3 +951,97 @@ async fn tool_review_rejects_missing_and_non_admin_principals() {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
+
+#[tokio::test]
+async fn drift_event_page_compares_an_automatically_accepted_change() {
+    use waygate_catalog::CatalogStore;
+    let Some(db) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let server = format!("drift-ui-{}", uuid::Uuid::new_v4());
+    ManifestImporter::new(db.clone())
+        .import_atomic(
+            "default",
+            &[ImportServer {
+                tenant_id: "default".into(),
+                name: server.clone(),
+                transport: "http".into(),
+                runtime_target: json!({"url":"http://example.test/mcp"}),
+                classification_mode: "manifest".into(),
+                tools: vec![ImportTool {
+                    name: "search".into(),
+                    approved_behavior_hash: None,
+                    risk: "low".into(),
+                    side_effects: false,
+                    pii: false,
+                    discriminator: None,
+                    operations: vec![],
+                }],
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    let store = Arc::new(PgCatalogStore::new(db));
+    for (hash, description) in [
+        ("a", "Search documentation"),
+        ("b", "<script>alert('x')</script> Search everything"),
+    ] {
+        store
+            .observe(
+                "default",
+                &server,
+                "search",
+                hash,
+                &json!({ "description": description }),
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    let event = store
+        .list_drift_events("default", time::OffsetDateTime::UNIX_EPOCH, 500)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|e| e.server == server)
+        .expect("drift event recorded");
+    let pool = UpstreamPool::connect(BTreeMap::new())
+        .await
+        .with_tool_reviews(store.clone())
+        .await;
+    let state = Arc::new(crate::admin_state::base_admin_state_with_pool(Arc::new(
+        pool,
+    )));
+    let app = dashboard_router(state, DashboardAuth::Disabled);
+    let get = |uri: String| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            (status, String::from_utf8(body.to_vec()).unwrap())
+        }
+    };
+    let uri = format!("/t/default/servers/tool-changes/events/{}", event.id);
+    let (status, html) = get(uri.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains(&format!("{server} · search")));
+    assert!(html.contains("Accepted automatically"));
+    assert!(html.contains("Description"));
+    assert!(html.contains("Search documentation"));
+    assert!(html.contains("Search everything"));
+    assert!(!html.contains("<script>alert"));
+    assert!(!html.contains("blocked pending review"));
+    let (status, _) = get(uri.replace("/t/default/", "/t/another/")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = get(format!(
+        "/t/default/servers/tool-changes/events/{}",
+        uuid::Uuid::new_v4()
+    ))
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

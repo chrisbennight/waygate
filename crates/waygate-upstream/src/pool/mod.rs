@@ -176,6 +176,9 @@ struct DriftReport {
     side_effects: bool,
     /// Whether this drift tripped the pool's quarantine threshold.
     quarantined: bool,
+    /// The durable catalog drift event that records this change, when tool
+    /// review storage recorded one.
+    drift_event: Option<uuid::Uuid>,
 }
 
 /// Last manifest/catalog transition observed for one tool. Settled entries are

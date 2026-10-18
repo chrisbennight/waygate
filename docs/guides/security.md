@@ -133,6 +133,13 @@ baseline. This workflow does
 not add upstream change-notification handling or inspect a server's internal
 implementation.
 
+**Catalog → Recent drift events** lists each recorded change, including changes
+accepted automatically, with its server, tool, changed fields, and outcome.
+**View change** compares that change's previous and new definitions, and the
+change's Activity entry links to the same page. A change back to a definition
+recorded earlier is labeled as one. Definitions over the storage limit, and
+changes recorded before this history was kept, show only their contract hashes.
+
 Durable review needs `GATEWAY_DATABASE_URL`. The accepted and current contracts
 are bounded to 256 KiB each in storage. Larger contracts retain their exact hash
 and any existing approval, but a new

@@ -13,8 +13,9 @@
 {# Governed catalog. Two sections: currently configured server registry rows
    and recent drift events. Initial approve and immediate quarantine are
    available in-page (admin-only, own-tenant rows); configured quarantined rows
-   queue a governed recovery change. Retained history, retire, the full drift
-   history, and the real-time SSE stream continue at /api/v1/catalog/*. #}
+   queue a governed recovery change. Each drift row links to its own comparison
+   under Tool changes. Retained history, retire, the full drift history, and
+   the real-time SSE stream continue at /api/v1/catalog/*. #}
 
 {% if insufficient_scope %}
 <div class="card">
@@ -160,34 +161,19 @@
                     <tr>
                         <th>Observed at</th>
                         <th>Tool</th>
-                        <th>Observed hash</th>
-                        <th>Approved hash</th>
-                        <th>Severity</th>
+                        <th>What changed</th>
+                        <th>Outcome</th>
+                        <th><span class="sr-only">Details</span></th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for d in drift_events %}
                     <tr id="drift-{{ d.id }}">
                         <td class="mono">{{ d.observed_at_abs }}</td>
-                        <td class="mono">{{ d.tool_id }}</td>
-                        <td class="cell-hash" title="{{ d.observed_hash }}">{{ d.observed_hash_short }}</td>
-                        <td class="cell-hash">
-                            {% match d.approved_hash %}
-                            {% when Some with (h) %}<span title="{{ h }}">{% match d.approved_hash_short %}{% when Some with (s) %}{{ s }}{% when None %}—{% endmatch %}</span>
-                            {% when None %}—
-                            {% endmatch %}
-                        </td>
-                        <td>
-                            {% if d.severity == "critical" %}
-                                <span class="chip chip--bad">critical</span>
-                            {% else if d.severity == "warn" %}
-                                <span class="chip chip--warn">warn</span>
-                            {% else if d.severity == "info" %}
-                                <span class="chip">info</span>
-                            {% else %}
-                                <span class="chip">{{ d.severity }}</span>
-                            {% endif %}
-                        </td>
+                        <td>{{ d.tool }}<div class="cell-sub">{{ d.server }}</div></td>
+                        <td>{{ d.summary }}{% if d.returned %} <span class="chip chip--warn">returned to an earlier definition</span>{% endif %}</td>
+                        <td><span class="{{ d.outcome.1 }}">{{ d.outcome.0 }}</span></td>
+                        <td><a href="{{ self.chrome.nav_url(d.url) }}">View change</a></td>
                     </tr>
                     {% endfor %}
                 </tbody>

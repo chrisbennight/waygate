@@ -3087,18 +3087,21 @@ async fn detached_drift_audit_preserves_pre_handoff_trace_and_event_contract() {
     let sink = std::sync::Arc::new(waygate_mcp::audit::InMemorySink::new());
     let evidence: waygate_mcp::audit::SharedEvidence = sink.clone();
     let expected_trace_id = "0123456789abcdef0123456789abcdef";
+    let drift_event = uuid::Uuid::new_v4();
     let drift = vec![
         DriftReport {
             tool: "send_msg".to_string(),
             risk: Some(waygate_core::RiskTier::High),
             side_effects: true,
             quarantined: true,
+            drift_event: Some(drift_event),
         },
         DriftReport {
             tool: "list".to_string(),
             risk: Some(waygate_core::RiskTier::Low),
             side_effects: false,
             quarantined: false,
+            drift_event: None,
         },
         // The campaign-decouple case: a LOW-risk side-effecting tool
         // quarantines because the threshold covers side_effects. The audit
@@ -3108,6 +3111,7 @@ async fn detached_drift_audit_preserves_pre_handoff_trace_and_event_contract() {
             risk: Some(waygate_core::RiskTier::Low),
             side_effects: true,
             quarantined: true,
+            drift_event: None,
         },
     ];
     tokio::spawn(async move {
@@ -3164,6 +3168,12 @@ async fn detached_drift_audit_preserves_pre_handoff_trace_and_event_contract() {
         matches!(quarantined.outcome, waygate_mcp::AuditOutcome::Denied),
         "a quarantined drift is recorded as Denied (the tool is now blocked)",
     );
+    assert_eq!(
+        quarantined.target,
+        Some(drift_event.to_string()),
+        "the audit row names the drift event that records the change",
+    );
+    assert!(se_quarantined.target.is_none());
     assert!(quarantined
         .reason
         .as_deref()

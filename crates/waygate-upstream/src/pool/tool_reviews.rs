@@ -131,7 +131,7 @@ impl UpstreamPool {
             {
                 continue;
             }
-            let (changed, decision) = store
+            let observation = store
                 .observe_decision(
                     waygate_core::TenantId::DEFAULT,
                     name,
@@ -146,7 +146,7 @@ impl UpstreamPool {
                     ),
                 )
                 .await?;
-            if let Some(decision) = decision.as_ref() {
+            if let Some(decision) = observation.decision.as_ref() {
                 let mut quarantined = entry
                     .quarantined
                     .write()
@@ -158,10 +158,10 @@ impl UpstreamPool {
                 }
                 waygate_telemetry::metrics::set_tool_quarantined(name, quarantined.len() as i64);
             }
-            if let Some(decision) = decision {
+            if let Some(decision) = observation.decision {
                 decisions.insert(tool.name.to_string(), decision);
             }
-            if changed && emit_evidence {
+            if observation.changed && emit_evidence {
                 if let (Some(evidence), Some(review)) = (
                     &self.evidence,
                     store
@@ -173,6 +173,7 @@ impl UpstreamPool {
                         risk: class.map(|class| class.risk),
                         side_effects,
                         quarantined: review.quarantined,
+                        drift_event: observation.drift_event,
                     }];
                     Self::emit_drift_audit(
                         evidence,

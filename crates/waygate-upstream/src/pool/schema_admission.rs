@@ -230,6 +230,7 @@ impl UpstreamEntry {
                         risk,
                         side_effects,
                         quarantined: should_quarantine,
+                        drift_event: None,
                     });
                     if should_quarantine {
                         newly_quarantined.push(tool.name.to_string());

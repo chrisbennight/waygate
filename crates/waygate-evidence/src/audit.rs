@@ -233,7 +233,8 @@ pub struct AuditEvent {
     /// subject of the change — e.g. the API key's `sub` for
     /// ApiKeyMinted/Revoked/Renamed, or the change-request `action_type`.
     /// `None` for tool-call invocations and other categories where the
-    /// `server`/`tool` columns already carry the subject. Surfaced in the
+    /// `server`/`tool` columns already carry the subject. A `ToolDrift` row
+    /// names the catalog drift event that records its change. Surfaced in the
     /// admin "What changed" feed / activity drawer / compare view, and
     /// included in the canonical hash when the event is recorded through the
     /// chain-bearing required path via

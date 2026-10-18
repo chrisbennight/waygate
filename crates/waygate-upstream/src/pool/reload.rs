@@ -2180,6 +2180,9 @@ impl UpstreamPool {
                 .with_category(waygate_mcp::EvidenceCategory::CatalogDrift)
                 .with_tool(server.to_string(), d.tool.clone())
                 .with_reason(reason);
+            if let Some(drift_event) = d.drift_event {
+                event = event.with_target(drift_event.to_string());
+            }
             event.trace_id.clone_from(&trace_id);
             evidence.record_chained_best_effort(event).await;
         }

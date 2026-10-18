@@ -703,11 +703,19 @@ impl CatalogStore for PgCatalogStore {
         let effective_limit = limit.min(500) as i64;
         let rows = sqlx::query(
             r#"
-            SELECT id, tenant_id, tool_id, observed_hash, approved_hash, severity, observed_at
-              FROM catalog_drift_events
-             WHERE tenant_id = $1
-               AND observed_at >= $2
-             ORDER BY observed_at DESC
+            SELECT e.id, e.tenant_id, e.tool_id, s.name AS server, t.name AS tool,
+                   e.observed_hash, e.approved_hash, e.previous_hash, e.changed_fields,
+                   v.first_recorded_at AS earlier_recorded_at, e.severity, e.observed_at
+              FROM catalog_drift_events e
+              JOIN mcp_tools t ON t.id = e.tool_id
+              JOIN mcp_servers s ON s.id = t.server_id
+              LEFT JOIN tool_contract_versions v
+                ON v.tool_id = e.tool_id
+               AND v.contract_hash = e.observed_hash
+               AND v.first_recorded_at < e.observed_at
+             WHERE e.tenant_id = $1
+               AND e.observed_at >= $2
+             ORDER BY e.observed_at DESC
              LIMIT $3
             "#,
         )
@@ -717,20 +725,7 @@ impl CatalogStore for PgCatalogStore {
         .fetch_all(&self.pool)
         .await
         .map_err(CatalogError::Database)?;
-        rows.into_iter()
-            .map(|r| {
-                let severity = parse_severity(r.get::<&str, _>("severity"))?;
-                Ok(DriftEvent {
-                    id: r.get("id"),
-                    tenant_id: r.get("tenant_id"),
-                    tool_id: r.get("tool_id"),
-                    observed_hash: r.get("observed_hash"),
-                    approved_hash: r.get("approved_hash"),
-                    severity,
-                    observed_at: r.get("observed_at"),
-                })
-            })
-            .collect()
+        rows.iter().map(drift_event_from_row).collect()
     }
 
     async fn set_server_status(
@@ -1440,6 +1435,25 @@ fn parse_severity(s: &str) -> Result<DriftSeverity, CatalogError> {
         "warn" => DriftSeverity::Warn,
         "critical" => DriftSeverity::Critical,
         _ => return Err(CatalogError::Unknown("drift severity")),
+    })
+}
+
+/// Maps a drift event row selected with the server and tool names, its
+/// previous hash and changed fields, and `earlier_recorded_at`.
+pub(crate) fn drift_event_from_row(r: &sqlx::postgres::PgRow) -> Result<DriftEvent, CatalogError> {
+    Ok(DriftEvent {
+        id: r.get("id"),
+        tenant_id: r.get("tenant_id"),
+        tool_id: r.get("tool_id"),
+        server: r.get("server"),
+        tool: r.get("tool"),
+        observed_hash: r.get("observed_hash"),
+        approved_hash: r.get("approved_hash"),
+        previous_hash: r.get("previous_hash"),
+        changed_fields: r.get("changed_fields"),
+        earlier_recorded_at: r.get("earlier_recorded_at"),
+        severity: parse_severity(r.get::<&str, _>("severity"))?,
+        observed_at: r.get("observed_at"),
     })
 }
 

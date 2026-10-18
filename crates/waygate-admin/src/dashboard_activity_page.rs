@@ -1919,6 +1919,7 @@ fn build_active_filter_chips(
 #[template(path = "activity_drawer.html")]
 struct ActivityDrawer {
     review_url: String,
+    review_label: &'static str,
     ts_abs: String,
     outcome: String,
     action_label_opt: Option<String>,
@@ -2213,12 +2214,23 @@ pub(crate) async fn activity_drawer(
         .as_deref()
         .zip(row.trace_id.as_deref())
         .map(|(tmpl, tid)| tmpl.replace("{trace_id}", tid));
-    let review_path = match (row.server.as_deref(), row.tool.as_deref()) {
-        (Some(server), Some(tool)) => crate::dashboard_tool_reviews::review_url(server, tool),
+    // A drift row names the catalog drift event that records its change;
+    // older rows fall back to the tool's current review.
+    let drift_event = (row.action == "ToolDrift")
+        .then(|| row.target.as_deref().and_then(|t| t.parse::<Uuid>().ok()))
+        .flatten();
+    let review_path = match (drift_event, row.server.as_deref(), row.tool.as_deref()) {
+        (Some(id), _, _) => crate::dashboard_tool_reviews::event_url(id),
+        (None, Some(server), Some(tool)) => crate::dashboard_tool_reviews::review_url(server, tool),
         _ => "/servers/tool-changes".into(),
     };
     render(&ActivityDrawer {
         review_url: crate::tenant_ctx::nav_url(tenant.as_ref().map(|Extension(t)| t), &review_path),
+        review_label: if drift_event.is_some() {
+            "View this change"
+        } else {
+            "Review tool changes"
+        },
         ts_abs: format_ts_abs(row.ts),
         outcome: row.outcome.clone(),
         action_label_opt: Some(action_label(&row)),
