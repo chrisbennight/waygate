@@ -346,6 +346,7 @@ fn connection_shape_eq(a: &UpstreamManifest, b: &UpstreamManifest) -> bool {
         && a.command == b.command
         && a.env_passthrough == b.env_passthrough
         && auth_eq(a.auth.as_ref(), b.auth.as_ref())
+        && a.headers == b.headers
         && a.mtls == b.mtls
         && session_connection_shape_eq(a.session.as_ref(), b.session.as_ref())
 }
@@ -632,9 +633,7 @@ pub(super) fn slot_count_stable(old: &UpstreamManifest, new: &UpstreamManifest) 
 fn auth_eq(a: Option<&UpstreamAuth>, b: Option<&UpstreamAuth>) -> bool {
     match (a, b) {
         (None, None) => true,
-        (Some(a), Some(b)) => {
-            a.bearer_env == b.bearer_env && a.catalog_probe_groups == b.catalog_probe_groups
-        }
+        (Some(a), Some(b)) => a == b,
         _ => false,
     }
 }
@@ -2021,6 +2020,7 @@ impl UpstreamPool {
             manifest_guard.command = new.command.clone();
             manifest_guard.env_passthrough = new.env_passthrough.clone();
             manifest_guard.auth = new.auth.clone();
+            manifest_guard.headers = new.headers.clone();
             manifest_guard.mtls = new.mtls.clone();
             manifest_guard.session = new.session.clone();
             manifest_guard.resources = new.resources.clone();

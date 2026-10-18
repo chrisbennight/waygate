@@ -315,6 +315,11 @@ pub struct UpstreamManifest {
     /// no docker-network isolation to fall back on.
     #[serde(default)]
     pub auth: Option<UpstreamAuth>,
+    /// Fixed, non-secret request headers sent to this upstream on every
+    /// request over HTTP or SSE. Header names the gateway controls are
+    /// refused at load; a secret belongs in `auth`, never here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
     /// Opt-in mutual TLS. When set, the
     /// gateway presents the configured client certificate
     /// when dialing this upstream. HTTP-only — SSE and stdio
@@ -695,12 +700,14 @@ pub struct ExchangeConfig {
 /// both: mTLS as the transport-layer "this is a trusted infrastructure
 /// peer" check, plus a bearer for per-user identity), so a single
 /// struct conflating them would invite "only one at a time" thinking.
-/// Future application-layer auth methods (basic, signed-JWT) land here
-/// as additional optional fields with an exactly-one-of check at dial
-/// time, rather than as enum variants — serde-yaml requires YAML tags
-/// for externally-tagged enums in this shape, which is awkward in
-/// hand-edited manifests.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+/// The secret methods (`bearer_env`, `header`, `query`, `basic`) are
+/// separate optional fields with an at-most-one-of check at manifest load,
+/// rather than enum variants — serde-yaml requires YAML tags for
+/// externally-tagged enums in this shape, which is awkward in hand-edited
+/// manifests. Every secret is read from a named environment variable, or the
+/// bounded file its `<NAME>_FILE` companion names, so a manifest never holds a
+/// secret value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpstreamAuth {
     /// Name of the process env var holding a bearer token. Sent as
@@ -712,6 +719,15 @@ pub struct UpstreamAuth {
     /// mode this field exists to prevent.
     #[serde(default)]
     pub bearer_env: Option<String>,
+    /// Send a secret in a named request header, such as `x-api-key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<SecretHeader>,
+    /// Send a secret as a named query parameter on every request URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<SecretQueryParameter>,
+    /// Send HTTP Basic authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basic: Option<BasicAuth>,
     /// Optional groups carried only by the gateway's short-lived catalog-probe
     /// identity while it initializes the upstream and reads `tools/list`.
     /// The identity cell is cleared before the connection can serve a caller,
@@ -719,6 +735,78 @@ pub struct UpstreamAuth {
     /// synthetic probe authority on later tool calls. Empty by default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub catalog_probe_groups: Vec<String>,
+}
+
+impl UpstreamAuth {
+    /// How many secret methods this block configures; at most one is valid.
+    fn secret_method_count(&self) -> usize {
+        usize::from(self.bearer_env.is_some())
+            + usize::from(self.header.is_some())
+            + usize::from(self.query.is_some())
+            + usize::from(self.basic.is_some())
+    }
+
+    /// Whether a configured secret method writes the `Authorization` header.
+    pub fn writes_authorization(&self) -> bool {
+        self.bearer_env.is_some()
+            || self.basic.is_some()
+            || self
+                .header
+                .as_ref()
+                .is_some_and(|header| header.name.eq_ignore_ascii_case("authorization"))
+    }
+
+    /// Names of every environment variable a secret method reads, each of
+    /// which may instead be supplied through its `<NAME>_FILE` companion.
+    pub fn secret_env_names(&self) -> Vec<&str> {
+        let mut names = Vec::new();
+        names.extend(self.bearer_env.as_deref());
+        names.extend(self.header.as_ref().map(|header| header.value_env.as_str()));
+        names.extend(self.query.as_ref().map(|query| query.value_env.as_str()));
+        if let Some(basic) = self.basic.as_ref() {
+            names.push(basic.username_env.as_str());
+            names.extend(basic.password_env.as_deref());
+        }
+        names
+    }
+}
+
+/// A secret sent in a named request header.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SecretHeader {
+    /// Header name, for example `x-api-key`. `Authorization` is allowed when
+    /// no other setting writes it, together with `prefix` for a scheme such
+    /// as `Token `.
+    pub name: String,
+    /// Environment variable holding the value.
+    pub value_env: String,
+    /// Text placed before the secret, for example `Token `.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+}
+
+/// A secret sent as a named query parameter on every request URL. The URL
+/// carrying it is never logged or shown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SecretQueryParameter {
+    /// Parameter name, for example `apiKey`.
+    pub name: String,
+    /// Environment variable holding the value.
+    pub value_env: String,
+}
+
+/// HTTP Basic authentication credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BasicAuth {
+    /// Environment variable holding the username.
+    pub username_env: String,
+    /// Environment variable holding the password. Absent ⇒ an empty
+    /// password, for services that take an API key as the username.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_env: Option<String>,
 }
 
 /// Per-upstream mutual TLS configuration.
@@ -1868,6 +1956,10 @@ pub fn validate_manifest_invariants(m: &UpstreamManifest) -> Result<(), Upstream
             m.name,
         )));
     }
+    if let Some(auth) = m.auth.as_ref() {
+        validate_auth_secrets(m, auth)?;
+    }
+    validate_fixed_headers(m)?;
     // Security guardrail. `session.isolation: reuse` runs calls on a
     // pooled session that is SHARED across all callers of this upstream. On
     // an HTTP/SSE upstream the gateway forwards per-caller identity — Tier-B
@@ -1954,12 +2046,13 @@ pub fn validate_manifest_invariants(m: &UpstreamManifest) -> Result<(), Upstream
     // carry a bearer, so a configured one would be silently inert. Refuse that
     // combo at load. (Supersedes the earlier HTTP-only-for-auth rule now that
     // the SSE client actually honors the field instead of dropping it.)
-    let has_static_auth = m.auth.as_ref().is_some_and(|a| a.bearer_env.is_some());
+    let has_static_auth = m.auth.as_ref().is_some_and(|a| a.secret_method_count() > 0);
     if has_static_auth && !m.transport.supports_static_bearer() {
         return Err(UpstreamError::InvalidManifest(format!(
-            "upstream `{}`: `auth.bearer_env:` is not supported for `transport: stdio` — a stdio \
-             child process has no HTTP request to carry `Authorization: Bearer`. Use `transport: \
-             http` or `sse`, or remove the `auth:` block.",
+            "upstream `{}`: `auth.bearer_env:`, `auth.header:`, `auth.query:` and `auth.basic:` \
+             are not supported for `transport: stdio` — a stdio child process has no HTTP request \
+             to carry a credential. Use `transport: http` or `sse`, or remove the secret from the \
+             `auth:` block.",
             m.name,
         )));
     }
@@ -2031,6 +2124,148 @@ pub fn validate_manifest_invariants(m: &UpstreamManifest) -> Result<(), Upstream
              the groups.",
             m.name,
         )));
+    }
+    Ok(())
+}
+
+/// Request headers the gateway or the MCP transport sets itself. A manifest
+/// can neither replace them nor add a second copy.
+const GATEWAY_CONTROLLED_HEADERS: &[&str] = &[
+    "accept",
+    "connection",
+    "content-length",
+    "content-type",
+    "host",
+    "keep-alive",
+    "last-event-id",
+    "mcp-method",
+    "mcp-name",
+    "mcp-protocol-version",
+    "mcp-session-id",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "x-mcp-identity",
+];
+
+fn is_gateway_controlled_header(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    GATEWAY_CONTROLLED_HEADERS.contains(&name.as_str()) || name.starts_with("mcp-param-")
+}
+
+/// An HTTP field name: one or more RFC 9110 token characters.
+fn is_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
+/// Visible ASCII, spaces and tabs: a value that cannot split or end a header.
+fn is_header_value_text(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte == b'\t' || (0x20..=0x7e).contains(&byte))
+}
+
+fn validate_auth_secrets(m: &UpstreamManifest, auth: &UpstreamAuth) -> Result<(), UpstreamError> {
+    let invalid =
+        |detail: String| UpstreamError::InvalidManifest(format!("upstream `{}`: {detail}", m.name));
+    if auth.secret_method_count() > 1 {
+        return Err(invalid(
+            "`auth:` may configure only one of `bearer_env`, `header`, `query` and `basic`".into(),
+        ));
+    }
+    if auth.writes_authorization()
+        && auth.bearer_env.is_none()
+        && (m.exchange.is_some() || m.tier_c_peer.is_some())
+    {
+        return Err(invalid(
+            "`auth:` writes `Authorization`, which `exchange:` and `tier_c_peer:` also write; \
+             pick one Authorization writer"
+                .into(),
+        ));
+    }
+    if auth.secret_env_names().iter().any(|name| name.is_empty()) {
+        return Err(invalid(
+            "every `auth:` environment variable name must be non-empty".into(),
+        ));
+    }
+    if let Some(header) = auth.header.as_ref() {
+        if !is_header_name(&header.name) || is_gateway_controlled_header(&header.name) {
+            return Err(invalid(format!(
+                "`auth.header.name` `{}` must be a valid header name the gateway does not set \
+                 itself",
+                header.name
+            )));
+        }
+        if header
+            .prefix
+            .as_deref()
+            .is_some_and(|prefix| !is_header_value_text(prefix))
+        {
+            return Err(invalid(
+                "`auth.header.prefix` may contain only visible characters, spaces and tabs".into(),
+            ));
+        }
+    }
+    if let Some(query) = auth.query.as_ref() {
+        if query.name.is_empty()
+            || query
+                .name
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '&' | '=' | '#' | '?'))
+        {
+            return Err(invalid(
+                "`auth.query.name` must be a non-empty parameter name without `&`, `=`, `#`, `?` \
+                 or control characters"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_fixed_headers(m: &UpstreamManifest) -> Result<(), UpstreamError> {
+    if m.headers.is_empty() {
+        return Ok(());
+    }
+    let invalid =
+        |detail: String| UpstreamError::InvalidManifest(format!("upstream `{}`: {detail}", m.name));
+    if !m.transport.supports_static_bearer() {
+        return Err(invalid(
+            "`headers:` applies only to `transport: http` and `sse`; a stdio child process has \
+             no HTTP request to carry them"
+                .into(),
+        ));
+    }
+    let secret_header = m
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.header.as_ref())
+        .map(|header| header.name.to_ascii_lowercase());
+    let mut seen = HashSet::new();
+    for (name, value) in &m.headers {
+        let lower = name.to_ascii_lowercase();
+        if !is_header_name(name) || is_gateway_controlled_header(name) || lower == "authorization" {
+            return Err(invalid(format!(
+                "`headers:` entry `{name}` must be a valid header name that neither the gateway \
+                 nor `auth:` sets; credentials belong in `auth:`"
+            )));
+        }
+        if !seen.insert(lower.clone()) || secret_header.as_deref() == Some(lower.as_str()) {
+            return Err(invalid(format!(
+                "`headers:` entry `{name}` repeats a header already configured"
+            )));
+        }
+        if !is_header_value_text(value) {
+            return Err(invalid(format!(
+                "`headers:` entry `{name}` may contain only visible characters, spaces and tabs"
+            )));
+        }
     }
     Ok(())
 }
@@ -2509,6 +2744,7 @@ tools:
             limits: None,
             exchange: None,
             auth: None,
+            headers: Default::default(),
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,
@@ -4031,6 +4267,148 @@ mod protocol_field_tests {
                 .expect("parse");
         validate_manifest_invariants(&sse_auto)
             .expect("auto on sse is fine — it resolves to the legacy handshake");
+    }
+}
+
+#[cfg(test)]
+mod auth_method_tests {
+    use super::*;
+
+    fn parse(yaml: &str) -> Result<UpstreamManifest, UpstreamError> {
+        let manifest = parse_manifest_document(yaml.as_bytes())?;
+        validate_manifest_invariants(&manifest)?;
+        Ok(manifest)
+    }
+
+    fn invalid(yaml: &str) -> String {
+        match parse(yaml) {
+            Err(UpstreamError::InvalidManifest(message)) => message,
+            other => panic!("expected InvalidManifest, got {other:?}"),
+        }
+    }
+
+    const BASE: &str = "name: hosted\ntransport: http\nurl: https://mcp.example.test/mcp\n";
+
+    #[test]
+    fn each_secret_method_loads_and_names_its_variables() {
+        for (block, names) in [
+            ("  bearer_env: TOKEN\n", vec!["TOKEN"]),
+            (
+                "  header:\n    name: x-api-key\n    value_env: API_KEY\n",
+                vec!["API_KEY"],
+            ),
+            (
+                "  query:\n    name: apiKey\n    value_env: API_KEY\n",
+                vec!["API_KEY"],
+            ),
+            (
+                "  basic:\n    username_env: USER\n    password_env: PASSWORD\n",
+                vec!["USER", "PASSWORD"],
+            ),
+            (
+                "  basic:\n    username_env: KEY_AS_USER\n",
+                vec!["KEY_AS_USER"],
+            ),
+        ] {
+            let m = parse(&format!("{BASE}auth:\n{block}")).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(m.auth.unwrap().secret_env_names(), names, "{block}");
+        }
+    }
+
+    #[test]
+    fn only_one_secret_method_may_be_configured() {
+        let message = invalid(&format!(
+            "{BASE}auth:\n  bearer_env: TOKEN\n  header:\n    name: x-api-key\n    \
+             value_env: API_KEY\n"
+        ));
+        assert!(message.contains("only one"), "{message}");
+    }
+
+    #[test]
+    fn a_secret_header_must_not_be_one_the_gateway_sets() {
+        for name in [
+            "X-MCP-Identity",
+            "Mcp-Session-Id",
+            "mcp-param-query",
+            "Host",
+            "bad name",
+        ] {
+            let message = invalid(&format!(
+                "{BASE}auth:\n  header:\n    name: \"{name}\"\n    value_env: API_KEY\n"
+            ));
+            assert!(message.contains("auth.header.name"), "{name}: {message}");
+        }
+    }
+
+    /// `Authorization` is one header; only one setting may write it.
+    #[test]
+    fn an_authorization_secret_conflicts_with_exchange_and_tier_c() {
+        let authorization_writers = [
+            "  header:\n    name: Authorization\n    prefix: \"Token \"\n    value_env: KEY\n",
+            "  basic:\n    username_env: USER\n",
+        ];
+        for block in authorization_writers {
+            parse(&format!("{BASE}auth:\n{block}")).unwrap_or_else(|e| panic!("{block}: {e}"));
+            let message = invalid(&format!(
+                "{BASE}exchange:\n  audience: https://idp.example.test/up\nauth:\n{block}"
+            ));
+            assert!(message.contains("Authorization"), "{block}: {message}");
+            let message = invalid(&format!(
+                "{BASE}tier_c_peer: {}\nauth:\n{block}",
+                uuid::Uuid::new_v4()
+            ));
+            assert!(message.contains("Authorization"), "{block}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_query_parameter_name_must_not_reshape_the_url() {
+        for name in ["", "a&b", "a=b", "a#b"] {
+            let message = invalid(&format!(
+                "{BASE}auth:\n  query:\n    name: \"{name}\"\n    value_env: KEY\n"
+            ));
+            assert!(message.contains("auth.query.name"), "{name:?}: {message}");
+        }
+    }
+
+    #[test]
+    fn fixed_headers_load_and_refuse_what_the_gateway_or_auth_sets() {
+        let m = parse(&format!("{BASE}headers:\n  x-client-name: waygate\n")).unwrap();
+        assert_eq!(m.headers["x-client-name"], "waygate");
+
+        for (headers, auth) in [
+            ("  Authorization: Bearer x\n", ""),
+            ("  accept: text/plain\n", ""),
+            ("  x-mcp-identity: forged\n", ""),
+            (
+                "  X-Api-Key: copy\n",
+                "auth:\n  header:\n    name: x-api-key\n    value_env: KEY\n",
+            ),
+            ("  x-split: \"a\\r\\nInjected: b\"\n", ""),
+        ] {
+            let message = invalid(&format!("{BASE}{auth}headers:\n{headers}"));
+            assert!(message.contains("headers:"), "{headers}: {message}");
+        }
+    }
+
+    #[test]
+    fn stdio_refuses_secrets_and_fixed_headers() {
+        let stdio = "name: local\ntransport: stdio\ncommand: [\"server\"]\n";
+        let message = invalid(&format!(
+            "{stdio}auth:\n  header:\n    name: x-api-key\n    value_env: KEY\n"
+        ));
+        assert!(message.contains("stdio"), "{message}");
+        let message = invalid(&format!("{stdio}headers:\n  x-client-name: waygate\n"));
+        assert!(message.contains("stdio"), "{message}");
+    }
+
+    #[test]
+    fn unused_settings_are_not_serialized() {
+        let m = parse(&format!("{BASE}auth:\n  bearer_env: TOKEN\n")).unwrap();
+        let yaml = serde_yaml::to_string(&m).unwrap();
+        for absent in ["header:", "query:", "basic:", "headers:"] {
+            assert!(!yaml.contains(absent), "{absent} in {yaml}");
+        }
     }
 }
 

@@ -37,6 +37,7 @@ use waygate_core::http_client::{read_body_capped, ReadBodyError};
 
 use crate::dial_trace::ExchangeRecorder;
 use crate::http_policy::RedirectRefused;
+use crate::transport::QuerySecret;
 
 const JSON_MIME_TYPE: &str = "application/json";
 const EVENT_STREAM_MIME_TYPE: &str = "text/event-stream";
@@ -119,6 +120,9 @@ pub(crate) struct BoundedResponseClient {
     refused_redirect: Arc<OnceLock<RedirectRefused>>,
     open_requests: CancellationToken,
     exchanges: ExchangeRecorder,
+    /// A secret query parameter added to every request URI here, at the last
+    /// gateway layer, so the SDK and every error see only the configured URI.
+    query_secret: Option<Arc<QuerySecret>>,
 }
 
 impl BoundedResponseClient {
@@ -129,6 +133,20 @@ impl BoundedResponseClient {
             refused_redirect: Arc::default(),
             open_requests: CancellationToken::new(),
             exchanges,
+            query_secret: None,
+        }
+    }
+
+    pub(crate) fn with_query_secret(mut self, query_secret: Option<Arc<QuerySecret>>) -> Self {
+        self.query_secret = query_secret;
+        self
+    }
+
+    /// `uri` as the request leaves the gateway.
+    fn request_uri(&self, uri: Arc<str>) -> Arc<str> {
+        match self.query_secret.as_ref() {
+            Some(query) => query.apply_str(&uri).into(),
+            None => uri,
         }
     }
 
@@ -169,6 +187,20 @@ impl BoundedResponseClient {
     /// so a connection can report it after the dial's handshake.
     pub(crate) fn refused_redirect_slot(&self) -> Arc<OnceLock<RedirectRefused>> {
         Arc::clone(&self.refused_redirect)
+    }
+
+    /// Record what a failure means for the dial, then drop the URL from an
+    /// HTTP error: it can carry the secret query parameter, and the dial error
+    /// names the server anyway.
+    fn settle<T>(
+        &self,
+        result: Result<T, StreamableHttpError<reqwest::Error>>,
+    ) -> Result<T, StreamableHttpError<reqwest::Error>> {
+        self.observe_failure(&result);
+        result.map_err(|error| match error {
+            StreamableHttpError::Client(error) => StreamableHttpError::Client(error.without_url()),
+            other => other,
+        })
     }
 
     fn observe_failure<T>(&self, result: &Result<T, StreamableHttpError<reqwest::Error>>) {
@@ -450,6 +482,7 @@ impl StreamableHttpClient for BoundedResponseClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         let exchange = self.exchanges.post(&message);
+        let uri = self.request_uri(uri);
         let result = self
             .until_closed(self.inner.post_message(
                 uri,
@@ -459,8 +492,7 @@ impl StreamableHttpClient for BoundedResponseClient {
                 custom_headers,
             ))
             .await;
-        self.observe_failure(&result);
-        exchange.post_result(result)
+        exchange.post_result(self.settle(result))
     }
 
     async fn post_message_with_max_sse_event_size(
@@ -473,6 +505,7 @@ impl StreamableHttpClient for BoundedResponseClient {
         max_sse_event_size: usize,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         let exchange = self.exchanges.post(&message);
+        let uri = self.request_uri(uri);
         let result = if let Some(limit) = Self::response_limit(&message) {
             self.until_closed(self.post_bounded(
                 uri,
@@ -494,8 +527,7 @@ impl StreamableHttpClient for BoundedResponseClient {
             ))
             .await
         };
-        self.observe_failure(&result);
-        exchange.post_result(result)
+        exchange.post_result(self.settle(result))
     }
 
     async fn delete_session(
@@ -506,12 +538,12 @@ impl StreamableHttpClient for BoundedResponseClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<(), StreamableHttpError<Self::Error>> {
         let exchange = self.exchanges.delete();
+        let uri = self.request_uri(uri);
         let result = self
             .inner
             .delete_session(uri, session_id, auth_header, custom_headers)
             .await;
-        self.observe_failure(&result);
-        exchange.unit_result(result)
+        exchange.unit_result(self.settle(result))
     }
 
     async fn get_stream(
@@ -523,12 +555,12 @@ impl StreamableHttpClient for BoundedResponseClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
         let exchange = self.exchanges.get();
+        let uri = self.request_uri(uri);
         let result = self
             .inner
             .get_stream(uri, session_id, last_event_id, auth_header, custom_headers)
             .await;
-        self.observe_failure(&result);
-        exchange.stream_result(result)
+        exchange.stream_result(self.settle(result))
     }
 
     async fn get_stream_with_max_sse_event_size(
@@ -541,6 +573,7 @@ impl StreamableHttpClient for BoundedResponseClient {
         max_sse_event_size: usize,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
         let exchange = self.exchanges.get();
+        let uri = self.request_uri(uri);
         let result = self
             .inner
             .get_stream_with_max_sse_event_size(
@@ -552,8 +585,7 @@ impl StreamableHttpClient for BoundedResponseClient {
                 max_sse_event_size,
             )
             .await;
-        self.observe_failure(&result);
-        exchange.stream_result(result)
+        exchange.stream_result(self.settle(result))
     }
 }
 

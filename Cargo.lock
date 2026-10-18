@@ -6345,6 +6345,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "blake3",
  "bytes",
  "ed25519-dalek",
