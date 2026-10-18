@@ -497,9 +497,16 @@ This document covers:
   `resources/templates/list` aggregates complete template catalogs from
   visible upstreams under the same fleet-wide limit; the gateway therefore
   returns no downstream cursor. Undeclared `resources/read` owner resolution
-  has its own 50-page / 30-second request-wide budget across the fleet. Reads
-  reject a URI advertised by multiple legacy upstreams instead of guessing an
-  owner. A declared prefix remains reserved even when its owner is hidden from
+  has its own 50-page / 30-second request-wide budget across the fleet. A
+  visible upstream that cannot list its resources stops the lookup, because
+  skipping it could hide a second owner. When the lookup cannot finish, the
+  read is not sent and the caller receives
+  `data.error = "resource_owner_lookup_failed"` with `retryable` and
+  `trace_id`; the cause, which can name another upstream and its connection
+  state, is recorded only in the audit row and the log under that trace id.
+  Declaring the owner's prefix routes its reads directly, so they no longer
+  depend on the health of other upstreams. Reads reject a URI advertised by
+  multiple legacy upstreams instead of guessing an owner. A declared prefix remains reserved even when its owner is hidden from
   the caller, so that URI space never falls through to a visible legacy server.
   Resolution carries a fleet-wide routing generation into dispatch; a reload
   that changes claims or legacy membership invalidates the admission and the
