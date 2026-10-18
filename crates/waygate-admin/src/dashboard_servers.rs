@@ -209,8 +209,10 @@ fn catalog_lifecycle(
         Status::Proposed | Status::Approved => Some(CatalogLifecycleView {
             label: "pending approval",
             tone: "warn",
-            detail: "Discovery hides this server until an administrator approves it in \
-                     the catalog.",
+            detail: "The catalog has not approved this server. With \
+                     GATEWAY_CATALOG_STRICT_PENDING_APPROVAL enabled its tools are refused \
+                     until an administrator approves it; otherwise they are served from \
+                     manifest classifications in the meantime.",
             action: link("Approve"),
         }),
     }
