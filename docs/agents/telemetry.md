@@ -135,10 +135,14 @@ carrier:
   `params._meta` onto `ctx.meta`.
 - **Outbound** — the upstream `call_tool` injects the current span into a
   fresh `params._meta` (`inject_span`) so the upstream server continues the
-  trace.
+  trace, when the upstream's manifest allows it: `internal` servers receive
+  trace context by default and `external` ones do not, and
+  `forward_trace_context` overrides that per server. See
+  [trust classification](upstreams.md#trust-classification).
 - **Baggage** — rides with trace context: entries extracted alongside a
   `traceparent` survive on the span's adopted parent context and are
-  re-injected outbound. The gateway relays, never originates, baggage; a
+  re-injected outbound to the upstreams that receive trace context. The
+  gateway relays, never originates, baggage; a
   `baggage` key without a `traceparent` is not adopted; the SDK's W3C
   limits (64 entries / 8 KiB) bound what an untrusted caller can relay.
 

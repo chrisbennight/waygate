@@ -1,5 +1,6 @@
 name: demo
 transport: http
+trust: internal
 url: http://demo-upstream:9000/mcp
 tools:
   - name: greet

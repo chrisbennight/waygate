@@ -92,6 +92,7 @@ async fn identity_header_arrives_at_upstream_over_real_http() {
         stored_upstream_subject_token: None,
         exchanged_bearer: None,
         tier_c_audience: None,
+        token_policy: waygate_upstream::IdentityTokenPolicy::FULL,
     });
 
     let uri: Arc<str> = format!("http://{addr}/mcp").into();
@@ -161,6 +162,7 @@ async fn tier_c_stamps_authorization_with_peer_audience_jwt() {
         stored_upstream_subject_token: None,
         exchanged_bearer: None,
         tier_c_audience: Some("https://remote-peer.example/".into()),
+        token_policy: waygate_upstream::IdentityTokenPolicy::FULL,
     });
 
     let uri: Arc<str> = format!("http://{addr}/mcp").into();

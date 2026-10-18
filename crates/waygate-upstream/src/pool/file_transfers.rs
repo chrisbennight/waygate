@@ -201,6 +201,7 @@ impl UpstreamPool {
                 stored_upstream_subject_token: None,
                 exchanged_bearer: None,
                 tier_c_audience: None,
+                token_policy: snapshot.identity_token_policy(),
             }),
             _ => None,
         };
@@ -626,7 +627,7 @@ mod tests {
     #[test]
     fn private_file_destination_is_limited_to_the_upstream_host() {
         let manifest: UpstreamManifest = serde_yaml::from_str(
-            "name: printable\ntransport: http\nurl: http://files.internal:3000/mcp\n",
+            "name: printable\ntransport: http\ntrust: internal\nurl: http://files.internal:3000/mcp\n",
         )
         .unwrap();
         let destination = transport::PinnedNetworkDestination::new(

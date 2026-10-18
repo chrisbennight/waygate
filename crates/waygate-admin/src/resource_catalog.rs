@@ -469,10 +469,10 @@ async fn list_server(
     let rows = page(all, offset, limit)
         .into_iter()
         .map(|s| {
-            let status = runtime
-                .get(&s.name)
-                .map(|status| (&status.health, status.rejected_output_schemas.as_slice()));
-            to_value(server_row(s, status))
+            let loaded = runtime.get(&s.name);
+            let status =
+                loaded.map(|status| (&status.health, status.rejected_output_schemas.as_slice()));
+            to_value(server_row(s, status, loaded.map(|status| &status.manifest)))
         })
         .collect();
     Ok(ReadPage {
@@ -1116,6 +1116,16 @@ struct ServerRow {
     /// `global` | `tenant_only`.
     visibility: String,
     owner: Option<String>,
+    /// `internal` | `external` from the loaded manifest; null with no
+    /// runtime entry.
+    trust: Option<String>,
+    /// Whether the loaded manifest lets this upstream receive the
+    /// gateway-signed identity token, which is sent only when the gateway
+    /// also has a signing key; null with no runtime entry.
+    receives_identity_token: Option<bool>,
+    /// Whether tool calls carry trace context and baggage; null with no
+    /// runtime entry.
+    receives_trace_context: Option<bool>,
 }
 
 fn server_row(
@@ -1124,6 +1134,7 @@ fn server_row(
         &waygate_upstream::UpstreamHealth,
         &[waygate_upstream::RejectedOutputSchema],
     )>,
+    manifest: Option<&waygate_upstream::UpstreamManifest>,
 ) -> ServerRow {
     let runtime = status.map(|(health, _)| health);
     let catalog_status = enum_str(&s.status);
@@ -1152,6 +1163,9 @@ fn server_row(
         }),
         visibility: enum_str(&s.visibility),
         owner: s.owner,
+        trust: manifest.map(|m| m.trust.as_str().to_owned()),
+        receives_identity_token: manifest.map(|m| m.identity_token_policy().send_header),
+        receives_trace_context: manifest.map(|m| m.forwards_trace_context()),
     }
 }
 
@@ -1705,7 +1719,7 @@ mod tests {
             protocol_versions: Vec::new(),
         };
 
-        let row = serde_json::to_value(server_row(catalog, Some((&runtime, &[]))))
+        let row = serde_json::to_value(server_row(catalog, Some((&runtime, &[])), None))
             .expect("serialize observable server row");
         assert_eq!(row["catalog_status"], "live");
         assert_eq!(row["runtime_status"], "disconnected");
@@ -1748,7 +1762,7 @@ mod tests {
             tool: "skill".into(),
             observed_type: "absent".into(),
         }];
-        let row = to_value(server_row(catalog(), Some((&runtime, &rejections))));
+        let row = to_value(server_row(catalog(), Some((&runtime, &rejections)), None));
         assert_eq!(row["rejected_output_schema_count"], 1);
         assert_eq!(row["rejected_output_schemas"][0]["tool"], "skill");
         assert_eq!(row["rejected_output_schemas"][0]["observed_type"], "absent");
@@ -1756,7 +1770,7 @@ mod tests {
             .as_str()
             .expect("readable reason")
             .contains("outputSchema.type"));
-        let unloaded = to_value(server_row(catalog(), None));
+        let unloaded = to_value(server_row(catalog(), None, None));
         assert!(unloaded["rejected_output_schema_count"].is_null());
         assert!(unloaded["rejected_output_schemas"].is_null());
 

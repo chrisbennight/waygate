@@ -94,6 +94,14 @@ pub struct ServerSummary {
     /// connected lanes (sorted; usually one, two mid-migration, empty when
     /// every lane is down).
     pub protocol_versions: Vec<String>,
+    /// `internal` | `external`: how far the gateway trusts this upstream.
+    pub trust: String,
+    /// Whether the manifest lets this upstream receive the gateway-signed
+    /// identity token. The token is sent only when the gateway also has a
+    /// signing key and the transport carries headers.
+    pub receives_identity_token: bool,
+    /// Whether tool calls to this upstream carry trace context and baggage.
+    pub receives_trace_context: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -159,6 +167,9 @@ async fn list_servers(State(state): State<Arc<AdminState>>) -> ApiResult<Json<Ve
         .await
         .into_iter()
         .map(|status| ServerSummary {
+            trust: status.manifest.trust.as_str().to_owned(),
+            receives_identity_token: status.manifest.identity_token_policy().send_header,
+            receives_trace_context: status.manifest.forwards_trace_context(),
             name: status.health.name,
             transport: transport_str(&status.manifest.transport).to_owned(),
             url: status.manifest.url,
@@ -577,6 +588,9 @@ mod tests {
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,
+            trust: waygate_upstream::TrustLevel::Internal,
+            identity: None,
+            forward_trace_context: None,
             session: None,
         };
         let pool = Arc::new(waygate_upstream::UpstreamPool::from_manifests_disconnected(

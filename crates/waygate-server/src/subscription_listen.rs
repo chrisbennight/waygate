@@ -187,8 +187,10 @@ mod tests {
     use super::*;
 
     fn manifest(url: &str) -> UpstreamManifest {
-        serde_yaml::from_str(&format!("name: mock\ntransport: http\nurl: {url}\n"))
-            .expect("manifest parses")
+        serde_yaml::from_str(&format!(
+            "name: mock\ntransport: http\ntrust: internal\nurl: {url}\n"
+        ))
+        .expect("manifest parses")
     }
 
     /// A cooldown blocks only while its recorded connection shape is still

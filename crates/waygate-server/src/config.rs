@@ -1716,7 +1716,8 @@ mod tests {
         // Non-load-bearing fields come from the serde defaults — the same
         // source a parsed production manifest gets them from.
         let base: UpstreamManifest =
-            serde_yaml::from_str("name: base\ntransport: http\n").expect("base manifest");
+            serde_yaml::from_str("name: base\ntransport: http\ntrust: internal\n")
+                .expect("base manifest");
         UpstreamManifest {
             name: name.into(),
             transport,

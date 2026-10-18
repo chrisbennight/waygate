@@ -1,8 +1,12 @@
 use waygate_oidc::{AuthMethod, Principal};
 
-use crate::IdentityContext;
+use crate::{IdentityContext, IdentityTokenPolicy};
 
-pub(crate) fn catalog_probe_identity(server: &str, groups: &[String]) -> IdentityContext {
+pub(crate) fn catalog_probe_identity(
+    server: &str,
+    groups: &[String],
+    token_policy: IdentityTokenPolicy,
+) -> IdentityContext {
     IdentityContext {
         principal: Principal {
             sub: "mcp-tool-search-gateway:catalog-probe".into(),
@@ -23,5 +27,6 @@ pub(crate) fn catalog_probe_identity(server: &str, groups: &[String]) -> Identit
         stored_upstream_subject_token: None,
         exchanged_bearer: None,
         tier_c_audience: None,
+        token_policy,
     }
 }

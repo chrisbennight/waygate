@@ -60,7 +60,7 @@ The gateway adds these identifiers of its own to MCP messages. Standard
 | `_gateway_counts` | A `structuredContent` member | To clients | Reports how a result-count argument was adjusted; see [operation envelopes](agents/tool-envelopes.md). |
 | `x-mcp-result-count` | A JSON Schema keyword on a count argument in published input schemas | To clients | Declares the count projection that `_gateway_counts` reports. |
 | `gateway:approval` | A key in `inputRequests` of an `input_required` result | To clients | The gateway's own approval request. It is removed from retried requests, and an upstream pause that uses it is refused. |
-| `X-MCP-Identity` | HTTP request header | To upstreams | The gateway's identity assertion for the caller; see [identity](agents/identity.md). |
+| `X-MCP-Identity` | HTTP request header | To upstreams that receive it | The gateway's identity assertion for the caller. Sent to `internal` servers by default; see [identity](agents/identity.md) and [trust classification](agents/upstreams.md#trust-classification). |
 
 These are gateway protocol identifiers, not network destinations or MCP standard
 fields. New gateway-specific keys use the `io.cacahuate.mcp-gateway/` prefix.

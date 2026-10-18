@@ -20,7 +20,7 @@ use waygate_manifest_store::{
 /// (rather than `permit(...)`-style policy text) keeps the smoke test
 /// honest about what S1 actually stores.
 fn manifest_set(name: &str, url: &str) -> String {
-    format!("- name: {name}\n  transport: http\n  url: {url}\n")
+    format!("- name: {name}\n  transport: http\n  trust: internal\n  url: {url}\n")
 }
 
 #[tokio::test]

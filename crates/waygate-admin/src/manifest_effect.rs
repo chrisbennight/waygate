@@ -766,6 +766,7 @@ mod tests {
     const GROUNDED_DOCS: &str = r#"
 - name: grounded-docs
   transport: http
+  trust: internal
   url: http://grounded-docs-mcp:6280/mcp
   tools:
     - name: scrape_docs
@@ -993,9 +994,10 @@ mod tests {
     #[test]
     fn removing_one_server_quarantines_without_recommending_repromotion() {
         let active = format!(
-            "{GROUNDED_DOCS}\n- name: retained\n  transport: http\n  url: http://retained/mcp\n"
+            "{GROUNDED_DOCS}\n- name: retained\n  transport: http\n  trust: internal\n  url: http://retained/mcp\n"
         );
-        let candidate = "- name: retained\n  transport: http\n  url: http://retained/mcp\n";
+        let candidate =
+            "- name: retained\n  transport: http\n  trust: internal\n  url: http://retained/mcp\n";
         let impact = compute_effective_manifest_impact(
             &active,
             candidate,

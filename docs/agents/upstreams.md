@@ -15,6 +15,52 @@ files before upgrading. A ledger snapshot stored before the upgrade may still
 carry such a key; the first clean load records the served set as a new
 snapshot, so recovery has a readable version again.
 
+## Trust classification
+
+`trust` says how far the gateway trusts an upstream, and selects the defaults
+for what the gateway sends it:
+
+| | `internal` | `external` (the default) |
+|---|---|---|
+| Identity token (`X-MCP-Identity`) | sent | withheld |
+| Trace context and caller baggage in tool-call `_meta` | forwarded | withheld |
+| Plain `http://` URL | allowed | refused at load |
+
+Use `internal` for a server that is part of the deployment, typically reached
+over its own network, and `external` for a hosted or third-party service. A
+server that does not set `trust` is `external`, so a new server never receives
+caller identity by accident.
+
+Two settings override the defaults per server:
+
+```yaml
+name: hosted-search
+transport: http
+url: https://mcp.search.example.test/mcp
+trust: external
+identity:
+  forward: true        # send the identity token to this external server
+  claims: []           # subject only: leave out the email and groups claims
+forward_trace_context: false
+```
+
+`identity.claims` lists the optional claims to include, `email` and `groups`;
+when it is absent both are included, and the subject, issuer, audience, times
+and actor are always present. Settings that could not take effect are refused
+at load: `identity` on a stdio server, `identity.claims` on a server that does
+not receive the token, and `auth.catalog_probe_groups` on a server that does
+not receive the token's `groups` claim. Tier A token exchange and Tier C peer
+assertions keep working on either classification; a Tier C peer assertion is
+still sent on `Authorization` when the `X-MCP-Identity` copy is withheld. Trace
+forwarding also applies to stdio servers, because trace context travels in the
+request body. The classification and its effective identity and trace settings
+appear in `GET /api/v1/servers` and in the `server` resource read through
+`gateway-observe`.
+
+Upgrading: classify every server that should keep receiving identity, trace
+context or plain-HTTP traffic as `internal` before moving to a gateway that
+enforces this; an unclassified plain-HTTP server fails to load.
+
 ## Classification authority: claims are not policy
 
 There are two explicit classification modes. They are compatibility modes, not
@@ -313,7 +359,8 @@ This document covers:
   `url` / `command`, `auth` (bearer-env), `exchange` (RFC 8693 token
   exchange config), `tools` (per-tool classification), `resources`
   (URI-prefix ownership and risk classification), `session`
-  (per-upstream connection-pool tuning). `protocol` defaults to `auto`:
+  (per-upstream connection-pool tuning), `trust`, `identity` and
+  `forward_trace_context` (see [trust classification](#trust-classification)). `protocol` defaults to `auto`:
   probe with `server/discover`, and fall back to the legacy `initialize`
   handshake if that probe fails at all. `protocol: legacy` skips the probe
   and is the operator escape hatch for an upstream known to be older, or

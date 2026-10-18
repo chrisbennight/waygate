@@ -547,6 +547,9 @@ fn manifest(addr: std::net::SocketAddr, isolation: Option<SessionIsolation>) -> 
         tier_c_peer: None,
         // concurrency: 1 ⇒ exactly one boot session, so the init counter is
         // unambiguous.
+        trust: waygate_upstream::TrustLevel::Internal,
+        identity: None,
+        forward_trace_context: None,
         session: Some(SessionConfig {
             concurrency: Some(1),
             isolation,
@@ -2289,4 +2292,43 @@ async fn busy_reuse_upstream_runs_extra_calls_on_fresh_sessions() {
         .await
         .unwrap_or_else(|error| panic!("reuse call failed: {error}"));
     assert_eq!(rig.inits.load(Ordering::SeqCst), lanes + EXTRA);
+}
+
+/// A server whose manifest withholds the identity token receives it on no
+/// request: neither the discovery probe nor a caller's dispatch.
+#[tokio::test]
+async fn a_withheld_identity_token_reaches_neither_discovery_nor_calls() {
+    let (addr, _, captured) = spawn_mock_upstream_with_identity_requirement(false).await;
+    let mut withheld = manifest(addr, None);
+    withheld.identity = Some(waygate_upstream::IdentityForwarding {
+        forward: Some(false),
+        claims: None,
+    });
+    let mut manifests = BTreeMap::new();
+    manifests.insert("mock".into(), withheld);
+
+    let pool = UpstreamPool::connect_with_identity(manifests, test_identity_issuer()).await;
+    assert!(pool.is_connected("mock").await);
+    let caller = waygate_oidc::Principal {
+        sub: "user-a".into(),
+        email: Some("a@example.test".into()),
+        groups: vec!["operators".into()],
+        issuer: "https://auth.example.test/".into(),
+        scopes: vec!["mcp:invoke".into()],
+        tenant: waygate_core::TenantId::default(),
+        auth_method: waygate_oidc::AuthMethod::Oauth,
+        raw_token: None,
+        roles: vec![],
+        scim: None,
+        enrichment_blocked: None,
+        api_key_profile_restrictions: None,
+    };
+    pool.call_tool("mock", "noop", None, Some(&caller), None)
+        .await
+        .expect("the call reaches the upstream");
+
+    assert!(
+        captured.tokens.lock().unwrap().is_empty(),
+        "no request to a server that withholds identity may carry the token",
+    );
 }

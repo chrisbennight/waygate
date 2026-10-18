@@ -1751,6 +1751,7 @@ impl UpstreamPool {
                     stored_upstream_subject_token,
                     exchanged_bearer,
                     tier_c_audience,
+                    token_policy: snapshot.identity_token_policy(),
                 })
             }
             _ => None,
@@ -1833,8 +1834,13 @@ impl UpstreamPool {
         // retryably and the caller rebuilds a context consistent with the new
         // connection.
 
-        let params =
-            dispatch::build_call_params(tool_name, args, mrtr.input_responses, mrtr.request_state);
+        let params = dispatch::build_call_params(
+            tool_name,
+            args,
+            mrtr.input_responses,
+            mrtr.request_state,
+            snapshot.forwards_trace_context(),
+        );
 
         // Tenant for the dispatch-time contract re-resolution: the same
         // derivation the pipeline's Stage 1 uses (anonymous ⇒ default

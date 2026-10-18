@@ -28,8 +28,14 @@ pub(super) fn install_catalog_probe_identity(
             server: manifest.name.clone(),
         });
     }
+    // A server that does not receive the identity token gets no probe
+    // identity either; manifest validation refuses probe groups there.
+    let token_policy = manifest.identity_token_policy();
+    if !token_policy.send_header {
+        return Ok(None);
+    }
     Ok(identity_cell.map(|cell| {
-        cell.set(catalog_probe_identity(&manifest.name, groups));
+        cell.set(catalog_probe_identity(&manifest.name, groups, token_policy));
         CellClearGuard { cell: cell.clone() }
     }))
 }

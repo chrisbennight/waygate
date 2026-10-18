@@ -182,6 +182,9 @@ async fn discovery_latency_and_database_queries() {
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,
+            trust: waygate_upstream::TrustLevel::Internal,
+            identity: None,
+            forward_trace_context: None,
             session: None,
         };
         ManifestImporter::new(setup_db.clone())

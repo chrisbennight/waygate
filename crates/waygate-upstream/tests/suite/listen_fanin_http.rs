@@ -170,6 +170,9 @@ fn manifest(addr: std::net::SocketAddr, protocol: UpstreamProtocol) -> UpstreamM
         tier_c_peer: None,
         // One lane, so one catalog refresh is exactly one tools/list call
         // and the counters below can assert EXACT refresh counts.
+        trust: waygate_upstream::TrustLevel::Internal,
+        identity: None,
+        forward_trace_context: None,
         session: Some(waygate_upstream::SessionConfig {
             concurrency: Some(1),
             isolation: None,

@@ -5635,7 +5635,7 @@ async fn state_with_manifests(
 /// A valid upstream-manifest set (a YAML sequence of one upstream), so the core's
 /// `canonical_disk_hash(content)` parse succeeds.
 const SAMPLE_MANIFEST_YAML: &str =
-    "- name: example-messages\n  transport: http\n  url: http://example-messages/mcp\n";
+    "- name: example-messages\n  transport: http\n  trust: internal\n  url: http://example-messages/mcp\n";
 
 fn sample_manifest_bundle(version: i32, status: ManifestStatus) -> ManifestBundle {
     ManifestBundle {
@@ -6010,14 +6010,14 @@ async fn stale_manifest_baseline_refuses_before_approval_is_consumed() {
         "action_type": "manifest.stage_and_publish",
         "params": {
             "base_hash": prepared_base,
-            "content": "- name: example-messages\n  transport: http\n  url: http://example-messages-v2/mcp\n"
+            "content": "- name: example-messages\n  transport: http\n  trust: internal\n  url: http://example-messages-v2/mcp\n"
         },
         "justification": "replace the reviewed manifest set"
     });
     let id = propose_as(&app, &body, "alice").await;
 
     let changed = waygate_upstream::parse_manifest_set(
-        "- name: example-messages\n  transport: http\n  url: http://example-messages-out-of-band/mcp\n",
+        "- name: example-messages\n  transport: http\n  trust: internal\n  url: http://example-messages-out-of-band/mcp\n",
     )
     .unwrap();
     waygate_upstream::write_manifest_set_to_dir(&dir, &changed).unwrap();
@@ -6098,7 +6098,7 @@ async fn stale_publish_and_rollback_baselines_refuse_before_approval_is_consumed
         let id = propose_as(&app, &body, "alice").await;
 
         let changed = waygate_upstream::parse_manifest_set(
-            "- name: example-messages\n  transport: http\n  url: http://example-messages-out-of-band/mcp\n",
+            "- name: example-messages\n  transport: http\n  trust: internal\n  url: http://example-messages-out-of-band/mcp\n",
         )
         .unwrap();
         waygate_upstream::write_manifest_set_to_dir(&dir, &changed).unwrap();

@@ -225,9 +225,9 @@ mod tests {
 
     #[test]
     fn content_hash_is_stable_and_sensitive() {
-        let a = content_hash("- name: example-messages\n  transport: http\n");
-        let b = content_hash("- name: example-messages\n  transport: http\n");
-        let c = content_hash("- name: other\n  transport: http\n");
+        let a = content_hash("- name: example-messages\n  transport: http\n  trust: internal\n");
+        let b = content_hash("- name: example-messages\n  transport: http\n  trust: internal\n");
+        let c = content_hash("- name: other\n  transport: http\n  trust: internal\n");
         assert_eq!(a, b, "same content ⇒ same hash");
         assert_ne!(a, c, "different content ⇒ different hash");
         assert_eq!(a.len(), 64, "sha256 hex is 64 chars");

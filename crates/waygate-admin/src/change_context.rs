@@ -996,7 +996,7 @@ mod tests {
     #[test]
     fn ledger_comparison_handles_manifest_round_trips_and_verbatim_policy_imports() {
         let manifest =
-            "# non-canonical input\n- url: http://demo/mcp\n  name: demo\n  transport: http\n";
+            "# non-canonical input\n- url: http://demo/mcp\n  name: demo\n  transport: http\n  trust: internal\n";
         let canonical_manifest =
             crate::dashboard_server_manifests::canonical_disk_hash(manifest).unwrap();
         let manifest_set = waygate_upstream::parse_manifest_set(manifest).unwrap();
@@ -1077,13 +1077,13 @@ mod tests {
                 .unwrap()
         };
         let userinfo = parse(
-            "- name: demo\n  transport: http\n  url: https://user:password@example.test/mcp\n",
+            "- name: demo\n  transport: http\n  trust: internal\n  url: https://user:password@example.test/mcp\n",
         );
         let error = ensure_manifest_safe_for_maker(&userinfo).unwrap_err();
         assert!(error.detail().contains("userinfo"));
 
         let unparseable = parse(
-            "- name: demo\n  transport: http\n  url: \"https://user:password@example test/mcp\"\n",
+            "- name: demo\n  transport: http\n  trust: internal\n  url: \"https://user:password@example test/mcp\"\n",
         );
         let error = ensure_manifest_safe_for_maker(&unparseable).unwrap_err();
         assert!(error.detail().contains("not parseable"));
@@ -1095,18 +1095,20 @@ mod tests {
         assert!(error.detail().contains("credential-shaped literal"));
 
         let credential_literal = parse(
-            "- name: demo\n  transport: http\n  url: https://example.test/mcp\n  tools:\n    - name: ghp_abcdefghijklmnopqrstuvwxyz0123456789\n      risk: low\n",
+            "- name: demo\n  transport: http\n  trust: internal\n  url: https://example.test/mcp\n  tools:\n    - name: ghp_abcdefghijklmnopqrstuvwxyz0123456789\n      risk: low\n",
         );
         let error = ensure_manifest_safe_for_maker(&credential_literal).unwrap_err();
         assert!(error.detail().contains("credential-shaped literal"));
 
         let query = parse(
-            "- name: demo\n  transport: http\n  url: https://example.test/mcp?region=us-east\n",
+            "- name: demo\n  transport: http\n  trust: internal\n  url: https://example.test/mcp?region=us-east\n",
         );
         ensure_manifest_safe_for_maker(&query)
             .expect("ordinary endpoint query configuration must remain available");
 
-        let endpoint = parse("- name: demo\n  transport: http\n  url: https://example.test/mcp\n");
+        let endpoint = parse(
+            "- name: demo\n  transport: http\n  trust: internal\n  url: https://example.test/mcp\n",
+        );
         ensure_manifest_safe_for_maker(&endpoint)
             .expect("ordinary operational configuration must remain available");
 
@@ -1118,8 +1120,8 @@ mod tests {
 
     #[test]
     fn selected_manifest_bundle_uses_the_same_proposer_safety_contract() {
-        let content = "- name: safe\n  transport: http\n  url: https://safe.example/mcp\n\
-             - name: unsafe\n  transport: http\n  url: https://user:password@api.example/mcp\n";
+        let content = "- name: safe\n  transport: http\n  trust: internal\n  url: https://safe.example/mcp\n\
+             - name: unsafe\n  transport: http\n  trust: internal\n  url: https://user:password@api.example/mcp\n";
         let error = ensure_manifest_bundle_safe_for_maker(Uuid::nil(), content).unwrap_err();
         assert!(error.detail().contains("userinfo"));
     }
