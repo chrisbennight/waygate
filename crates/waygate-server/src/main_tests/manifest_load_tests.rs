@@ -584,6 +584,113 @@ async fn reload_manifests_only_defers_a_partial_coordinated_write() {
     );
 }
 
+/// A catalog database that refuses every connection, bounded so a doomed
+/// reconcile fails in about a second.
+#[cfg(unix)]
+fn unreachable_catalog() -> sqlx::PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_secs(1))
+        .connect_lazy("postgres://invalid-user@127.0.0.1:1/none")
+        .expect("lazy pool construction is offline")
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reload_manifests_only_failed_catalog_reconcile_marks_config_health_degraded() {
+    let dir = TmpDir::with_one_manifest();
+    let manifests = load_manifests(&dir.0).unwrap();
+    let pool = std::sync::Arc::new(UpstreamPool::from_manifests_disconnected(manifests));
+    let ch: waygate_upstream::SharedConfigHealth =
+        std::sync::Arc::new(waygate_upstream::ConfigHealth::default());
+    ch.set_healthy("serving the boot set");
+    let mut deps = reload_deps_for(&dir.0, pool, ch.clone());
+    deps.db_pool = Some(unreachable_catalog());
+    // An earlier dashboard reload owes this tick a reconcile even though the
+    // served set is unchanged.
+    super::CATALOG_RECONCILE_LATCH.arm();
+
+    reload_manifests_only(&deps).await;
+    let first = ch.snapshot().expect("health set");
+    assert!(
+        !first.healthy,
+        "a failed catalog reconcile must not leave config-health healthy",
+    );
+    assert!(
+        first.detail.contains("catalog reconcile failed"),
+        "the banner must name the catalog failure: {}",
+        first.detail,
+    );
+
+    // The failure re-armed the latch, so the next tick retries; a retry that
+    // fails again keeps the banner and the age of the original failure.
+    reload_manifests_only(&deps).await;
+    let second = ch.snapshot().expect("health set");
+    assert!(!second.healthy, "a repeated failure stays degraded");
+    assert_eq!(second.since_unix, first.since_unix);
+}
+
+/// The reload path's catalog step: a failed reconcile degrades config
+/// health, a retry that fails again keeps it degraded, and the first
+/// successful reconcile clears it.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_catalog_reconcile_stays_degraded_until_a_retry_succeeds() {
+    let pool = UpstreamPool::from_manifests_disconnected(BTreeMap::new());
+    let health = waygate_upstream::ConfigHealth::default();
+    health.set_healthy("serving the boot set");
+    let mut changed = waygate_upstream::ReloadReport::default();
+    changed.classifications_updated = vec!["gamma".to_owned()];
+    let attempts = std::sync::atomic::AtomicUsize::new(0);
+    let attempt = |ok: bool| {
+        attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async move {
+            if ok {
+                Ok(waygate_catalog::ImportStats::default())
+            } else {
+                Err(anyhow::anyhow!("catalog database unavailable"))
+            }
+        }
+    };
+
+    let observed = super::CATALOG_RECONCILE_LATCH.observe();
+    let failure =
+        super::reconcile_owed_catalog(&pool, &changed, observed, Some(|| attempt(false)), "test")
+            .await;
+    super::publish_reload_health(&health, 1, None, failure);
+    let degraded = health.snapshot().expect("health set");
+    assert!(!degraded.healthy);
+    assert!(
+        degraded.detail.contains("catalog database unavailable"),
+        "{}",
+        degraded.detail
+    );
+
+    let observed = super::CATALOG_RECONCILE_LATCH.observe();
+    let failure =
+        super::reconcile_owed_catalog(&pool, &changed, observed, Some(|| attempt(false)), "test")
+            .await;
+    super::publish_reload_health(&health, 1, None, failure);
+    let still = health.snapshot().expect("health set");
+    assert!(!still.healthy, "a repeated failure stays degraded");
+    assert_eq!(still.since_unix, degraded.since_unix);
+
+    let observed = super::CATALOG_RECONCILE_LATCH.observe();
+    let failure =
+        super::reconcile_owed_catalog(&pool, &changed, observed, Some(|| attempt(true)), "test")
+            .await;
+    assert!(failure.is_none());
+    super::publish_reload_health(&health, 1, None, failure);
+    assert!(
+        health.snapshot().expect("health set").healthy,
+        "a successful reconcile clears the degraded state",
+    );
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+    // A ledger recovery stays degraded even when the reconcile succeeds.
+    super::publish_reload_health(&health, 1, Some("recovered ledger snapshot".into()), None);
+    assert!(!health.snapshot().expect("health set").healthy);
+}
+
 /// The generation-fenced reconcile latch contract: an arm owes a
 /// reconcile; settling the generation observed BEFORE the reconcile began
 /// disarms it; and an arm that lands between observe and settle survives —

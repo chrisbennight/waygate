@@ -42,6 +42,9 @@ WHERE ($1::TEXT IS NULL OR server = $1)
        OR category = ANY($14)
        OR (category IS NULL AND 'invocation' = ANY($14)))
   AND ($15::TEXT IS NULL OR reason IS DISTINCT FROM $15)
+  AND ($16::TEXT IS NULL OR tool = $16)
+  AND ($17::TEXT IS NULL OR reason = $17)
+  AND ($18::TEXT IS NULL OR trace_id = $18)
 "#;
 
 static ORDERED_SQL: LazyLock<String> =
@@ -90,6 +93,9 @@ pub(super) async fn fetch<'e>(
         .bind(query.policy_id.as_deref())
         .bind(query.categories.as_slice())
         .bind(query.reason_ne.as_deref())
+        .bind(query.tool.as_deref())
+        .bind(query.reason.as_deref())
+        .bind(query.trace_id.as_deref())
         .fetch_all(executor)
         .await
 }

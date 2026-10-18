@@ -127,3 +127,120 @@ pub(crate) async fn tools_page_ignores_unrepresentable_filter_values() {
         "tool dropped by invalid filter"
     );
 }
+
+// ---- connected versus disconnected publication -----------------------------
+
+/// A disconnected server's rows come from its manifest, so each is marked as
+/// not currently connected rather than presented as a working tool.
+#[tokio::test]
+pub(crate) async fn tools_page_marks_disconnected_manifest_rows_not_connected() {
+    let app = dashboard_router(state_with_manifests().await, DashboardAuth::Disabled);
+    let (status, body) = body_of(app, "/tools").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(r#"data-tool="send_msg""#));
+    assert!(body.contains(r#"data-tool="list_contacts""#));
+    assert_eq!(
+        body.matches(">not connected</span>").count(),
+        2,
+        "both manifest rows carry the not-connected label: {body}"
+    );
+    assert!(
+        !body.contains("Connected servers publishing no tools"),
+        "a disconnected server is not reported as withheld"
+    );
+}
+
+/// Advertises one tool the manifest does not classify, so a connected lane
+/// publishes none of the manifest's tools.
+#[derive(Clone)]
+struct UnclassifiedOnlyUpstream;
+
+impl rmcp::ServerHandler for UnclassifiedOnlyUpstream {
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        rmcp::model::ServerConfig::new(
+            rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+        )
+        .with_server_info(rmcp::model::Implementation::new(
+            "unclassified-only-fixture",
+            "1",
+        ))
+        .with_protocol_version(rmcp::model::ProtocolVersion::LATEST)
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        Ok(rmcp::model::ListToolsResult::with_all_items(vec![
+            rmcp::model::Tool::new(
+                "rogue",
+                "Not classified by the manifest",
+                serde_json::json!({"type": "object", "properties": {}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        ]))
+    }
+}
+
+/// A connected server whose published list is empty lists no rows; its
+/// classified tools are reported as blocked instead of falling back to the
+/// manifest as if they worked.
+#[tokio::test]
+pub(crate) async fn tools_page_withholds_a_connected_server_that_publishes_no_tools() {
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+    let service = StreamableHttpService::new(
+        || Ok(UnclassifiedOnlyUpstream),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default().with_legacy_session_mode(true),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, axum::Router::new().nest_service("/mcp", service))
+            .await
+            .unwrap();
+    });
+    let mut manifest = example_messages_manifest();
+    manifest.url = Some(format!("http://{address}/mcp"));
+    let pool =
+        Arc::new(UpstreamPool::connect(BTreeMap::from([(manifest.name.clone(), manifest)])).await);
+    let health = pool.health_snapshot().await;
+    assert!(health[0].connected_lanes > 0, "the fixture lanes connect");
+    assert_eq!(health[0].published_tool_count, 0);
+    let app = dashboard_router(
+        Arc::new(base_admin_state_with_pool(pool)),
+        DashboardAuth::Disabled,
+    );
+
+    let (status, body) = body_of(app.clone(), "/tools").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.contains(r#"data-tool="send_msg""#) && !body.contains(r#"data-tool="list_contacts""#),
+        "blocked tools must not be listed as rows: {body}"
+    );
+    assert!(body.contains("Connected servers publishing no tools"));
+    assert!(
+        body.contains("none of its 2 classified tools are published"),
+        "{body}"
+    );
+    assert!(body.contains(">2 blocked</span>"), "{body}");
+    assert!(!body.contains(">not connected</span>"));
+
+    // Filtering to the withheld server keeps the selection and the notice.
+    let (status, body) = body_of(app, "/t/default/tools?server=example-messages").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains(r#"<option value="example-messages" selected>example-messages (0)</option>"#),
+        "{body}"
+    );
+    assert!(body.contains(">2 blocked</span>"));
+    assert!(body.contains(r#"<a href="/admin/t/default/servers">Servers</a>"#));
+    server.abort();
+}

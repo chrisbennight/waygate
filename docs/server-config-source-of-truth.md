@@ -88,6 +88,8 @@ After a manifest generation is accepted, the gateway atomically reconciles its
 tool-facts catalog from that generation. Servers absent from the authoritative
 set are quarantined rather than deleted, preventing absence from becoming a
 permissive catalog miss. Per-tool catalog retirement is tracked separately.
+When a reconcile after a reload fails, configuration health stays degraded,
+with the catalog failure as its detail, until a later reconcile succeeds.
 
 Connection-shape changes re-dial the affected upstream. Other replicas converge
 through the shared files plus doorbell/poll path; the database is coordination,

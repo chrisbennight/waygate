@@ -11,13 +11,21 @@ These signals answer different questions and have different persistence guarante
    bearer tokens, file contents, or provider credentials into an incident report.
 2. Inspect **Activity** in the authenticated dashboard, or use the scoped
    `gateway-observe.query_audit` and `activity_summary` tools. Filter by the
-   relevant time window, tool, and outcome using the live schemas.
+   relevant time window, server, tool, and outcome using the live schemas. To
+   find the exact event, filter by the trace ID the client received or by an
+   exact audit reason copied from an event's detail. Tool, reason, and trace ID
+   filters match the whole recorded value, and the time window bounds them.
 3. Follow the trace ID into your configured trace backend to inspect request
    stages and upstream latency. Code Mode evidence also carries execution,
    step, call, and attempt identities.
-4. Check upstream runtime health and catalog state. `triage_digest` combines
-   durable signals for an observation-capable caller; an admin can choose the
-   appropriate recovery action after diagnosis.
+4. Check upstream runtime health and catalog state. For an administrator,
+   **Servers** shows a catalog chip beside runtime health when a configured
+   server is quarantined, retired, pending approval, or missing from the
+   catalog, linked to the Catalog control that resolves it where one exists.
+   **Tools** lists a connected server that publishes none of its tools with
+   its blocked count instead of presenting those tools as callable.
+   `triage_digest` combines durable signals for an observation-capable caller;
+   an admin can choose the appropriate recovery action after diagnosis.
 
 Authorization simulation is useful for explaining a candidate policy decision.
 It does not execute the tool or grant future access; the actual invocation

@@ -6,9 +6,12 @@
 </header>
 
 <p class="muted" style="margin: 0 0 16px; max-width: 70ch">
-    Every tool advertised by every connected upstream, with its manifest-declared
+    Every tool each connected upstream publishes, with its manifest-declared
     risk tier. MCP clients see the subset of this catalog they are authorized to
-    call. <strong>Select any row</strong> to inspect a tool's input schema.
+    call. A server with no connected lane lists its manifest's tools marked
+    <strong>not connected</strong>; a connected server that publishes none of
+    its tools is listed separately with its blocked count.
+    <strong>Select any row</strong> to inspect a tool's input schema.
 </p>
 
 <form class="tools-filter" method="get" action="{{ self.chrome.nav_url("/tools") }}" role="search" aria-label="Filter tools">
@@ -38,6 +41,34 @@
     <noscript><button type="submit" class="btn btn-secondary">Apply</button></noscript>
 </form>
 
+{# A connected server whose published list is empty has every tool withheld
+   from clients. Its manifest classifications are not rows in the table, which
+   would present them as working; this notice gives the count instead. #}
+{% if !withheld.is_empty() %}
+<section class="card" aria-labelledby="withheld-servers-title">
+    <h2 class="card-title" id="withheld-servers-title">Connected servers publishing no tools</h2>
+    <ul>
+    {% for w in withheld %}
+        <li>
+            <span class="mono">{{ w.server }}</span>
+            {% if w.unreadable %}
+                is connected, but its published tool list could not be read. See the gateway logs.
+            {% else if w.classified == 0 %}
+                is connected, but its manifest classifies no tools, so none are published.
+            {% else %}
+                is connected, but none of its {{ w.classified }} classified tool{% if w.classified != 1 %}s are{% else %} is{% endif %} published.
+                <span class="chip chip--bad">{{ w.classified }} blocked</span>
+            {% endif %}
+        </li>
+    {% endfor %}
+    </ul>
+    <p class="muted">
+        Blocked tools are not callable. <a href="{{ self.chrome.nav_url("/servers") }}">Servers</a>
+        shows each server's tool review and catalog status.
+    </p>
+</section>
+{% endif %}
+
 <p class="tools-count">
     {% if truncated %}
         Showing the first <strong>{{ tools.len() }}</strong> of <strong>{{ total }}</strong> matching tools — refine your filter to narrow.
@@ -55,7 +86,7 @@
         <tbody>
         {% for t in tools %}
             <tr class="tool-row" data-server="{{ t.server }}" data-tool="{{ t.name }}" tabindex="0" role="button" aria-label="Inspect {{ t.name }} on {{ t.server }}">
-                <td class="mono">{{ t.server }}</td>
+                <td class="mono">{{ t.server }}{% if !t.connected %} <span class="chip chip--warn" title="This server has no connected lane; the row comes from its manifest classification.">not connected</span>{% endif %}</td>
                 <td class="mono">{{ t.name }}</td>
                 <td>
                     {% if t.risk == "high" %}

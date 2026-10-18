@@ -57,6 +57,9 @@
                 <input type="hidden" name="principal" value="{% match principal %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
                 <input type="hidden" name="category" value="{% match category %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
                 <input type="hidden" name="pii" value="{% match pii %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+                <input type="hidden" name="tool" value="{% match tool %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+                <input type="hidden" name="reason" value="{% match reason %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+                <input type="hidden" name="trace_id" value="{% match trace_id %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
                 <input type="hidden" name="since" value="{% match since %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
                 <input type="text" name="name" placeholder="View name"
                        maxlength="64" pattern="[A-Za-z0-9 _-]{1,64}"
@@ -195,9 +198,21 @@
             <label for="f-server">Server</label>
             <input id="f-server" name="server" type="search" placeholder="any"
                 value="{% match server %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+            <label for="f-tool">Tool</label>
+            <input id="f-tool" name="tool" type="search" placeholder="any"
+                value="{% match tool %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
             <label for="f-principal">Principal</label>
             <input id="f-principal" name="principal" type="search" placeholder="any"
                 value="{% match principal %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+            {# Reason and trace id match the whole recorded value: paste a
+               reason from an event's detail or the trace id a caller was
+               given. #}
+            <label for="f-reason">Reason</label>
+            <input id="f-reason" name="reason" type="search" placeholder="exact reason"
+                value="{% match reason %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+            <label for="f-trace">Trace id</label>
+            <input id="f-trace" name="trace_id" type="search" placeholder="exact trace id"
+                value="{% match trace_id %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
             {# Explicit submit button (replaces htmx auto-submit on
                change). Visible so the no-JS path works the same as
                the JS path — matches the tenant-switch pattern. #}

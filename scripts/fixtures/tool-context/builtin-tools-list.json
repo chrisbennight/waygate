@@ -4952,7 +4952,7 @@
       {
         "name": "gateway-observe.query_audit",
         "title": "Query the audit log",
-        "description": "Read tenant-scoped audit events, newest IDs first, with actors, outcomes and denial details. Filter by server, outcome, category, risk, principal (literal subject/email substring), or since (relative window; default 24h). Reads have a 20-second total budget; errors distinguish timeout, database cancellation and connection unavailability.",
+        "description": "Read tenant-scoped audit events, newest IDs first, with actors, outcomes and denial details. Filter by server, tool, outcome, reason, trace_id, category, risk, principal (literal subject/email substring), or since (relative window; default 24h). Reads have a 20-second total budget; errors distinguish timeout, database cancellation and connection unavailability.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -4964,9 +4964,21 @@
               "type": "string",
               "description": "Exact upstream server name."
             },
+            "tool": {
+              "type": "string",
+              "description": "Exact unqualified tool name."
+            },
             "outcome": {
               "type": "string",
               "description": "Exact outcome: success | denied | step_up_required | execution_error."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Whole recorded reason, matched exactly."
+            },
+            "trace_id": {
+              "type": "string",
+              "description": "Exact trace ID from a caller's error."
             },
             "category": {
               "type": "string",

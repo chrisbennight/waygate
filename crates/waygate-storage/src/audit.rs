@@ -1061,6 +1061,18 @@ pub struct AuditQuery {
     /// `GATEWAY_AUDIT_MODE=fail_closed` (mirrors the top-tools aggregate's own
     /// `reason IS DISTINCT FROM 'pre_call'` exclusion).
     pub reason_ne: Option<String>,
+    /// Exact match on `tool` (the unqualified tool name). The tenant and time
+    /// window bound the rows examined; with `server` also set,
+    /// `audit_log_tool_ts_idx` is available as well.
+    pub tool: Option<String>,
+    /// Exact match on the whole `reason` string, such as one refusal reason.
+    /// Reasons are free text of up to 8 KiB, beyond the B-tree entry limit, so
+    /// the column is not indexed; the tenant and time window bound the rows
+    /// examined.
+    pub reason: Option<String>,
+    /// Exact match on `trace_id`, the identifier returned in a caller's error.
+    /// Bounded by the tenant and time window like `reason`.
+    pub trace_id: Option<String>,
 }
 
 impl AuditQuery {
@@ -1154,7 +1166,34 @@ impl AuditQuery {
                 return false;
             }
         }
+        // Exact matches; a row whose column is NULL never matches a set filter.
+        if let Some(v) = &self.tool {
+            if r.tool.as_deref() != Some(v.as_str()) {
+                return false;
+            }
+        }
+        if let Some(v) = &self.reason {
+            if r.reason.as_deref() != Some(v.as_str()) {
+                return false;
+            }
+        }
+        if let Some(v) = &self.trace_id {
+            if r.trace_id.as_deref() != Some(v.as_str()) {
+                return false;
+            }
+        }
         true
+    }
+
+    /// True when a set filter is one the rollup readers cannot apply, so a
+    /// rollup read would silently ignore it and the live reader must answer.
+    /// `audit_rollup_hourly` has no principal, reason, or trace dimension, and
+    /// its readers take no tool filter.
+    fn needs_live_aggregate(&self) -> bool {
+        self.principal_substr.is_some()
+            || self.tool.is_some()
+            || self.reason.is_some()
+            || self.trace_id.is_some()
     }
 }
 
@@ -1436,9 +1475,10 @@ pub trait AuditReader: Send + Sync + 'static {
     /// live methods for narrow windows. The default bodies delegate to the live
     /// methods so non-Postgres readers (the in-memory fake) stay correct; only
     /// `PgAuditSink` overrides them to read the rollup. The Postgres overrides
-    /// fall back to live when a `principal_substr` filter is set (the rollup
-    /// carries no principal dimension). p95 latency is not in the rollup, so
-    /// `rollup_tool_stats` returns `None` p95.
+    /// fall back to live when a `principal_substr`, `tool`, `reason`, or
+    /// `trace_id` filter is set, because the rollup reads cannot apply them.
+    /// p95 latency is not in the rollup, so `rollup_tool_stats` returns `None`
+    /// p95.
     async fn rollup_histogram(
         &self,
         query: &AuditQuery,
@@ -1720,6 +1760,9 @@ impl AuditReader for PgAuditSink {
               AND ($7::TIMESTAMPTZ IS NULL OR ts >= $7)
               AND ($8::TIMESTAMPTZ IS NULL OR ts <= $8)
               AND ($9::TEXT IS NULL OR tenant_id = $9)
+              AND ($11::TEXT IS NULL OR tool = $11)
+              AND ($12::TEXT IS NULL OR reason = $12)
+              AND ($13::TEXT IS NULL OR trace_id = $13)
               -- Exclude fail-closed pre-dispatch intent rows
               -- (reason='pre_call'): each pairs with a later outcome row, so
               -- counting both would double-count volume and halve the error
@@ -1742,6 +1785,9 @@ impl AuditReader for PgAuditSink {
         .bind(query.until)
         .bind(query.tenant_id.as_deref())
         .bind(limit)
+        .bind(query.tool.as_deref())
+        .bind(query.reason.as_deref())
+        .bind(query.trace_id.as_deref())
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -1788,6 +1834,9 @@ impl AuditReader for PgAuditSink {
               AND ($7::TIMESTAMPTZ IS NULL OR ts >= $7)
               AND ($8::TIMESTAMPTZ IS NULL OR ts <= $8)
               AND ($9::TEXT IS NULL OR tenant_id = $9)
+              AND ($11::TEXT IS NULL OR tool = $11)
+              AND ($12::TEXT IS NULL OR reason = $12)
+              AND ($13::TEXT IS NULL OR trace_id = $13)
               AND reason IS DISTINCT FROM 'pre_call'
             GROUP BY bucket_epoch, outcome
             ORDER BY bucket_epoch, outcome
@@ -1803,6 +1852,9 @@ impl AuditReader for PgAuditSink {
         .bind(query.until)
         .bind(query.tenant_id.as_deref())
         .bind(bucket_seconds)
+        .bind(query.tool.as_deref())
+        .bind(query.reason.as_deref())
+        .bind(query.trace_id.as_deref())
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -1820,9 +1872,7 @@ impl AuditReader for PgAuditSink {
         query: &AuditQuery,
         bucket_seconds: i64,
     ) -> Result<Vec<HistogramBucket>, sqlx::Error> {
-        // The rollup carries no principal dimension — fall back to the live
-        // reader when a principal substring filter is active.
-        if query.principal_substr.is_some() {
+        if query.needs_live_aggregate() {
             return self.histogram(query, bucket_seconds).await;
         }
         crate::rollup::rollup_histogram(
@@ -1844,7 +1894,7 @@ impl AuditReader for PgAuditSink {
         query: &AuditQuery,
         limit: i64,
     ) -> Result<Vec<ToolStat>, sqlx::Error> {
-        if query.principal_substr.is_some() {
+        if query.needs_live_aggregate() {
             return self.tool_stats(query, limit).await;
         }
         crate::rollup::rollup_tool_stats(
@@ -2831,5 +2881,91 @@ mod tests {
         assert!(q.matches(&r), "a different reason is kept");
         r.reason = None;
         assert!(q.matches(&r), "a NULL reason is kept (IS DISTINCT FROM)");
+    }
+
+    #[test]
+    fn matches_filters_by_exact_tool() {
+        let q = AuditQuery {
+            tool: Some("send".to_owned()),
+            ..Default::default()
+        };
+        let mut r = row("denied");
+        r.tool = Some("send".to_owned());
+        assert!(q.matches(&r), "the named tool matches");
+        r.tool = Some("send_batch".to_owned());
+        assert!(!q.matches(&r), "a longer name sharing the prefix does not");
+        r.tool = Some("Send".to_owned());
+        assert!(!q.matches(&r), "the match is case-sensitive");
+        r.tool = None;
+        assert!(!q.matches(&r), "a row without a tool never matches");
+    }
+
+    #[test]
+    fn matches_filters_by_exact_reason() {
+        let q = AuditQuery {
+            reason: Some("refused:server_quarantined".to_owned()),
+            ..Default::default()
+        };
+        let mut r = row("denied");
+        r.reason = Some("refused:server_quarantined".to_owned());
+        assert!(q.matches(&r), "the exact reason matches");
+        r.reason = Some("refused:server_quarantined; retry later".to_owned());
+        assert!(!q.matches(&r), "a reason containing the value does not");
+        r.reason = Some("refused:drift_quarantined".to_owned());
+        assert!(!q.matches(&r), "a different reason does not");
+        r.reason = None;
+        assert!(!q.matches(&r), "a row without a reason never matches");
+    }
+
+    #[test]
+    fn matches_filters_by_exact_trace_id() {
+        let trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let q = AuditQuery {
+            trace_id: Some(trace.to_owned()),
+            ..Default::default()
+        };
+        let mut r = row("denied");
+        r.trace_id = Some(trace.to_owned());
+        assert!(q.matches(&r), "the exact trace id matches");
+        r.trace_id = Some(trace[..16].to_owned());
+        assert!(!q.matches(&r), "a prefix of the trace id does not");
+        r.trace_id = None;
+        assert!(!q.matches(&r), "a row without a trace id never matches");
+    }
+
+    #[test]
+    fn rollup_reads_defer_to_live_for_filters_they_cannot_apply() {
+        assert!(!AuditQuery::default().needs_live_aggregate());
+        let rollup_dimensions = AuditQuery {
+            server: Some("srv".to_owned()),
+            risk_level: Some("high".to_owned()),
+            category: Some("invocation".to_owned()),
+            pii: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            !rollup_dimensions.needs_live_aggregate(),
+            "the rollup readers apply these filters themselves",
+        );
+        for q in [
+            AuditQuery {
+                principal_substr: Some("alice".to_owned()),
+                ..Default::default()
+            },
+            AuditQuery {
+                tool: Some("send".to_owned()),
+                ..Default::default()
+            },
+            AuditQuery {
+                reason: Some("refused:not_in_catalog".to_owned()),
+                ..Default::default()
+            },
+            AuditQuery {
+                trace_id: Some("4bf92f3577b34da6a3ce929d0e0e4736".to_owned()),
+                ..Default::default()
+            },
+        ] {
+            assert!(q.needs_live_aggregate(), "{q:?} must read live rows");
+        }
     }
 }

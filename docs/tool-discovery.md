@@ -327,7 +327,9 @@ Use this recovery sequence:
    `POST /api/v1/servers/{name}/quarantine/clear`) before refreshing and
    rechecking. This runtime action is distinct from restoring a durable
    quarantined catalog row, which requires the governed
-   `catalog.server.unquarantine` change. When no runtime quarantine is present,
+   `catalog.server.unquarantine` change; the dashboard's Servers page marks
+   such a server with a catalog chip linked to that control. When no runtime
+   quarantine is present,
    refresh the source through the dashboard,
    `POST /api/v1/servers/{name}/catalog/refresh`, or
    `gateway-control.refresh_server_catalog`.
