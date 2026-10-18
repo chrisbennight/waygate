@@ -759,8 +759,10 @@ Header names the gateway or the MCP transport sets itself, such as `Accept`,
 as is `Authorization`; credentials belong in `auth:`. Names must be valid HTTP
 field names, values may contain only visible characters, spaces and tabs, and a
 header may not repeat the `auth.header` name. Both blocks are refused on stdio
-servers. Changing either re-dials the server, and rotating any secret they read
-re-dials it on the next reload.
+servers. Changing either re-dials the server. A rotated secret value is read by
+every new dial: each per-call session, which is the default, every reconnect
+and every recovery attempt. A session kept with `session.isolation: reuse`
+keeps the value it dialed with until it reconnects.
 
 ## Upstream request destinations
 
