@@ -1125,3 +1125,70 @@ async fn a_helper_redeems_by_file_uri_only_with_its_own_key_once() {
         "an expired grant is never selected"
     );
 }
+
+#[tokio::test]
+async fn redemption_by_file_uri_waits_for_the_grant_to_be_issued() {
+    use waygate_transfer::{NewGrantRow, TransferOwner, TransferStore as _};
+
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("file-issue-{}", Uuid::new_v4().simple());
+    seed_tenant(&pool, &tenant).await;
+    let store = PgTransferStore::new(pool.clone());
+    let actor = principal(&tenant);
+    let helper = HelperKey::new(47);
+    let now = OffsetDateTime::now_utc();
+
+    // The row exists before its creation audit is written; until it is
+    // issued, selection by file URI must not see it.
+    let spec = upload_grant(helper.thumbprint(), now);
+    let file_uri = spec.file_uri.clone();
+    let row = store
+        .insert(NewGrantRow {
+            id: Uuid::now_v7(),
+            handle_hash: Sha256::digest(Uuid::new_v4().as_bytes()).to_vec(),
+            owner: TransferOwner::from_principal(&actor),
+            spec,
+        })
+        .await
+        .unwrap();
+    let helper_jkt = helper.thumbprint();
+    let lookup =
+        || store.find_pending_for_helper(&helper_jkt, &file_uri, TransferDirection::Upload);
+    assert!(lookup().await.unwrap().is_none());
+    assert!(store.mark_issued(row.id).await.unwrap());
+    assert_eq!(lookup().await.unwrap().map(|grant| grant.id), Some(row.id));
+    assert!(
+        !store.mark_issued(row.id).await.unwrap(),
+        "a grant is issued once"
+    );
+
+    // A grant whose required creation audit fails is never redeemable by URI.
+    let unaudited = TransferAuthority::new(
+        Arc::new(PgTransferStore::new(pool)),
+        Arc::new(NullSink),
+        DpopVerifier::new(Duration::minutes(5), Duration::seconds(30)).unwrap(),
+    );
+    let spec = upload_grant(helper.thumbprint(), now);
+    let unaudited_uri = spec.file_uri.clone();
+    assert!(matches!(
+        unaudited.create_grant(&actor, spec, now).await,
+        Err(AuthorityError::Evidence(_))
+    ));
+    let endpoint = "https://gateway.example/file-transfers/credentials";
+    let proof = helper.proof("unaudited", "POST", endpoint, None, now);
+    assert!(matches!(
+        unaudited
+            .exchange_credential_for_file(
+                &unaudited_uri,
+                TransferDirection::Upload,
+                &proof,
+                "POST",
+                endpoint,
+                now,
+            )
+            .await,
+        Err(AuthorityError::GrantUnavailable)
+    ));
+}

@@ -705,6 +705,9 @@ Selecting by file URI verifies the proof before any lookup, because the
 proof's key is part of the selection. The gateway then activates the newest
 pending, unexpired grant prepared for that key, URI, and direction, under the
 same single-use activation, replay protection, and audit rules as the handle.
+A grant becomes selectable this way only once its creation audit is recorded,
+the same point at which a handle would be returned, so a grant whose required
+audit fails is never redeemable.
 Older pending grants for the same selection stay unused until they expire. A
 request that matches no grant is refused without audit evidence, as an unknown
 handle is, because no owner can be attributed to it.

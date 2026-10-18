@@ -153,6 +153,20 @@ impl TransferStore for PgTransferStore {
         row.map(|row| row_to_grant(&row)).transpose()
     }
 
+    async fn mark_issued(&self, grant_id: Uuid) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE file_transfer_grants
+               SET issued_at = now()
+             WHERE id = $1 AND status = 'pending' AND issued_at IS NULL
+            "#,
+        )
+        .bind(grant_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     async fn find_pending_for_helper(
         &self,
         helper_jkt: &str,
@@ -167,6 +181,7 @@ impl TransferStore for PgTransferStore {
               AND file_uri = $2
               AND direction = $3
               AND status = 'pending'
+              AND issued_at IS NOT NULL
               AND expires_at > now()
             ORDER BY created_at DESC, id DESC
             LIMIT 1

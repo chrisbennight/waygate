@@ -535,8 +535,13 @@ pub trait TransferStore: Send + Sync + 'static {
         file_uri: &str,
     ) -> Result<Option<TransferGrant>, StoreError>;
 
-    /// The newest pending, unexpired grant prepared for this helper key, file,
-    /// and direction. Activation re-checks every condition atomically.
+    /// Record that a pending grant's creation is on record and it has been
+    /// handed to its caller. Returns false when the grant is no longer pending.
+    async fn mark_issued(&self, grant_id: Uuid) -> Result<bool, StoreError>;
+
+    /// The newest issued, pending, unexpired grant prepared for this helper
+    /// key, file, and direction. Activation re-checks every condition
+    /// atomically.
     async fn find_pending_for_helper(
         &self,
         helper_jkt: &str,
@@ -699,6 +704,13 @@ impl TransferAuthority {
         {
             self.revoke_unreturned_grant(grant.id).await;
             return Err(error.into());
+        }
+        // Selection by file URI considers only issued grants, so this is the
+        // point at which a grant becomes redeemable that way: its creation is
+        // on record, exactly as when the handle is returned below. A grant
+        // left unissued by a failure here is unreachable by either form.
+        if !self.store.mark_issued(grant.id).await? {
+            return Err(AuthorityError::GrantUnavailable);
         }
 
         Ok(PublicTransferGrant {
