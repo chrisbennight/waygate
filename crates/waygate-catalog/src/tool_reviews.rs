@@ -418,8 +418,9 @@ impl PgCatalogStore {
         .fetch_one(&mut *tx)
         .await?;
         let unavailable = contract.is_null();
-        // A missing optional comparison cannot override an exact annotation approval.
-        let storage_requires_review = unavailable && approved_hash.is_none();
+        // A missing optional comparison cannot override an exact annotation
+        // approval, and holds only a contract whose changes require review.
+        let storage_requires_review = unavailable && approved_hash.is_none() && block_changes;
         let approval_mismatch = approved_hash.is_some_and(|approved| approved != hash);
         let baseline_hash = approved_hash.unwrap_or(hash);
         let baseline = if approval_mismatch {

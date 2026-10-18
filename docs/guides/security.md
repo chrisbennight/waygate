@@ -133,8 +133,9 @@ baseline. This workflow does
 not add upstream change-notification handling or inspect a server's internal
 implementation.
 
-**Catalog → Recent drift events** lists each recorded change, including changes
-accepted automatically, with its server, tool, changed fields, and outcome.
+**Catalog → Recent drift events** lists each change to a classified tool,
+including changes accepted automatically, with its server, tool, changed fields,
+and outcome.
 **View change** compares that change's previous and new definitions, and the
 change's Activity entry links to the same page. A change back to a definition
 recorded earlier is labeled as one. Definitions over the storage limit, and
@@ -143,9 +144,10 @@ changes recorded before this history was kept, show only their contract hashes.
 Durable review needs `GATEWAY_DATABASE_URL`. The accepted and current contracts
 are bounded to 256 KiB each in storage. Larger contracts retain their exact hash
 and any existing approval, but a new
-replacement cannot be compared or approved. Reduce the contract upstream
-and refresh to review it; reverting to a previous contract does not clear the
-block. Other tools remain reviewable. Database failures refuse protected admission. Existing quarantines survive restart, reconnect, and the upstream's
+replacement cannot be compared. For a tool the quarantine threshold covers, it
+also cannot be approved: reduce the contract upstream and refresh to review it;
+reverting to a previous contract does not clear the block. A larger replacement
+for an uncovered tool is accepted automatically. Other tools remain reviewable. Database failures refuse protected admission. Existing quarantines survive restart, reconnect, and the upstream's
 Clear quarantine control. Without a database, the existing process-local
 quarantine remains available, but this durable review screen is unavailable.
 Upstream configuration and its review belong to the default configuration

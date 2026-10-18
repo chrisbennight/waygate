@@ -1184,3 +1184,58 @@ async fn drift_events_keep_both_contracts_and_identify_returns() {
         "a return names when the contract was first recorded"
     );
 }
+
+#[tokio::test]
+async fn unprotected_oversized_change_is_recorded_without_blocking() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("drift-unprotected-{}", Uuid::new_v4());
+    ManifestImporter::new(pool.clone())
+        .import_atomic(
+            &tenant,
+            &[ImportServer {
+                tenant_id: tenant.clone(),
+                name: "fixture".into(),
+                transport: "http".into(),
+                runtime_target: json!({"url":"http://example.test/mcp"}),
+                classification_mode: "manifest".into(),
+                tools: vec![ImportTool {
+                    name: "search".into(),
+                    approved_behavior_hash: None,
+                    risk: "low".into(),
+                    side_effects: false,
+                    pii: false,
+                    discriminator: None,
+                    operations: vec![],
+                }],
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    let store = PgCatalogStore::new(pool.clone());
+    let oversized = json!({"description": "x".repeat(300 * 1024)});
+    for (hash, contract) in [
+        ("a", json!({"description":"Search documentation"})),
+        ("b", oversized),
+    ] {
+        let observation = store
+            .observe_decision(&tenant, "fixture", "search", hash, &contract, false, None)
+            .await
+            .unwrap();
+        assert!(
+            !observation.decision.unwrap().quarantined,
+            "an unprotected contract is not held because it cannot be stored"
+        );
+    }
+    let events = store
+        .list_drift_events(&tenant, time::OffsetDateTime::UNIX_EPOCH, 10)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].previous_hash.as_deref(), Some("a"));
+    assert_eq!(events[0].observed_hash, "b");
+    assert_eq!(events[0].severity, waygate_catalog::DriftSeverity::Info);
+    assert_eq!(events[0].changed_fields, None);
+}

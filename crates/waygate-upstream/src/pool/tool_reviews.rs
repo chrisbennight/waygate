@@ -149,17 +149,10 @@ impl UpstreamPool {
             }
             let (hash, contract) = review_contract(tool, manifest.classification_mode);
             let side_effects = class.is_some_and(|class| class.side_effects) || annotation_mode;
+            // Every classified tool is observed, so each change keeps its
+            // drift history. Only a covered tool's change is held for review.
             let block_changes = class
                 .is_some_and(|class| self.quarantine_threshold.covers(class.risk, side_effects));
-            if !annotation_mode
-                && !block_changes
-                && store
-                    .get(waygate_core::TenantId::DEFAULT, name, tool.name.as_ref())
-                    .await?
-                    .is_none()
-            {
-                continue;
-            }
             let observation = store
                 .observe_decision(
                     waygate_core::TenantId::DEFAULT,

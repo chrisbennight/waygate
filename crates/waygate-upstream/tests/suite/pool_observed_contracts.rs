@@ -203,7 +203,7 @@ async fn durable_review_preserves_below_threshold_activity_on_refresh_and_rebuil
                 .await,
             ResolvedInvocationTool::Ready(_)
         ));
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let target = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 let events = sink.snapshot().await;
                 let drift: Vec<_> = events
@@ -218,13 +218,36 @@ async fn durable_review_preserves_below_threshold_activity_on_refresh_and_rebuil
                     assert!(drift
                         .iter()
                         .all(|event| event.outcome == waygate_mcp::AuditOutcome::Success));
-                    break;
+                    break drift[index].target.clone();
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
         .await
         .expect("informational drift must remain visible in Activity");
+        // An automatically accepted change keeps its history, and its Activity
+        // row names the drift event that compares the two definitions.
+        let change = store
+            .drift_change(
+                "default",
+                target
+                    .expect("Activity names the drift event")
+                    .parse()
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .expect("named drift event exists");
+        assert_eq!(
+            (change.event.server.as_str(), change.event.tool.as_str()),
+            (name.as_str(), "stable")
+        );
+        assert_eq!(change.event.severity, waygate_catalog::DriftSeverity::Info);
+        assert!(change.previous_contract.is_some());
+        assert_eq!(
+            change.observed_contract.unwrap()["description"],
+            serde_json::json!(description)
+        );
     }
     server_task.abort();
 }
