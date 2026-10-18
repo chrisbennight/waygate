@@ -33,6 +33,7 @@ mod reconnect_scheduler;
 mod reload;
 mod retention_config;
 mod skills_git;
+mod startup_listener;
 mod state;
 mod subscription_listen;
 mod upstream_tasks;
@@ -48,7 +49,6 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use tokio_util::sync::CancellationToken;
-use tower::make::Shared;
 use tower::Layer;
 use tower_http::normalize_path::NormalizePathLayer;
 use tower_http::trace::TraceLayer;
@@ -391,6 +391,18 @@ async fn gateway_main() -> anyhow::Result<()> {
         Some((active, ring)) => (Some(active), Some(ring)),
         None => (None, None),
     };
+    // Upstreams that verify `X-MCP-Identity` fetch these keys from the gateway
+    // on first contact, and the pool's first connections below carry such
+    // tokens, so the keys are served before the pool dials.
+    let listener = startup_listener::StartupListener::bind(
+        cfg.listen_addr,
+        startup_listener::starting_router(identity_keyring.as_ref()),
+    )
+    .await?;
+    tracing::info!(
+        addr = %listener.local_addr(),
+        "gateway listener bound; serving identity keys while starting",
+    );
 
     let oidc_http = build_oidc_http_clients(&cfg)?;
     let exchange_bundle = build_exchange_bundle(&cfg)?;
@@ -1913,15 +1925,10 @@ async fn gateway_main() -> anyhow::Result<()> {
     // routing and can't influence path matching.
     let app = NormalizePathLayer::trim_trailing_slash().layer(app);
 
-    let listener = tokio::net::TcpListener::bind(&cfg.listen_addr)
-        .await
-        .with_context(|| format!("bind {}", cfg.listen_addr))?;
-
     tracing::info!(addr = %cfg.listen_addr, "gateway listening");
 
-    // NOW that the listener is bound (the serving point — the fallible
-    // startup is done), record the boot activation event built earlier. A boot
-    // that failed before here never persists it.
+    // NOW that the fallible startup is done, record the boot activation event
+    // built earlier. A boot that failed before here never persists it.
     if let Some(event) = boot_activation {
         audit_sink.record_best_effort(event).await;
     }
@@ -2450,10 +2457,12 @@ async fn gateway_main() -> anyhow::Result<()> {
     // would match the grace period exactly, leaving no
     // margin.
     //
-    // Pattern: spawn the server future as a detached task so
-    // it runs concurrently with the notify wait. The shutdown
-    // trigger fires `drain_started.notify_one()` from inside
-    // axum's graceful-shutdown future. We then race
+    // Pattern: the server has run as a detached task since the
+    // listener was bound, concurrently with the notify wait. The
+    // shutdown task below starts axum's graceful shutdown and fires
+    // `drain_started.notify_one()`. The signal handlers are installed
+    // here, after startup, so a signal during startup still ends the
+    // process at once. We then race
     // `(server task join + concurrent pool closes)` against
     // `sleep(drain_timeout)`. On the timeout branch, dropping
     // the cleanup future + returning from main aborts the
@@ -2463,15 +2472,18 @@ async fn gateway_main() -> anyhow::Result<()> {
     let drain_started = std::sync::Arc::new(tokio::sync::Notify::new());
     let drain_started_signal = drain_started.clone();
     let drain_timeout = cfg.drain_timeout;
-    let server_fut = axum::serve(listener, Shared::new(app)).with_graceful_shutdown(async move {
+    // The complete application serves requests only from here, once the
+    // registration and background tasks above are in place; until now the
+    // listener has answered only the identity keys.
+    listener.install(app);
+    let stop_serving = listener.stop_token();
+    tokio::spawn(async move {
         shutdown_signal().await;
         shutdown_ct.cancel();
+        stop_serving.cancel();
         drain_started_signal.notify_one();
     });
-    // `WithGracefulShutdown` is `IntoFuture` but not directly
-    // `Future` (axum 0.8). Wrap in an async block so `tokio::spawn`
-    // accepts it.
-    let server_task = tokio::spawn(async move { server_fut.await });
+    let server_task = listener.into_task();
 
     // Wait for SIGTERM/SIGINT to fire (the trigger inside
     // `with_graceful_shutdown` notifies us as soon as it
