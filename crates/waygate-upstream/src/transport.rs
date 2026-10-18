@@ -228,7 +228,7 @@ impl DialError {
         }
     }
 
-    fn redirect_refused(server: &str, refused: http_policy::RedirectRefused) -> Self {
+    pub(crate) fn redirect_refused(server: &str, refused: http_policy::RedirectRefused) -> Self {
         Self::RedirectRefused {
             server: server.to_owned(),
             status: refused.status,
@@ -312,6 +312,10 @@ pub(crate) struct ConnectedService {
     /// upstream before the service closes. Only streamable HTTP holds a
     /// request open that the service's own shutdown cannot reach.
     pub(crate) open_requests: tokio_util::sync::CancellationToken,
+    /// Set when this connection refused a redirect. A dial request after the
+    /// handshake fails only as a generic request error, so the dial reads this
+    /// to report the refusal instead.
+    pub(crate) refused_redirect: std::sync::Arc<std::sync::OnceLock<http_policy::RedirectRefused>>,
 }
 
 /// A connection whose dial is still recording its HTTP exchanges.
@@ -334,6 +338,11 @@ impl DialedService {
     /// `error` followed by a summary of this dial's HTTP exchanges.
     pub(crate) fn with_http_exchanges(&self, error: DialError) -> DialError {
         error.with_http_exchanges(&self.exchanges)
+    }
+
+    /// The redirect this connection refused, if a dial request was redirected.
+    pub(crate) fn refused_redirect(&self) -> Option<http_policy::RedirectRefused> {
+        self.connected.refused_redirect.get().copied()
     }
 
     /// End the dial: stop recording and hand over the connection.
@@ -703,6 +712,7 @@ async fn dial_once(
                 cleartext_control_plane: url::Url::parse(&url)
                     .is_ok_and(|url| url.scheme() == "http"),
                 open_requests,
+                refused_redirect: connection_probe.refused_redirect_slot(),
             })
         }
         Transport::Sse => {
@@ -760,9 +770,9 @@ async fn dial_once(
                         |refused| DialError::redirect_refused(&manifest.name, *refused),
                     )
                 })?;
-                Ok::<_, DialError>((service, cleartext_control_plane))
+                Ok::<_, DialError>((service, cleartext_control_plane, refused_redirect))
             };
-            let (service, cleartext_control_plane) =
+            let (service, cleartext_control_plane, refused_redirect) =
                 tokio::time::timeout(handshake_timeout, handshake)
                     .await
                     .map_err(|_| DialError::handshake_timeout(handshake_timeout))??;
@@ -771,6 +781,7 @@ async fn dial_once(
                 network_destination: Some(destination),
                 cleartext_control_plane,
                 open_requests: Default::default(),
+                refused_redirect,
             })
         }
         Transport::Stdio => {
@@ -810,6 +821,7 @@ async fn dial_once(
                 network_destination: None,
                 cleartext_control_plane: false,
                 open_requests: Default::default(),
+                refused_redirect: Default::default(),
             })
         }
     }

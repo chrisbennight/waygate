@@ -123,6 +123,12 @@ impl BoundedResponseClient {
         self.refused_redirect.get().copied()
     }
 
+    /// The slot recording that refusal, shared by every clone of this client,
+    /// so a connection can report it after the dial's handshake.
+    pub(crate) fn refused_redirect_slot(&self) -> Arc<OnceLock<RedirectRefused>> {
+        Arc::clone(&self.refused_redirect)
+    }
+
     fn observe_failure<T>(&self, result: &Result<T, StreamableHttpError<reqwest::Error>>) {
         let Err(StreamableHttpError::Client(error)) = result else {
             return;
