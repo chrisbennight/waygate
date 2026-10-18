@@ -153,9 +153,36 @@ impl TransferStore for PgTransferStore {
         row.map(|row| row_to_grant(&row)).transpose()
     }
 
+    async fn find_pending_for_helper(
+        &self,
+        helper_jkt: &str,
+        file_uri: &str,
+        direction: TransferDirection,
+    ) -> Result<Option<TransferGrant>, StoreError> {
+        let row = grant_query!(
+            "SELECT",
+            r#"
+            FROM file_transfer_grants
+            WHERE helper_jkt = $1
+              AND file_uri = $2
+              AND direction = $3
+              AND status = 'pending'
+              AND expires_at > now()
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            "#
+        )
+        .bind(helper_jkt)
+        .bind(file_uri)
+        .bind(direction.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| row_to_grant(&row)).transpose()
+    }
+
     async fn activate(
         &self,
-        handle_hash: &[u8],
+        grant_id: Uuid,
         helper_jkt: &str,
         credential_hash: &[u8],
         credential_expires_at: OffsetDateTime,
@@ -165,7 +192,7 @@ impl TransferStore for PgTransferStore {
             UPDATE file_transfer_grants
                SET status = 'active', credential_hash = $3,
                    credential_expires_at = $4, activated_at = now()
-             WHERE handle_hash = $1
+             WHERE id = $1
                AND helper_jkt = $2
                AND status = 'pending'
                AND expires_at > now()
@@ -175,7 +202,7 @@ impl TransferStore for PgTransferStore {
             "#,
             ""
         )
-        .bind(handle_hash)
+        .bind(grant_id)
         .bind(helper_jkt)
         .bind(credential_hash)
         .bind(credential_expires_at)

@@ -998,3 +998,130 @@ async fn dpop_credential_cannot_be_used_as_a_native_bearer() {
         .await
         .expect("native refusal does not consume generic credential");
 }
+
+#[tokio::test]
+async fn a_helper_redeems_by_file_uri_only_with_its_own_key_once() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("file-redeem-{}", Uuid::new_v4().simple());
+    seed_tenant(&pool, &tenant).await;
+    let authority = TransferAuthority::new(
+        Arc::new(PgTransferStore::new(pool)),
+        Arc::new(InMemorySink::new()),
+        DpopVerifier::new(Duration::minutes(5), Duration::seconds(30)).unwrap(),
+    );
+    let actor = principal(&tenant);
+    let helper = HelperKey::new(45);
+    let other_helper = HelperKey::new(46);
+    let now = OffsetDateTime::now_utc();
+    let endpoint = "https://gateway.example/file-transfers/credentials";
+    let redeem = |key: &HelperKey, jti: &str, uri: &str, direction: TransferDirection| {
+        let proof = key.proof(jti, "POST", endpoint, None, now);
+        let uri = uri.to_owned();
+        let authority = &authority;
+        async move {
+            authority
+                .exchange_credential_for_file(&uri, direction, &proof, "POST", endpoint, now)
+                .await
+        }
+    };
+
+    let older = authority
+        .create_grant(&actor, upload_grant(helper.thumbprint(), now), now)
+        .await
+        .unwrap();
+    let file_uri = older.file_uri.clone();
+    let mut newer_spec = upload_grant(helper.thumbprint(), now);
+    newer_spec.file_uri = file_uri.clone();
+    let newer = authority
+        .create_grant(&actor, newer_spec, now)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(
+            redeem(
+                &other_helper,
+                "other-key",
+                &file_uri,
+                TransferDirection::Upload
+            )
+            .await,
+            Err(AuthorityError::GrantUnavailable)
+        ),
+        "a grant prepared for one key must not be redeemable with another"
+    );
+    assert!(
+        matches!(
+            redeem(
+                &helper,
+                "wrong-direction",
+                &file_uri,
+                TransferDirection::Download
+            )
+            .await,
+            Err(AuthorityError::GrantUnavailable)
+        ),
+        "an upload grant must not be redeemable as a download"
+    );
+    assert!(matches!(
+        redeem(
+            &helper,
+            "unknown-file",
+            &format!("mcp-file://gateway/{}", Uuid::new_v4()),
+            TransferDirection::Upload,
+        )
+        .await,
+        Err(AuthorityError::GrantUnavailable)
+    ));
+
+    let issued = redeem(&helper, "by-file", &file_uri, TransferDirection::Upload)
+        .await
+        .expect("the preparing key redeems by file URI");
+    assert_eq!(issued.grant.file_uri, file_uri);
+    assert_eq!(issued.grant.expected_size, Some(3));
+
+    let newer_proof = helper.proof("newer-handle", "POST", endpoint, None, now);
+    assert!(
+        matches!(
+            authority
+                .exchange_credential(&newer.handle, &newer_proof, "POST", endpoint, now)
+                .await,
+            Err(AuthorityError::GrantUnavailable)
+        ),
+        "redemption by file selects the newest pending grant"
+    );
+    let older_proof = helper.proof("older-handle", "POST", endpoint, None, now);
+    authority
+        .exchange_credential(&older.handle, &older_proof, "POST", endpoint, now)
+        .await
+        .expect("an older pending grant is untouched");
+
+    assert!(
+        matches!(
+            redeem(&helper, "spent", &file_uri, TransferDirection::Upload).await,
+            Err(AuthorityError::GrantUnavailable)
+        ),
+        "no pending grant remains, so a later redemption is refused"
+    );
+
+    let past = now - Duration::minutes(30);
+    let expired = authority
+        .create_grant(&actor, upload_grant(helper.thumbprint(), past), past)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            redeem(
+                &helper,
+                "expired",
+                &expired.file_uri,
+                TransferDirection::Upload
+            )
+            .await,
+            Err(AuthorityError::GrantUnavailable)
+        ),
+        "an expired grant is never selected"
+    );
+}

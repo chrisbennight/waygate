@@ -28,8 +28,11 @@ pub struct PrepareDownload {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileValue {
     pub uri: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
     #[serde(default)]
     pub size: Option<u64>,
     #[serde(default)]
@@ -61,6 +64,41 @@ pub struct TransferDescriptor {
     pub proof_header: String,
     #[serde(default)]
     pub content_type: Option<String>,
+}
+
+/// The gateway serves both transfer endpoints at fixed paths under its base
+/// URL. Redeeming by file URI builds them from the recorded gateway, so no
+/// address reaches the helper through the caller's context at all.
+const CREDENTIAL_EXCHANGE_PATH: &str = "/file-transfers/credentials";
+const CONTENT_PATH: &str = "/file-transfers/content";
+
+fn fixed_endpoint(gateway: &Url, path: &str) -> String {
+    format!("{}{path}", gateway.as_str().trim_end_matches('/'))
+}
+
+impl CredentialExchange {
+    pub fn fixed(gateway: &Url) -> Self {
+        Self {
+            method: "POST".to_owned(),
+            url: fixed_endpoint(gateway, CREDENTIAL_EXCHANGE_PATH),
+            grant_handle_field: "grant_handle".to_owned(),
+            proof_header: "DPoP".to_owned(),
+            access_token_field: "access_token".to_owned(),
+        }
+    }
+}
+
+impl TransferDescriptor {
+    /// `PUT` for an upload, `GET` for a download.
+    pub fn fixed(gateway: &Url, method: &str, content_type: Option<String>) -> Self {
+        Self {
+            method: method.to_owned(),
+            url: fixed_endpoint(gateway, CONTENT_PATH),
+            authorization_scheme: "DPoP".to_owned(),
+            proof_header: "DPoP".to_owned(),
+            content_type,
+        }
+    }
 }
 
 /// Read a tool result from `reader`.
@@ -147,6 +185,35 @@ mod tests {
 
     fn gateway() -> Origin {
         Url::parse("https://gateway.example").expect("url").origin()
+    }
+
+    #[test]
+    fn reads_the_file_the_credential_exchange_describes() {
+        let file: FileValue = serde_json::from_value(serde_json::json!({
+            "uri": "mcp-file://gateway/example",
+            "mimeType": "application/pdf",
+            "size": 5,
+            "digest": {"algorithm": "sha-256", "value": "abc"},
+        }))
+        .expect("the exchange response's file description parses");
+        assert_eq!(file.mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(file.size, Some(5));
+        assert_eq!(file.digest.expect("digest").value, "abc");
+    }
+
+    #[test]
+    fn fixed_endpoints_sit_under_the_recorded_gateway() {
+        for recorded in ["https://gateway.example", "https://gateway.example/"] {
+            let gateway = Url::parse(recorded).expect("url");
+            assert_eq!(
+                CredentialExchange::fixed(&gateway).url,
+                "https://gateway.example/file-transfers/credentials"
+            );
+            assert_eq!(
+                TransferDescriptor::fixed(&gateway, "GET", None).url,
+                "https://gateway.example/file-transfers/content"
+            );
+        }
     }
 
     #[test]

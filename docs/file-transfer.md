@@ -625,13 +625,23 @@ Neither is offered for a plain HTTP public URL.
 A general-purpose client that lacks SEP support can run a helper in any
 language. For upload, the helper creates a temporary signing key, calls
 `gateway-files.prepare_upload` with the key thumbprint and any known name,
-media type, size, or SHA-256 digest, exchanges the returned opaque handle over
-the fixed credential endpoint, and streams the local file with `PUT`. The tool
-result spells out every field and header. After a successful upload the client
+media type, size, or SHA-256 digest, redeems the grant over the fixed
+credential endpoint, and streams the local file with `PUT`. The tool result
+spells out every field and header. After a successful upload the client
 keeps only `file.uri` and its safe metadata; it never puts the file bytes,
 local path, transfer credential, or upload URL in a tool argument.
 
-The `mcp-files` reference helper reads the first complete JSON value by default,
+The `mcp-files` reference helper needs only the gateway file URI:
+`mcp-files upload --uri <file.uri> --file <path>` and
+`mcp-files download --uri <uri> --dest <path>` redeem the grant prepared for
+the helper's key and that URI, and build the fixed endpoint addresses from the
+gateway recorded by `mcp-files init`. A client therefore never relays the
+prepare result to a local command. That matters for hosts that cannot feed a
+tool result to a command's standard input, whose only alternative would be to
+copy the result into the command text.
+
+Without `--uri`, the helper reads the prepare result on standard input. It
+reads the first complete JSON value by default,
 so a process host can write either compact or formatted JSON without signalling
 EOF. Explicit EOF-delimited (`--input-framing eof`) and compact
 newline-delimited (`--input-framing jsonl`) modes remain available for hosts
@@ -678,12 +688,33 @@ OAuth or CIMD cache. The gateway supports that separation as follows:
    and download URLs. It returns no file bytes or bearer credential. The handle
    cannot be redeemed without the temporary private key.
 3. The helper sends an RFC 9449 DPoP proof directly to
-   `POST /file-transfers/credentials` and puts the grant handle in the JSON
-   body as `grant_handle`. No MCP bearer is sent, and the opaque handle is not
-   placed in request URLs or routine HTTP traces.
+   `POST /file-transfers/credentials`. The JSON body selects the grant in one
+   of two ways: `grant_handle` carries the opaque handle, or `file_uri` and
+   `direction` (`upload` or `download`) name the gateway file URI and the
+   transfer direction. A body with both forms, or neither, is refused. No MCP
+   bearer is sent, and the opaque handle is not placed in request URLs or
+   routine HTTP traces.
 4. The gateway returns a short-lived `DPoP` transfer credential bound to that
-   key. The helper sends a fresh proof when it starts the download. The
-   credential stays in headers and out of URLs and model-visible objects.
+   key, and a `file` object describing the grant's file from gateway state:
+   `uri`, and `mimeType`, `size`, and `digest` when known. The helper verifies
+   a download against that description. It sends a fresh proof when it starts
+   the transfer. The credential stays in headers and out of URLs and
+   model-visible objects.
+
+Selecting by file URI verifies the proof before any lookup, because the
+proof's key is part of the selection. The gateway then activates the newest
+pending, unexpired grant prepared for that key, URI, and direction, under the
+same single-use activation, replay protection, and audit rules as the handle.
+Older pending grants for the same selection stay unused until they expire. A
+request that matches no grant is refused without audit evidence, as an unknown
+handle is, because no owner can be attributed to it.
+
+This form gives up the handle as a second secret. Anyone holding the helper's
+private key can redeem any grant still pending for that key, once, within the
+grant's short lifetime. The key is stored where only its user can read it, and
+preparing a grant still requires the authenticated caller, file ownership,
+credential-profile checks, and quota. Every grant named that key when it was
+prepared, so the key alone authorizes nothing that the caller did not request.
 
 Each grant records who owns the file, which invocation produced it, the file
 URI, direction, source, destination, expiry, request count, media type, size,

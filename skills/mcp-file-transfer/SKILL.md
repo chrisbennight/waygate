@@ -4,7 +4,7 @@ description: Move a file to or from an MCP gateway without its bytes entering mo
 license: Apache-2.0
 metadata:
   source: waygate
-  version: 0.1.3
+  version: 0.2.0
 ---
 
 # Moving a file through the gateway
@@ -15,11 +15,11 @@ signing and moves the bytes. What comes back is an address you pass along.
 
 ## Why there is a command at all
 
-The tool call returns a grant that is bound to a key on this machine. That
-binding is the point: the grant is safe to sit in your context precisely
-because reading it is not enough to use it. Redeeming it requires signing with
-that key, which needs a JOSE library — so it is done by `mcp-files` rather than
-by you.
+The prepare call creates a grant bound to a key on this machine. Redeeming it
+requires signing with that key, which needs a JOSE library — so it is done by
+`mcp-files` rather than by you. The command finds the grant from its own key
+and the file's `mcp-file://` address, so the only things you pass it are that
+address and a local path. The address is not an access credential.
 
 Pasting file contents into a tool argument is not the fallback when the command
 is missing. It defeats the whole arrangement. Install the command instead.
@@ -38,29 +38,15 @@ Then call `gateway-files.prepare_upload` with:
 - `helper_jkt` — the fingerprint from above
 - `name`, `mime_type`, `size` — whatever you know; all optional
 
-Then pipe that tool result straight into the command:
+Take `file.uri` from the result and run:
 
 ```
-mcp-files upload --file <path> <<'JSON'
-<the prepare_upload structuredContent>
-JSON
+mcp-files upload --uri <file.uri> --file <path>
 ```
 
-The default input mode starts the transfer as soon as it receives one complete
-JSON value. It accepts compact or formatted JSON and does not wait for EOF. If
-the execution host can write only through a PTY, start the PTY with terminal
-echo disabled and send the JSON followed by a newline once; do not send Ctrl-D.
-The explicit `--input-framing eof` and `--input-framing jsonl` modes remain
-available for launchers that require fixed framing.
-
-Use the tool call's `structuredContent` object when it is available. The helper
-also accepts a complete tool result carrying `structuredContent`. For clients
-that drop that field, it accepts exactly one text content block only when that
-block is entirely a JSON prepare result; it does not scrape JSON from prose.
-
-It prints one line: an `mcp-file://gateway/...` address. That address, and
-metadata like the file name, are the only things to carry forward. Not the
-bytes, not the local path, not anything else from the result.
+It prints the same `mcp-file://gateway/...` address once the upload succeeds.
+That address, and metadata like the file name, are the only things to carry
+forward. Not the bytes, not the local path, not anything else from the result.
 
 Use the address wherever the next tool wants the file.
 
@@ -72,8 +58,29 @@ do not duplicate it yet. A new upload can be prepared after `failed` or
 
 ## Download
 
-Same shape. `mcp-files thumbprint`, then `gateway-files.prepare_download` with
-the `mcp-file://` address and that fingerprint, then:
+`mcp-files thumbprint`, then `gateway-files.prepare_download` with the
+`mcp-file://` address and that fingerprint, then:
+
+```
+mcp-files download --uri <mcp-file address> --dest <path>
+```
+
+It writes the file and checks it against the size and digest the gateway
+reports when the grant is redeemed, so a truncated or altered transfer fails
+instead of landing.
+
+## Each prepare call is good for one transfer
+
+The helper redeems the newest unused grant prepared for its key and that
+address. A grant works once and expires after a few minutes. If the helper
+says the grant is unavailable, call the prepare tool again and rerun the
+command; do not retry the command alone.
+
+## Older gateways and piped results
+
+A gateway that predates address-based redemption refuses `--uri` at the
+credential exchange. Against such a gateway, omit `--uri` and give the helper
+the prepare call's `structuredContent` on standard input instead, for example:
 
 ```
 mcp-files download --dest <path> <<'JSON'
@@ -81,11 +88,9 @@ mcp-files download --dest <path> <<'JSON'
 JSON
 ```
 
-The download command uses the same automatic framing and supports the same
-explicit overrides.
-
-It writes the file and checks it against whatever size and digest the gateway
-declared, so a truncated or altered transfer fails instead of landing.
+The helper reads the first complete JSON value without waiting for EOF and
+also accepts a whole tool result. `--input-framing eof` and
+`--input-framing jsonl` exist for launchers that need fixed framing.
 
 ## First run on a machine
 
@@ -93,12 +98,9 @@ declared, so a truncated or altered transfer fails instead of landing.
 mcp-files init --gateway https://<your-gateway>
 ```
 
-Records which gateway the transfer addresses must belong to, and creates the
-signing key. Without it the other commands refuse and say so.
-
-That check matters: the tool result reaches the command by way of your context,
-so the addresses inside it are not trusted. An address pointing anywhere other
-than the recorded gateway is refused before any bytes move.
+Records the gateway's base address and creates the signing key. Without it the
+other commands refuse and say so. The helper sends grants and bytes only to
+that recorded gateway.
 
 The helper connects directly to that recorded gateway over HTTPS. In a
 sandboxed execution host, grant network access for the `mcp-files upload` or
