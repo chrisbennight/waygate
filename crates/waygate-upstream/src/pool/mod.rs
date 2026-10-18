@@ -1504,11 +1504,14 @@ impl UpstreamCatalog for UpstreamPool {
                     %tenant, %server, tool = %tool_name,
                     "tool is in-process quarantined (drift-triggered); refusing dispatch",
                 );
-                return ResolvedInvocationTool::refused(
-                    server,
-                    tool_name,
-                    ToolRefusal::DriftQuarantined,
-                );
+                return match self.catalog_server_block(tenant, server, tool_name).await {
+                    Some(block) => block,
+                    None => ResolvedInvocationTool::refused(
+                        server,
+                        tool_name,
+                        ToolRefusal::DriftQuarantined,
+                    ),
+                };
             }
             let admission = admission::entry_tool_admission(entry, manifest, tool_name).await;
             if let Some(refusal) = admission.refusal(server, tool_name) {
@@ -1516,7 +1519,10 @@ impl UpstreamCatalog for UpstreamPool {
                     %tenant, %server, tool = %tool_name, ?admission,
                     "tool is not admitted by the current classification mode and behavior hash",
                 );
-                return refusal;
+                return match self.catalog_server_block(tenant, server, tool_name).await {
+                    Some(block) => block,
+                    None => refusal,
+                };
             }
         }
         let published =

@@ -580,7 +580,7 @@ pub enum InvocationError {
     /// for a caller who may discover that server. No policy explains that
     /// refusal, so `trace_id` is set and names the gateway's log and audit
     /// record for it; Cedar denials leave it `None`.
-    #[error("forbidden: {reason}")]
+    #[error("forbidden: {reason}{}", .trace_id.as_ref().map(|id| format!(" (trace id {id})")).unwrap_or_default())]
     Forbidden {
         reason: String,
         policy_ids: Vec<String>,
@@ -592,7 +592,7 @@ pub enum InvocationError {
     /// not exist, so the error never confirms that a withheld tool exists.
     /// The precise reason is recorded only in the gateway's log and audit
     /// record for `trace_id`. `tool` is the requested `<server>.<tool>` name.
-    #[error("unknown or unavailable tool `{tool}`")]
+    #[error("unknown or unavailable tool `{tool}` (trace id {trace_id})")]
     ToolUnavailable { tool: String, trace_id: String },
     /// Cedar policy returned `StepUpRequired` — the caller is otherwise
     /// authenticated but missing a scope the tool's risk class requires.

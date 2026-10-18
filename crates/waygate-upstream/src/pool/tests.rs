@@ -1239,6 +1239,72 @@ async fn in_process_drift_quarantine_is_its_own_refusal() {
     );
 }
 
+/// A server the catalog has quarantined or retired is reported as blocked
+/// even when the live contract check would refuse the tool for its own
+/// reason or call it temporarily unavailable, so a caller is never told to
+/// retry a call that only an administrator can unblock.
+#[tokio::test]
+async fn a_catalog_server_block_outranks_live_contract_reasons() {
+    let quarantined_catalog = |retired| -> waygate_catalog::SharedCatalogStore {
+        Arc::new(ScriptedCatalog {
+            outcome: std::sync::Mutex::new(Some(waygate_catalog::ResolvedTool::Quarantined {
+                server_name: "example-messages".into(),
+                tool_name: "send_message".into(),
+                retired,
+            })),
+            err: false,
+            ..Default::default()
+        })
+    };
+    for (retired, expected) in [
+        (false, ToolRefusal::ServerQuarantined),
+        (true, ToolRefusal::ServerRetired),
+    ] {
+        // No connected session: the live check alone reports a temporary state.
+        let mut manifest = manifest_with(false);
+        manifest.classification_mode = crate::ClassificationMode::McpAnnotations;
+        let mut approved = classification("send_message");
+        approved.approved_behavior_hash = Some("a".repeat(64));
+        manifest.tools = vec![approved];
+        let disconnected = UpstreamPool::from_manifests_disconnected(BTreeMap::from([(
+            "example-messages".to_owned(),
+            manifest,
+        )]))
+        .with_catalog(quarantined_catalog(retired));
+        assert_eq!(
+            refusal_reason(
+                disconnected
+                    .resolve_invocation_tool("default", "example-messages", "send_message")
+                    .await
+            ),
+            Ok(expected),
+            "disconnected, retired={retired}",
+        );
+
+        // An in-process drift quarantine is a per-tool reason.
+        let drifted = pool_with_one_upstream("send_message", RiskTier::High)
+            .with_catalog(quarantined_catalog(retired));
+        drifted
+            .entries
+            .load()
+            .get("example-messages")
+            .expect("entry")
+            .quarantined
+            .write()
+            .expect("upstream quarantine lock poisoned")
+            .insert("send_message".to_owned());
+        assert_eq!(
+            refusal_reason(
+                drifted
+                    .resolve_invocation_tool("default", "example-messages", "send_message")
+                    .await
+            ),
+            Ok(expected),
+            "drift quarantined, retired={retired}",
+        );
+    }
+}
+
 #[tokio::test]
 async fn resolved_side_effects_reports_resolver_facts_and_defaults_conservative() {
     // Ready snapshot: the derived side-effect fact is returned as-is

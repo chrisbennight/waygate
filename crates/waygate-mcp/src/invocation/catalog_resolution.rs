@@ -108,7 +108,9 @@ impl DefaultInvocationService {
             };
         }
         InvocationError::Upstream(ErrorData::internal_error(
-            "the governed tool catalog is unavailable; retry the request",
+            format!(
+                "the governed tool catalog is unavailable; retry the request (trace id {trace_id})"
+            ),
             Some(serde_json::json!({
                 "error": "catalog_unavailable",
                 "retryable": true,

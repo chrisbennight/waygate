@@ -347,6 +347,8 @@ async fn the_audit_row_carries_the_trace_id_the_caller_receives() {
     ];
     for (outcome, caller) in cases {
         let (err, events) = refuse(outcome, Arc::new(AllowAllGate), Some(caller)).await;
+        // Code Mode passes on only the error's text, so it must name the id.
+        let text = err.to_string();
         let data = wire(err).data.expect("structured error data");
         let returned = data["trace_id"].as_str().expect("trace id in the error");
         assert_eq!(events.len(), 1, "{outcome:?}");
@@ -354,6 +356,10 @@ async fn the_audit_row_carries_the_trace_id_the_caller_receives() {
             events[0].trace_id.as_deref(),
             Some(returned),
             "{outcome:?}: the audit row must be findable by the caller's trace id"
+        );
+        assert!(
+            text.contains(&format!("(trace id {returned})")),
+            "{outcome:?}: the error text must carry the trace id: {text}"
         );
     }
 }
