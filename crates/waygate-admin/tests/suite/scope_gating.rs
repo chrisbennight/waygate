@@ -93,6 +93,7 @@ fn disconnected_manifest(name: &str) -> UpstreamManifest {
         exchange: None,
         tier_a_required: false,
         auth: None,
+        headers: Default::default(),
         mtls: None,
         tier_c_peer: None,
         session: None,

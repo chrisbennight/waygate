@@ -179,6 +179,7 @@ async fn discovery_latency_and_database_queries() {
             resources: vec![],
             exchange: None,
             auth: None,
+            headers: Default::default(),
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,

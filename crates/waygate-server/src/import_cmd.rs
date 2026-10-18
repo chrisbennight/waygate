@@ -605,6 +605,7 @@ mod tests {
             resources: Vec::new(),
             exchange: None,
             auth: None,
+            headers: Default::default(),
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,
@@ -706,6 +707,9 @@ mod tests {
         let mut m = manifest("ha", Transport::Http);
         m.auth = Some(waygate_upstream::UpstreamAuth {
             bearer_env: Some("HA_BEARER".into()),
+            header: None,
+            query: None,
+            basic: None,
             catalog_probe_groups: vec!["ha-admin".into()],
         });
         let s = to_import_server(&m);

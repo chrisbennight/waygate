@@ -343,6 +343,7 @@ fn connection_shape_eq(a: &UpstreamManifest, b: &UpstreamManifest) -> bool {
         && a.url == b.url
         && a.command == b.command
         && auth_eq(a.auth.as_ref(), b.auth.as_ref())
+        && a.headers == b.headers
         && a.mtls == b.mtls
         && session_connection_shape_eq(a.session.as_ref(), b.session.as_ref())
 }
@@ -618,9 +619,7 @@ pub(super) fn slot_count_stable(old: &UpstreamManifest, new: &UpstreamManifest) 
 fn auth_eq(a: Option<&UpstreamAuth>, b: Option<&UpstreamAuth>) -> bool {
     match (a, b) {
         (None, None) => true,
-        (Some(a), Some(b)) => {
-            a.bearer_env == b.bearer_env && a.catalog_probe_groups == b.catalog_probe_groups
-        }
+        (Some(a), Some(b)) => a == b,
         _ => false,
     }
 }
@@ -2006,6 +2005,7 @@ impl UpstreamPool {
             manifest_guard.url = new.url.clone();
             manifest_guard.command = new.command.clone();
             manifest_guard.auth = new.auth.clone();
+            manifest_guard.headers = new.headers.clone();
             manifest_guard.mtls = new.mtls.clone();
             manifest_guard.session = new.session.clone();
             manifest_guard.resources = new.resources.clone();
@@ -2529,17 +2529,10 @@ impl UpstreamPool {
                     (false, false, None, false, false, false)
                 } else {
                     entry.last_reload_gen.store(my_gen, Ordering::Release);
-                    let transport_changed =
-                        !matches_transport(&guard.transport, &new_manifest.transport)
-                            || guard.protocol != new_manifest.protocol
-                            || guard.url != new_manifest.url
-                            || guard.command != new_manifest.command
-                            || !auth_eq(guard.auth.as_ref(), new_manifest.auth.as_ref())
-                            || guard.mtls != new_manifest.mtls
-                            || !session_connection_shape_eq(
-                                guard.session.as_ref(),
-                                new_manifest.session.as_ref(),
-                            );
+                    // The same predicate the re-dial commit compares under, so a
+                    // connection-shape field cannot be detected here and missed
+                    // there, or the reverse.
+                    let transport_changed = !connection_shape_eq(&guard, new_manifest);
                     // A connection-shape change that keeps the same slot count is
                     // re-dialed live below — the old session is torn down
                     // and re-dialed in place with the new shape (fresh identity

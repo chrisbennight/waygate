@@ -195,6 +195,7 @@ pub(crate) fn bundle_content_with_stdio() -> String {
         resources: vec![],
         exchange: None,
         auth: None,
+        headers: Default::default(),
         mtls: None,
         tier_a_required: false,
         tier_c_peer: None,
@@ -1250,6 +1251,9 @@ pub(crate) async fn identity_save_preserves_governed_catalog_probe_groups() {
         let mut manifest = example_messages_manifest();
         manifest.auth = Some(waygate_upstream::UpstreamAuth {
             bearer_env: Some("EXAMPLE_MESSAGES_TOKEN_OLD".into()),
+            header: None,
+            query: None,
+            basic: None,
             catalog_probe_groups: vec!["example-messages-admin".into()],
         });
         let mut set = BTreeMap::new();
@@ -1280,6 +1284,60 @@ pub(crate) async fn identity_save_preserves_governed_catalog_probe_groups() {
             ["example-messages-admin"],
             "{case}"
         );
+    }
+}
+
+/// The bearer-focused form must neither drop a server's header secret on an
+/// unrelated save nor silently replace it with a bearer.
+#[tokio::test]
+pub(crate) async fn identity_save_preserves_a_header_secret_and_refuses_a_second_method() {
+    for (case, bearer_form, outcome) in [
+        // Preserving the header leaves the set unchanged, so nothing publishes.
+        ("save without a bearer", "", "nothing to apply"),
+        (
+            "add a bearer",
+            "&bearer_env=EXAMPLE_MESSAGES_TOKEN",
+            "only one",
+        ),
+    ] {
+        let mut manifest = example_messages_manifest();
+        manifest.auth = Some(waygate_upstream::UpstreamAuth {
+            header: Some(waygate_upstream::SecretHeader {
+                name: "x-api-key".into(),
+                value_env: "EXAMPLE_MESSAGES_KEY".into(),
+                prefix: None,
+            }),
+            ..Default::default()
+        });
+        let mut set = BTreeMap::new();
+        set.insert(manifest.name.clone(), manifest);
+        let content = waygate_upstream::serialize_manifest_set(&set).unwrap();
+        let store = InMemoryManifestStore::seeded(&content);
+        let shared: waygate_manifest_store::SharedManifestStore = store.clone();
+        let app = dashboard_router(
+            state_with_manifests_and_store(Some(shared)).await,
+            DashboardAuth::Disabled,
+        );
+        let base_hash = waygate_manifest_store::content_hash(&content);
+        let form =
+            format!("csrf=dev-csrf&server=example-messages&base_hash={base_hash}{bearer_form}");
+
+        let (status, body) = post_body(app, "/servers/config/identity", &form).await;
+        assert_eq!(status, StatusCode::OK, "{case}: {body}");
+        assert!(body.contains(outcome), "{case}: {body}");
+        assert!(!body.contains("Published v2"), "{case}: {body}");
+
+        let active = waygate_upstream::parse_manifest_set(&store.active_content()).unwrap();
+        let auth = active["example-messages"]
+            .auth
+            .as_ref()
+            .expect("auth retained");
+        assert_eq!(
+            auth.header.as_ref().map(|header| header.value_env.as_str()),
+            Some("EXAMPLE_MESSAGES_KEY"),
+            "{case}"
+        );
+        assert_eq!(auth.bearer_env, None, "{case}");
     }
 }
 

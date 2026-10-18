@@ -52,11 +52,11 @@ pub fn tool_behavior_hash(tool: &rmcp::model::Tool) -> String {
 pub use waygate_manifest_types::{
     enforce_no_prod_stdio, load_manifests, manifest_write_in_progress, parse_manifest_document,
     parse_manifest_set, serialize_manifest_set, validate_manifest_invariants,
-    write_manifest_set_to_dir, write_manifest_set_to_dir_from_base, ApprovalMode,
+    write_manifest_set_to_dir, write_manifest_set_to_dir_from_base, ApprovalMode, BasicAuth,
     ClassificationMode, ExchangeConfig, MtlsConfig, OperationClassification,
-    ResourceClassification, SessionConfig, SessionIsolation, SessionScope, ToolClassification,
-    Transport, UpstreamAuth, UpstreamError, UpstreamManifest, UpstreamProtocol,
-    MANIFEST_WRITE_MARKER,
+    ResourceClassification, SecretHeader, SecretQueryParameter, SessionConfig, SessionIsolation,
+    SessionScope, ToolClassification, Transport, UpstreamAuth, UpstreamError, UpstreamManifest,
+    UpstreamProtocol, MANIFEST_WRITE_MARKER,
 };
 
 /// A point-in-time snapshot of the upstream-manifest config health.

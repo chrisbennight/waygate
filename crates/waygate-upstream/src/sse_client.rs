@@ -29,6 +29,7 @@ use bytes::Bytes;
 use futures::stream::{BoxStream, StreamExt};
 use futures::Sink;
 use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use http::HeaderValue;
 use rmcp::model::{ClientJsonRpcMessage, ServerJsonRpcMessage};
 use sse_stream::{Sse, SseStream};
 use tokio::sync::mpsc;
@@ -39,6 +40,7 @@ use url::Url;
 use crate::dial_trace::bounded_text;
 use crate::http_policy::RedirectRefused;
 use crate::identity_client::IdentityAugmenter;
+use crate::transport::SseCredentials;
 
 /// Buffer size for both inbound and outbound JSON-RPC channels. rmcp pumps
 /// messages serially per peer so a small fixed buffer is fine; tune up only
@@ -104,6 +106,8 @@ pub enum SseConnectError {
     Url(#[from] url::ParseError),
     #[error("http transport: {0}")]
     Http(#[source] reqwest::Error),
+    #[error("static bearer is not a valid HTTP header value")]
+    InvalidCredential,
     #[error(transparent)]
     RedirectRefused(RedirectRefused),
     /// The endpoint event named a message URL on another origin. Only that
@@ -130,8 +134,18 @@ impl From<reqwest::Error> for SseConnectError {
     fn from(error: reqwest::Error) -> Self {
         match RedirectRefused::from_reqwest(&error) {
             Some(refused) => Self::RedirectRefused(refused),
-            None => Self::Http(error),
+            // The URL can carry a secret query parameter, and the configured
+            // server is named by the dial error anyway.
+            None => Self::Http(error.without_url()),
         }
+    }
+}
+
+/// `url` as a request leaves the gateway, with any secret query parameter.
+fn request_url(credentials: &SseCredentials, url: &Url) -> Url {
+    match credentials.query.as_ref() {
+        Some(query) => query.apply(url),
+        None => url.clone(),
     }
 }
 
@@ -166,11 +180,21 @@ pub async fn connect(
     endpoint_timeout: Duration,
     write_timeout: Duration,
 ) -> Result<SseClientTransport, SseConnectError> {
+    let mut headers = Vec::new();
+    if let Some(token) = static_bearer {
+        let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| SseConnectError::InvalidCredential)?;
+        value.set_sensitive(true);
+        headers.push((AUTHORIZATION, value));
+    }
     Ok(connect_with_control_plane(
         base_url,
         http,
         augmenter,
-        static_bearer,
+        SseCredentials {
+            headers,
+            query: None,
+        },
         endpoint_timeout,
         write_timeout,
     )
@@ -182,20 +206,24 @@ pub(crate) async fn connect_with_control_plane(
     base_url: &str,
     http: reqwest::Client,
     augmenter: Option<IdentityAugmenter>,
-    static_bearer: Option<String>,
+    credentials: SseCredentials,
     endpoint_timeout: Duration,
     write_timeout: Duration,
 ) -> Result<ConnectedSse, SseConnectError> {
     let base = Url::parse(base_url)?;
+    let credentials = Arc::new(credentials);
 
-    let mut req = http.get(base.clone()).header(ACCEPT, "text/event-stream");
-    // Static per-upstream bearer (`auth.bearer_env`) on the SSE GET. The
+    let mut req = http
+        .get(request_url(&credentials, &base))
+        .header(ACCEPT, "text/event-stream");
+    // Static per-upstream credentials and fixed headers on the SSE GET. The
     // augmenter below adds per-caller identity (`X-MCP-Identity`), a distinct
-    // header — `validate_manifest_invariants` makes `auth.bearer_env` mutually
-    // exclusive with the augmenter's Authorization-writing variants
-    // (`exchange` / `tier_c_peer`), so the two never collide on `Authorization`.
-    if let Some(token) = static_bearer.as_ref() {
-        req = req.header(AUTHORIZATION, format!("Bearer {token}"));
+    // header — `validate_manifest_invariants` makes every `Authorization`
+    // writer in `auth:` mutually exclusive with the augmenter's
+    // Authorization-writing variants (`exchange` / `tier_c_peer`), so the two
+    // never collide on `Authorization`.
+    for (name, value) in &credentials.headers {
+        req = req.header(name, value);
     }
     if let Some(aug) = augmenter.as_ref() {
         for (k, v) in aug.headers().await {
@@ -251,7 +279,7 @@ pub(crate) async fn connect_with_control_plane(
         http,
         messages_url,
         augmenter,
-        static_bearer,
+        credentials,
         write_timeout,
         outbound_rx,
         cancel,
@@ -354,7 +382,7 @@ async fn writer_task(
     http: reqwest::Client,
     messages_url: Url,
     augmenter: Option<IdentityAugmenter>,
-    static_bearer: Option<String>,
+    credentials: Arc<SseCredentials>,
     write_timeout: Duration,
     mut rx: mpsc::Receiver<ClientJsonRpcMessage>,
     cancel: CancellationToken,
@@ -374,14 +402,14 @@ async fn writer_task(
             }
         };
         let mut req = http
-            .post(messages_url.clone())
+            .post(request_url(&credentials, &messages_url))
             .header(CONTENT_TYPE, "application/json")
             .body(body);
-        // Same static bearer as the GET, on *every* outbound message
+        // Same static credentials as the GET, on *every* outbound message
         // (initialize / ping / tools/list / call) — the upstream authorizes each
-        // POST independently, so it must ride all of them, not just tool calls.
-        if let Some(token) = static_bearer.as_ref() {
-            req = req.header(AUTHORIZATION, format!("Bearer {token}"));
+        // POST independently, so they must ride all of them, not just tool calls.
+        for (name, value) in &credentials.headers {
+            req = req.header(name, value);
         }
         if let Some(aug) = augmenter.as_ref() {
             let headers = tokio::select! {
@@ -414,7 +442,9 @@ async fn writer_task(
                             "sse upstream redirected an outbound jsonrpc post; redirect refused",
                         );
                     }
-                    None => tracing::warn!(error = %e, "sse upstream post failed"),
+                    None => {
+                        tracing::warn!(error = %e.without_url(), "sse upstream post failed")
+                    }
                 }
                 break;
             }

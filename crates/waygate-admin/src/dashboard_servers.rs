@@ -2020,21 +2020,20 @@ pub(crate) async fn server_identity_save(
                     Err(_) => return Err("tier_c_peer must be a UUID or blank.".to_owned()),
                 },
             };
-            // Catalog-probe groups are governed through the raw manifest
-            // change path, not this bearer-focused form. Preserve them across
-            // both bearer edits and bearer removal so an unrelated dashboard
-            // save cannot narrow a role-filtered upstream's indexed catalog.
-            let catalog_probe_groups = m
-                .auth
-                .as_ref()
-                .map(|auth| auth.catalog_probe_groups.clone())
-                .unwrap_or_default();
+            // Catalog-probe groups and the header, query and Basic secret
+            // methods are governed through the raw manifest change path, not
+            // this bearer-focused form. Preserve them across both bearer edits
+            // and bearer removal so an unrelated dashboard save can neither
+            // narrow a role-filtered upstream's indexed catalog nor drop its
+            // credential. Adding a bearer beside another secret method is
+            // refused by manifest validation rather than silently replacing it.
+            let preserved = waygate_upstream::UpstreamAuth {
+                bearer_env: None,
+                ..m.auth.clone().unwrap_or_default()
+            };
             m.auth = match opt("bearer_env") {
-                None if catalog_probe_groups.is_empty() => None,
-                None => Some(waygate_upstream::UpstreamAuth {
-                    catalog_probe_groups,
-                    ..Default::default()
-                }),
+                None if preserved == waygate_upstream::UpstreamAuth::default() => None,
+                None => Some(preserved),
                 Some(name) => {
                     // Require the UPPER_SNAKE_CASE env-var
                     // convention so a pasted token value (lowercase / base64 /
@@ -2048,7 +2047,7 @@ pub(crate) async fn server_identity_save(
                     }
                     Some(waygate_upstream::UpstreamAuth {
                         bearer_env: Some(name),
-                        catalog_probe_groups,
+                        ..preserved
                     })
                 }
             };

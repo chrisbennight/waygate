@@ -307,8 +307,8 @@ ones fire per upstream.
 
 Tier A and Tier C both want to write `Authorization: Bearer`,
 so they're mutually exclusive at manifest load time — and so is
-Tier C + `auth.bearer_env` (static per-upstream bearer, same
-header). `load_manifests` returns `UpstreamError::InvalidManifest`
+either of them with any `auth:` method that writes `Authorization`
+(`bearer_env`, `basic`, or a `header` named `Authorization`). `load_manifests` returns `UpstreamError::InvalidManifest`
 on conflict; the `--import-manifests` path runs the same check.
 
 Every tier's headers go only to the configured upstream's scheme, host, and
