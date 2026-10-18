@@ -10,6 +10,10 @@
   an earlier revision provides. Those reads previously reached the client
   without the required `resultType`, and the client rejected them. Clients on
   earlier revisions see no change.
+- The warning that an upstream offers resources its manifest declares no
+  prefix for appears once, when that becomes true, instead of on every
+  connection to the upstream. It appears again after a reload removes the
+  last declaration or rebuilds the upstream's connections.
 
 ## 2.0.0
 

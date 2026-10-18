@@ -1461,6 +1461,18 @@ impl UpstreamPool {
                 }
             }
         }
+        // Judged from the lanes that will actually serve after this commit,
+        // so a stale lane the cleanup above just cleared cannot keep the
+        // condition looking true.
+        if healed > 0 {
+            let resource_capability_advertised = guards.iter().any(|guard| {
+                guard
+                    .as_ref()
+                    .is_some_and(|conn| conn.resource_capability_advertised)
+            });
+            let manifest = entry.manifest.read().expect("manifest lock poisoned");
+            entry.report_undeclared_resources(&manifest, Some(resource_capability_advertised));
+        }
         // Sampled under the guards that installed the healed lanes, for the
         // same reason as the re-dial path.
         let (served_at_install, install_at) = {
@@ -2060,6 +2072,14 @@ impl UpstreamPool {
                 }
             }
         }
+        if redialed > 0 {
+            let resource_capability_advertised = guards.iter().any(|guard| {
+                guard
+                    .as_ref()
+                    .is_some_and(|conn| conn.resource_capability_advertised)
+            });
+            entry.report_undeclared_resources(new, Some(resource_capability_advertised));
+        }
         // Linearize recovery of the shared failure budget with the lane swap.
         // A call cannot fail on a newly installed lane until its writer drops,
         // so no post-commit breaker transition can be erased here.
@@ -2620,14 +2640,6 @@ impl UpstreamPool {
                         // success paths below commit the complete new manifest
                         // and a failure keeps these old claims.
                         guard.resources = new_manifest.resources.clone();
-                        super::resources::warn_if_resources_undeclared(
-                            &guard,
-                            classification_guards.iter().any(|conn_guard| {
-                                conn_guard
-                                    .as_ref()
-                                    .is_some_and(|conn| conn.resource_capability_advertised)
-                            }),
-                        );
                     }
                     if tool_classification_changed {
                         let catalog_change = self.tool_catalog_epoch.begin_change();
@@ -2741,6 +2753,26 @@ impl UpstreamPool {
                         guard.trust = new_manifest.trust;
                         guard.identity = new_manifest.identity.clone();
                         guard.forward_trace_context = new_manifest.forward_trace_context;
+                        // Both the declarations and the identity fields that
+                        // decide whether resources are readable at all were
+                        // just applied in place; judge the condition against
+                        // all of them. A shape change instead reports from the
+                        // redial or rebuild that commits the new manifest. This
+                        // runs on every poll, so a moment with no lane up must
+                        // not read as the upstream offering no resources.
+                        let lanes_up = classification_guards
+                            .iter()
+                            .any(|conn_guard| conn_guard.is_some());
+                        entry.report_undeclared_resources(
+                            &guard,
+                            lanes_up.then(|| {
+                                classification_guards.iter().any(|conn_guard| {
+                                    conn_guard
+                                        .as_ref()
+                                        .is_some_and(|conn| conn.resource_capability_advertised)
+                                })
+                            }),
+                        );
                     }
                     (
                         needs_redial,

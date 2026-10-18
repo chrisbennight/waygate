@@ -57,22 +57,47 @@ pub(super) fn manifest_supports_resource_operations(manifest: &UpstreamManifest)
 
 /// Resource reads and listings reach an upstream only through prefixes its
 /// manifest declares, so an upstream that offers resources without any
-/// declaration is unreachable for them. Say so where the operator sees it,
-/// whether the upstream connected that way or a reload removed its last
-/// declaration.
-pub(super) fn warn_if_resources_undeclared(
-    manifest: &UpstreamManifest,
-    resource_capability_advertised: bool,
-) {
-    if resource_capability_advertised
+/// declaration is unreachable for them.
+fn resources_undeclared(manifest: &UpstreamManifest, resource_capability_advertised: bool) -> bool {
+    resource_capability_advertised
         && manifest.resources.is_empty()
         && manifest_supports_resource_operations(manifest)
-    {
+}
+
+impl UpstreamEntry {
+    /// Tell the operator, once, that this upstream offers resources its
+    /// manifest gives no route to. The entry outlives reconnects and fresh
+    /// sessions, so those repeat nothing. The warning returns when the
+    /// condition clears and comes back, such as a reload removing the last
+    /// declaration, or when a reload builds a new entry. Returns whether it
+    /// warned.
+    ///
+    /// `resource_capability_advertised` is `None` when no lane is up to say
+    /// whether the upstream offers resources. A declaration, or a manifest the
+    /// gateway cannot read resources through, settles the condition anyway;
+    /// otherwise what was last reported stands until a lane connects.
+    pub(super) fn report_undeclared_resources(
+        &self,
+        manifest: &UpstreamManifest,
+        resource_capability_advertised: Option<bool>,
+    ) -> bool {
+        let undeclared = match resource_capability_advertised {
+            Some(advertised) => resources_undeclared(manifest, advertised),
+            None if resources_undeclared(manifest, true) => return false,
+            None => false,
+        };
+        let already_reported = self
+            .undeclared_resources_reported
+            .swap(undeclared, Ordering::AcqRel);
+        if !undeclared || already_reported {
+            return false;
+        }
         tracing::warn!(
             server = %manifest.name,
             "upstream advertises MCP resources but its manifest declares no resource prefix; \
              the gateway does not route resource reads or listings to it",
         );
+        true
     }
 }
 

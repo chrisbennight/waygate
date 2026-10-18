@@ -2583,6 +2583,7 @@ fn entry_with_lanes(n: usize, bounded: bool) -> Arc<UpstreamEntry> {
         )),
         reconnect_notify: Arc::new(Notify::new()),
         removed: AtomicBool::new(false),
+        undeclared_resources_reported: AtomicBool::new(false),
         observed_schemas: StdMutex::new(HashMap::new()),
         quarantined: StdRwLock::new(HashSet::new()),
         last_reload_gen: AtomicU64::new(0),
@@ -3392,6 +3393,7 @@ fn entry_with_classification(tool_name: &str, risk: RiskTier) -> Arc<UpstreamEnt
         )),
         reconnect_notify: Arc::new(Notify::new()),
         removed: AtomicBool::new(false),
+        undeclared_resources_reported: AtomicBool::new(false),
         observed_schemas: StdMutex::new(HashMap::new()),
         quarantined: StdRwLock::new(HashSet::new()),
         last_reload_gen: AtomicU64::new(0),
@@ -5266,4 +5268,70 @@ async fn refusal_report_is_bounded_per_server() {
     assert_eq!(report.tools.len(), REFUSAL_REPORT_TOOL_LIMIT);
     assert_eq!(report.tools[0].tool, "tool-00000");
     assert!(pool.refusals("default", |_| false).await.is_empty());
+}
+
+#[test]
+fn undeclared_resources_are_reported_only_when_the_condition_becomes_true() {
+    let undeclared = manifest_with(false);
+    let mut declared = undeclared.clone();
+    declared.resources = vec![crate::ResourceClassification {
+        uri_prefix: "example-messages://".to_owned(),
+        risk: RiskTier::Low,
+    }];
+    let pool = UpstreamPool::from_manifests_disconnected(BTreeMap::from([(
+        undeclared.name.clone(),
+        undeclared.clone(),
+    )]));
+    let entry = pool
+        .entries
+        .load()
+        .get(&undeclared.name)
+        .cloned()
+        .expect("entry");
+
+    assert!(
+        !entry.report_undeclared_resources(&undeclared, Some(false)),
+        "an upstream offering no resources has nothing to report",
+    );
+    assert!(entry.report_undeclared_resources(&undeclared, Some(true)));
+    assert!(
+        !entry.report_undeclared_resources(&undeclared, Some(true)),
+        "an unchanged condition repeats nothing",
+    );
+    assert!(
+        !entry.report_undeclared_resources(&declared, Some(true)),
+        "a declaration clears the condition without a report",
+    );
+    assert!(
+        entry.report_undeclared_resources(&undeclared, Some(true)),
+        "removing the last declaration makes it true again",
+    );
+    assert!(!entry.report_undeclared_resources(&undeclared, Some(false)));
+    assert!(
+        entry.report_undeclared_resources(&undeclared, Some(true)),
+        "the upstream offering resources again makes it true again",
+    );
+    assert!(
+        !entry.report_undeclared_resources(&manifest_with(true), Some(true)),
+        "an upstream the gateway cannot read resources from is not reported",
+    );
+
+    // With no lane up the capability is unknown.
+    assert!(entry.report_undeclared_resources(&undeclared, Some(true)));
+    assert!(
+        !entry.report_undeclared_resources(&undeclared, None),
+        "a moment with no lane up neither reports nor clears",
+    );
+    assert!(
+        !entry.report_undeclared_resources(&undeclared, Some(true)),
+        "so the next connection repeats nothing",
+    );
+    assert!(
+        !entry.report_undeclared_resources(&declared, None),
+        "a declaration settles the condition even with no lane up",
+    );
+    assert!(
+        entry.report_undeclared_resources(&undeclared, Some(true)),
+        "a declaration added and removed while disconnected still clears it",
+    );
 }
