@@ -605,7 +605,7 @@ async fn empty_resource_page_preserves_meta_and_advances_one_server() {
 }
 
 #[tokio::test]
-async fn resource_reads_stamp_the_bound_without_erasing_caller_metadata() {
+async fn resource_reads_replace_caller_metadata_with_the_gateway_bound() {
     const URI: &str = "printable://design/product-v1";
     let catalog = FakeCatalog::with_resources(vec![(
         "printable".into(),
@@ -613,7 +613,16 @@ async fn resource_reads_stamp_the_bound_without_erasing_caller_metadata() {
     )]);
     let server = GatewayServer::new(catalog.clone()).with_resource_response_max_bytes(73);
     let mut meta = rmcp::model::RequestMetaObject::new();
-    meta.insert("caller-member".into(), json!("preserved"));
+    meta.insert("example.test/caller".into(), json!(1));
+    for (key, value) in waygate_mcp::files::stateless_client_capability_meta(
+        waygate_mcp::files::FileOperation::Download,
+    ) {
+        meta.insert(key, value);
+    }
+    meta.insert(
+        waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY.into(),
+        json!(1_000_000),
+    );
     let mut params = ReadResourceRequestParams::new(URI);
     params.meta = Some(meta);
 
@@ -629,10 +638,15 @@ async fn resource_reads_stamp_the_bound_without_erasing_caller_metadata() {
         .clone()
         .expect("captured read params");
     let meta = params.meta.expect("read metadata");
-    assert_eq!(meta.get("caller-member"), Some(&json!("preserved")));
+    assert_eq!(
+        meta.keys().collect::<Vec<_>>(),
+        vec![waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY],
+        "an ungoverned read forwards neither caller keys nor a caller file promise",
+    );
     assert_eq!(
         meta.get(waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY),
         Some(&json!(73)),
+        "the caller cannot choose the gateway's response bound",
     );
 }
 

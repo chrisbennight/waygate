@@ -349,6 +349,8 @@ const RETAINED_BODY: &str = r#"[{"name":"large result"}]"#;
 #[derive(Clone, Default)]
 struct SessionRetainedUpstream {
     retained: Arc<Mutex<Option<String>>>,
+    /// Request metadata of every retained read, shared across sessions.
+    read_meta: Arc<Mutex<Vec<serde_json::Map<String, serde_json::Value>>>>,
 }
 
 impl ServerHandler for SessionRetainedUpstream {
@@ -410,7 +412,7 @@ impl ServerHandler for SessionRetainedUpstream {
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
         if request.uri != RETAINED_URI {
             return Err(McpError::resource_not_found(
@@ -418,6 +420,7 @@ impl ServerHandler for SessionRetainedUpstream {
                 None,
             ));
         }
+        self.read_meta.lock().unwrap().push(ctx.meta.0 .0.clone());
         let Some(body) = self.retained.lock().unwrap().take() else {
             return Err(McpError::resource_not_found(
                 format!("no stored payload at {}", request.uri),
@@ -428,10 +431,20 @@ impl ServerHandler for SessionRetainedUpstream {
     }
 }
 
-async fn spawn_session_retained_upstream() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+type RetainedReadMeta = Arc<Mutex<Vec<serde_json::Map<String, serde_json::Value>>>>;
+
+async fn spawn_session_retained_upstream(
+) -> (std::net::SocketAddr, Arc<AtomicUsize>, RetainedReadMeta) {
     let inits = Arc::new(AtomicUsize::new(0));
+    let read_meta = RetainedReadMeta::default();
+    let shared_read_meta = read_meta.clone();
     let svc = StreamableHttpService::new(
-        || Ok(SessionRetainedUpstream::default()),
+        move || {
+            Ok(SessionRetainedUpstream {
+                read_meta: shared_read_meta.clone(),
+                ..SessionRetainedUpstream::default()
+            })
+        },
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default().with_legacy_session_mode(true),
     );
@@ -452,7 +465,7 @@ async fn spawn_session_retained_upstream() -> (std::net::SocketAddr, Arc<AtomicU
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (addr, inits)
+    (addr, inits, read_meta)
 }
 
 #[derive(Clone, Default)]
@@ -1082,7 +1095,7 @@ async fn native_response_limit_provenance_survives_rmcp_transport_erasure() {
 
 #[tokio::test]
 async fn retained_resource_processing_stays_on_the_tool_calls_per_call_session() {
-    let (addr, inits) = spawn_session_retained_upstream().await;
+    let (addr, inits, read_meta) = spawn_session_retained_upstream().await;
     let mut configured = legacy(manifest(addr, None));
     configured.tools = vec![ToolClassification::new(
         "retained",
@@ -1122,6 +1135,13 @@ async fn retained_resource_processing_stays_on_the_tool_calls_per_call_session()
         inits.load(Ordering::SeqCst),
         boot + 1,
         "tool call and retained-resource read must share one ephemeral session",
+    );
+    let read_meta = read_meta.lock().unwrap();
+    assert_eq!(read_meta.len(), 1, "one retained read reached the upstream");
+    assert!(
+        !read_meta[0].contains_key(RESPONSE_MATERIALIZATION_LIMIT_META_KEY),
+        "the retained read's response budget must stay inside the gateway: {:?}",
+        read_meta[0],
     );
 }
 

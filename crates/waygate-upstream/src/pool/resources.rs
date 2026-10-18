@@ -1,14 +1,16 @@
 //! MCP resource requests over the upstream pool.
 
 use super::*;
-use rmcp::model::{ClientRequest, ReadResourceRequest, ServerResult};
+use rmcp::model::{
+    ClientRequest, GetExtensions, ReadResourceRequest, RequestMetaObject, ServerResult,
+};
 use rmcp::service::PeerRequestOptions;
 use rmcp::service::ServiceError;
 use waygate_mcp::catalog::{
     AdmittedResourceReadError, CallScopedResourceError, CallScopedResourceReader, ResourceClaim,
 };
 
-use crate::bounded_http_client::response_materialization_limit;
+use crate::bounded_http_client::{response_materialization_limit, ResponseByteLimit};
 
 pub(super) enum ResourceRequest {
     List(Option<PaginatedRequestParams>),
@@ -147,6 +149,60 @@ impl ResourceRequest {
     }
 }
 
+/// Build the `resources/read` request an upstream receives from the gateway's
+/// own read parameters.
+///
+/// As with a tool call, the request metadata holds only values the gateway
+/// sets; every other `_meta` key is dropped. The private response budget is
+/// moved onto a request extension, which the gateway's HTTP transport reads and
+/// rmcp never serializes. The request-local client capabilities are the
+/// gateway's file promise for this one read. rmcp stamps the dial's
+/// initialize-time client capabilities before sending; an explicit request
+/// option is applied afterwards and therefore preserves the per-request file
+/// signal instead of letting the connection default erase it.
+fn upstream_read_request(
+    mut params: ReadResourceRequestParams,
+) -> (ClientRequest, PeerRequestOptions) {
+    let mut meta = params.meta.take().unwrap_or_default();
+    let limit = meta
+        .remove(waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY)
+        .as_ref()
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    let mut request = ClientRequest::ReadResourceRequest(ReadResourceRequest::new(params));
+    if let Some(limit) = limit {
+        request.extensions_mut().insert(ResponseByteLimit(limit));
+    }
+    let options = match meta.remove(waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY) {
+        Some(capabilities) => {
+            let mut outbound = RequestMetaObject::new();
+            outbound.insert(
+                waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY.to_owned(),
+                capabilities,
+            );
+            PeerRequestOptions::no_options().with_meta(outbound)
+        }
+        None => PeerRequestOptions::no_options(),
+    };
+    (request, options)
+}
+
+async fn send_read_request(
+    client: &RunningService<RoleClient, ClientConfig>,
+    params: ReadResourceRequestParams,
+) -> Result<ReadResourceResult, ServiceError> {
+    let (request, options) = upstream_read_request(params);
+    let response = client
+        .send_request_with_option(request, options)
+        .await?
+        .await_response()
+        .await?;
+    match response {
+        ServerResult::ReadResourceResult(result) => Ok(result),
+        _ => Err(ServiceError::UnexpectedResponse),
+    }
+}
+
 async fn send_resource_request(
     client: &RunningService<RoleClient, ClientConfig>,
     request: ResourceRequest,
@@ -160,31 +216,9 @@ async fn send_resource_request(
             .list_resource_templates(params)
             .await
             .map(ResourceResponse::ListTemplates),
-        ResourceRequest::Read(params) => {
-            // Request-local client capabilities are the gateway's promise for
-            // this one resource read. rmcp stamps the dial's initialize-time
-            // client capabilities before sending; an explicit request option
-            // is applied afterwards and therefore preserves the per-request
-            // file signal instead of letting the connection default erase it.
-            let options = params
-                .meta
-                .clone()
-                .map_or_else(PeerRequestOptions::no_options, |meta| {
-                    PeerRequestOptions::no_options().with_meta(meta)
-                });
-            let response = client
-                .send_request_with_option(
-                    ClientRequest::ReadResourceRequest(ReadResourceRequest::new(params)),
-                    options,
-                )
-                .await?
-                .await_response()
-                .await?;
-            match response {
-                ServerResult::ReadResourceResult(result) => Ok(ResourceResponse::Read(result)),
-                _ => Err(ServiceError::UnexpectedResponse),
-            }
-        }
+        ResourceRequest::Read(params) => send_read_request(client, params)
+            .await
+            .map(ResourceResponse::Read),
     }
 }
 
@@ -211,7 +245,7 @@ impl CallScopedResourceReader for SessionResourceReader<'_> {
                 Some(serde_json::json!({"error":"bounded_resource_read_unsupported"})),
             )));
         }
-        let read = self.client.read_resource(params);
+        let read = send_read_request(self.client, params);
         let result = match self.timeout {
             Some(timeout) => tokio::time::timeout(timeout, read).await.map_err(|_| {
                 CallScopedResourceError::Transport(format!(
@@ -597,7 +631,70 @@ impl UpstreamPool {
 
 #[cfg(test)]
 mod tests {
-    use super::bounded_resource_read_unsupported;
+    use super::{bounded_resource_read_unsupported, upstream_read_request};
+    use crate::bounded_http_client::ResponseByteLimit;
+    use rmcp::model::{
+        ClientJsonRpcMessage, ClientRequest, GetExtensions, ReadResourceRequestParams, RequestId,
+        RequestMetaObject,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn an_upstream_read_carries_only_gateway_metadata() {
+        let capabilities = json!({"files": {"download": true, "transports": ["https"]}});
+        let mut meta = RequestMetaObject::new();
+        meta.insert(
+            waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY.to_owned(),
+            json!(4096),
+        );
+        meta.insert(
+            waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY.to_owned(),
+            capabilities.clone(),
+        );
+        meta.insert("example.test/caller".to_owned(), json!(1));
+        let params = ReadResourceRequestParams::new("docs://report").with_meta(meta);
+
+        let (request, options) = upstream_read_request(params);
+
+        assert_eq!(
+            request
+                .extensions()
+                .get::<ResponseByteLimit>()
+                .map(|limit| limit.0),
+            Some(4096),
+        );
+        let option_meta = options.meta.expect("the file promise is a request option");
+        assert_eq!(
+            option_meta.keys().collect::<Vec<_>>(),
+            vec![waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY],
+        );
+        assert_eq!(
+            option_meta[waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY],
+            capabilities,
+        );
+        let ClientRequest::ReadResourceRequest(read) = &request else {
+            panic!("a resource read builds a read request")
+        };
+        assert!(read.params.meta.is_none());
+        let wire =
+            serde_json::to_value(ClientJsonRpcMessage::request(request, RequestId::Number(1)))
+                .unwrap();
+        assert!(
+            wire["params"].get("_meta").is_none(),
+            "only rmcp's stamping and the request options may add metadata: {wire}"
+        );
+    }
+
+    #[test]
+    fn an_unbounded_read_without_a_file_promise_adds_no_metadata() {
+        let mut meta = RequestMetaObject::new();
+        meta.insert("example.test/caller".to_owned(), json!(1));
+        let (request, options) =
+            upstream_read_request(ReadResourceRequestParams::new("docs://report").with_meta(meta));
+
+        assert!(request.extensions().get::<ResponseByteLimit>().is_none());
+        assert!(options.meta.is_none());
+    }
 
     #[test]
     fn non_http_bounded_reads_name_the_stable_error_and_transport() {
