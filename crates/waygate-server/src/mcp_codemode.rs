@@ -1087,7 +1087,7 @@ impl CodeModeTools {
             })
             .transpose()?;
         Ok(structured(&SearchResponse {
-            contract_version: ContractVersion::V1,
+            contract_version: ContractVersion::CODE_MODE,
             tools,
             next_cursor,
         }))
@@ -1237,7 +1237,7 @@ impl CodeModeTools {
             .cloned()
             .and_then(|console| serde_json::from_value(console).ok());
         Ok(structured(&StoredResultResponse {
-            contract_version: ContractVersion::V1,
+            contract_version: ContractVersion::CODE_MODE,
             reference: ExecutionResultReference { execution_id },
             result,
             console,
@@ -1750,7 +1750,7 @@ impl CodeModeTools {
             None
         };
         Ok(structured(&ExecutionListResponse {
-            contract_version: ContractVersion::V1,
+            contract_version: ContractVersion::CODE_MODE,
             executions: executions.iter().map(in_flight_status_projection).collect(),
             next_cursor,
         }))
@@ -1871,7 +1871,7 @@ impl CodeModeTools {
             None
         };
         Ok(structured(&ArtifactListResponse {
-            contract_version: ContractVersion::V1,
+            contract_version: ContractVersion::CODE_MODE,
             execution_id: execution.id,
             artifacts: artifacts.into_iter().map(artifact_summary).collect(),
             next_cursor,
@@ -3191,9 +3191,9 @@ impl CodeModeTools {
                     .live_source_reference(attempt.principal, &attempt.source_digest)
                     .await;
                 return Ok(ExecuteResponse {
-                    contract_version: ContractVersion::V1,
-                    sdk_contract_version: SdkContractVersion::V7,
-                    runner_contract_version: RunnerContractVersion::V10,
+                    contract_version: ContractVersion::CODE_MODE,
+                    sdk_contract_version: ContractVersion::SDK,
+                    runner_contract_version: ContractVersion::RUNNER,
                     execution_id: attempt.execution_id,
                     source_ref,
                     status: ExecutionResponseStatus::WaitingForResume,
@@ -3220,9 +3220,9 @@ impl CodeModeTools {
                     .live_source_reference(attempt.principal, &attempt.source_digest)
                     .await;
                 return Ok(ExecuteResponse {
-                    contract_version: ContractVersion::V1,
-                    sdk_contract_version: SdkContractVersion::V7,
-                    runner_contract_version: RunnerContractVersion::V10,
+                    contract_version: ContractVersion::CODE_MODE,
+                    sdk_contract_version: ContractVersion::SDK,
+                    runner_contract_version: ContractVersion::RUNNER,
                     execution_id: attempt.execution_id,
                     source_ref,
                     status: ExecutionResponseStatus::WaitingForApproval,
@@ -3257,9 +3257,9 @@ impl CodeModeTools {
             .live_source_reference(attempt.principal, &attempt.source_digest)
             .await;
         Ok(ExecuteResponse {
-            contract_version: ContractVersion::V1,
-            sdk_contract_version: SdkContractVersion::V7,
-            runner_contract_version: RunnerContractVersion::V10,
+            contract_version: ContractVersion::CODE_MODE,
+            sdk_contract_version: ContractVersion::SDK,
+            runner_contract_version: ContractVersion::RUNNER,
             execution_id: attempt.execution_id,
             source_ref,
             status: ExecutionResponseStatus::Completed,
@@ -4730,7 +4730,7 @@ fn artifact_summary(artifact: ExecutionArtifact) -> ArtifactSummary {
 
 fn artifact_response(content: ExecutionArtifactContent) -> ArtifactResponse {
     ArtifactResponse {
-        contract_version: ContractVersion::V1,
+        contract_version: ContractVersion::CODE_MODE,
         reference: artifact_reference(&content.artifact),
         value: content.value,
         created_at: waygate_core::fmt::format_ts_rfc3339(content.artifact.created_at),
@@ -4771,7 +4771,7 @@ fn in_flight_status_projection(
     entry: &waygate_codemode::InFlightExecution,
 ) -> ExecutionStatusResponse {
     ExecutionStatusResponse {
-        contract_version: ContractVersion::V1,
+        contract_version: ContractVersion::CODE_MODE,
         execution_id: entry.id,
         source_ref: None,
         status: lifecycle_status_str(lifecycle_status(entry.status)),
@@ -6834,27 +6834,45 @@ struct ClaimedExecution<'a> {
     deadline: tokio::time::Instant,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
-enum ContractVersion {
-    #[serde(rename = "1")]
-    V1,
+/// A contract version as callers see it: the number as a decimal JSON string.
+///
+/// The SDK and runner versions are built from `SDK_CONTRACT_VERSION` and
+/// `RUNNER_CONTRACT_VERSION`, the stamps executions are written with, so a
+/// response cannot advertise a contract other than the one the program ran
+/// against.
+///
+/// The published schema is a plain string, not the current value. A client may
+/// validate results against a tool list it fetched before the gateway was
+/// upgraded; a schema that allowed only the current value would make that
+/// client reject every result after a version change.
+#[derive(Debug, Clone, Copy)]
+struct ContractVersion(i32);
+
+impl ContractVersion {
+    /// The Code Mode tool request and result contract.
+    const CODE_MODE: Self = Self(1);
+    const SDK: Self = Self(SDK_CONTRACT_VERSION);
+    const RUNNER: Self = Self(RUNNER_CONTRACT_VERSION);
 }
 
-/// The caller-facing spelling of the stamps a row carries. These are the same
-/// two numbers as `SDK_CONTRACT_VERSION` and `RUNNER_CONTRACT_VERSION` and must
-/// advance with them: a response that advertised the previous contract while
-/// the sandbox offered a new one would tell a client the program surface is
-/// something other than what it ran against.
-#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
-enum SdkContractVersion {
-    #[serde(rename = "7")]
-    V7,
+impl Serialize for ContractVersion {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&self.0)
+    }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
-enum RunnerContractVersion {
-    #[serde(rename = "10")]
-    V10,
+impl JsonSchema for ContractVersion {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        String::schema_name()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        String::json_schema(generator)
+    }
 }
 
 #[derive(Debug)]
@@ -6949,9 +6967,9 @@ struct ExecuteResponse {
     /// Version of the Code Mode execution contract.
     contract_version: ContractVersion,
     /// Version of the `connectors[server][operation]` binding contract.
-    sdk_contract_version: SdkContractVersion,
+    sdk_contract_version: ContractVersion,
     /// Version of the parent/runner capability protocol.
-    runner_contract_version: RunnerContractVersion,
+    runner_contract_version: ContractVersion,
     /// Parent identity stamped onto every governed nested invocation and its
     /// evidence rows.
     execution_id: uuid::Uuid,
@@ -7102,7 +7120,7 @@ fn reportable_checkpoint(execution: &ExecutionStatusRecord) -> Option<Value> {
 
 fn execution_status_projection(execution: &ExecutionStatusRecord) -> ExecutionStatusResponse {
     ExecutionStatusResponse {
-        contract_version: ContractVersion::V1,
+        contract_version: ContractVersion::CODE_MODE,
         execution_id: execution.id,
         source_ref: Some(SourceReference {
             sha256: execution.source_digest.clone(),
@@ -7265,7 +7283,7 @@ fn upstream_connector_contract(
 ) -> Option<DescribeResponse> {
     let input_schema = snapshot.input_schema().cloned()?;
     Some(DescribeResponse {
-        contract_version: ContractVersion::V1,
+        contract_version: ContractVersion::CODE_MODE,
         binding: ConnectorBinding {
             connector: server.to_owned(),
             operation: tool_name.to_owned(),
@@ -7295,7 +7313,7 @@ fn connector_contract_for_tool(tool: &CatalogTool) -> Option<DescribeResponse> {
             upstream_connector_contract(server, &tool.identity.name, tool.invocation_snapshot()?)
         }
         CatalogToolSource::Builtin(namespace) => Some(DescribeResponse {
-            contract_version: ContractVersion::V1,
+            contract_version: ContractVersion::CODE_MODE,
             binding: ConnectorBinding {
                 connector: namespace.clone(),
                 operation: tool.identity.name.clone(),
@@ -13598,9 +13616,9 @@ mod tests {
         }
 
         let sample = super::structured(&ExecuteResponse {
-            contract_version: ContractVersion::V1,
-            sdk_contract_version: SdkContractVersion::V7,
-            runner_contract_version: RunnerContractVersion::V10,
+            contract_version: ContractVersion::CODE_MODE,
+            sdk_contract_version: ContractVersion::SDK,
+            runner_contract_version: ContractVersion::RUNNER,
             execution_id: uuid::Uuid::now_v7(),
             source_ref: SourceReference {
                 sha256: source_digest("return null;"),
@@ -15949,20 +15967,82 @@ mod tests {
             .is_none());
     }
 
-    /// The stamp a row is written with and the stamp a response advertises are
-    /// two spellings of one number, held in separate declarations that can
-    /// drift apart. They did: advancing the durable constants for
-    /// `execution.input` left responses advertising the previous contract.
+    /// A response advertises the stamps a row is written with, spelled as the
+    /// decimal strings clients already receive.
     #[test]
     fn responses_advertise_the_contracts_executions_are_stamped_with() {
         assert_eq!(
-            serde_json::to_value(SdkContractVersion::V7).expect("serialize sdk stamp"),
+            serde_json::to_value(ContractVersion::SDK).expect("serialize sdk stamp"),
             Value::String(SDK_CONTRACT_VERSION.to_string()),
         );
         assert_eq!(
-            serde_json::to_value(RunnerContractVersion::V10).expect("serialize runner stamp"),
+            serde_json::to_value(ContractVersion::RUNNER).expect("serialize runner stamp"),
             Value::String(RUNNER_CONTRACT_VERSION.to_string()),
         );
+    }
+
+    /// A client may validate results against a tool list it fetched before the
+    /// gateway was upgraded. Every published contract version property must
+    /// therefore accept versions other than the current one; otherwise each
+    /// version change makes that client reject every result.
+    #[test]
+    fn output_schemas_accept_other_contract_versions() {
+        const VERSION_FIELDS: [&str; 3] = [
+            "contract_version",
+            "sdk_contract_version",
+            "runner_contract_version",
+        ];
+        fn collect<'a>(node: &'a Value, found: &mut Vec<(&'static str, &'a Value)>) {
+            match node {
+                Value::Object(map) => {
+                    if let Some(Value::Object(properties)) = map.get("properties") {
+                        for field in VERSION_FIELDS {
+                            if let Some(property) = properties.get(field) {
+                                found.push((field, property));
+                            }
+                        }
+                    }
+                    map.values().for_each(|value| collect(value, found));
+                }
+                Value::Array(items) => items.iter().for_each(|value| collect(value, found)),
+                _ => {}
+            }
+        }
+
+        let mut execute_fields = Vec::new();
+        for definition in tool_defs() {
+            let Some(output_schema) = definition.output_schema.as_ref() else {
+                continue;
+            };
+            let root = Value::Object(output_schema.as_ref().clone());
+            let mut found = Vec::new();
+            collect(&root, &mut found);
+            for (field, property) in found {
+                let schema = match property.get("$ref").and_then(Value::as_str) {
+                    Some(reference) => root
+                        .pointer(reference.trim_start_matches('#'))
+                        .expect("local schema reference resolves"),
+                    None => property,
+                };
+                let validator = jsonschema::validator_for(schema).expect("schema compiles");
+                for version in ["1", "999"] {
+                    assert!(
+                        validator.is_valid(&json!(version)),
+                        "{} {field} rejects contract version {version}: {schema}",
+                        definition.name
+                    );
+                }
+                if definition.name == "codemode.execute" {
+                    execute_fields.push(field);
+                }
+            }
+        }
+        for field in VERSION_FIELDS {
+            assert!(
+                execute_fields.contains(&field),
+                "codemode.execute publishes no {field} property"
+            );
+        }
     }
 
     #[tokio::test]

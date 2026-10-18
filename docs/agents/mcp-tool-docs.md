@@ -55,6 +55,31 @@ when the result also has `structuredContent`. Put anything the model must see
 in the structured value as well; a result delivered as a file, for example,
 carries its preview in both places.
 
+### Output schema changes and cached tool lists
+
+Claude Code validates each result's `structuredContent` against the tool's
+published `outputSchema` and rejects a result that does not match. A client
+can keep the tool list it fetched when it connected, so after a gateway
+upgrade it checks the new build's results against the previous build's
+schemas. A rejected result also hides whether the call ran.
+
+Change a built-in output schema so that results from the new build still
+validate against the previous build's schema:
+
+- Adding an optional property is compatible.
+- Removing a property the previous schema required, changing a property's
+  type, returning a value the previous schema did not allow, or adding a
+  property where the previous schema forbids extra properties is not.
+- Publish the type of a value that changes between builds, such as a version,
+  instead of pinning its current value with `enum` or `const`. The Code Mode
+  contract versions are plain strings for this reason, and
+  `output_schemas_accept_other_contract_versions` in
+  `crates/waygate-server/src/mcp_codemode.rs` keeps them that way.
+
+When an incompatible change is necessary, record it in the
+[release notes](../release-notes.md) and tell operators to reconnect clients
+after upgrading so they fetch the new tool list.
+
 ## Scope
 
 All built-in tools in the `gateway-admin`, `gateway-observe`, and
