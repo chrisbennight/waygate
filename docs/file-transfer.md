@@ -74,6 +74,7 @@ upstream server manifest:
 ```yaml
 - name: example-search
   transport: http
+  trust: internal
   url: http://example-search:8080/mcp
   inline_response_threshold_bytes: 65536
   tools:

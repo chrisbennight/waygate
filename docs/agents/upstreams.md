@@ -845,6 +845,7 @@ optional, and an omitted field inherits the gateway-wide setting:
 ```yaml
 name: example-search
 transport: http
+trust: internal
 url: http://example-search:8080/mcp
 limits:
   call_timeout_seconds: 900
