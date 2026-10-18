@@ -747,10 +747,19 @@ async fn dial_once(
                     "exchange: block ignored for stdio upstream — identity forwarding is HTTP-only",
                 );
             }
-            let mut cmd = tokio::process::Command::new(&argv[0]);
-            if argv.len() > 1 {
-                cmd.args(&argv[1..]);
+            for name in manifest
+                .env_passthrough
+                .iter()
+                .filter(|name| std::env::var_os(name).is_none())
+            {
+                tracing::warn!(
+                    server = %manifest.name,
+                    variable = %name,
+                    "env_passthrough names a variable the gateway has not set; the stdio child \
+                     starts without it",
+                );
             }
+            let cmd = stdio_command(&argv[0], &argv[1..], &manifest.env_passthrough);
             let transport = TokioChildProcess::new(cmd).map_err(DialError::Spawn)?;
             let service = info
                 .serve_with_lifecycle(transport, lifecycle)
@@ -764,6 +773,53 @@ async fn dial_once(
             })
         }
     }
+}
+
+/// Gateway environment variables every stdio child receives when the gateway
+/// has them set. None carries a credential: `PATH` resolves the command and
+/// any program it starts (launchers such as `npx` and `uvx` depend on it),
+/// `HOME` and `TMPDIR` are where runtimes keep caches and scratch files, and
+/// `LANG`, `LC_ALL` and `TZ` keep text encoding and timestamps consistent with
+/// the gateway. Anything else reaches the child only through the manifest's
+/// `env_passthrough`.
+const STDIO_BASELINE_ENV: &[&str] = &["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ"];
+
+/// Build the command that starts a stdio upstream. The child's environment
+/// starts empty, so it inherits none of the gateway's variables, then
+/// receives [`STDIO_BASELINE_ENV`] and the variables `env_passthrough` names,
+/// each with the gateway's own value. A named variable the gateway has not
+/// set is left out rather than failing the start.
+///
+/// The gateway dial and the `classify` CLI both start upstream servers here,
+/// so a scaffolded server sees the environment it will be served with.
+pub fn stdio_command(
+    program: &str,
+    args: &[String],
+    env_passthrough: &[String],
+) -> tokio::process::Command {
+    stdio_command_with_env(program, args, env_passthrough, |name| {
+        std::env::var_os(name)
+    })
+}
+
+fn stdio_command_with_env(
+    program: &str,
+    args: &[String],
+    env_passthrough: &[String],
+    gateway_env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args).env_clear();
+    let names = STDIO_BASELINE_ENV
+        .iter()
+        .copied()
+        .chain(env_passthrough.iter().map(String::as_str));
+    for name in names {
+        if let Some(value) = gateway_env(name) {
+            cmd.env(name, value);
+        }
+    }
+    cmd
 }
 
 async fn resolve_network_destination(
@@ -1871,6 +1927,175 @@ url: https://mcp.example/mcp
 "#;
         let parsed: crate::UpstreamManifest = serde_yaml::from_str(yaml).expect("parse yaml");
         assert!(parsed.mtls.is_none(), "mtls must default to None");
+    }
+
+    /// The stdio child's environment, observed from real child processes.
+    /// Failure messages name variables but never print a value, because a
+    /// regression would expose the test process's own environment.
+    #[cfg(unix)]
+    mod stdio_environment {
+        use std::collections::BTreeMap;
+        use std::ffi::OsString;
+
+        use super::*;
+
+        /// The entries `env -0` prints, keyed by name. NUL separation keeps a
+        /// multi-line value from being read as further entries.
+        fn parse_env_report(report: &[u8]) -> BTreeMap<String, Vec<u8>> {
+            report
+                .split(|byte| *byte == 0)
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| {
+                    let split = entry.iter().position(|byte| *byte == b'=');
+                    let (name, value) = entry.split_at(split.unwrap_or(entry.len()));
+                    let value = value.get(1..).unwrap_or_default();
+                    (String::from_utf8_lossy(name).into_owned(), value.to_vec())
+                })
+                .collect()
+        }
+
+        /// Assert that `observed` holds exactly the `expected` names, each
+        /// with its expected value.
+        fn assert_child_env(observed: &BTreeMap<String, Vec<u8>>, expected: &[(&str, &str)]) {
+            let mut expected_names: Vec<&str> = expected.iter().map(|(name, _)| *name).collect();
+            expected_names.sort_unstable();
+            let observed_names: Vec<&str> = observed.keys().map(String::as_str).collect();
+            assert_eq!(observed_names, expected_names, "stdio child variable names");
+            for (name, value) in expected {
+                assert!(
+                    observed[*name] == value.as_bytes(),
+                    "`{name}` did not carry the gateway's value",
+                );
+            }
+        }
+
+        /// Run `env -0` as a stdio child whose gateway environment is
+        /// `gateway_env`, and return the environment it reports.
+        async fn child_environment(
+            gateway_env: &[(&str, &str)],
+            env_passthrough: &[String],
+        ) -> BTreeMap<String, Vec<u8>> {
+            let args = ["-0".to_owned()];
+            let output = stdio_command_with_env("/usr/bin/env", &args, env_passthrough, |name| {
+                gateway_env
+                    .iter()
+                    .find(|(candidate, _)| *candidate == name)
+                    .map(|(_, value)| OsString::from(value))
+            })
+            .output()
+            .await
+            .expect("run env as a stdio child");
+            assert!(output.status.success(), "env exited with {}", output.status);
+            parse_env_report(&output.stdout)
+        }
+
+        #[tokio::test]
+        async fn stdio_child_receives_only_the_baseline_and_named_variables() {
+            // A stand-in gateway environment holding the identity signing key,
+            // an `auth.bearer_env` credential and database settings next to two
+            // baseline variables. The values are synthetic.
+            let gateway_env = [
+                ("PATH", "/usr/bin:/bin"),
+                ("LANG", "C.UTF-8"),
+                ("GATEWAY_IDENTITY_SIGNING_KEY_PEM", "fixture-signing-key"),
+                ("EXAMPLE_UPSTREAM_BEARER", "fixture-upstream-bearer"),
+                ("GATEWAY_DATABASE_URL", "fixture-gateway-database"),
+                ("AUDIT_DATABASE_URL", "fixture-audit-database"),
+                ("GATEWAY_AS_DATABASE_URL", "fixture-as-database"),
+            ];
+            let baseline = [("PATH", "/usr/bin:/bin"), ("LANG", "C.UTF-8")];
+
+            // An exact name match also proves that nothing from the test
+            // process's own environment reached the child.
+            assert_child_env(&child_environment(&gateway_env, &[]).await, &baseline);
+
+            // Naming a variable passes the gateway's value through. A named
+            // variable the gateway has not set is left out without failing the
+            // start, and unnamed secrets stay withheld.
+            let named = [
+                "EXAMPLE_UPSTREAM_BEARER".to_owned(),
+                "AUDIT_DATABASE_URL".to_owned(),
+                "EXAMPLE_UNSET_VARIABLE".to_owned(),
+            ];
+            let mut expected = baseline.to_vec();
+            expected.extend([
+                ("EXAMPLE_UPSTREAM_BEARER", "fixture-upstream-bearer"),
+                ("AUDIT_DATABASE_URL", "fixture-audit-database"),
+            ]);
+            assert_child_env(&child_environment(&gateway_env, &named).await, &expected);
+        }
+
+        #[tokio::test]
+        async fn stdio_dial_withholds_unnamed_gateway_variables_from_the_child() {
+            let named = "GW_TEST_STDIO_ENV_NAMED_TOKEN";
+            let unnamed = "GW_TEST_STDIO_ENV_UNNAMED_TOKEN";
+            // SAFETY: `set_var` is process-global; both names are unique to this
+            // test, so no concurrent reader can observe them.
+            unsafe {
+                std::env::set_var(named, "fixture-named-token");
+                std::env::set_var(unnamed, "fixture-unnamed-token");
+            }
+            let dir = std::env::temp_dir().join(format!("gateway-stdio-env-{}", Uuid::new_v4()));
+            std::fs::create_dir(&dir).expect("create isolated stdio env test directory");
+            let report = dir.join("child-env");
+            // The child writes its environment to `report` and exits without
+            // speaking MCP. The shell holds the child's stdout open until `env`
+            // has finished, so the dial fails only after the report is complete.
+            let manifest: UpstreamManifest = serde_json::from_value(serde_json::json!({
+                "name": "env-report",
+                "transport": "stdio",
+                "protocol": "legacy",
+                "command": [
+                    "/bin/sh",
+                    "-c",
+                    "/usr/bin/env -0 > \"$1\"",
+                    "sh",
+                    report.to_str().expect("temporary path is UTF-8"),
+                ],
+                "env_passthrough": [named],
+            }))
+            .expect("test manifest parses");
+
+            let dialed = tokio::time::timeout(
+                Duration::from_secs(10),
+                connect(&manifest, None, None, None),
+            )
+            .await
+            .expect("a stdio child that exits must not hang the dial");
+            // SAFETY: as above, the names are unique to this test.
+            unsafe {
+                std::env::remove_var(named);
+                std::env::remove_var(unnamed);
+            }
+            assert!(
+                dialed.is_err(),
+                "a child that never speaks MCP cannot connect"
+            );
+            let observed = parse_env_report(&std::fs::read(&report).expect("child wrote its env"));
+            std::fs::remove_dir_all(&dir).expect("remove isolated stdio env test directory");
+
+            assert!(
+                observed
+                    .get(named)
+                    .is_some_and(|value| value == b"fixture-named-token"),
+                "the named variable must carry the gateway's value",
+            );
+            assert!(
+                !observed.contains_key(unnamed),
+                "an unnamed variable must be withheld"
+            );
+            // Nothing else from the test process's environment arrived: only the
+            // baseline, the named variable, and what the shell sets for itself.
+            let shell_maintained = ["PWD", "OLDPWD", "SHLVL", "_"];
+            for name in observed.keys() {
+                assert!(
+                    STDIO_BASELINE_ENV.contains(&name.as_str())
+                        || name == named
+                        || shell_maintained.contains(&name.as_str()),
+                    "stdio child received unlisted variable `{name}`",
+                );
+            }
+        }
     }
 }
 

@@ -8,9 +8,11 @@
 //!   own.
 //! - `stdio` — spawns the configured `command` and speaks rmcp over its
 //!   stdin/stdout via `TokioChildProcess`. The child inherits the gateway's
-//!   stderr for logging. A child that exits is respawned by the reconnect
-//!   scheduler with backoff, like any failed upstream; the breaker trips
-//!   after the configured failure budget.
+//!   stderr for logging, but not its environment: it receives a non-secret
+//!   baseline plus the variables the manifest's `env_passthrough` names (see
+//!   [`crate::transport::stdio_command`]). A child that exits is respawned
+//!   by the reconnect scheduler with backoff, like any failed upstream; the
+//!   breaker trips after the configured failure budget.
 //!
 //! Identity forwarding (`X-MCP-Identity`) and RFC 8693 token exchange are
 //! HTTP-only (http + sse). Stdio upstreams run inside the gateway's own

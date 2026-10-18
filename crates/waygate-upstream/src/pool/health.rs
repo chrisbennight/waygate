@@ -1247,6 +1247,7 @@ mod bounded_snapshot_tests {
             protocol: Default::default(),
             url: None,
             command: Some(vec!["/does-not-run".to_owned()]),
+            env_passthrough: Vec::new(),
             tools: Vec::new(),
             resources: Vec::new(),
             exchange: None,

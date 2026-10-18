@@ -129,6 +129,7 @@ fn manifest(
         protocol,
         url: Some(format!("http://{addr}/mcp")),
         command: None,
+        env_passthrough: Vec::new(),
         tools: vec![ToolClassification::new("wait", RiskTier::Low, true, false)],
         resources: Vec::new(),
         exchange: None,
