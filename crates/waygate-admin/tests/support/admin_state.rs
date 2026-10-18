@@ -25,6 +25,7 @@ pub fn example_messages_manifest() -> UpstreamManifest {
         protocol: Default::default(),
         url: Some("http://example-messages:8000/mcp".into()),
         command: None,
+        env_passthrough: Vec::new(),
         tools: vec![
             ToolClassification::new("send_msg", waygate_core::RiskTier::High, true, false),
             ToolClassification::new("list_contacts", waygate_core::RiskTier::Low, false, false),
