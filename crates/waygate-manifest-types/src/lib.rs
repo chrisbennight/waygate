@@ -30,6 +30,14 @@ pub enum UpstreamError {
     Io(#[from] std::io::Error),
     #[error("yaml: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    /// One manifest entry did not match the manifest schema, for example
+    /// because it carries an unknown or misspelled key. Names the upstream so
+    /// an operator can find the entry in a multi-server set.
+    #[error("upstream `{server}`: {source}")]
+    ManifestEntry {
+        server: String,
+        source: serde_yaml::Error,
+    },
     #[error("no upstream named {0}")]
     UnknownUpstream(String),
     /// A manifest combines mutually exclusive identity fields (e.g.
@@ -213,6 +221,7 @@ impl ApprovalMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpstreamManifest {
     pub name: String,
     pub transport: Transport,
@@ -343,6 +352,7 @@ pub struct UpstreamManifest {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct ResourceClassification {
     pub uri_prefix: String,
     #[schemars(with = "String")]
@@ -357,6 +367,7 @@ pub struct ResourceClassification {
 /// This block tunes that pool per upstream; every field is optional and
 /// falls back to the gateway-wide default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SessionConfig {
     /// Most calls in flight to this server at once, for an upstream that
     /// cannot manage its own load. Calls beyond it wait in arrival order.
@@ -475,6 +486,7 @@ pub enum SessionScope {
 
 /// Per-upstream RFC 8693 token exchange settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExchangeConfig {
     /// Value passed as `audience` on the exchange request. Typically the
     /// canonical URI the upstream registered with the IdP.
@@ -498,6 +510,7 @@ pub struct ExchangeConfig {
 /// for externally-tagged enums in this shape, which is awkward in
 /// hand-edited manifests.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpstreamAuth {
     /// Name of the process env var holding a bearer token. Sent as
     /// `Authorization: Bearer <value>` on every upstream request. When that
@@ -540,6 +553,7 @@ pub struct UpstreamAuth {
 /// files. Operators with single-file PEMs can point both fields
 /// at the same path.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MtlsConfig {
     /// Path to the PEM-encoded client certificate (and chain).
     /// Required.
@@ -570,6 +584,7 @@ pub struct MtlsConfig {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct ToolClassification {
     pub name: String,
     /// Reviewed live behavior hash required by annotation-native mode. This is
@@ -635,6 +650,7 @@ impl ToolClassification {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct OperationClassification {
     /// Exact discriminator value this entry classifies.
     pub value: String,
@@ -661,12 +677,33 @@ pub fn load_manifests(
             continue;
         }
         let bytes = std::fs::read(&path)?;
-        let m: UpstreamManifest = serde_yaml::from_slice(&bytes)?;
+        let m = parse_manifest_document(&bytes)?;
         validate_manifest_invariants(&m)?;
         out.insert(m.name.clone(), m);
     }
     validate_resource_claim_set(&out)?;
     Ok(out)
+}
+
+/// Parse one manifest document, such as a single `servers/*.yaml` file.
+/// Unknown keys at any level are rejected, and a schema error names the
+/// upstream when the document carries a string `name`.
+pub fn parse_manifest_document(bytes: &[u8]) -> Result<UpstreamManifest, UpstreamError> {
+    manifest_from_yaml_value(serde_yaml::from_slice(bytes)?)
+}
+
+/// Deserialize one already-parsed manifest entry. Parsing to a YAML value
+/// first lets the error name the upstream, which a direct typed parse of a
+/// whole set cannot do.
+fn manifest_from_yaml_value(value: serde_yaml::Value) -> Result<UpstreamManifest, UpstreamError> {
+    let server = value
+        .get("name")
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::to_owned);
+    serde_yaml::from_value(value).map_err(|source| match server {
+        Some(server) => UpstreamError::ManifestEntry { server, source },
+        None => UpstreamError::Yaml(source),
+    })
 }
 
 fn valid_uri_prefix(prefix: &str) -> bool {
@@ -1738,9 +1775,10 @@ pub fn serialize_manifest_set(
 pub fn parse_manifest_set(
     content: &str,
 ) -> Result<BTreeMap<String, UpstreamManifest>, UpstreamError> {
-    let seq: Vec<UpstreamManifest> = serde_yaml::from_str(content)?;
+    let seq: Vec<serde_yaml::Value> = serde_yaml::from_str(content)?;
     let mut out = BTreeMap::new();
-    for m in seq {
+    for value in seq {
+        let m = manifest_from_yaml_value(value)?;
         validate_manifest_invariants(&m)?;
         if out.contains_key(&m.name) {
             return Err(UpstreamError::DuplicateName(m.name));
@@ -3346,6 +3384,94 @@ session:
                 "error must identify the bad entry: {msg}",
             ),
             other => panic!("expected InvalidManifest, got {other:?}"),
+        }
+    }
+
+    /// A misspelled key must fail the load rather than silently doing
+    /// nothing, at the top level and inside every nested block, and the
+    /// error must name both the upstream and the key.
+    #[test]
+    fn parse_manifest_set_rejects_unknown_keys_at_every_level() {
+        let cases = [
+            ("top level", "  forward_identity: false\n"),
+            ("session", "  session:\n    isolaton: per_call\n"),
+            (
+                "exchange",
+                "  exchange:\n    audience: https://idp/up\n    scopes: read\n",
+            ),
+            ("auth", "  auth:\n    bearer: TOKEN_ENV\n"),
+            (
+                "mtls",
+                "  mtls:\n    cert_path: /c.pem\n    key_path: /k.pem\n    ca: /ca.pem\n",
+            ),
+            (
+                "resources",
+                "  resources:\n    - uri_prefix: \"note:\"\n      risk: low\n      owner: x\n",
+            ),
+            (
+                "tools",
+                "  tools:\n    - name: send\n      risk: low\n      riks: high\n",
+            ),
+            (
+                "operations",
+                "  tools:\n    - name: act\n      risk: low\n      discriminator: op\n      \
+                 operations:\n        - value: read\n          risk: low\n          pi: true\n",
+            ),
+        ];
+        for (level, extra) in cases {
+            let doc = format!(
+                "- name: ok\n  transport: http\n  url: http://ok/mcp\n\
+                 - name: misspelled\n  transport: http\n  url: http://misspelled/mcp\n{extra}"
+            );
+            match parse_manifest_set(&doc) {
+                Err(UpstreamError::ManifestEntry { server, source }) => {
+                    assert_eq!(server, "misspelled", "{level}");
+                    assert!(
+                        source.to_string().contains("unknown field"),
+                        "{level}: error must name the unknown key: {source}",
+                    );
+                }
+                other => panic!("{level}: expected ManifestEntry, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn load_manifests_rejects_a_file_with_an_unknown_key() {
+        let dir = TmpDir::new();
+        std::fs::write(
+            dir.0.join("typo.yaml"),
+            "name: typo\ntransport: http\nurl: http://typo/mcp\ntrnasport: sse\n",
+        )
+        .unwrap();
+        let error = load_manifests(&dir.0).unwrap_err().to_string();
+        assert!(
+            error.contains("typo") && error.contains("trnasport"),
+            "error must name the upstream and the key: {error}",
+        );
+    }
+
+    /// A document with no usable `name` still fails, as a plain YAML error.
+    #[test]
+    fn parse_manifest_document_rejects_unknown_keys_without_a_name() {
+        let error = parse_manifest_document(b"transport: http\nbogus: 1\n").unwrap_err();
+        assert!(matches!(error, UpstreamError::Yaml(_)), "{error:?}");
+    }
+
+    /// The example and smoke-test manifests shipped in the repository must
+    /// keep loading under the strict schema.
+    #[test]
+    fn repository_example_manifests_parse_strictly() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for path in [
+            "examples/quickstart/servers/demo.yaml",
+            "scripts/boot-smoke/upstream.yaml",
+            "scripts/boot-smoke-2026/upstream.yaml",
+            "crates/waygate-upstream/tests/fixtures/servers/example-open.yaml",
+            "crates/waygate-upstream/tests/fixtures/servers/example-authed.yaml",
+        ] {
+            let bytes = std::fs::read(root.join(path)).unwrap_or_else(|e| panic!("{path}: {e}"));
+            parse_manifest_document(&bytes).unwrap_or_else(|e| panic!("{path}: {e}"));
         }
     }
 }
