@@ -6,6 +6,12 @@ is the code of record. The gateway repo carries representative fixtures under
 [`crates/waygate-upstream/tests/fixtures/servers/`](../../crates/waygate-upstream/tests/fixtures/servers/);
 a deployment supplies the served set through its servers volume.
 
+Manifests are strict: a key the schema does not define, at the top level or
+inside any nested block, fails the load with an error naming the upstream and
+the key. Every path that reads manifests applies this, including the served
+directory, `import`, the dashboard editor and ledger recovery, so a misspelled
+setting can never be silently ignored. Remove obsolete keys before upgrading.
+
 ## Classification authority: claims are not policy
 
 There are two explicit classification modes. They are compatibility modes, not
