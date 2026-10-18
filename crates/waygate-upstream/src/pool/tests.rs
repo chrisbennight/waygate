@@ -4775,6 +4775,7 @@ async fn refusal_report_matches_the_call_path_for_admission_states() {
             tool: "extra".into(),
             block: ToolBlock::Refused(ToolRefusal::Unclassified),
             advertised: true,
+            review_recorded: false,
         }],
         "only the unclassified name is refused without a catalog",
     );
@@ -4793,6 +4794,7 @@ async fn refusal_report_matches_the_call_path_for_admission_states() {
         tool: "read".into(),
         block: ToolBlock::Refused(ToolRefusal::DriftQuarantined),
         advertised: true,
+        review_recorded: false,
     }));
 
     // Annotation mode: an unapproved hash, an unclassified name, and a
@@ -4933,6 +4935,7 @@ async fn refusal_report_matches_the_call_path_for_catalog_states() {
         tool: "read".into(),
         block: ToolBlock::Unavailable(TemporaryUnavailability::CatalogConverging),
         advertised: true,
+        review_recorded: false,
     }));
 
     // With no connected session, an annotation-mode name cannot be checked.
@@ -4953,6 +4956,7 @@ async fn refusal_report_matches_the_call_path_for_catalog_states() {
             tool: "send_message".into(),
             block: ToolBlock::Unavailable(TemporaryUnavailability::NoConnectedLane),
             advertised: false,
+            review_recorded: false,
         }],
     );
 }

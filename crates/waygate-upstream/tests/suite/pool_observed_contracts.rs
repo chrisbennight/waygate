@@ -1103,6 +1103,10 @@ async fn refusal_report_holds_an_oversized_first_observation_for_review() {
         vec![("stable", ToolBlock::Refused(ToolRefusal::ReviewRequired))],
     );
     assert!(
+        !report[0].tools[0].review_recorded,
+        "no review is stored to link to yet"
+    );
+    assert!(
         review_state(&db, &name).await.0.is_empty(),
         "the report records no observation"
     );

@@ -45,6 +45,10 @@ pub struct BlockedTool {
     /// Whether a connected session to the server advertises the name. A name
     /// only the manifest classifies is not advertised.
     pub advertised: bool,
+    /// Whether a tool-change review is stored for the tool, so a link to its
+    /// comparison has something to open. A first observation held for review
+    /// is not stored until the gateway records it.
+    pub review_recorded: bool,
 }
 
 /// The tools one configured server does not run.
@@ -152,11 +156,13 @@ impl UpstreamPool {
                     }
                     _ => None,
                 };
+                let review = reviews
+                    .as_ref()
+                    .map(|reviews| reviews.get(name).cloned())
+                    .map_err(|_| ());
+                let review_recorded = matches!(review, Ok(Some(_)));
                 let reads = BatchReads {
-                    review: reviews
-                        .as_ref()
-                        .map(|reviews| reviews.get(name).cloned())
-                        .map_err(|_| ()),
+                    review,
                     catalog: catalog_row,
                     transition,
                 };
@@ -180,6 +186,7 @@ impl UpstreamPool {
                     advertised: advertised.contains(name),
                     tool: name.clone(),
                     block,
+                    review_recorded,
                 });
             }
         }

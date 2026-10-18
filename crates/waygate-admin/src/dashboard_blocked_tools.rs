@@ -163,13 +163,7 @@ impl Links<'_> {
 
 /// Explain one blocked tool on `server`. `connected` is whether any session
 /// to the server is connected.
-fn explain(
-    server: &str,
-    blocked: &BlockedTool,
-    connected: bool,
-    review_recorded: bool,
-    links: &Links<'_>,
-) -> Explanation {
+fn explain(server: &str, blocked: &BlockedTool, connected: bool, links: &Links<'_>) -> Explanation {
     let audit_reason = match blocked.block {
         ToolBlock::Refused(reason) => format!("refused:{}", reason.code()),
         ToolBlock::Unavailable(reason) => format!("unavailable:{}", reason.code()),
@@ -263,7 +257,7 @@ fn explain(
             SCOPE_UNTIL_RESTART,
             links.configuration("/servers", "Clear the quarantine on Servers"),
         ),
-        ToolBlock::Refused(ToolRefusal::ReviewRequired) if !review_recorded => refused(
+        ToolBlock::Refused(ToolRefusal::ReviewRequired) if !blocked.review_recorded => refused(
             "Held for review",
             "The tool's definition is larger than the gateway can store for comparison, so \
              the gateway holds it for review. Its review appears under Tool changes once the \
@@ -382,9 +376,6 @@ impl CatalogRows {
 struct Report {
     catalog: CatalogRows,
     servers: Vec<ServerRefusals>,
-    /// Review-required tools with no stored review to link to: a first
-    /// observation held for review that the gateway has not recorded yet.
-    unrecorded_reviews: std::collections::HashSet<(String, String)>,
 }
 
 async fn read_report(state: &AdminState, tenant: &str, only: Option<&str>) -> Report {
@@ -397,45 +388,7 @@ async fn read_report(state: &AdminState, tenant: &str, only: Option<&str>) -> Re
                 && (default_tenant || catalog.get(server).is_some())
         })
         .await;
-    Report {
-        catalog,
-        servers,
-        unrecorded_reviews: Default::default(),
-    }
-}
-
-/// The review-required tools in `report` whose tool-change review is not
-/// stored, so a link to its comparison would find nothing. An unreadable
-/// review store counts as not stored.
-async fn unrecorded_reviews(
-    state: &AdminState,
-    report: &Report,
-) -> std::collections::HashSet<(String, String)> {
-    let mut unrecorded = std::collections::HashSet::new();
-    for server in &report.servers {
-        for blocked in &server.tools {
-            if blocked.block != ToolBlock::Refused(ToolRefusal::ReviewRequired) {
-                continue;
-            }
-            let stored = match state.servers.tool_reviews.get() {
-                Some(store) => matches!(
-                    store
-                        .get(
-                            waygate_core::TenantId::DEFAULT,
-                            &server.server,
-                            &blocked.tool
-                        )
-                        .await,
-                    Ok(Some(_))
-                ),
-                None => false,
-            };
-            if !stored {
-                unrecorded.insert((server.server.clone(), blocked.tool.clone()));
-            }
-        }
-    }
-    unrecorded
+    Report { catalog, servers }
 }
 
 /// The number of tools the gateway does not run for `principal`'s tenant,
@@ -471,16 +424,7 @@ fn blocked_rows(
         };
         let mut groups: Vec<BlockedRow> = Vec::new();
         for blocked in &server.tools {
-            let review_recorded = !report
-                .unrecorded_reviews
-                .contains(&(server.server.clone(), blocked.tool.clone()));
-            let explanation = explain(
-                &server.server,
-                blocked,
-                server.connected,
-                review_recorded,
-                &links,
-            );
+            let explanation = explain(&server.server, blocked, server.connected, &links);
             match groups
                 .iter_mut()
                 .find(|group| group.explanation == explanation)
@@ -515,16 +459,13 @@ async fn blocked_tools_page(
     let (rows, catalog_unavailable, truncated) = if insufficient_scope {
         (Vec::new(), false, Vec::new())
     } else {
-        let mut report = read_report(&state, &tenant, server_filter.as_deref()).await;
+        let report = read_report(&state, &tenant, server_filter.as_deref()).await;
         // Tool-change review also requires the URL tenant to be the default
         // tenant, so a cross-tenant view offers no configuration links.
         let owns_configuration = tenant == waygate_core::TenantId::DEFAULT
             && tenant_ctx
                 .as_ref()
                 .is_none_or(|ctx| ctx.slug == waygate_core::TenantId::DEFAULT);
-        if owns_configuration {
-            report.unrecorded_reviews = unrecorded_reviews(&state, &report).await;
-        }
         let rows = blocked_rows(
             &report,
             &tenant,
@@ -612,11 +553,11 @@ mod tests {
                         tool: (*tool).into(),
                         block: *block,
                         advertised: *advertised,
+                        review_recorded: true,
                     })
                     .collect(),
                 truncated: false,
             }],
-            unrecorded_reviews: Default::default(),
         }
     }
 
@@ -962,9 +903,7 @@ mod tests {
             true,
             &[("t", ToolBlock::Refused(ToolRefusal::ReviewRequired), true)],
         );
-        report
-            .unrecorded_reviews
-            .insert(("garage".to_owned(), "t".to_owned()));
+        report.servers[0].tools[0].review_recorded = false;
         let html = page(blocked_rows(&report, "default", None, true, true));
         assert!(html.contains("larger than the gateway can store for comparison"));
         assert!(
