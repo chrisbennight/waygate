@@ -24,6 +24,13 @@ use waygate_federation::{
     PgFederatedPeersStore, TrustTier, MAX_LIST_LIMIT,
 };
 
+/// Both tests write `federated_peers`, and the lifecycle test's cross-tenant
+/// scan reads every tenant's rows, so a peer the page-window test inserts can
+/// push the lifecycle test's peers off a page, and its cleanup can shift rows
+/// between pages. This lock keeps them apart within one test process; the
+/// `federation-peers-pg` nextest group keeps them apart across processes.
+static PEERS_TABLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn connect() -> Option<sqlx::PgPool> {
     let url = env::var("AUDIT_DATABASE_URL").ok()?;
     let pool = PgPoolOptions::new()
@@ -60,6 +67,7 @@ async fn peers_lifecycle_and_isolation() {
         eprintln!("skipping federated_peers Pg smoke: AUDIT_DATABASE_URL not set");
         return;
     };
+    let _serial = PEERS_TABLE.lock().await;
     let suffix = Uuid::new_v4().to_string();
     let tenant_a = seed_tenant(&pool, &suffix).await;
     let tenant_b = seed_tenant(&pool, &format!("b-{suffix}")).await;
@@ -248,8 +256,8 @@ async fn peers_lifecycle_and_isolation() {
     assert!(matches!(dup_issuer, PeerError::DuplicateName));
 
     // 7. Cross-tenant scan used by the JWKS refresher:
-    //    list_all_for_refresh returns peers
-    //    from every tenant, ordered by id, clamped to
+    //    list_all_for_refresh pages through peers from
+    //    every tenant, ordered by id, clamped to
     //    MAX_LIST_LIMIT. Seed a peer in tenant_b first so
     //    we can observe at least one row outside tenant_a.
     let p_b = store
@@ -262,10 +270,21 @@ async fn peers_lifecycle_and_isolation() {
         })
         .await
         .expect("insert tenant_b peer");
-    let cross = store
-        .list_all_for_refresh(100, 0)
-        .await
-        .expect("list_all_for_refresh");
+    // Other tenants' rows sort among these by random id, so read every page
+    // as the refresher does rather than only the first.
+    const PAGE: u32 = 100;
+    let mut cross = Vec::new();
+    loop {
+        let page = store
+            .list_all_for_refresh(PAGE, cross.len() as u32)
+            .await
+            .expect("list_all_for_refresh");
+        let last = page.len() < PAGE as usize;
+        cross.extend(page);
+        if last {
+            break;
+        }
+    }
     assert!(
         cross.iter().any(|p| p.id == p1.id),
         "p1 (tenant_a) must appear in cross-tenant scan",
@@ -304,6 +323,7 @@ async fn peer_pages_above_the_old_ceiling_preserve_scope() {
     let Some(pool) = connect().await else {
         return;
     };
+    let _serial = PEERS_TABLE.lock().await;
     let tenant = seed_tenant(&pool, &format!("counts-{}", Uuid::new_v4())).await;
     let store = PgFederatedPeersStore::new(pool.clone());
     for i in 0..551 {

@@ -35,6 +35,10 @@ discovery-pg = { max-threads = 1 }
 # These fixtures invoke a database-wide grant sweeper and assert intermediate
 # states. A separate test's sweeper must not advance or delete those fixtures.
 transfer-sweep-pg = { max-threads = 1 }
+# Both federated_peers smoke tests write the table, and one scans every
+# tenant's rows, so a run of one must not overlap the other. Within one test
+# binary they also serialize on PEERS_TABLE in that file.
+federation-peers-pg = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'package(waygate-server) & (test(=llm_discovery::tests::refresh_target_upserts_prices_and_reconciles) | test(=llm_discovery::tests::refresh_target_discovers_embeddings_distinctly_and_reconcile_keeps_both) | test(=llm::tests::boot_load_makes_a_discovered_row_routable))'
@@ -43,3 +47,7 @@ test-group = 'discovery-pg'
 [[profile.default.overrides]]
 filter = 'package(waygate-transfer) & (test(=upload_status_is_scoped_to_the_exact_owner_and_credential_profile) | test(=authority_transitions_are_atomic_and_sender_constrained))'
 test-group = 'transfer-sweep-pg'
+
+[[profile.default.overrides]]
+filter = 'binary_id(waygate-federation::pg_smoke)'
+test-group = 'federation-peers-pg'
