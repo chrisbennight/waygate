@@ -13,6 +13,7 @@ mod admin_state;
 
 mod activity;
 mod activity_live;
+mod blocked_tools;
 mod bundles_playground;
 mod chrome;
 mod consent_identities;

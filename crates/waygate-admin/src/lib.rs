@@ -57,6 +57,7 @@ pub mod dashboard_activity_page;
 pub mod dashboard_agent_chat;
 pub mod dashboard_agents;
 pub mod dashboard_approvals;
+pub mod dashboard_blocked_tools;
 pub mod dashboard_break_glass;
 pub mod dashboard_builtins;
 pub mod dashboard_catalog;

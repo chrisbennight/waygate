@@ -44,6 +44,24 @@ later after a connection failure. The gateway logs the failure category and
 elapsed time without query arguments. PostgreSQL enforces a transaction-local
 statement timeout, and interrupted connections are retired from the pool.
 
+## Find every blocked tool
+
+A caller whose tool call is refused sees only that the tool is unavailable.
+The dashboard's **Tools → Blocked** page, which requires the `mcp:admin`
+scope, lists every tool the gateway currently refuses to run or holds as
+temporarily unavailable. For each it gives the reason in plain English, the
+`refused:<code>` or `unavailable:<code>` reason Activity records for such a
+call, where the state applies, and a link to the dashboard control that
+resolves it when your tenant owns that control. A drift quarantine held only
+in one gateway's memory is marked as applying to that copy of the gateway
+until it restarts. Temporary states have no control; they should clear on
+their own.
+
+The Overview attention queue shows the number of blocked tools when it is not
+zero, and the Activity detail of a refused call links to the page for that
+server. The page applies the same checks a call would, and reading it changes
+nothing.
+
 ## Inspect rejected output schemas
 
 On **Servers**, expand the **Output schemas** rejection count to see each

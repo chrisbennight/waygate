@@ -215,6 +215,39 @@ screens. At phone widths it becomes a horizontally scrollable row of named
 destinations below the tenant selector. The shared CSS owns the exact
 breakpoints and spacing.
 
+## Blocked tools
+
+The **Blocked** tab of Tools (`/tools/blocked`) lists every tool the gateway
+currently refuses to run or holds as temporarily unavailable. Each row gives
+the server, the tool, the reason in plain English with its `refused:<code>` or
+`unavailable:<code>` audit reason, where the state applies, and the control
+that resolves it. Tools on one server that share a reason and a control share
+a row. Preserve these properties when changing the page:
+
+- **One decision.** `UpstreamPool::refusals` decides each tool through
+  `UpstreamPool::admit`, the function invocation uses, with catalog and review
+  reads batched per server. It records nothing: no log line, audit row, review
+  observation, admission cache entry, discovery signal, or dial. It examines
+  the names a connected session advertises and the names the manifest
+  classifies, at most `REFUSAL_REPORT_TOOL_LIMIT` per server; the page says
+  when a server was truncated. Do not add a second classifier to the page.
+- **Gate and scope.** The page uses the Catalog tab's admin gate and the
+  principal's tenant, and reads nothing without them. A configured server is
+  listed when a catalog row visible to that tenant names it, or when the viewer
+  is in the default tenant, which owns the server configuration.
+- **Scope text.** A drift quarantine held only in memory says it applies to
+  this copy of the gateway and is cleared on restart. Catalog and review states
+  apply to every copy; temporary states say what they wait for and that they
+  should clear on their own.
+- **Links.** A control is linked only when the viewer's tenant owns what it
+  changes: the catalog row for **Propose unquarantine** and **Approve** on the
+  Catalog tab, and the default tenant for Server manifests, Servers operations,
+  and tool-change review. A retired server and a temporary state have none.
+- **Entry points.** The Tools tab bar, an Overview attention item with the
+  count when it is not zero, the command palette, and the Activity detail of an
+  event whose reason starts with `refused:` or `unavailable:`, which links to
+  that server's rows (`?server=<name>`).
+
 ## Skills review
 
 The Skills destination (`/skills`) is a searchable tenant-scoped review catalog.

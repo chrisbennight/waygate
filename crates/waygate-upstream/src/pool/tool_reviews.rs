@@ -1,7 +1,7 @@
 //! Persist observed contracts before serving replacement sessions. Durable
 //! review is an additional refusal gate; it never grants catalog admission.
 
-use super::admission::Admission;
+use super::admission::{Admission, Effects};
 use super::*;
 use waygate_catalog::tool_reviews::{PgCatalogStore, ReviewDecision};
 
@@ -230,7 +230,7 @@ impl UpstreamPool {
         contract: Option<&Tool>,
         mode: crate::ClassificationMode,
     ) -> bool {
-        self.review_admission(server, tool, contract, mode)
+        self.review_admission(server, tool, contract, mode, Effects::Record)
             .await
             .is_admitted()
     }
@@ -242,6 +242,7 @@ impl UpstreamPool {
         tool: &str,
         contract: Option<&Tool>,
         mode: crate::ClassificationMode,
+        effects: Effects,
     ) -> Admission {
         let Some(store) = self.tool_reviews.as_ref() else {
             return Admission::Admitted;
@@ -252,15 +253,17 @@ impl UpstreamPool {
         {
             Ok(review) => review,
             Err(_) => {
-                tracing::warn!(
-                    server,
-                    tool,
-                    "tool review storage unavailable; refusing admission"
-                );
+                if effects.records() {
+                    tracing::warn!(
+                        server,
+                        tool,
+                        "tool review storage unavailable; refusing admission"
+                    );
+                }
                 return Admission::Unavailable(TemporaryUnavailability::ReviewUnavailable);
             }
         };
-        self.review_admission_with(server, tool, contract, mode, review)
+        self.review_admission_with(server, tool, contract, mode, review, effects)
             .await
     }
 
@@ -274,7 +277,7 @@ impl UpstreamPool {
         mode: crate::ClassificationMode,
         review: Option<ReviewDecision>,
     ) -> bool {
-        self.review_admission_with(server, tool, contract, mode, review)
+        self.review_admission_with(server, tool, contract, mode, review, Effects::Record)
             .await
             .is_admitted()
     }
@@ -288,6 +291,7 @@ impl UpstreamPool {
         contract: Option<&Tool>,
         mode: crate::ClassificationMode,
         review: Option<ReviewDecision>,
+        effects: Effects,
     ) -> Admission {
         let protected = self.entries.load().get(server).is_some_and(|entry| {
             let manifest = entry.manifest_snapshot();
@@ -302,13 +306,14 @@ impl UpstreamPool {
                     )
                 })
         });
-        self.review_admission_from_state(server, tool, contract, mode, protected, review)
+        self.review_admission_from_state(server, tool, contract, mode, protected, review, effects)
             .await
     }
 
     /// Apply the same decision to a row fetched alone or in a discovery batch.
     /// A missing protected observation keeps the existing first-observation
     /// reconciliation path; normal publication has already recorded it.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn review_admission_from_state(
         &self,
         server: &str,
@@ -317,6 +322,7 @@ impl UpstreamPool {
         mode: crate::ClassificationMode,
         protected: bool,
         review: Option<ReviewDecision>,
+        effects: Effects,
     ) -> Admission {
         let Some(store) = self.tool_reviews.as_ref() else {
             return Admission::Admitted;
@@ -334,6 +340,14 @@ impl UpstreamPool {
         let (hash, value) = review_contract(contract, mode);
         if let Some(review) = review {
             return review_decision_admission(&review, &hash, protected);
+        }
+        if !effects.records() {
+            // Only the call path records a first observation. That
+            // observation admits the contract it records unless the contract
+            // is too large to store, and a tool with no catalog identity yet
+            // is refused by the catalog check that follows, so leave the
+            // decision to that check rather than write.
+            return Admission::Admitted;
         }
         if store
             .observe(

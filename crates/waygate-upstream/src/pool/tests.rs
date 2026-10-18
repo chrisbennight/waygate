@@ -4356,6 +4356,7 @@ fn an_operation_more_severe_than_its_tool_is_ignored() {
             row("identities.get", "low", false, true),
             row("folders.list", "medium", false, false),
         ],
+        super::admission::Effects::Record,
     );
 
     let names: Vec<&str> = kept.iter().map(|o| o.value.as_str()).collect();
@@ -4392,6 +4393,7 @@ fn annotation_mode_pins_operation_flags_to_the_tool() {
             side_effects: false,
             pii: false,
         }],
+        super::admission::Effects::Record,
     );
 
     assert_eq!(kept.len(), 1);
@@ -4441,6 +4443,7 @@ fn annotation_mode_cannot_launder_an_out_of_ceiling_row() {
                 pii: false,
             },
         ],
+        super::admission::Effects::Record,
     );
 
     let names: Vec<&str> = kept.iter().map(|o| o.value.as_str()).collect();
@@ -4470,4 +4473,395 @@ fn protocol_change_is_a_connection_shape_change() {
         !super::reload::redial_committed_fields_eq(&base, &legacy),
         "a protocol override must trigger a re-dial, not apply silently in place"
     );
+}
+
+// ---- read-only refusal report ----------------------------------------------
+
+/// Counts `tracing` events this crate emits while it is the thread's default
+/// subscriber, so a test can prove a code path logs nothing.
+struct CountingSubscriber(Arc<std::sync::atomic::AtomicUsize>);
+
+impl tracing::Subscriber for CountingSubscriber {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if event.metadata().target().starts_with("waygate_upstream") {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// The report for one server, which must be present.
+async fn server_report(pool: &UpstreamPool, server: &str) -> ServerRefusals {
+    let mut report = pool.refusals("default", |name| name == server).await;
+    assert_eq!(report.len(), 1, "one report for {server}");
+    report.remove(0)
+}
+
+/// Report first, then ask the call path about every name: each name the
+/// call path does not admit must be reported with the same reason, and each
+/// admitted name must be absent. Returns the report for further assertions.
+async fn report_matches_call_path(
+    pool: &UpstreamPool,
+    server: &str,
+    names: &[&str],
+) -> ServerRefusals {
+    let report = server_report(pool, server).await;
+    for name in names {
+        let expected = match pool.resolve_invocation_tool("default", server, name).await {
+            ResolvedInvocationTool::Ready(_) => None,
+            ResolvedInvocationTool::Refused { reason, .. } => Some(ToolBlock::Refused(reason)),
+            ResolvedInvocationTool::Unavailable { reason, .. } => {
+                Some(ToolBlock::Unavailable(reason))
+            }
+        };
+        let reported = report
+            .tools
+            .iter()
+            .find(|blocked| blocked.tool == *name)
+            .map(|blocked| blocked.block);
+        assert_eq!(reported, expected, "{server}.{name}");
+    }
+    report
+}
+
+fn scripted(outcome: Option<waygate_catalog::ResolvedTool>, err: bool) -> Arc<ScriptedCatalog> {
+    Arc::new(ScriptedCatalog {
+        outcome: std::sync::Mutex::new(outcome),
+        err,
+        ..Default::default()
+    })
+}
+
+/// Manifest mode: `extra` is advertised but unclassified, `ghost` is
+/// classified but not advertised, and `read` is both.
+async fn manifest_mode_garage() -> UpstreamPool {
+    pool_connected_to(
+        crate::ClassificationMode::Manifest,
+        vec![live("read"), live("extra")],
+        vec![classification("read"), classification("ghost")],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn refusal_report_matches_the_call_path_for_admission_states() {
+    let names = ["read", "extra", "ghost"];
+    let pool = manifest_mode_garage().await;
+    let report = report_matches_call_path(&pool, "garage", &names).await;
+    assert!(report.connected && !report.truncated);
+    assert_eq!(
+        report.tools,
+        vec![BlockedTool {
+            tool: "extra".into(),
+            block: ToolBlock::Refused(ToolRefusal::Unclassified),
+            advertised: true,
+        }],
+        "only the unclassified name is refused without a catalog",
+    );
+
+    // Contract drift held only in this process's memory.
+    pool.entries
+        .load()
+        .get("garage")
+        .expect("entry")
+        .quarantined
+        .write()
+        .expect("upstream quarantine lock poisoned")
+        .insert("read".to_owned());
+    let report = report_matches_call_path(&pool, "garage", &names).await;
+    assert!(report.tools.contains(&BlockedTool {
+        tool: "read".into(),
+        block: ToolBlock::Refused(ToolRefusal::DriftQuarantined),
+        advertised: true,
+    }));
+
+    // Annotation mode: an unapproved hash, an unclassified name, and a
+    // classified name nobody advertises; the approved tool is admitted.
+    let mut approved = classification("ok");
+    approved.approved_behavior_hash = Some(crate::security_metadata::behavior_hash(
+        &annotation_native_live("ok"),
+    ));
+    let mut unapproved = classification("read");
+    unapproved.approved_behavior_hash = Some("0".repeat(64));
+    let mut ghost = classification("ghost");
+    ghost.approved_behavior_hash = Some("1".repeat(64));
+    let pool = pool_connected_to(
+        crate::ClassificationMode::McpAnnotations,
+        vec![
+            annotation_native_live("read"),
+            annotation_native_live("extra"),
+            annotation_native_live("ok"),
+        ],
+        vec![approved, unapproved, ghost],
+    )
+    .await;
+    let report = report_matches_call_path(&pool, "garage", &["ok", "read", "extra", "ghost"]).await;
+    let blocks: Vec<_> = report
+        .tools
+        .iter()
+        .map(|blocked| (blocked.tool.as_str(), blocked.block, blocked.advertised))
+        .collect();
+    assert_eq!(
+        blocks,
+        vec![
+            ("extra", ToolBlock::Refused(ToolRefusal::Unclassified), true),
+            (
+                "ghost",
+                ToolBlock::Refused(ToolRefusal::NotInCatalog),
+                false
+            ),
+            ("read", ToolBlock::Refused(ToolRefusal::NotAdmitted), true),
+        ],
+    );
+}
+
+#[tokio::test]
+async fn refusal_report_matches_the_call_path_for_catalog_states() {
+    let names = ["read", "extra", "ghost"];
+    let quarantined = |retired| waygate_catalog::ResolvedTool::Quarantined {
+        server_name: "garage".into(),
+        tool_name: "read".into(),
+        retired,
+    };
+    let pending = waygate_catalog::ResolvedTool::PendingApproval {
+        server_name: "garage".into(),
+        tool_name: "read".into(),
+    };
+    let cases: Vec<(&str, UpstreamPool, ToolBlock)> = vec![
+        (
+            "quarantined",
+            manifest_mode_garage()
+                .await
+                .with_authoritative_catalog(scripted(Some(quarantined(false)), false)),
+            ToolBlock::Refused(ToolRefusal::ServerQuarantined),
+        ),
+        (
+            "retired",
+            manifest_mode_garage()
+                .await
+                .with_authoritative_catalog(scripted(Some(quarantined(true)), false)),
+            ToolBlock::Refused(ToolRefusal::ServerRetired),
+        ),
+        (
+            "pending approval",
+            manifest_mode_garage()
+                .await
+                .with_authoritative_catalog(scripted(Some(pending), false))
+                .with_catalog_strict_pending_approval(true),
+            ToolBlock::Refused(ToolRefusal::ApprovalPending),
+        ),
+        (
+            "missing from the catalog",
+            manifest_mode_garage()
+                .await
+                .with_authoritative_catalog(scripted(None, false)),
+            ToolBlock::Refused(ToolRefusal::NotInCatalog),
+        ),
+        (
+            "catalog unreadable",
+            manifest_mode_garage()
+                .await
+                .with_authoritative_catalog(scripted(None, true)),
+            ToolBlock::Unavailable(TemporaryUnavailability::CatalogUnavailable),
+        ),
+    ];
+    for (case, pool, expected) in cases {
+        let report = report_matches_call_path(&pool, "garage", &names).await;
+        // Admission refuses the unclassified name before the catalog is read.
+        let blocks: Vec<_> = report
+            .tools
+            .iter()
+            .map(|blocked| (blocked.tool.as_str(), blocked.block))
+            .collect();
+        assert_eq!(
+            blocks,
+            vec![
+                ("extra", ToolBlock::Refused(ToolRefusal::Unclassified)),
+                ("ghost", expected),
+                ("read", expected),
+            ],
+            "{case}",
+        );
+    }
+
+    // A manifest/catalog transition in progress is temporary.
+    let pool = manifest_mode_garage()
+        .await
+        .with_authoritative_catalog(scripted(None, false));
+    pool.catalog_transitions
+        .write()
+        .expect("catalog transition lock poisoned")
+        .insert(
+            ("garage".to_owned(), "read".to_owned()),
+            CatalogTransition {
+                generation: 1,
+                pending: true,
+            },
+        );
+    let report = report_matches_call_path(&pool, "garage", &names).await;
+    assert!(report.tools.contains(&BlockedTool {
+        tool: "read".into(),
+        block: ToolBlock::Unavailable(TemporaryUnavailability::CatalogConverging),
+        advertised: true,
+    }));
+
+    // With no connected session, an annotation-mode name cannot be checked.
+    let mut manifest = manifest_with(false);
+    manifest.classification_mode = crate::ClassificationMode::McpAnnotations;
+    let mut approved = classification("send_message");
+    approved.approved_behavior_hash = Some("a".repeat(64));
+    manifest.tools = vec![approved];
+    let pool = UpstreamPool::from_manifests_disconnected(BTreeMap::from([(
+        "example-messages".to_owned(),
+        manifest,
+    )]));
+    let report = report_matches_call_path(&pool, "example-messages", &["send_message"]).await;
+    assert!(!report.connected);
+    assert_eq!(
+        report.tools,
+        vec![BlockedTool {
+            tool: "send_message".into(),
+            block: ToolBlock::Unavailable(TemporaryUnavailability::NoConnectedLane),
+            advertised: false,
+        }],
+    );
+}
+
+/// The report logs nothing, writes no audit record, and does not tell
+/// discovery that the catalog failed, although the call path does all three
+/// for the same refusal.
+#[tokio::test]
+async fn refusal_report_logs_records_and_signals_nothing() {
+    let sink = Arc::new(waygate_mcp::audit::InMemorySink::new());
+    let mut manifest = manifest_with(false);
+    manifest.tools.push(classification("send"));
+    let pool = UpstreamPool::from_manifests_disconnected(BTreeMap::from([(
+        "example-messages".to_owned(),
+        manifest,
+    )]))
+    .with_evidence(sink.clone())
+    .with_authoritative_catalog(scripted(None, true));
+    pool.entries
+        .load()
+        .get("example-messages")
+        .expect("entry")
+        .quarantined
+        .write()
+        .expect("upstream quarantine lock poisoned")
+        .insert("send".to_owned());
+    let events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _subscriber = tracing::subscriber::set_default(CountingSubscriber(events.clone()));
+    let error_generation = pool.discovery_error_generation();
+
+    let report = server_report(&pool, "example-messages").await;
+    assert_eq!(
+        report
+            .tools
+            .iter()
+            .map(|blocked| (blocked.tool.as_str(), blocked.block))
+            .collect::<Vec<_>>(),
+        vec![
+            ("send", ToolBlock::Refused(ToolRefusal::DriftQuarantined)),
+            (
+                "send_message",
+                ToolBlock::Unavailable(TemporaryUnavailability::CatalogUnavailable)
+            ),
+        ],
+    );
+    assert_eq!(events.load(Ordering::SeqCst), 0, "the report logs nothing");
+    assert_eq!(pool.discovery_error_generation(), error_generation);
+    assert!(sink.snapshot().await.is_empty(), "no audit record");
+
+    // The call path, given the same state, logs both and signals the failure.
+    for tool in ["send", "send_message"] {
+        assert!(!matches!(
+            pool.resolve_invocation_tool("default", "example-messages", tool)
+                .await,
+            ResolvedInvocationTool::Ready(_)
+        ));
+    }
+    assert!(events.load(Ordering::SeqCst) >= 2, "the call path logs");
+    assert_ne!(pool.discovery_error_generation(), error_generation);
+}
+
+/// The report reads the catalog without filling the admission read cache, so
+/// the call path's next admission still reads the catalog itself.
+#[tokio::test]
+async fn refusal_report_leaves_the_admission_cache_untouched() {
+    let source_version =
+        waygate_catalog::manifest_classification_hash("send", "high", true, false, None, &[]);
+    let catalog = Arc::new(ScriptedCatalog {
+        outcome: std::sync::Mutex::new(Some(waygate_catalog::ResolvedTool::Live(Box::new(
+            waygate_catalog::ToolDefinition {
+                discriminator: None,
+                operations: Vec::new(),
+                tool_id: uuid_nil(),
+                server_id: uuid_nil(),
+                server_name: "example-messages".into(),
+                tool_name: "send".into(),
+                schema_hash: source_version,
+                description: "d".into(),
+                classification_mode: "manifest".into(),
+                input_schema: Some(serde_json::json!({"type": "object"})),
+                output_schema: None,
+                tool_annotations: None,
+                action_metadata: None,
+                risk: "high".into(),
+                side_effects: true,
+                pii: false,
+                data_classification: None,
+                cost_class: None,
+                requires_approval: false,
+            },
+        )))),
+        generation: Some(std::sync::atomic::AtomicI64::new(1)),
+        ..Default::default()
+    });
+    let pool = pool_with_manifest_tool().with_catalog(catalog.clone());
+    let resolves = || catalog.resolves.load(Ordering::SeqCst);
+
+    let report = server_report(&pool, "example-messages").await;
+    assert!(report.tools.is_empty(), "the live tool is admitted");
+    assert_eq!(resolves(), 1, "the report reads the catalog once per name");
+    expect_snapshot(
+        pool.resolve_invocation_tool("default", "example-messages", "send")
+            .await,
+    );
+    assert_eq!(resolves(), 2, "the report left nothing in the cache");
+    expect_snapshot(
+        pool.resolve_invocation_tool("default", "example-messages", "send")
+            .await,
+    );
+    assert_eq!(resolves(), 2, "the call path's own read is reused");
+}
+
+#[tokio::test]
+async fn refusal_report_is_bounded_per_server() {
+    let mut manifest = manifest_with(false);
+    manifest.classification_mode = crate::ClassificationMode::McpAnnotations;
+    manifest.tools = (0..=REFUSAL_REPORT_TOOL_LIMIT)
+        .map(|index| {
+            let mut tool = classification(&format!("tool-{index:05}"));
+            tool.approved_behavior_hash = Some("a".repeat(64));
+            tool
+        })
+        .collect();
+    let pool = UpstreamPool::from_manifests_disconnected(BTreeMap::from([(
+        "example-messages".to_owned(),
+        manifest,
+    )]));
+    let report = server_report(&pool, "example-messages").await;
+    assert!(report.truncated);
+    assert_eq!(report.tools.len(), REFUSAL_REPORT_TOOL_LIMIT);
+    assert_eq!(report.tools[0].tool, "tool-00000");
+    assert!(pool.refusals("default", |_| false).await.is_empty());
 }

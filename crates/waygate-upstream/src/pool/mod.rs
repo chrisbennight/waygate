@@ -1486,63 +1486,8 @@ impl UpstreamCatalog for UpstreamPool {
         server: &str,
         tool_name: &str,
     ) -> ResolvedInvocationTool {
-        // Without durable review storage, the in-process quarantine is the
-        // authority. With storage, resolve_snapshot_from checks the durable
-        // decision so an acceptance on another replica can take effect.
-        // Clone the entry out from under the lock-free `load()` BEFORE the
-        // `.await` — an `if let` scrutinee's temporary (the arc-swap guard)
-        // would otherwise live across the await, holding the guard over a
-        // suspension point.
-        let entry = self.entries.load().get(server).cloned();
-        // ONE manifest snapshot governs admission, mode, hash, and facts;
-        // the separately read published contract is bound to this generation
-        // inside the resolver (published behavior hash == approved hash).
-        let manifest = entry.as_ref().map(|entry| entry.manifest_snapshot());
-        if let (Some(entry), Some(manifest)) = (entry.as_ref(), manifest.as_ref()) {
-            if self.tool_reviews.is_none() && entry.is_quarantined(tool_name).await {
-                tracing::info!(
-                    %tenant, %server, tool = %tool_name,
-                    "tool is in-process quarantined (drift-triggered); refusing dispatch",
-                );
-                return ResolvedInvocationTool::refused(
-                    server,
-                    tool_name,
-                    ToolRefusal::DriftQuarantined,
-                );
-            }
-            let admission = admission::entry_tool_admission(entry, manifest, tool_name).await;
-            if let Some(refusal) = admission.refusal(server, tool_name) {
-                tracing::info!(
-                    %tenant, %server, tool = %tool_name, ?admission,
-                    "tool is not admitted by the current classification mode and behavior hash",
-                );
-                return refusal;
-            }
-        }
-        let published =
-            schema_admission::published_tool_contract(entry.as_deref(), tool_name).await;
-        let mode = manifest
-            .as_ref()
-            .map_or(crate::ClassificationMode::Manifest, |manifest| {
-                manifest.classification_mode
-            });
-        let reads = self
-            .admission_reads(
-                tenant,
-                server,
-                tool_name,
-                mode,
-                published.advertised_definition.as_ref(),
-            )
-            .await;
-        self.resolve_snapshot_with_reads(
-            tenant,
-            server,
-            tool_name,
-            contract_binding::snapshot_inputs_for(manifest.as_ref(), server, tool_name, published),
-            reads,
-        )
-        .await
+        self.admit(tenant, server, tool_name, admission::AdmissionSource::Call)
+            .await
     }
 }
 
@@ -2295,6 +2240,7 @@ pub mod listen;
 mod reconnect;
 mod recovery;
 mod refusal_record;
+mod refusals;
 pub(crate) mod reload;
 mod resources;
 mod schema_admission;
@@ -2313,6 +2259,7 @@ pub use freshness::{CatalogFreshnessTrigger, ScheduledCatalogRefresh};
 pub use health::{
     ObservedContracts, ObservedToolContract, UpstreamErrorClass, UpstreamHealth, UpstreamStatus,
 };
+pub use refusals::{BlockedTool, ServerRefusals, ToolBlock, REFUSAL_REPORT_TOOL_LIMIT};
 use reload::redial_committed_fields_eq;
 pub use reload::{CatalogRefreshOutcome, CatalogRefreshReport, ReloadReport};
 use resources::{ResourceRequest, ResourceResponse};
