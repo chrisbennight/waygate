@@ -161,7 +161,10 @@ The hot path for one tool call:
    tier, allowing direct routing and ordinary step-up policy. Undeclared
    upstreams retain bounded catalog-enumeration fallback for compatibility.
    Resolution always completes before authorization and fails closed on URI
-   collisions.
+   collisions. As with a tool call, a forwarded `resources/read` carries only
+   request metadata the gateway sets, never the caller's `_meta`; its
+   response budget bounds the upstream response inside the gateway and is not
+   sent.
    An opt-in client schema profile adapts only the authorized `tools/list`
    copies before pagination. Invocation snapshots and inspection/Code Mode
    contracts keep the complete constraints; see

@@ -2022,10 +2022,23 @@ impl GatewayServer {
         principal: Option<&Principal>,
         governed_file_transfer: bool,
     ) -> Result<ReadResourceResult, McpError> {
-        params.meta.get_or_insert_with(Default::default).insert(
+        // Like a tool call, the upstream read carries only metadata the gateway
+        // sets, never the caller's own `_meta`: the response budget, which the
+        // upstream pool keeps inside the gateway, and a file promise only for a
+        // read the gateway can govern as a download.
+        let mut meta = rmcp::model::RequestMetaObject::new();
+        meta.insert(
             crate::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY.to_owned(),
             json!(self.resource_response_max_bytes),
         );
+        if governed_file_transfer {
+            for (key, value) in crate::files::stateless_client_capability_meta(
+                crate::files::FileOperation::Download,
+            ) {
+                meta.insert(key, value);
+            }
+        }
+        params.meta = Some(meta);
         let resolved = match tokio::time::timeout(
             RESOURCE_RESOLUTION_TIMEOUT,
             self.resolve_resource_owners(&params.uri, principal),
@@ -4611,7 +4624,7 @@ impl ServerHandler for GatewayServer {
     )]
     async fn read_resource(
         &self,
-        mut request: ReadResourceRequestParams,
+        request: ReadResourceRequestParams,
         ctx: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
         let started = std::time::Instant::now();
@@ -4670,32 +4683,6 @@ impl ServerHandler for GatewayServer {
             && request_capabilities.as_ref().is_some_and(|capabilities| {
                 capabilities.supports(crate::files::FileOperation::Download)
             });
-        if governed_file_transfer {
-            let meta = request.meta.get_or_insert_with(Default::default);
-            let capabilities = meta
-                .entry(crate::files::CLIENT_CAPABILITIES_META_KEY.to_owned())
-                .or_insert_with(|| Value::Object(JsonObject::new()));
-            let Value::Object(capabilities) = capabilities else {
-                return Err(McpError::invalid_params(
-                    "client capability metadata must be an object",
-                    None,
-                ));
-            };
-            capabilities.insert(
-                crate::files::FILES_CAPABILITY_MEMBER.to_owned(),
-                crate::files::stateless_client_file_capability(
-                    crate::files::FileOperation::Download,
-                ),
-            );
-        } else if let Some(Value::Object(capabilities)) = request
-            .meta
-            .as_mut()
-            .and_then(|meta| meta.get_mut(crate::files::CLIENT_CAPABILITIES_META_KEY))
-        {
-            // Never promise an upstream that this gateway can govern a file
-            // when the caller cannot consume one or the processor is absent.
-            capabilities.remove(crate::files::FILES_CAPABILITY_MEMBER);
-        }
         let result = self
             .read_visible_resource_with_transfer(
                 request,
