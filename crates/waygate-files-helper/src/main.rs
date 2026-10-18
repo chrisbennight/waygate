@@ -4,8 +4,9 @@
 //! bound to a key rather than a bearer credential, so the handle can travel
 //! back through a caller's context without becoming usable to anyone who reads
 //! it. Redeeming such a grant needs a signing library, which is what this binary
-//! supplies: the caller runs the `gateway-files.prepare_*` tool, pipes the
-//! result here, and gets back a file URI and nothing else.
+//! supplies: the caller runs the `gateway-files.prepare_*` tool, then names the
+//! file URI here (or pipes the whole result in), and gets back a file URI and
+//! nothing else.
 //!
 //! It speaks HTTPS and JOSE only. There is no MCP client here and no gateway
 //! login: the signing key authorizes nothing on its own, so this process holds
@@ -66,16 +67,28 @@ fn run(cli: Cli) -> Result<()> {
         Command::Upload(args) => {
             let config = Config::load(&paths.config())?;
             let key = HelperKey::load_or_create(&paths.key())?;
-            let prepared = wire::from_reader(read_prepared_input(args.input_framing)?.as_slice())?;
-            let uri = transfer::upload(prepared, &args.file, &config.origin(), &key)?;
+            let uri = match args.uri {
+                Some(uri) => transfer::upload_by_uri(&uri, &args.file, &config.gateway, &key)?,
+                None => {
+                    let prepared =
+                        wire::from_reader(read_prepared_input(args.input_framing)?.as_slice())?;
+                    transfer::upload(prepared, &args.file, &config.origin(), &key)?
+                }
+            };
             println!("{uri}");
             Ok(())
         }
         Command::Download(args) => {
             let config = Config::load(&paths.config())?;
             let key = HelperKey::load_or_create(&paths.key())?;
-            let prepared = wire::from_reader(read_prepared_input(args.input_framing)?.as_slice())?;
-            let uri = transfer::download(prepared, &args.dest, &config.origin(), &key)?;
+            let uri = match args.uri {
+                Some(uri) => transfer::download_by_uri(&uri, &args.dest, &config.gateway, &key)?,
+                None => {
+                    let prepared =
+                        wire::from_reader(read_prepared_input(args.input_framing)?.as_slice())?;
+                    transfer::download(prepared, &args.dest, &config.origin(), &key)?
+                }
+            };
             println!("{uri}");
             Ok(())
         }
@@ -132,6 +145,38 @@ mod tests {
             panic!("upload command");
         };
         assert_eq!(args.input_framing, InputFraming::Jsonl);
+    }
+
+    #[test]
+    fn download_can_name_the_file_instead_of_reading_stdin() {
+        let cli = Cli::try_parse_from([
+            "mcp-files",
+            "download",
+            "--uri",
+            "mcp-file://gateway/example",
+            "--dest",
+            "report.pdf",
+        ])
+        .expect("a URI replaces the piped prepare result");
+        let Command::Download(args) = cli.command else {
+            panic!("download command");
+        };
+        assert_eq!(args.uri.as_deref(), Some("mcp-file://gateway/example"));
+    }
+
+    #[test]
+    fn input_framing_is_refused_alongside_a_uri() {
+        Cli::try_parse_from([
+            "mcp-files",
+            "upload",
+            "--file",
+            "report.pdf",
+            "--uri",
+            "mcp-file://gateway/example",
+            "--input-framing",
+            "eof",
+        ])
+        .expect_err("with --uri nothing is read from stdin, so a framing choice is a mistake");
     }
 
     #[test]

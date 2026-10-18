@@ -15,6 +15,8 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use axum::routing::post;
 use axum::Router;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -725,9 +727,11 @@ impl ExchangeAdmission {
 
 /// Build the helper exchange route without OAuth bearer middleware.
 ///
-/// Access is controlled by the opaque pending grant and an RFC 9449 DPoP proof
-/// from the ephemeral helper key. This lets an ordinary script participate
-/// without access to the MCP client's OAuth or CIMD cache.
+/// Access is controlled by a pending grant and an RFC 9449 DPoP proof from the
+/// helper key named when the grant was prepared. The request selects the grant
+/// either by its opaque handle or by the gateway file URI and direction. This
+/// lets an ordinary script participate without access to the MCP client's OAuth
+/// or CIMD cache, and without being handed the prepare result.
 pub fn credential_exchange_router(
     authority: Arc<TransferAuthority>,
     public_url: impl Into<Arc<str>>,
@@ -760,34 +764,61 @@ async fn exchange(
         .get("dpop")
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    let handle = match GrantHandle::parse(payload.grant_handle) {
-        Ok(handle) => handle,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_grant"),
-    };
     let request_uri = format!(
         "{}/file-transfers/credentials",
         state.public_url.trim_end_matches('/'),
     );
+    let now = OffsetDateTime::now_utc();
+    let outcome = match payload {
+        CredentialRequest::Handle(HandleSelection { grant_handle }) => {
+            let Ok(handle) = GrantHandle::parse(grant_handle) else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid_grant");
+            };
+            state
+                .authority
+                .exchange_credential(&handle, proof, "POST", &request_uri, now)
+                .await
+        }
+        CredentialRequest::File(FileSelection {
+            file_uri,
+            direction,
+        }) => {
+            state
+                .authority
+                .exchange_credential_for_file(
+                    &file_uri,
+                    direction,
+                    proof,
+                    "POST",
+                    &request_uri,
+                    now,
+                )
+                .await
+        }
+    };
 
-    match state
-        .authority
-        .exchange_credential(
-            &handle,
-            proof,
-            "POST",
-            &request_uri,
-            OffsetDateTime::now_utc(),
-        )
-        .await
-    {
+    match outcome {
         Ok(issued) => {
             let expires_in = (issued.expires_at - OffsetDateTime::now_utc())
                 .whole_seconds()
                 .max(0);
+            let grant = &issued.grant;
             let payload = CredentialResponse {
                 access_token: issued.credential.expose(),
                 token_type: "DPoP",
                 expires_in,
+                file: CredentialFile {
+                    uri: &grant.file_uri,
+                    mime_type: grant.media_type.as_deref(),
+                    size: grant.expected_size,
+                    digest: grant
+                        .expected_digest
+                        .as_ref()
+                        .map(|digest| CredentialFileDigest {
+                            algorithm: &digest.algorithm,
+                            value: URL_SAFE_NO_PAD.encode(&digest.value),
+                        }),
+                },
             };
             match serde_json::to_vec(&payload) {
                 Ok(body) => json_response(StatusCode::OK, body),
@@ -801,10 +832,26 @@ async fn exchange(
     }
 }
 
-#[derive(Deserialize)]
+/// Exactly one way of selecting the grant. A body naming both a handle and a
+/// file matches neither shape and is refused.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum CredentialRequest {
+    Handle(HandleSelection),
+    File(FileSelection),
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CredentialRequest {
+struct HandleSelection {
     grant_handle: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileSelection {
+    file_uri: String,
+    direction: TransferDirection,
 }
 
 #[derive(Serialize)]
@@ -812,6 +859,27 @@ struct CredentialResponse<'a> {
     access_token: &'a str,
     token_type: &'static str,
     expires_in: i64,
+    /// What the grant allows to move, read from gateway state, so a helper can
+    /// verify a transfer without trusting metadata relayed through a model.
+    file: CredentialFile<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CredentialFile<'a> {
+    uri: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mime_type: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digest: Option<CredentialFileDigest<'a>>,
+}
+
+#[derive(Serialize)]
+struct CredentialFileDigest<'a> {
+    algorithm: &'a str,
+    value: String,
 }
 
 #[derive(Serialize)]
@@ -919,7 +987,64 @@ mod tests {
         assert_eq!(CREDENTIAL_EXCHANGE_PATH, "/file-transfers/credentials");
         let payload: CredentialRequest =
             serde_json::from_str(r#"{"grant_handle":"ftg_value"}"#).unwrap();
-        assert_eq!(payload.grant_handle, "ftg_value");
+        assert!(
+            matches!(payload, CredentialRequest::Handle(selection) if selection.grant_handle == "ftg_value")
+        );
+    }
+
+    #[test]
+    fn exchange_accepts_a_file_uri_and_direction_instead_of_a_handle() {
+        let payload: CredentialRequest = serde_json::from_str(
+            r#"{"file_uri":"mcp-file://gateway/example","direction":"download"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            payload,
+            CredentialRequest::File(FileSelection {
+                ref file_uri,
+                direction: TransferDirection::Download,
+            }) if file_uri == "mcp-file://gateway/example"
+        ));
+    }
+
+    #[test]
+    fn exchange_response_describes_the_file_in_file_value_shape() {
+        let response = CredentialResponse {
+            access_token: "ftc_value",
+            token_type: "DPoP",
+            expires_in: 60,
+            file: CredentialFile {
+                uri: "mcp-file://gateway/example",
+                mime_type: Some("application/pdf"),
+                size: Some(5),
+                digest: Some(CredentialFileDigest {
+                    algorithm: "sha-256",
+                    value: URL_SAFE_NO_PAD.encode([7_u8; 32]),
+                }),
+            },
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            value["file"],
+            serde_json::json!({
+                "uri": "mcp-file://gateway/example",
+                "mimeType": "application/pdf",
+                "size": 5,
+                "digest": {"algorithm": "sha-256", "value": URL_SAFE_NO_PAD.encode([7_u8; 32])},
+            })
+        );
+    }
+
+    #[test]
+    fn exchange_refuses_a_request_that_selects_a_grant_two_ways() {
+        for body in [
+            r#"{"grant_handle":"ftg_value","file_uri":"mcp-file://gateway/example","direction":"upload"}"#,
+            r#"{"file_uri":"mcp-file://gateway/example"}"#,
+            r#"{"file_uri":"mcp-file://gateway/example","direction":"sideways"}"#,
+        ] {
+            serde_json::from_str::<CredentialRequest>(body)
+                .expect_err("an ambiguous or incomplete grant selection is refused");
+        }
     }
 
     #[test]

@@ -535,9 +535,23 @@ pub trait TransferStore: Send + Sync + 'static {
         file_uri: &str,
     ) -> Result<Option<TransferGrant>, StoreError>;
 
+    /// Record that a pending grant's creation is on record and it has been
+    /// handed to its caller. Returns false when the grant is no longer pending.
+    async fn mark_issued(&self, grant_id: Uuid) -> Result<bool, StoreError>;
+
+    /// The newest issued, pending, unexpired grant prepared for this helper
+    /// key, file, and direction. Activation re-checks every condition
+    /// atomically.
+    async fn find_pending_for_helper(
+        &self,
+        helper_jkt: &str,
+        file_uri: &str,
+        direction: TransferDirection,
+    ) -> Result<Option<TransferGrant>, StoreError>;
+
     async fn activate(
         &self,
-        handle_hash: &[u8],
+        grant_id: Uuid,
         helper_jkt: &str,
         credential_hash: &[u8],
         credential_expires_at: OffsetDateTime,
@@ -691,6 +705,13 @@ impl TransferAuthority {
             self.revoke_unreturned_grant(grant.id).await;
             return Err(error.into());
         }
+        // Selection by file URI considers only issued grants, so this is the
+        // point at which a grant becomes redeemable that way: its creation is
+        // on record, exactly as when the handle is returned below. A grant
+        // left unissued by a failure here is unreachable by either form.
+        if !self.store.mark_issued(grant.id).await? {
+            return Err(AuthorityError::GrantUnavailable);
+        }
 
         Ok(PublicTransferGrant {
             handle,
@@ -781,7 +802,7 @@ impl TransferAuthority {
         let expires_at = std::cmp::min(stored.expires_at, now + stored.credential_ttl);
         let Some(grant) = self
             .store
-            .activate(&handle_hash, &helper_jkt, &credential.digest(), expires_at)
+            .activate(stored.id, &helper_jkt, &credential.digest(), expires_at)
             .await?
         else {
             return Err(AuthorityError::GrantUnavailable);
@@ -816,8 +837,7 @@ impl TransferAuthority {
         request_uri: &str,
         now: OffsetDateTime,
     ) -> Result<IssuedTransferCredential, AuthorityError> {
-        let handle_hash = handle.digest();
-        let Some(stored) = self.store.find_by_handle(&handle_hash).await? else {
+        let Some(stored) = self.store.find_by_handle(&handle.digest()).await? else {
             return Err(AuthorityError::GrantUnavailable);
         };
         let unclaimed = match self
@@ -846,6 +866,47 @@ impl TransferAuthority {
             .await?;
             return Err(AuthorityError::GrantUnavailable);
         }
+        self.activate_for_proof(stored, unclaimed, now).await
+    }
+
+    /// Redeem a grant without its handle: the proof's key, the gateway file
+    /// URI, and the direction select the newest pending grant prepared for
+    /// that key. A helper can then be given only the file URI, which is not an
+    /// access credential, instead of the relayed prepare result.
+    ///
+    /// The proof is verified before any lookup because its key is the lookup.
+    /// A request that matches no grant is refused without audit evidence, as an
+    /// unknown handle is, because no owner can be attributed to it.
+    pub async fn exchange_credential_for_file(
+        &self,
+        file_uri: &str,
+        direction: TransferDirection,
+        proof_jwt: &str,
+        request_method: &str,
+        request_uri: &str,
+        now: OffsetDateTime,
+    ) -> Result<IssuedTransferCredential, AuthorityError> {
+        let unclaimed = self
+            .dpop
+            .verify(proof_jwt, request_method, request_uri, None, now)?;
+        let Some(stored) = self
+            .store
+            .find_pending_for_helper(&unclaimed.jkt, file_uri, direction)
+            .await?
+        else {
+            return Err(AuthorityError::GrantUnavailable);
+        };
+        self.activate_for_proof(stored, unclaimed, now).await
+    }
+
+    /// Claim the proof and activate the grant it was checked against. The
+    /// caller has already established that the proof's key is the grant's.
+    async fn activate_for_proof(
+        &self,
+        stored: TransferGrant,
+        unclaimed: UnclaimedDpopProof,
+        now: OffsetDateTime,
+    ) -> Result<IssuedTransferCredential, AuthorityError> {
         let proof = match self.claim_proof(unclaimed).await {
             Ok(proof) => proof,
             Err(error) => {
@@ -864,7 +925,7 @@ impl TransferAuthority {
         let expires_at = std::cmp::min(stored.expires_at, now + stored.credential_ttl);
         let Some(grant) = self
             .store
-            .activate(&handle_hash, &proof.jkt, &credential.digest(), expires_at)
+            .activate(stored.id, &proof.jkt, &credential.digest(), expires_at)
             .await?
         else {
             self.record_for_owner(

@@ -32,9 +32,11 @@ pub enum Command {
     /// Print the key thumbprint to pass as `helper_jkt` when preparing a
     /// transfer.
     Thumbprint,
-    /// Upload a local file. Pipe the `prepare_upload` result in on stdin.
+    /// Upload a local file. Name the file URI from the `prepare_upload` result
+    /// with `--uri`, or pipe that result in on stdin.
     Upload(UploadArgs),
-    /// Download a gateway file. Pipe the `prepare_download` result in on stdin.
+    /// Download a gateway file. Name its URI with `--uri` after
+    /// `prepare_download`, or pipe that result in on stdin.
     Download(DownloadArgs),
 }
 
@@ -51,9 +53,15 @@ pub struct UploadArgs {
     #[arg(long)]
     pub file: PathBuf,
 
-    /// How the prepare result on stdin is delimited. The default completes as
+    /// The `mcp-file://gateway/...` URI returned by `prepare_upload`. The
+    /// helper redeems the grant prepared for its key and this URI, so nothing
+    /// is read from stdin.
+    #[arg(long)]
+    pub uri: Option<String>,
+
+    /// How the prepare result on stdin is delimited. Not used with `--uri`. The default completes as
     /// soon as one JSON value is available and does not require EOF.
-    #[arg(long, value_enum, default_value_t = InputFraming::Auto)]
+    #[arg(long, value_enum, default_value_t = InputFraming::Auto, conflicts_with = "uri")]
     pub input_framing: InputFraming,
 }
 
@@ -63,9 +71,15 @@ pub struct DownloadArgs {
     #[arg(long)]
     pub dest: PathBuf,
 
-    /// How the prepare result on stdin is delimited. The default completes as
+    /// The `mcp-file://gateway/...` URI passed to `prepare_download`. The
+    /// helper redeems the grant prepared for its key and this URI, so nothing
+    /// is read from stdin.
+    #[arg(long)]
+    pub uri: Option<String>,
+
+    /// How the prepare result on stdin is delimited. Not used with `--uri`. The default completes as
     /// soon as one JSON value is available and does not require EOF.
-    #[arg(long, value_enum, default_value_t = InputFraming::Auto)]
+    #[arg(long, value_enum, default_value_t = InputFraming::Auto, conflicts_with = "uri")]
     pub input_framing: InputFraming,
 }
 

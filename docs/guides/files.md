@@ -21,20 +21,24 @@ that key; a prepare grant alone cannot be redeemed without its proof.
 
 1. Call `gateway-files.prepare_upload` with the returned `helper_jkt` and any
    known file metadata. Discover the live schema for supported fields.
-2. Feed the result's `structuredContent` to
-   `mcp-files upload --file ./document.pdf` through standard input. Capture the
-   resulting `mcp-file://gateway/...` URI.
+2. Run `mcp-files upload --uri <file.uri> --file ./document.pdf` with the
+   `file.uri` from that result. The helper redeems the grant prepared for its
+   key and that URI, and prints the URI once the upload succeeds.
 3. Pass that URI in a tool's advertised file input. The gateway authorizes the
    call, delivers bytes to the selected upstream, and substitutes its private
    file URI before dispatch. A connector must support the corresponding file
    workflow; an arbitrary string parameter is not automatically a file input.
 4. For a returned gateway file, call `gateway-files.prepare_download` with its
-   URI and helper thumbprint. Feed the prepare result to
-   `mcp-files download --dest ./result.pdf` through standard input.
+   URI and helper thumbprint, then run
+   `mcp-files download --uri <uri> --dest ./result.pdf`.
+
+Only the file URI and a local path reach the helper. Clients that can feed a
+tool result to a command's standard input may instead omit `--uri` and pipe the
+prepare result's `structuredContent` to the helper.
 
 Keep file bytes out of tool arguments, pasted base64, and model-visible output.
 The [bundled transfer skill](../../skills/mcp-file-transfer/SKILL.md) gives exact
-helper framing and recovery instructions. A denied helper network call should
+helper commands and recovery instructions. A denied helper network call should
 be resolved in the execution host's network permissions.
 
 ## Receiving tool and task reports
