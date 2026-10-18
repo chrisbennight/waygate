@@ -1246,6 +1246,7 @@ mod bounded_snapshot_tests {
             approval_mode: Default::default(),
             inline_response_threshold_bytes: None,
             long_running_tools: Vec::new(),
+            limits: None,
             name: name.to_owned(),
             transport: Transport::Stdio,
             protocol: Default::default(),

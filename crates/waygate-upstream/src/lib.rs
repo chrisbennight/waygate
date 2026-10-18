@@ -34,7 +34,8 @@ pub use pool::{
     list_all_tools, BlockedTool, CatalogFreshnessTrigger, CatalogRefreshOutcome,
     CatalogRefreshReport, ExchangeBundle, ListedCatalog, ObservedContracts, ObservedToolContract,
     RejectedOutputSchema, ReloadReport, ScheduledCatalogRefresh, ServerRefusals, ToolBlock,
-    UpstreamHealth, UpstreamPool, UpstreamStatus, REFUSAL_REPORT_TOOL_LIMIT,
+    UpstreamHealth, UpstreamPool, UpstreamStatus, DEFAULT_CALL_RESPONSE_MAX_BYTES,
+    REFUSAL_REPORT_TOOL_LIMIT,
 };
 pub use transport::{
     client_config, default_auto_lifecycle, legacy_bridge_lifecycle, stdio_command,
@@ -58,8 +59,8 @@ pub use waygate_manifest_types::{
     ApprovalMode, BasicAuth, ClassificationMode, ExchangeConfig, IdentityClaim, IdentityForwarding,
     IdentityTokenPolicy, MtlsConfig, OperationClassification, ResourceClassification, SecretHeader,
     SecretQueryParameter, SessionConfig, SessionIsolation, SessionScope, ToolClassification,
-    Transport, TrustLevel, UpstreamAuth, UpstreamError, UpstreamManifest, UpstreamProtocol,
-    MANIFEST_WRITE_MARKER,
+    Transport, TrustLevel, UpstreamAuth, UpstreamError, UpstreamLimits, UpstreamManifest,
+    UpstreamProtocol, MANIFEST_WRITE_MARKER, MAX_CALL_RESPONSE_BYTES, MIN_CALL_TIMEOUT_SECONDS,
 };
 
 /// A point-in-time snapshot of the upstream-manifest config health.

@@ -548,6 +548,13 @@ fn to_import_server(m: &UpstreamManifest) -> ImportServer {
     if m.session.is_some() {
         rt.insert("session".into(), serde_json::json!(m.session));
     }
+    // `limits` bounds every call this server receives — its deadline and the
+    // largest response read — so a runtime-target-backed dial without it
+    // would silently apply the gateway-wide values instead. Only emitted when
+    // present, like `session`.
+    if m.limits.is_some() {
+        rt.insert("limits".into(), serde_json::json!(m.limits));
+    }
     ImportServer {
         tenant_id: TenantId::DEFAULT.to_owned(),
         name: m.name.clone(),
@@ -604,6 +611,7 @@ mod tests {
             approval_mode: Default::default(),
             inline_response_threshold_bytes: None,
             long_running_tools: Vec::new(),
+            limits: None,
             name: name.into(),
             transport,
             protocol: Default::default(),
@@ -804,6 +812,33 @@ mod tests {
         assert!(s.runtime_target.get("tier_a_required").is_none());
         assert!(s.runtime_target.get("mtls").is_none());
         assert!(s.runtime_target.get("session").is_none());
+        assert!(s.runtime_target.get("limits").is_none());
+    }
+
+    #[test]
+    fn call_limits_are_preserved_in_runtime_target() {
+        let mut m = manifest("example-search", Transport::Http);
+        let limits = waygate_upstream::UpstreamLimits {
+            call_timeout_seconds: Some(900),
+            call_response_max_bytes: Some(1_048_576),
+        };
+        m.limits = Some(limits.clone());
+        let s = to_import_server(&m);
+        let stored: waygate_upstream::UpstreamLimits =
+            serde_json::from_value(s.runtime_target["limits"].clone())
+                .expect("limits round-trip into runtime_target");
+        assert_eq!(stored, limits);
+
+        m.limits = Some(waygate_upstream::UpstreamLimits {
+            call_timeout_seconds: Some(0),
+            call_response_max_bytes: None,
+        });
+        let s = to_import_server(&m);
+        assert_eq!(
+            s.runtime_target["limits"],
+            serde_json::json!({"call_timeout_seconds": 0}),
+            "a disabled timeout is kept and an inherited field stays absent",
+        );
     }
 
     #[test]

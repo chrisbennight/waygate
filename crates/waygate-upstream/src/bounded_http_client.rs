@@ -1,11 +1,13 @@
-//! Per-request response bounds for gateway-internal MCP reads.
+//! Per-request response bounds for gateway-originated MCP requests.
 //!
-//! Ordinary MCP traffic delegates unchanged to rmcp's reqwest client. A native
-//! resource read or call-scoped retained-response read carries its serialized
-//! materialization budget as a [`ResponseByteLimit`] request extension. For
-//! that request only, this wrapper consumes one JSON-RPC response under the
-//! raw-byte ceiling before rmcp can decode an untrusted body into the shared
-//! gateway process.
+//! Ordinary MCP traffic delegates unchanged to rmcp's reqwest client. A
+//! request whose response budget rides in a [`ResponseByteLimit`] request
+//! extension is read under that raw-byte ceiling before rmcp can decode an
+//! untrusted body into the shared gateway process. A native resource read or
+//! call-scoped retained-response read is consumed here up to its one JSON-RPC
+//! response. Any other bounded request, such as a tool call, keeps its event
+//! stream: rmcp still receives the upstream's notifications, requests and
+//! resumable event IDs, and only the byte count is enforced here.
 //!
 //! Every request also reports its outcome to the dial's exchange recorder,
 //! which records only while the dial that built this client is in progress.
@@ -20,7 +22,10 @@ use std::sync::{
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use http::{HeaderName, HeaderValue};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
-use rmcp::model::{ClientJsonRpcMessage, GetExtensions, JsonRpcMessage, ServerJsonRpcMessage};
+use rmcp::model::{
+    ClientJsonRpcMessage, ClientRequest, ErrorData, GetExtensions, JsonRpcMessage, RequestId,
+    ServerJsonRpcMessage,
+};
 use rmcp::service::ServiceError;
 use rmcp::transport::streamable_http_client::{
     SseError, StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
@@ -52,6 +57,30 @@ struct ResponseMaterializationLimit {
     limit_bytes: usize,
 }
 
+/// `data` member of the JSON-RPC error that ends an event stream cut off at
+/// its limit. Its value is [`local_limit_marker`].
+const LIMIT_MARKER_KEY: &str = "io.bennight.gateway/responseLimitMarker";
+
+/// Random value generated once per gateway process. Only this transport
+/// writes it, into the refusals it hands to rmcp, and the pool replaces those
+/// refusals before any caller sees them, so an upstream cannot produce a
+/// JSON-RPC error that passes for the gateway's own refusal.
+fn local_limit_marker() -> &'static str {
+    static MARKER: OnceLock<String> = OnceLock::new();
+    MARKER.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
+}
+
+/// Limit named by an event-stream refusal this transport synthesized.
+fn streamed_response_materialization_limit(error: &ErrorData) -> Option<usize> {
+    let data = error.data.as_ref()?;
+    if data.get(LIMIT_MARKER_KEY)?.as_str()? != local_limit_marker() {
+        return None;
+    }
+    data.get("limit_bytes")?
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+}
+
 fn streamable_response_materialization_limit(
     error: &StreamableHttpError<reqwest::Error>,
 ) -> Option<usize> {
@@ -64,18 +93,24 @@ fn streamable_response_materialization_limit(
         .map(|error| error.limit_bytes)
 }
 
-/// Recover the gateway's typed raw-response refusal after rmcp erases the
-/// concrete streamable-HTTP transport behind [`ServiceError::TransportSend`].
-/// An upstream JSON-RPC error never enters this transport-error branch and
-/// therefore cannot impersonate the refusal with matching wire data.
+/// Recover the gateway's raw-response refusal from the error rmcp returns for
+/// the request.
+///
+/// A refusal made before rmcp has the response arrives as a typed transport
+/// error behind [`ServiceError::TransportSend`], which an upstream JSON-RPC
+/// error never enters. A refusal on an event stream already handed to rmcp
+/// can only end the request as its JSON-RPC error, so that error carries the
+/// process-local marker; an upstream error without it is never recognized,
+/// whatever its wire data.
 pub(crate) fn response_materialization_limit(error: &ServiceError) -> Option<usize> {
-    let ServiceError::TransportSend(error) = error else {
-        return None;
-    };
-    error
-        .error
-        .downcast_ref::<StreamableHttpError<reqwest::Error>>()
-        .and_then(streamable_response_materialization_limit)
+    match error {
+        ServiceError::TransportSend(error) => error
+            .error
+            .downcast_ref::<StreamableHttpError<reqwest::Error>>()
+            .and_then(streamable_response_materialization_limit),
+        ServiceError::McpError(error) => streamed_response_materialization_limit(error),
+        _ => None,
+    }
 }
 
 #[derive(Clone)]
@@ -198,6 +233,105 @@ impl BoundedResponseClient {
         }))
     }
 
+    /// Whether the bounded request is consumed here up to its one response.
+    /// Resource reads are; every other request keeps its event stream so rmcp
+    /// still sees what the upstream sends while it works.
+    fn materializes_reply(message: &ClientJsonRpcMessage) -> bool {
+        matches!(
+            message,
+            JsonRpcMessage::Request(request)
+                if matches!(request.request, ClientRequest::ReadResourceRequest(_))
+        )
+    }
+
+    async fn read_capped(
+        response: reqwest::Response,
+        limit: usize,
+    ) -> Result<Vec<u8>, StreamableHttpError<reqwest::Error>> {
+        match read_body_capped(response, limit).await {
+            Ok(body) => Ok(body),
+            Err(ReadBodyError::TooLarge(_)) => Err(Self::limit_error(limit)),
+            Err(ReadBodyError::Http(error)) => Err(StreamableHttpError::Client(error)),
+        }
+    }
+
+    /// The response body as a byte stream that fails once more than `limit`
+    /// bytes have arrived, and the flag recording that it did.
+    fn capped_bytes(
+        response: reqwest::Response,
+        limit: usize,
+    ) -> (
+        impl futures::Stream<Item = Result<bytes::Bytes, io::Error>> + Send + 'static,
+        Arc<AtomicBool>,
+    ) {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let exceeded = Arc::new(AtomicBool::new(false));
+        let tripped = Arc::clone(&exceeded);
+        let bytes = response
+            .bytes_stream()
+            .map_err(|_| io::Error::other("bounded upstream response transport failed"))
+            .and_then(move |chunk| {
+                let next = seen
+                    .fetch_add(chunk.len(), Ordering::Relaxed)
+                    .saturating_add(chunk.len());
+                let tripped = Arc::clone(&tripped);
+                async move {
+                    if next > limit {
+                        tripped.store(true, Ordering::Relaxed);
+                        Err(io::Error::other(
+                            "bounded upstream response exceeded its limit",
+                        ))
+                    } else {
+                        Ok(chunk)
+                    }
+                }
+            });
+        (bytes, exceeded)
+    }
+
+    /// The request's event stream, ended by a marked JSON-RPC error for the
+    /// request once it exceeds `limit`. The count covers every event, so it
+    /// also bounds any single event. rmcp would resume a stream that merely
+    /// failed after an event ID and could then read the rest uncounted; a
+    /// final response for the request is what ends it for good.
+    fn bounded_event_stream(
+        response: reqwest::Response,
+        request_id: Option<RequestId>,
+        limit: usize,
+    ) -> BoxStream<'static, Result<Sse, SseError>> {
+        let refusal = request_id.map(|id| {
+            let error = ErrorData::internal_error(
+                format!("upstream response exceeded the {limit}-byte materialization limit"),
+                Some(serde_json::json!({
+                    LIMIT_MARKER_KEY: local_limit_marker(),
+                    "limit_bytes": limit,
+                })),
+            );
+            Sse {
+                data: Some(
+                    serde_json::to_string(&ServerJsonRpcMessage::error(error, Some(id)))
+                        .expect("a JSON-RPC error serializes"),
+                ),
+                ..Sse::default()
+            }
+        });
+        let (bytes, exceeded) = Self::capped_bytes(response, limit);
+        let events = SseStream::from_bytes_stream(bytes).boxed();
+        futures::stream::unfold(Some(events), move |events| {
+            let refusal = refusal.clone();
+            let exceeded = Arc::clone(&exceeded);
+            async move {
+                let mut events = events?;
+                let event = events.next().await?;
+                if event.is_err() && exceeded.load(Ordering::Relaxed) {
+                    return Some((refusal.map_or(event, Ok), None));
+                }
+                Some((event, Some(events)))
+            }
+        })
+        .boxed()
+    }
+
     fn is_response_for(request: &ClientJsonRpcMessage, response: &ServerJsonRpcMessage) -> bool {
         let JsonRpcMessage::Request(request) = request else {
             return false;
@@ -218,6 +352,7 @@ impl BoundedResponseClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         limit: usize,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<reqwest::Error>> {
+        let materialize = Self::materializes_reply(&message);
         let mut request = self
             .inner
             .post(uri.as_ref())
@@ -246,21 +381,40 @@ impl BoundedResponseClient {
         ) {
             return Ok(StreamableHttpPostResponse::Accepted);
         }
-        if !response.status().is_success() {
-            return Err(StreamableHttpError::UnexpectedServerResponse(
-                format!("HTTP {} during bounded resource read", response.status()).into(),
-            ));
-        }
 
         let content_type = response
             .headers()
             .get(CONTENT_TYPE)
             .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
+        let is_json = content_type
+            .as_deref()
+            .is_some_and(|value| value.as_bytes().starts_with(JSON_MIME_TYPE.as_bytes()));
         let returned_session = response
             .headers()
             .get(SESSION_HEADER)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        let status = response.status();
+        if !status.is_success() {
+            if materialize {
+                return Err(StreamableHttpError::UnexpectedServerResponse(
+                    format!("HTTP {status} during bounded resource read").into(),
+                ));
+            }
+            // Like rmcp, deliver a JSON-RPC error sent with an error status
+            // as the request's typed error. The body never enters error text.
+            if is_json {
+                let body = Self::read_capped(response, limit).await?;
+                if let Ok(error @ JsonRpcMessage::Error(_)) =
+                    serde_json::from_slice::<ServerJsonRpcMessage>(&body)
+                {
+                    return Ok(StreamableHttpPostResponse::Json(error, returned_session));
+                }
+            }
+            return Err(StreamableHttpError::UnexpectedServerResponse(
+                format!("HTTP {status} during a bounded request").into(),
+            ));
+        }
         if response
             .content_length()
             .is_some_and(|bytes| bytes > limit as u64)
@@ -268,73 +422,51 @@ impl BoundedResponseClient {
             return Err(Self::limit_error(limit));
         }
 
-        match content_type.as_deref() {
-            Some(value) if value.as_bytes().starts_with(JSON_MIME_TYPE.as_bytes()) => {
-                let body = match read_body_capped(response, limit).await {
-                    Ok(body) => body,
-                    Err(ReadBodyError::TooLarge(_)) => return Err(Self::limit_error(limit)),
-                    Err(ReadBodyError::Http(error)) => {
-                        return Err(StreamableHttpError::Client(error))
-                    }
-                };
-                let decoded = serde_json::from_slice::<ServerJsonRpcMessage>(&body)?;
-                Ok(StreamableHttpPostResponse::Json(decoded, returned_session))
-            }
-            Some(value)
-                if value
-                    .as_bytes()
-                    .starts_with(EVENT_STREAM_MIME_TYPE.as_bytes()) =>
-            {
-                let seen = Arc::new(AtomicUsize::new(0));
-                let exceeded = Arc::new(AtomicBool::new(false));
-                let count = Arc::clone(&seen);
-                let tripped = Arc::clone(&exceeded);
-                let bounded = response
-                    .bytes_stream()
-                    .map_err(|_| io::Error::other("bounded upstream response transport failed"))
-                    .and_then(move |chunk| {
-                        let next = count
-                            .fetch_add(chunk.len(), Ordering::Relaxed)
-                            .saturating_add(chunk.len());
-                        let tripped = Arc::clone(&tripped);
-                        async move {
-                            if next > limit {
-                                tripped.store(true, Ordering::Relaxed);
-                                Err(io::Error::other(
-                                    "bounded upstream response exceeded its limit",
-                                ))
-                            } else {
-                                Ok(chunk)
-                            }
-                        }
-                    });
-                let events = SseStream::from_bytes_stream(bounded);
-                futures::pin_mut!(events);
-                while let Some(event) = events.next().await {
-                    match event {
-                        Ok(event) => {
-                            let Some(data) = event.data.filter(|data| !data.trim().is_empty())
-                            else {
-                                continue;
-                            };
-                            let decoded = serde_json::from_str::<ServerJsonRpcMessage>(&data)?;
-                            if Self::is_response_for(&message, &decoded) {
-                                return Ok(StreamableHttpPostResponse::Json(
-                                    decoded,
-                                    returned_session,
-                                ));
-                            }
-                        }
-                        Err(_error) if exceeded.load(Ordering::Relaxed) => {
-                            return Err(Self::limit_error(limit));
-                        }
-                        Err(error) => return Err(StreamableHttpError::Sse(error)),
+        if is_json {
+            let body = Self::read_capped(response, limit).await?;
+            let decoded = serde_json::from_slice::<ServerJsonRpcMessage>(&body)?;
+            return Ok(StreamableHttpPostResponse::Json(decoded, returned_session));
+        }
+        let is_event_stream = content_type.as_deref().is_some_and(|value| {
+            value
+                .as_bytes()
+                .starts_with(EVENT_STREAM_MIME_TYPE.as_bytes())
+        });
+        if !is_event_stream {
+            return Err(StreamableHttpError::UnexpectedContentType(content_type));
+        }
+        if !materialize {
+            let request_id = match &message {
+                JsonRpcMessage::Request(request) => Some(request.id.clone()),
+                _ => None,
+            };
+            return Ok(StreamableHttpPostResponse::Sse(
+                Self::bounded_event_stream(response, request_id, limit),
+                returned_session,
+            ));
+        }
+
+        let (bounded, exceeded) = Self::capped_bytes(response, limit);
+        let events = SseStream::from_bytes_stream(bounded);
+        futures::pin_mut!(events);
+        while let Some(event) = events.next().await {
+            match event {
+                Ok(event) => {
+                    let Some(data) = event.data.filter(|data| !data.trim().is_empty()) else {
+                        continue;
+                    };
+                    let decoded = serde_json::from_str::<ServerJsonRpcMessage>(&data)?;
+                    if Self::is_response_for(&message, &decoded) {
+                        return Ok(StreamableHttpPostResponse::Json(decoded, returned_session));
                     }
                 }
-                Err(StreamableHttpError::UnexpectedEndOfStream)
+                Err(_error) if exceeded.load(Ordering::Relaxed) => {
+                    return Err(Self::limit_error(limit));
+                }
+                Err(error) => return Err(StreamableHttpError::Sse(error)),
             }
-            _ => Err(StreamableHttpError::UnexpectedContentType(content_type)),
         }
+        Err(StreamableHttpError::UnexpectedEndOfStream)
     }
 }
 
@@ -653,6 +785,262 @@ mod tests {
             .expect_err("local SSE limit is a typed transport refusal");
 
         assert_eq!(streamable_response_materialization_limit(&error), Some(128));
+        server.abort();
+    }
+
+    fn tool_call_request(limit: usize) -> ClientJsonRpcMessage {
+        let mut request = ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(
+            rmcp::model::CallToolRequestParams::new("large"),
+        ));
+        request.extensions_mut().insert(ResponseByteLimit(limit));
+        ClientJsonRpcMessage::request(request, RequestId::Number(7))
+    }
+
+    #[test]
+    fn a_bounded_tool_call_keeps_its_budget_off_the_wire() {
+        let bounded = tool_call_request(73);
+        assert_eq!(BoundedResponseClient::response_limit(&bounded), Some(73));
+        let wire = serde_json::to_value(&bounded).unwrap();
+        assert_eq!(wire["method"], "tools/call");
+        assert!(
+            wire["params"].get("_meta").is_none(),
+            "the budget must not serialize onto the upstream request: {wire}"
+        );
+
+        let wire_shaped: ClientJsonRpcMessage = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "large",
+                "_meta": {
+                    waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY: 73
+                },
+            },
+        }))
+        .expect("valid tools/call request");
+        assert_eq!(
+            BoundedResponseClient::response_limit(&wire_shaped),
+            None,
+            "request metadata is not the budget's carrier"
+        );
+    }
+
+    /// Serve `body` as two chunks split at `split`, with the given status and
+    /// content type, so a limit falls inside the body rather than on its
+    /// declared length. The limit is checked as each chunk arrives.
+    async fn serve_chunked(
+        status: u16,
+        content_type: &'static str,
+        body: Vec<u8>,
+        split: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let body = Arc::new(body);
+        let app = Router::new().route(
+            "/mcp",
+            post(move || {
+                let body = Arc::clone(&body);
+                async move {
+                    let chunks = stream::iter(vec![
+                        Ok::<_, Infallible>(Bytes::copy_from_slice(&body[..split])),
+                        Ok(Bytes::copy_from_slice(&body[split..])),
+                    ]);
+                    Response::builder()
+                        .status(status)
+                        .header(CONTENT_TYPE, content_type)
+                        .body(Body::from_stream(chunks))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}/mcp"), server)
+    }
+
+    fn client() -> BoundedResponseClient {
+        BoundedResponseClient::new(
+            waygate_core::http_client::client(waygate_core::http_client::Profile::NoTotalTimeout)
+                .unwrap(),
+            ExchangeRecorder::default(),
+        )
+    }
+
+    async fn post_tool_call(
+        uri: String,
+        limit: usize,
+    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<reqwest::Error>> {
+        client()
+            .post_message_with_max_sse_event_size(
+                uri.into(),
+                tool_call_request(limit),
+                None,
+                None,
+                HashMap::new(),
+                usize::MAX,
+            )
+            .await
+    }
+
+    fn large_result_event() -> String {
+        format!(
+            "event: message\ndata: {}\n\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "result": {"content": [{"type": "text", "text": "x".repeat(1024)}]}
+            })
+        )
+    }
+
+    fn progress_event() -> String {
+        format!(
+            "event: message\ndata: {}\n\n",
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": {"progressToken": 1, "progress": 1}
+            })
+        )
+    }
+
+    #[test]
+    fn only_resource_reads_are_consumed_up_to_their_response() {
+        assert!(BoundedResponseClient::materializes_reply(&read_request(
+            Some(73)
+        )));
+        assert!(!BoundedResponseClient::materializes_reply(
+            &tool_call_request(73)
+        ));
+    }
+
+    #[test]
+    fn only_this_process_marker_identifies_a_streamed_refusal() {
+        let refusal = |marker: &str| {
+            ErrorData::internal_error(
+                "upstream response exceeded the 128-byte materialization limit",
+                Some(json!({LIMIT_MARKER_KEY: marker, "limit_bytes": 128})),
+            )
+        };
+        assert_eq!(
+            response_materialization_limit(&ServiceError::McpError(refusal(local_limit_marker()))),
+            Some(128)
+        );
+        for spoofed in ["", "00000000000000000000000000000000"] {
+            assert_eq!(
+                response_materialization_limit(&ServiceError::McpError(refusal(spoofed))),
+                None,
+                "an upstream cannot name the gateway's marker"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn chunked_json_tool_result_is_refused_before_rmcp_decodes_it() {
+        let body = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": {"content": [{"type": "text", "text": "x".repeat(1024)}]}
+        }))
+        .unwrap();
+        let (uri, server) = serve_chunked(200, JSON_MIME_TYPE, body, 64).await;
+
+        let error = post_tool_call(uri, 128)
+            .await
+            .expect_err("local limit is a typed transport refusal");
+
+        assert_eq!(streamable_response_materialization_limit(&error), Some(128));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tool_call_event_stream_keeps_its_messages_until_the_limit_ends_it() {
+        let progress = progress_event();
+        let limit = progress.len() + 64;
+        let body = format!("{progress}{}", large_result_event()).into_bytes();
+        let (uri, server) = serve_chunked(200, EVENT_STREAM_MIME_TYPE, body, progress.len()).await;
+
+        let response = post_tool_call(uri, limit)
+            .await
+            .expect("an event stream is handed to rmcp, not consumed here");
+        let StreamableHttpPostResponse::Sse(mut events, _) = response else {
+            panic!("a bounded tool call keeps its event stream")
+        };
+        let first = events.next().await.expect("first event").expect("readable");
+        assert!(
+            first
+                .data
+                .as_deref()
+                .is_some_and(|data| data.contains("notifications/progress")),
+            "messages within the limit reach rmcp unchanged: {first:?}"
+        );
+        let last = events
+            .next()
+            .await
+            .expect("refusal event")
+            .expect("readable");
+        let message: ServerJsonRpcMessage =
+            serde_json::from_str(last.data.as_deref().expect("refusal data")).unwrap();
+        let JsonRpcMessage::Error(error) = message else {
+            panic!("the stream ends with an error for the request")
+        };
+        assert_eq!(error.id, Some(RequestId::Number(7)));
+        assert_eq!(
+            response_materialization_limit(&ServiceError::McpError(error.error)),
+            Some(limit)
+        );
+        assert!(
+            events.next().await.is_none(),
+            "nothing past the limit is read"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tool_call_event_stream_within_its_limit_is_unchanged() {
+        let progress = progress_event();
+        let body = format!("{progress}{}", large_result_event()).into_bytes();
+        let limit = body.len();
+        let (uri, server) = serve_chunked(200, EVENT_STREAM_MIME_TYPE, body, progress.len()).await;
+
+        let StreamableHttpPostResponse::Sse(events, _) =
+            post_tool_call(uri, limit).await.expect("stream")
+        else {
+            panic!("a bounded tool call keeps its event stream")
+        };
+        let events: Vec<_> = events.collect().await;
+        assert_eq!(events.len(), 2, "{events:?}");
+        let result: ServerJsonRpcMessage = serde_json::from_str(
+            events[1]
+                .as_ref()
+                .expect("readable")
+                .data
+                .as_deref()
+                .expect("data"),
+        )
+        .unwrap();
+        assert!(matches!(result, JsonRpcMessage::Response(_)));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tool_call_error_status_keeps_its_json_rpc_error() {
+        let body = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "error": {"code": -32602, "message": "unknown tool"}
+        }))
+        .unwrap();
+        let (uri, server) = serve_chunked(400, JSON_MIME_TYPE, body, 16).await;
+
+        let response = post_tool_call(uri, 1024)
+            .await
+            .expect("a JSON-RPC error body is the request's typed error");
+        let StreamableHttpPostResponse::Json(JsonRpcMessage::Error(error), _) = response else {
+            panic!("the upstream's JSON-RPC error is delivered")
+        };
+        assert_eq!(error.error.message, "unknown tool");
         server.abort();
     }
 }

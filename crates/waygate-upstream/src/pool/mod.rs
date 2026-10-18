@@ -417,8 +417,17 @@ pub struct UpstreamPool {
     /// [`connect_with_identity_and_exchange`](Self::connect_with_identity_and_exchange);
     /// operators override via
     /// [`with_call_timeout`](Self::with_call_timeout) (wired to
-    /// `GATEWAY_UPSTREAM_CALL_TIMEOUT_SECONDS` in `waygate-server`).
+    /// `GATEWAY_UPSTREAM_CALL_TIMEOUT_SECONDS` in `waygate-server`), and a
+    /// manifest's `limits.call_timeout_seconds` overrides both for its server.
     call_timeout: Option<Duration>,
+    /// Gateway-wide raw-byte limit on one tool-call response from a
+    /// streamable-HTTP upstream. Defaults to
+    /// [`DEFAULT_CALL_RESPONSE_MAX_BYTES`]; operators override it via
+    /// [`with_call_response_max_bytes`](Self::with_call_response_max_bytes)
+    /// (wired to `GATEWAY_UPSTREAM_CALL_RESPONSE_MAX_BYTES` in
+    /// `waygate-server`), and a manifest's `limits` block overrides both for
+    /// its server.
+    call_response_max_bytes: usize,
     /// Per-lane timeout for a live re-dial's connect + `tools/list`,
     /// so an unresponsive new target surfaces as `redial_failed` instead of
     /// wedging the awaited `reload_manifests`. Always set;
@@ -605,6 +614,16 @@ const DEFAULT_UPSTREAM_POOL_SIZE: usize = 4;
 /// the operator's troubleshooting attention is on something else.
 const DEFAULT_UPSTREAM_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Default raw-byte limit on one tool-call response (64 MiB). The limit only
+/// bounds gateway memory while a response is received; a large structured
+/// result still moves to gateway file storage afterwards. Event-stream
+/// results were already refused above the SDK's 16 MiB per-event ceiling and
+/// JSON results had no bound, so four times that ceiling keeps today's
+/// results well inside the limit while still stopping a runaway response. It
+/// sits between the 4 MiB resource-read default and the 1 GiB maximum both
+/// limits accept.
+pub const DEFAULT_CALL_RESPONSE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 /// Per-lane timeout for a live re-dial's connect + `tools/list`. Unlike
 /// boot / background reconnect, a re-dial runs *synchronously inside*
 /// `reload_manifests`, which the SIGHUP / dashboard Reload / doorbell paths
@@ -735,6 +754,7 @@ impl UpstreamPool {
             issuer,
             exchange,
             call_timeout: Some(DEFAULT_UPSTREAM_CALL_TIMEOUT),
+            call_response_max_bytes: DEFAULT_CALL_RESPONSE_MAX_BYTES,
             redial_dial_timeout: DEFAULT_REDIAL_DIAL_TIMEOUT,
             evidence: None,
             upstream_sessions: None,
@@ -895,6 +915,7 @@ impl UpstreamPool {
             issuer: None,
             exchange: None,
             call_timeout: Some(DEFAULT_UPSTREAM_CALL_TIMEOUT),
+            call_response_max_bytes: DEFAULT_CALL_RESPONSE_MAX_BYTES,
             redial_dial_timeout: DEFAULT_REDIAL_DIAL_TIMEOUT,
             evidence: None,
             upstream_sessions: None,
@@ -1855,9 +1876,10 @@ impl UpstreamPool {
             .map(|p| p.tenant.as_str())
             .unwrap_or(waygate_core::TenantId::DEFAULT);
 
-        let call_deadline = self
-            .call_timeout
-            .and_then(|duration| tokio::time::Instant::now().checked_add(duration));
+        let call_timeout = self.call_timeout_for(&snapshot);
+        let response_limit = self.call_response_limit_for(&snapshot);
+        let call_deadline =
+            call_timeout.and_then(|duration| tokio::time::Instant::now().checked_add(duration));
         let trace_id = dispatch::call_trace_id();
         let mut attempts = 1_usize;
         let (inner_result, conn_guard) = match isolation {
@@ -1983,7 +2005,8 @@ impl UpstreamPool {
                     has_continuation,
                     approval_gated: mrtr.approval_gated,
                     deadline: call_deadline,
-                    timeout: self.call_timeout,
+                    timeout: call_timeout,
+                    response_limit,
                     server,
                     tool_name,
                     advertised_tool: raw_contract,
@@ -2241,6 +2264,7 @@ impl UpstreamPool {
                         .and(mrtr.caller_capabilities.as_ref()),
                     processor.is_some_and(|processor| processor.supports_file_output()),
                     conn.cleartext_control_plane,
+                    response_limit,
                     recovery::remaining(call_deadline),
                     &mrtr.cancellation,
                 )

@@ -537,7 +537,7 @@ impl UpstreamPool {
                         .into());
                     }
                 };
-                let response = match self.call_timeout {
+                let response = match self.call_timeout_for(&snapshot) {
                     Some(timeout) => {
                         match tokio::time::timeout(
                             timeout,
@@ -576,7 +576,7 @@ impl UpstreamPool {
                     }
                     _ => None,
                 };
-                match self.call_timeout {
+                match self.call_timeout_for(&snapshot) {
                     Some(timeout) => {
                         match tokio::time::timeout(
                             timeout,

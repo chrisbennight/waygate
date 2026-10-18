@@ -17,6 +17,7 @@ fn stdio_manifest(name: &str, command: Vec<String>) -> UpstreamManifest {
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
         long_running_tools: Vec::new(),
+        limits: None,
         name: name.to_owned(),
         transport: waygate_upstream::Transport::Stdio,
         protocol: Default::default(),

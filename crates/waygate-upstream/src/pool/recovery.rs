@@ -62,6 +62,7 @@ pub(super) struct PerCallExecution<'a> {
     pub(super) approval_gated: bool,
     pub(super) deadline: Option<tokio::time::Instant>,
     pub(super) timeout: Option<std::time::Duration>,
+    pub(super) response_limit: Option<usize>,
     pub(super) server: &'a str,
     pub(super) tool_name: &'a str,
     pub(super) advertised_tool: Option<&'a rmcp::model::Tool>,
@@ -373,6 +374,7 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
                         .processor
                         .is_some_and(|processor| processor.supports_file_output()),
                     cleartext_control_plane,
+                    setup.response_limit,
                     budget,
                     setup.cancellation,
                 )

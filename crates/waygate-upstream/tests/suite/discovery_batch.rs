@@ -194,6 +194,7 @@ async fn fixture(
         approval_mode: Default::default(),
         inline_response_threshold_bytes: None,
         long_running_tools: Vec::new(),
+        limits: None,
         tools: names
             .iter()
             .map(|name| ToolClassification::new(name, RiskTier::Low, false, false))
