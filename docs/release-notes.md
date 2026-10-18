@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- An upstream that verifies the gateway's identity token no longer refuses the
+  gateway's first connections after a restart. The gateway now serves its
+  identity key set before it connects to upstreams; until startup completes,
+  every other path answers `503 Service Unavailable`.
 - Clients on MCP revision 2026-07-28 can read resources that an upstream on
   an earlier revision provides. Those reads previously reached the client
   without the required `resultType`, and the client rejected them. Clients on

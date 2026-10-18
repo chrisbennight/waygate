@@ -319,6 +319,14 @@ needs only the subject can be given only the subject. The subject, issuer,
 audience, times and actor are always present. See
 [trust classification](upstreams.md#trust-classification).
 
+An upstream verifies the Tier B token against the gateway's
+`/.well-known/jwks.json`, usually on its first sight of the token. The gateway
+binds its listener and serves that key set as soon as its identity keys are
+loaded, before it connects to any upstream, so a verifier can fetch the keys
+while the gateway's first connection to it is in flight. Until startup
+completes, every other path answers `503 Service Unavailable`, and `/readyz`
+reports not ready.
+
 Every tier's headers go only to the configured upstream's scheme, host, and
 port. Upstream requests never follow redirects, and a legacy-SSE message
 endpoint on another origin fails the connection; see
