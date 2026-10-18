@@ -16,8 +16,9 @@ use ReviewError as CatalogError;
 /// comparison and the locked observation share it, so they cannot disagree
 /// about which approval is current.
 /// The largest contract, in bytes of PostgreSQL's JSONB text, that a review
-/// stores for comparison. A larger first observation without an approval
-/// baseline is held for review because it cannot be compared later.
+/// stores for comparison. A larger first observation of a tool whose changes
+/// require review, without an approval baseline, is held for review because
+/// it cannot be compared later.
 macro_rules! max_stored_contract_bytes {
     () => {
         "262144"
@@ -78,6 +79,43 @@ pub struct ReviewDecision {
     /// An operator acknowledged the quarantined candidate and kept it
     /// blocked. A later observation of a changed contract reopens review.
     pub kept_blocked: bool,
+}
+
+/// What one observation recorded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Observation {
+    /// The stored review changed: a new candidate or a repaired baseline.
+    pub changed: bool,
+    /// The drift event recorded because the observed contract changed.
+    pub drift_event: Option<Uuid>,
+    /// The admission decision left in place. `None` means the tool has no
+    /// recorded review.
+    pub decision: Option<ReviewDecision>,
+}
+
+/// One drift event with the contracts it compares.
+#[derive(Clone, Debug)]
+pub struct DriftChange {
+    pub event: crate::DriftEvent,
+    /// `None` when the contract was not retained: it exceeded the review
+    /// storage limit, or the event predates retained contracts.
+    pub previous_contract: Option<Value>,
+    pub observed_contract: Option<Value>,
+    /// The tool is currently blocked pending review.
+    pub quarantined: bool,
+}
+
+/// Top-level contract fields whose values differ, in name order.
+pub fn changed_fields(before: &Value, after: &Value) -> Vec<String> {
+    let mut keys = std::collections::BTreeSet::new();
+    for value in [before, after] {
+        if let Some(object) = value.as_object() {
+            keys.extend(object.keys().cloned());
+        }
+    }
+    keys.into_iter()
+        .filter(|key| before.get(key) != after.get(key))
+        .collect()
 }
 
 /// Selects the [`ReviewDecision`] columns of `tool_contract_reviews r`.
@@ -247,10 +285,10 @@ impl PgCatalogStore {
     }
 
     /// Whether [`Self::observe`] would hold a first observation of `contract`
-    /// for review, read without writing. A first observation without an
-    /// approval baseline is held only when the contract is too large to store
-    /// for comparison. `None` means the tool has no catalog identity yet, so
-    /// observation would record nothing.
+    /// for a tool whose changes require review, read without writing. Such a
+    /// first observation without an approval baseline is held only when the
+    /// contract is too large to store for comparison. `None` means the tool
+    /// has no catalog identity yet, so observation would record nothing.
     pub async fn first_observation_requires_review(
         &self,
         tenant: &str,
@@ -298,13 +336,13 @@ impl PgCatalogStore {
             approved_hash,
         )
         .await
-        .map(|(changed, _)| changed)
+        .map(|observation| observation.changed)
     }
 
     /// [`Self::observe_against_approval`], also returning the admission
     /// decision the observation leaves in place, as [`Self::review_state`]
-    /// would read it, so admission needs no second read. `None` means the
-    /// tool has no recorded review.
+    /// would read it, so admission needs no second read, and the drift event
+    /// recorded for a changed contract.
     #[allow(clippy::too_many_arguments)]
     pub async fn observe_decision(
         &self,
@@ -315,7 +353,7 @@ impl PgCatalogStore {
         contract: &Value,
         block_changes: bool,
         approved_hash: Option<&str>,
-    ) -> Result<(bool, Option<ReviewDecision>), CatalogError> {
+    ) -> Result<Observation, CatalogError> {
         // An observation that matches the stored decision changes nothing.
         // Confirm that from one unlocked snapshot, so observing an unchanged
         // contract neither writes nor waits behind catalog reconciliation.
@@ -342,7 +380,11 @@ impl PgCatalogStore {
             let approved_hash = durable_approval.as_deref().or(approved_hash);
             let observed_hash: String = current.get("observed_hash");
             if observed_hash == hash && !baseline_needs_repair(&current, hash, approved_hash) {
-                return Ok((false, Some(decision_from_row(&current))));
+                return Ok(Observation {
+                    changed: false,
+                    drift_event: None,
+                    decision: Some(decision_from_row(&current)),
+                });
             }
         }
         let mut tx = self.pool.begin().await?;
@@ -374,10 +416,14 @@ impl PgCatalogStore {
         let Some(id) = id else {
             // Newly configured tools are not authoritative until catalog
             // reconciliation creates their identity. Admission refuses absence.
-            return Ok((false, None));
+            return Ok(Observation {
+                changed: false,
+                drift_event: None,
+                decision: None,
+            });
         };
         let previous = sqlx::query(
-            "SELECT observed_hash, approved_hash, quarantined FROM tool_contract_reviews WHERE tool_id=$1 FOR UPDATE",
+            "SELECT observed_hash, observed_contract, approved_hash, quarantined FROM tool_contract_reviews WHERE tool_id=$1 FOR UPDATE",
         ).bind(id).fetch_optional(&mut *tx).await?;
         // Catalog activation records deliberate manifest changes, including
         // rollback. Exact review approvals remain durable when a new observed
@@ -409,8 +455,9 @@ impl PgCatalogStore {
         .fetch_one(&mut *tx)
         .await?;
         let unavailable = contract.is_null();
-        // A missing optional comparison cannot override an exact annotation approval.
-        let storage_requires_review = unavailable && approved_hash.is_none();
+        // A missing optional comparison cannot override an exact annotation
+        // approval, and holds only a contract whose changes require review.
+        let storage_requires_review = unavailable && approved_hash.is_none() && block_changes;
         let approval_mismatch = approved_hash.is_some_and(|approved| approved != hash);
         let baseline_hash = approved_hash.unwrap_or(hash);
         let baseline = if approval_mismatch {
@@ -434,7 +481,7 @@ impl PgCatalogStore {
         let previous = match previous {
             Some(previous) => previous,
             None => sqlx::query(
-                "SELECT observed_hash, approved_hash, quarantined FROM tool_contract_reviews WHERE tool_id=$1 FOR UPDATE",
+                "SELECT observed_hash, observed_contract, approved_hash, quarantined FROM tool_contract_reviews WHERE tool_id=$1 FOR UPDATE",
             ).bind(id).fetch_one(&mut *tx).await?,
         };
         let old: String = previous.get("observed_hash");
@@ -446,7 +493,9 @@ impl PgCatalogStore {
                 decided_at=NULL,decided_by=NULL,observed_at=now() WHERE tool_id=$1")
                 .bind(id).bind(baseline_hash).execute(&mut *tx).await?;
         }
+        let mut drift_event = None;
         if old != hash {
+            let previous_contract: Value = previous.get("observed_contract");
             let blocked = previous.get::<bool, _>("quarantined")
                 || block_changes
                 || storage_requires_review
@@ -460,22 +509,45 @@ impl PgCatalogStore {
             )
             .bind(id)
             .bind(hash)
-            .bind(contract)
+            .bind(&contract)
             .bind(blocked)
             .execute(&mut *tx)
             .await?;
+            // The review row keeps only the current pair of contracts, so the
+            // event's own versions are what later show this change.
+            for (version_hash, version) in [(old.as_str(), &previous_contract), (hash, &contract)] {
+                if version.is_object() {
+                    sqlx::query(
+                        "INSERT INTO tool_contract_versions (tool_id, contract_hash, contract)
+                         VALUES ($1,$2,$3) ON CONFLICT (tool_id, contract_hash) DO NOTHING",
+                    )
+                    .bind(id)
+                    .bind(version_hash)
+                    .bind(version)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+            let fields = (previous_contract.is_object() && contract.is_object())
+                .then(|| changed_fields(&previous_contract, &contract));
+            // Stamp the event under the tool lock, not at transaction start, so
+            // event order follows observation order for return detection.
+            let event = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO catalog_drift_events
-                 (id,tenant_id,tool_id,observed_hash,approved_hash,severity)
-                 SELECT $1,$2,tool_id,observed_hash,approved_hash,$3
+                 (id,tenant_id,tool_id,observed_hash,approved_hash,severity,previous_hash,changed_fields,observed_at)
+                 SELECT $1,$2,tool_id,observed_hash,approved_hash,$3,$5,$6,clock_timestamp()
                  FROM tool_contract_reviews WHERE tool_id=$4",
             )
-            .bind(Uuid::new_v4())
+            .bind(event)
             .bind(tenant)
             .bind(if blocked { "critical" } else { "info" })
             .bind(id)
+            .bind(&old)
+            .bind(fields)
             .execute(&mut *tx)
             .await?;
+            drift_event = Some(event);
         }
         let decision = sqlx::query(concat!(
             "SELECT ",
@@ -486,10 +558,50 @@ impl PgCatalogStore {
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok((
-            old != hash || repair_baseline,
-            Some(decision_from_row(&decision)),
+        Ok(Observation {
+            changed: old != hash || repair_baseline,
+            drift_event,
+            decision: Some(decision_from_row(&decision)),
+        })
+    }
+
+    /// One drift event of `tenant` with the contracts it compares.
+    pub async fn drift_change(
+        &self,
+        tenant: &str,
+        id: Uuid,
+    ) -> Result<Option<DriftChange>, CatalogError> {
+        let row = sqlx::query(concat!(
+            "SELECT e.id, e.tenant_id, e.tool_id, s.name AS server, t.name AS tool,
+                    e.observed_hash, e.approved_hash, e.previous_hash, e.changed_fields, ",
+            earlier_recorded_at!(),
+            " AS earlier_recorded_at, e.severity, e.observed_at,
+                    previous.contract AS previous_contract,
+                    observed.contract AS observed_contract,
+                    COALESCE(r.quarantined, false) AS quarantined
+             FROM catalog_drift_events e
+             JOIN mcp_tools t ON t.id=e.tool_id
+             JOIN mcp_servers s ON s.id=t.server_id
+             LEFT JOIN tool_contract_versions previous
+               ON previous.tool_id=e.tool_id AND previous.contract_hash=e.previous_hash
+             LEFT JOIN tool_contract_versions observed
+               ON observed.tool_id=e.tool_id AND observed.contract_hash=e.observed_hash
+             LEFT JOIN tool_contract_reviews r ON r.tool_id=e.tool_id
+             WHERE e.tenant_id=$1 AND e.id=$2"
         ))
+        .bind(tenant)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(DriftChange {
+                event: crate::store::drift_event_from_row(&row)?,
+                previous_contract: row.get("previous_contract"),
+                observed_contract: row.get("observed_contract"),
+                quarantined: row.get("quarantined"),
+            })
+        })
+        .transpose()
     }
 
     pub async fn get(

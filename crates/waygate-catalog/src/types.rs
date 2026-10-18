@@ -305,9 +305,24 @@ pub struct DriftEvent {
     pub id: Uuid,
     pub tenant_id: String,
     pub tool_id: Uuid,
+    /// Names of the server and tool that `tool_id` identifies.
+    pub server: String,
+    pub tool: String,
     pub observed_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approved_hash: Option<String>,
+    /// Contract this event replaced. `None` for externally reported drift and
+    /// for events recorded before the gateway retained it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_hash: Option<String>,
+    /// Top-level contract fields that differ from the previous contract.
+    /// `None` when either contract was unavailable for comparison.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_fields: Option<Vec<String>>,
+    /// When the observed contract was first recorded, if that was before this
+    /// event: the tool returned to an earlier definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earlier_recorded_at: Option<OffsetDateTime>,
     pub severity: DriftSeverity,
     pub observed_at: OffsetDateTime,
 }

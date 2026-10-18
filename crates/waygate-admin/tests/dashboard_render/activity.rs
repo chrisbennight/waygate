@@ -128,6 +128,47 @@ pub(crate) async fn activity_drawer_returns_event_detail() {
     assert!(body.contains("policy0"));
 }
 
+/// A drift row that names its catalog drift event links to that event's
+/// comparison; an older row without one links to the tool's current review.
+#[tokio::test]
+pub(crate) async fn activity_drawer_links_drift_rows_to_their_change() {
+    let event = Uuid::new_v4();
+    let mut linked = sample_row("success", Some("example-messages"), None);
+    linked.action = "ToolDrift".into();
+    linked.category = Some("catalog_drift".into());
+    linked.target = Some(event.to_string());
+    let mut legacy = linked.clone();
+    legacy.id = Uuid::now_v7();
+    legacy.target = None;
+    let (linked_id, legacy_id) = (linked.id, legacy.id);
+    let pool = Arc::new(UpstreamPool::connect(BTreeMap::new()).await);
+    let audit: Arc<dyn AuditReader> = Arc::new(MemoryAudit {
+        rows: vec![linked, legacy],
+    });
+    let state = Arc::new(AdminState::new(
+        pool,
+        None,
+        Some(audit),
+        AdminState::null_evidence(),
+        None,
+        None,
+        None,
+        None,
+        "http://127.0.0.1:0".into(),
+    ));
+    let app = dashboard_router(state, DashboardAuth::Disabled);
+    let (status, body) = body_of(app.clone(), &format!("/t/default/activity/{linked_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(&format!(
+        "href=\"/admin/t/default/servers/tool-changes/events/{event}\">View this change</a>"
+    )));
+    let (status, body) = body_of(app, &format!("/t/default/activity/{legacy_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(
+        "href=\"/admin/t/default/servers/tool-changes?server=example-messages&#38;tool=send_msg\">Review tool changes</a>"
+    ));
+}
+
 /// With `GATEWAY_TRACE_URL_TEMPLATE` configured (via the
 /// `with_trace_url_template` builder), the drawer renders a "View trace"
 /// link with the `{trace_id}` placeholder substituted by the row's trace_id.

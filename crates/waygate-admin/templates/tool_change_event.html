@@ -1,0 +1,26 @@
+{% extends "layout.html" %}
+{% block main %}
+<section class="page-section">
+<header class="page-header"><h1 class="page-title">Tool change</h1></header>
+<p><a href="{{ self.chrome.nav_url("/catalog") }}">Catalog</a> · <a href="{{ self.chrome.nav_url("/servers/tool-changes") }}">Awaiting review</a></p>
+<div class="card">
+<h2 class="card-title skills-source">{{ event.server }} · {{ event.tool }}</h2>
+<p><span class="{{ outcome.1 }}">{{ outcome.0 }}</span> Observed {{ observed_at }}.</p>
+{% match earlier_recorded_at %}{% when Some with (at) %}<p>Returned to a definition first recorded {{ at }}.</p>{% when None %}{% endmatch %}
+{% if quarantined %}<p>This tool is blocked pending review. <a href="{{ self.chrome.nav_url(review_url) }}">Review its current replacement</a>.</p>{% endif %}
+<details><summary>Contract identity</summary>
+<p class="mono skills-source">Previous: {% match event.previous_hash %}{% when Some with (h) %}{{ h }}{% when None %}not recorded{% endmatch %}</p>
+<p class="mono skills-source">Observed: {{ event.observed_hash }}</p>
+{% match event.approved_hash %}{% when Some with (h) %}<p class="mono skills-source">Approved: {{ h }}</p>{% when None %}{% endmatch %}
+</details>
+</div>
+{% match unavailable %}{% when Some with (reason) %}<div class="card"><p>{{ reason }}</p></div>{% when None %}{% endmatch %}
+{% for change in changes %}
+<section class="page-section"><h2 class="section-heading">{{ change.name }}</h2>
+<div class="skills-comparison">
+<section><h3 class="card-title">Before</h3><pre class="skills-content" tabindex="0">{{ change.before }}</pre></section>
+<section><h3 class="card-title">After</h3><pre class="skills-content" tabindex="0">{{ change.after }}</pre></section>
+</div></section>
+{% endfor %}
+</section>
+{% endblock %}

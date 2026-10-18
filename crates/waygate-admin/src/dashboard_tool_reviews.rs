@@ -11,7 +11,7 @@ use crate::{
 };
 use askama::Template;
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -25,6 +25,34 @@ pub fn router() -> Router<Arc<AdminState>> {
     Router::new()
         .route("/servers/tool-changes", get(page))
         .route("/servers/tool-changes/approve", post(approve))
+        .route("/servers/tool-changes/events/{id}", get(event_page))
+}
+
+pub(crate) fn event_url(id: uuid::Uuid) -> String {
+    format!("/servers/tool-changes/events/{id}")
+}
+
+/// What happened to the tool when the change was observed, and its chip class.
+pub(crate) fn drift_outcome(
+    severity: waygate_catalog::DriftSeverity,
+) -> (&'static str, &'static str) {
+    match severity {
+        waygate_catalog::DriftSeverity::Info => ("Accepted automatically", "chip"),
+        waygate_catalog::DriftSeverity::Warn => ("Flagged", "chip chip--warn"),
+        waygate_catalog::DriftSeverity::Critical => ("Blocked for review", "chip chip--bad"),
+    }
+}
+
+/// Display name of a top-level tool contract field.
+pub(crate) fn field_label(key: &str) -> &str {
+    match key {
+        "description" => "Description",
+        "inputSchema" => "Input schema",
+        "outputSchema" => "Output schema",
+        "annotations" => "Tool annotations",
+        "_meta" => "Tool metadata",
+        other => other,
+    }
 }
 
 pub(crate) fn review_url(server: &str, tool: &str) -> String {
@@ -99,37 +127,124 @@ fn changes(review: &waygate_catalog::tool_reviews::ToolReview) -> Vec<FieldChang
     if review.observed_contract.is_null() {
         return Vec::new();
     }
-    let mut keys = std::collections::BTreeSet::new();
-    for value in [&review.approved_contract, &review.observed_contract] {
-        if let Some(object) = value.as_object() {
-            keys.extend(object.keys().cloned());
+    let mut changes = field_changes(&review.approved_contract, &review.observed_contract);
+    if review.approved_contract.is_null() {
+        for change in &mut changes {
+            change.before = "Previous definition unavailable".into();
         }
     }
+    changes
+}
+
+fn field_changes(before: &serde_json::Value, after: &serde_json::Value) -> Vec<FieldChange> {
     let text = |value: Option<&serde_json::Value>| match value {
         None => "Not present".into(),
         Some(serde_json::Value::String(text)) => text.clone(),
         Some(value) => serde_json::to_string_pretty(value).expect("JSON contract serializes"),
     };
-    keys.into_iter()
-        .filter(|key| review.approved_contract.get(key) != review.observed_contract.get(key))
+    waygate_catalog::tool_reviews::changed_fields(before, after)
+        .into_iter()
         .map(|key| FieldChange {
-            before: if review.approved_contract.is_null() {
-                "Previous definition unavailable".into()
-            } else {
-                text(review.approved_contract.get(&key))
-            },
-            after: text(review.observed_contract.get(&key)),
-            name: match key.as_str() {
-                "description" => "Description",
-                "inputSchema" => "Input schema",
-                "outputSchema" => "Output schema",
-                "annotations" => "Tool annotations",
-                "_meta" => "Tool metadata",
-                other => other,
-            }
-            .to_owned(),
+            before: text(before.get(&key)),
+            after: text(after.get(&key)),
+            name: field_label(&key).to_owned(),
         })
         .collect()
+}
+
+#[derive(Template)]
+#[template(path = "tool_change_event.html")]
+struct EventPage {
+    chrome: PageChrome,
+    event: waygate_catalog::DriftEvent,
+    observed_at: String,
+    outcome: (&'static str, &'static str),
+    /// When the tool returned to a definition recorded earlier.
+    earlier_recorded_at: Option<String>,
+    /// Why no field comparison is shown, when it cannot be.
+    unavailable: Option<&'static str>,
+    changes: Vec<FieldChange>,
+    quarantined: bool,
+    review_url: String,
+}
+
+async fn event_page(
+    State(state): State<Arc<AdminState>>,
+    user: Option<Extension<Principal>>,
+    csrf: Option<Extension<CsrfToken>>,
+    tenant: Option<Extension<TenantContext>>,
+    headers: HeaderMap,
+    Path(params): Path<std::collections::HashMap<String, String>>,
+) -> Result<Response, ApiError> {
+    // Read `id` by key: the tenant-prefixed mount adds a second capture.
+    let id = params
+        .get("id")
+        .and_then(|id| id.parse::<uuid::Uuid>().ok())
+        .ok_or(ApiError::NotFound("Tool change not found"))?;
+    let actor = user
+        .as_ref()
+        .map(|Extension(p)| p)
+        .ok_or(ApiError::Forbidden("An administrator session is required"))?;
+    tool_reviews::authorize(
+        actor,
+        tenant
+            .as_ref()
+            .map(|Extension(t)| t.slug.as_str())
+            .unwrap_or(actor.tenant.as_str()),
+    )?;
+    let change = tool_reviews::store(&state)?
+        .drift_change(actor.tenant.as_str(), id)
+        .await
+        .map_err(tool_reviews::unavailable)?
+        .ok_or(ApiError::NotFound("Tool change not found"))?;
+    let (unavailable, changes) = match (
+        &change.event.previous_hash,
+        &change.previous_contract,
+        &change.observed_contract,
+    ) {
+        (None, _, _) => (
+            Some("The earlier definition was not recorded for this change."),
+            Vec::new(),
+        ),
+        (Some(_), None, _) => (
+            Some("The earlier definition exceeded the review storage limit and was not kept."),
+            Vec::new(),
+        ),
+        (Some(_), Some(_), None) => (
+            Some("The new definition exceeded the review storage limit and was not kept."),
+            Vec::new(),
+        ),
+        (Some(_), Some(before), Some(after)) => {
+            let changes = field_changes(before, after);
+            let unavailable = changes
+                .is_empty()
+                .then_some("The stored definitions do not differ.");
+            (unavailable, changes)
+        }
+    };
+    let page = EventPage {
+        observed_at: waygate_core::fmt::format_ts_abs(change.event.observed_at),
+        outcome: drift_outcome(change.event.severity),
+        earlier_recorded_at: change
+            .event
+            .earlier_recorded_at
+            .map(waygate_core::fmt::format_ts_abs),
+        unavailable,
+        changes,
+        quarantined: change.quarantined,
+        review_url: review_url(&change.event.server, &change.event.tool),
+        chrome: PageChrome::build(
+            &state,
+            "Tool change",
+            "/servers",
+            &headers,
+            Some(user_display(actor)),
+            tenant.map(|Extension(t)| t),
+            csrf.map(|Extension(c)| c.0).unwrap_or_default(),
+        ),
+        event: change.event,
+    };
+    Ok(render(&page))
 }
 
 async fn page(

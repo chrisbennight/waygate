@@ -176,6 +176,9 @@ struct DriftReport {
     side_effects: bool,
     /// Whether this drift tripped the pool's quarantine threshold.
     quarantined: bool,
+    /// The durable catalog drift event that records this change, when tool
+    /// review storage recorded one.
+    drift_event: Option<uuid::Uuid>,
 }
 
 /// Last manifest/catalog transition observed for one tool. Settled entries are
@@ -2143,7 +2146,7 @@ impl UpstreamPool {
                     let current_tool = session_tools
                         .iter()
                         .find(|tool| tool.name.as_ref() == tool_name);
-                    let Ok(mut decisions) = self
+                    let Ok(mut observed) = self
                         .observe_tool_reviews(
                             &entry,
                             server,
@@ -2162,7 +2165,7 @@ impl UpstreamPool {
                             tool_name,
                             current_tool,
                             current_manifest.classification_mode,
-                            decisions.remove(tool_name),
+                            observed.decisions.remove(tool_name),
                         )
                         .await
                     {
