@@ -55,6 +55,27 @@ pub(super) fn manifest_supports_resource_operations(manifest: &UpstreamManifest)
     !manifest.tier_a_required && manifest.exchange.is_none() && manifest.tier_c_peer.is_none()
 }
 
+/// Resource reads and listings reach an upstream only through prefixes its
+/// manifest declares, so an upstream that offers resources without any
+/// declaration is unreachable for them. Say so where the operator sees it,
+/// whether the upstream connected that way or a reload removed its last
+/// declaration.
+pub(super) fn warn_if_resources_undeclared(
+    manifest: &UpstreamManifest,
+    resource_capability_advertised: bool,
+) {
+    if resource_capability_advertised
+        && manifest.resources.is_empty()
+        && manifest_supports_resource_operations(manifest)
+    {
+        tracing::warn!(
+            server = %manifest.name,
+            "upstream advertises MCP resources but its manifest declares no resource prefix; \
+             the gateway does not route resource reads or listings to it",
+        );
+    }
+}
+
 fn resource_transport_name(transport: &crate::Transport) -> &'static str {
     match transport {
         crate::Transport::Http => "http",
@@ -298,14 +319,12 @@ impl UpstreamPool {
             .entry(server)
             .map_err(AdmittedResourceReadError::Upstream)?;
         let manifest = entry.manifest_snapshot();
-        let identity_matches = match admitted.claim.as_ref() {
-            Some(claim) => manifest.resources.iter().any(|current| {
-                current.uri_prefix == claim.uri_prefix
-                    && current.risk == claim.risk
-                    && params.uri.starts_with(&current.uri_prefix)
-            }),
-            None => manifest.resources.is_empty(),
-        };
+        let claim = &admitted.claim;
+        let identity_matches = manifest.resources.iter().any(|current| {
+            current.uri_prefix == claim.uri_prefix
+                && current.risk == claim.risk
+                && params.uri.starts_with(&current.uri_prefix)
+        });
         if !identity_matches {
             return Err(AdmittedResourceReadError::RoutingChanged);
         }

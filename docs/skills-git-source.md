@@ -110,11 +110,9 @@ previously approved contents while replacement contents await review.
 
 Gateway-owned skill URIs remain isolated from upstream MCP resources. A
 manifest-declared upstream prefix that overlaps a skill resource prevents the
-skill catalog from being listed. For legacy resource providers without URI
-claims, the gateway's published `skill://` URI remains authoritative and a
-skill read does not enumerate those providers. An unrelated legacy catalog, an
-undeclared matching URI, or a legacy provider outage therefore cannot disable
-the gateway-owned skill namespace.
+skill catalog from being listed. An upstream without URI declarations has no
+readable resources, so its catalog, a matching URI it lists, or its outage
+cannot shadow or disable the gateway-owned skill namespace.
 
 The existing Agent Skills limits from SEP-2640 remain validation boundaries.
 They come from the draft specification rather than locally invented success
@@ -166,8 +164,8 @@ approved skill from a verified snapshot.
 `skills/list` and `skills/get` expose validated frontmatter and the dynamic
 resource declaration. Individual files use ordinary MCP `resources/read` and
 retain their media type. Explicit upstream URI reservations cannot overlap the
-gateway skill catalog; undeclared legacy catalogs do not override a published
-gateway skill URI. Skill reads apply the existing Cedar authorization,
+gateway skill catalog, and upstreams without declarations cannot serve or
+override a published gateway skill URI. Skill reads apply the existing Cedar authorization,
 inspection, and audit path.
 
 A resource read has two authorization decisions because its SHA-256 does not

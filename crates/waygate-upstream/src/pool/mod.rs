@@ -1180,6 +1180,7 @@ async fn dial(
     let negotiated_protocol = peer_info.as_ref().map(|i| i.protocol_version.to_string());
     let resource_capability_advertised =
         peer_info.is_some_and(|i| i.capabilities.resources.is_some());
+    resources::warn_if_resources_undeclared(manifest, resource_capability_advertised);
     Ok(Connection {
         client: connected.service,
         network_destination: connected.network_destination,

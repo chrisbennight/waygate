@@ -156,6 +156,7 @@ async fn gateway(
     let manifest: UpstreamManifest = serde_json::from_value(json!({
         "name": "demo-apps", "transport": "http", "url": upstream_url,
         "tools": [{"name": "show_chart", "risk": "low", "side_effects": false, "pii": false}],
+        "resources": [{"uri_prefix": "ui://demo-apps/", "risk": "low"}],
     }))
     .unwrap();
     let pool =
