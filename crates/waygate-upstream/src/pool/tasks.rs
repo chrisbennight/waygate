@@ -61,7 +61,7 @@ pub(super) async fn dispatch_once(
         .map(|task| &task.capabilities)
         .or(capabilities)
         .map(task_capabilities);
-    let mut meta = if file_output {
+    let meta = if file_output {
         Some(file_transfers::client_capability_meta(
             mirrored.as_ref().unwrap_or(&service.service().capabilities),
             waygate_mcp::files::FileOperation::Download,
@@ -77,19 +77,17 @@ pub(super) async fn dispatch_once(
             meta
         })
     };
-    // The streamable-HTTP client reads this private value and stops reading
-    // the response at that many bytes; task requests carry it too, because a
-    // completed task returns the tool's result.
-    if let Some(limit) = response_limit {
-        meta.get_or_insert_default().insert(
-            waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY.to_owned(),
-            serde_json::json!(limit),
-        );
-    }
     let Some(task) = task else {
-        return dispatch::call_tool_once_with_meta(service, params, meta, timeout, cancellation)
-            .await
-            .map(|result| DispatchResponse::Tool(Box::new(result)));
+        return dispatch::call_tool_once_with_meta(
+            service,
+            params,
+            meta,
+            response_limit,
+            timeout,
+            cancellation,
+        )
+        .await
+        .map(|result| DispatchResponse::Tool(Box::new(result)));
     };
     if task.expires_at <= time::OffsetDateTime::now_utc().unix_timestamp() {
         return Err(dispatch::ToolCallAttemptError {
@@ -101,7 +99,9 @@ pub(super) async fn dispatch_once(
             retryable: false,
         });
     }
-    let request = request(task);
+    // A completed task returns the tool's result, so its requests carry the
+    // tool call's response budget too.
+    let request = dispatch::with_response_limit(request(task), response_limit);
     let result =
         dispatch::send_once_classified(service, request, meta, timeout, cancellation).await?;
     let response = match (&task.action, result) {

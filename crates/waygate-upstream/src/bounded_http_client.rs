@@ -757,17 +757,41 @@ mod tests {
     }
 
     fn tool_call_request(limit: usize) -> ClientJsonRpcMessage {
-        serde_json::from_value(json!({
+        let mut request = ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(
+            rmcp::model::CallToolRequestParams::new("large"),
+        ));
+        request.extensions_mut().insert(ResponseByteLimit(limit));
+        ClientJsonRpcMessage::request(request, RequestId::Number(7))
+    }
+
+    #[test]
+    fn a_bounded_tool_call_keeps_its_budget_off_the_wire() {
+        let bounded = tool_call_request(73);
+        assert_eq!(BoundedResponseClient::response_limit(&bounded), Some(73));
+        let wire = serde_json::to_value(&bounded).unwrap();
+        assert_eq!(wire["method"], "tools/call");
+        assert!(
+            wire["params"].get("_meta").is_none(),
+            "the budget must not serialize onto the upstream request: {wire}"
+        );
+
+        let wire_shaped: ClientJsonRpcMessage = serde_json::from_value(json!({
             "jsonrpc": "2.0",
             "id": 7,
             "method": "tools/call",
             "params": {
                 "name": "large",
-                "arguments": {},
-                "_meta": {waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY: limit},
+                "_meta": {
+                    waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY: 73
+                },
             },
         }))
-        .expect("valid tools/call request")
+        .expect("valid tools/call request");
+        assert_eq!(
+            BoundedResponseClient::response_limit(&wire_shaped),
+            None,
+            "request metadata is not the budget's carrier"
+        );
     }
 
     /// Serve `body` as two chunks split at `split`, with the given status and

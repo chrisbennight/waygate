@@ -6,7 +6,8 @@
 //! succeeds. Without an override the gateway-wide limit applies. A server's
 //! call timeout replaces the gateway-wide one. A middleware records the
 //! content type of every `tools/call` response, so each case proves which
-//! response form it exercised.
+//! response form it exercised, and the `_meta` keys of every `tools/call`
+//! request, so each case proves the budget never reached the upstream.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -127,6 +128,7 @@ struct Upstream {
     addr: std::net::SocketAddr,
     handler: LimitsUpstream,
     tool_call_content_types: Arc<Mutex<Vec<String>>>,
+    tool_call_meta_keys: Arc<Mutex<Vec<String>>>,
 }
 
 async fn spawn_upstream(form: ResponseForm) -> Upstream {
@@ -145,11 +147,14 @@ async fn spawn_upstream(form: ResponseForm) -> Upstream {
         config,
     );
     let tool_call_content_types = Arc::new(Mutex::new(Vec::new()));
+    let tool_call_meta_keys = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&tool_call_content_types);
+    let recorded_meta = Arc::clone(&tool_call_meta_keys);
     let app: Router<()> = Router::new()
         .nest_service("/mcp", svc)
         .layer(middleware::from_fn(move |req: Request, next: Next| {
             let recorded = Arc::clone(&recorded);
+            let recorded_meta = Arc::clone(&recorded_meta);
             async move {
                 if req.method() != Method::POST {
                     return next.run(req).await;
@@ -158,11 +163,19 @@ async fn spawn_upstream(form: ResponseForm) -> Upstream {
                 let Ok(bytes) = to_bytes(body, 64 * 1024).await else {
                     return StatusCode::BAD_REQUEST.into_response();
                 };
-                let is_tool_call = serde_json::from_slice::<serde_json::Value>(&bytes)
-                    .ok()
-                    .and_then(|value| value.get("method")?.as_str().map(str::to_owned))
-                    .as_deref()
+                let request = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+                let is_tool_call = request
+                    .as_ref()
+                    .and_then(|value| value.get("method")?.as_str())
                     == Some("tools/call");
+                if is_tool_call {
+                    if let Some(meta) = request
+                        .as_ref()
+                        .and_then(|value| value.get("params")?.get("_meta")?.as_object())
+                    {
+                        recorded_meta.lock().unwrap().extend(meta.keys().cloned());
+                    }
+                }
                 let response = next
                     .run(Request::from_parts(parts, Body::from(bytes)))
                     .await;
@@ -187,6 +200,7 @@ async fn spawn_upstream(form: ResponseForm) -> Upstream {
         addr,
         handler,
         tool_call_content_types,
+        tool_call_meta_keys,
     }
 }
 
@@ -281,6 +295,13 @@ fn assert_exercised(upstream: &Upstream, form: ResponseForm) {
             .iter()
             .all(|content_type| content_type.starts_with(form.content_type())),
         "{form:?}: {content_types:?}"
+    );
+    let meta_keys = upstream.tool_call_meta_keys.lock().unwrap();
+    assert!(
+        !meta_keys
+            .iter()
+            .any(|key| key.starts_with("io.bennight.gateway/")),
+        "{form:?}: the response budget reached the upstream in `_meta`: {meta_keys:?}"
     );
 }
 

@@ -10,7 +10,7 @@ use std::time::Instant;
 use rmcp::model::RequestParamsMeta;
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities,
-    ClientRequest, ProtocolVersion, ServerResult,
+    ClientRequest, GetExtensions, ProtocolVersion, ServerResult,
 };
 use rmcp::service::{PeerRequestOptions, RequestHandle, RunningService, ServiceError};
 use rmcp::{ErrorData as McpError, RoleClient};
@@ -124,19 +124,46 @@ pub(super) async fn call_tool_once_classified(
     params: CallToolRequestParams,
     timeout: Option<std::time::Duration>,
 ) -> Result<CallToolResponse, ToolCallAttemptError> {
-    call_tool_once_with_meta(service, params, None, timeout, &CancellationToken::new()).await
+    call_tool_once_with_meta(
+        service,
+        params,
+        None,
+        None,
+        timeout,
+        &CancellationToken::new(),
+    )
+    .await
+}
+
+/// Attach the raw-byte budget the gateway's streamable-HTTP client enforces
+/// on the response to `request`. It rides as a request extension, which rmcp
+/// never serializes, so the upstream never receives it.
+pub(super) fn with_response_limit(
+    mut request: ClientRequest,
+    limit: Option<usize>,
+) -> ClientRequest {
+    if let Some(limit) = limit {
+        request
+            .extensions_mut()
+            .insert(crate::bounded_http_client::ResponseByteLimit(limit));
+    }
+    request
 }
 
 pub(super) async fn call_tool_once_with_meta(
     service: &RunningService<RoleClient, rmcp::model::ClientConfig>,
     params: CallToolRequestParams,
     meta: Option<rmcp::model::RequestMetaObject>,
+    response_limit: Option<usize>,
     timeout: Option<std::time::Duration>,
     cancellation: &CancellationToken,
 ) -> Result<CallToolResponse, ToolCallAttemptError> {
     let result = send_once_classified(
         service,
-        ClientRequest::CallToolRequest(CallToolRequest::new(params)),
+        with_response_limit(
+            ClientRequest::CallToolRequest(CallToolRequest::new(params)),
+            response_limit,
+        ),
         meta,
         timeout,
         cancellation,
@@ -1009,6 +1036,43 @@ mod tests {
     use super::*;
     use rmcp::model::{ClientConfig, Implementation};
     use rmcp::{ServerHandler, ServiceExt};
+
+    #[test]
+    fn tool_and_task_requests_carry_the_response_budget_only_in_process() {
+        let get_task = || {
+            ClientRequest::GetTaskRequest(rmcp::model::GetTaskRequest::new(
+                rmcp::model::GetTaskParams::new("task-1"),
+            ))
+        };
+        for request in [
+            ClientRequest::CallToolRequest(CallToolRequest::new(CallToolRequestParams::new(
+                "large",
+            ))),
+            get_task(),
+        ] {
+            let bounded = with_response_limit(request, Some(4096));
+            assert_eq!(
+                bounded
+                    .extensions()
+                    .get::<crate::bounded_http_client::ResponseByteLimit>()
+                    .map(|limit| limit.0),
+                Some(4096)
+            );
+            let wire = serde_json::to_value(rmcp::model::ClientJsonRpcMessage::request(
+                bounded,
+                rmcp::model::RequestId::Number(1),
+            ))
+            .unwrap();
+            assert!(
+                wire["params"].get("_meta").is_none(),
+                "the budget must not serialize onto the upstream request: {wire}"
+            );
+        }
+        assert!(with_response_limit(get_task(), None)
+            .extensions()
+            .get::<crate::bounded_http_client::ResponseByteLimit>()
+            .is_none());
+    }
 
     #[derive(Clone)]
     struct HandoffTestServer;
