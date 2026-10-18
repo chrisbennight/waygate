@@ -1,5 +1,12 @@
 # Release notes
 
+## Unreleased
+
+- Clients on MCP revision 2026-07-28 can read resources that an upstream on
+  an earlier revision provides. Those reads previously reached the client
+  without the required `resultType`, and the client rejected them. Clients on
+  earlier revisions see no change.
+
 ## 2.0.0
 
 This release changes which upstream manifests the gateway accepts. Read

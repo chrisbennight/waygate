@@ -593,66 +593,114 @@ async fn connect_legacy(
     UpstreamPool::connect(manifests).await
 }
 
+/// Serve `catalog` as a gateway and send it one stateless 2026-07-28 request,
+/// returning the JSON-RPC response and its raw body for assertion messages.
+/// `name` is the SEP-2243 routing value: the tool name or the resource URI.
+async fn current_client_request(
+    catalog: waygate_mcp::catalog::SharedCatalog,
+    method: &str,
+    name: &str,
+    mut params: serde_json::Value,
+) -> (serde_json::Value, String) {
+    let service = StreamableHttpService::new(
+        move || Ok(waygate_mcp::GatewayServer::new(catalog.clone())),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("gateway binds");
+    let addr = listener.local_addr().expect("gateway address");
+    let app: Router<()> = Router::new().nest_service("/mcp", service);
+    let gateway = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    params.as_object_mut().expect("object params").insert(
+        "_meta".to_owned(),
+        serde_json::json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+                "name": "result-type-probe",
+                "version": "0.0.0"
+            }
+        }),
+    );
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/mcp"))
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2026-07-28")
+        .header("mcp-method", method)
+        .header("mcp-name", name)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        }))
+        .send()
+        .await
+        .expect("request reaches gateway");
+    assert!(response.status().is_success());
+    let body = response.text().await.expect("response body");
+    let payload = body
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .unwrap_or(&body);
+    let message: serde_json::Value = serde_json::from_str(payload).expect("JSON-RPC response");
+
+    gateway.abort();
+    assert!(gateway.await.expect_err("gateway cancelled").is_cancelled());
+    (message, body)
+}
+
 #[tokio::test]
 async fn legacy_upstream_tool_result_has_complete_discriminator_on_current_gateway_wire() {
     let (upstream_addr, _) = spawn_mock_upstream().await;
     for isolation in [SessionIsolation::Reuse, SessionIsolation::PerCall] {
         let catalog: waygate_mcp::catalog::SharedCatalog =
             Arc::new(connect_legacy(upstream_addr, Some(isolation)).await);
-        let service = StreamableHttpService::new(
-            move || Ok(waygate_mcp::GatewayServer::new(catalog.clone())),
-            LocalSessionManager::default().into(),
-            StreamableHttpServerConfig::default(),
-        );
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("gateway binds");
-        let addr = listener.local_addr().expect("gateway address");
-        let app: Router<()> = Router::new().nest_service("/mcp", service);
-        let gateway = tokio::spawn(async move { axum::serve(listener, app).await });
-
-        let response = reqwest::Client::new()
-            .post(format!("http://{addr}/mcp"))
-            .header("accept", "application/json, text/event-stream")
-            .header("mcp-protocol-version", "2026-07-28")
-            .header("mcp-method", "tools/call")
-            .header("mcp-name", "mock.noop")
-            .json(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {
-                    "name": "mock.noop",
-                    "arguments": {},
-                    "_meta": {
-                        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                        "io.modelcontextprotocol/clientCapabilities": {},
-                        "io.modelcontextprotocol/clientInfo": {
-                            "name": "result-type-probe",
-                            "version": "0.0.0"
-                        }
-                    }
-                }
-            }))
-            .send()
-            .await
-            .expect("call reaches gateway");
-        assert!(response.status().is_success());
-        let body = response.text().await.expect("response body");
-        let payload = body
-            .lines()
-            .find_map(|line| line.strip_prefix("data: "))
-            .unwrap_or(&body);
-        let message: serde_json::Value = serde_json::from_str(payload).expect("JSON-RPC response");
+        let (message, body) = current_client_request(
+            catalog,
+            "tools/call",
+            "mock.noop",
+            serde_json::json!({"name": "mock.noop", "arguments": {}}),
+        )
+        .await;
         assert_eq!(message["result"]["resultType"], "complete", "{body}");
         assert_eq!(
             message["result"]["content"],
             serde_json::json!([{"type": "text", "text": "ok"}]),
             "{body}"
         );
+    }
+}
 
-        gateway.abort();
-        assert!(gateway.await.expect_err("gateway cancelled").is_cancelled());
+#[tokio::test]
+async fn legacy_upstream_resource_read_has_complete_discriminator_on_current_gateway_wire() {
+    let (upstream_addr, _) = spawn_mock_upstream().await;
+    for isolation in [SessionIsolation::Reuse, SessionIsolation::PerCall] {
+        let mut declared = legacy(manifest(upstream_addr, Some(isolation)));
+        declared.resources = vec![ResourceClassification {
+            uri_prefix: "mock://".to_owned(),
+            risk: RiskTier::Low,
+        }];
+        let catalog: waygate_mcp::catalog::SharedCatalog =
+            Arc::new(UpstreamPool::connect(BTreeMap::from([("mock".to_owned(), declared)])).await);
+        let (message, body) = current_client_request(
+            catalog,
+            "resources/read",
+            "mock://guide",
+            serde_json::json!({"uri": "mock://guide"}),
+        )
+        .await;
+        assert_eq!(message["result"]["resultType"], "complete", "{body}");
+        assert_eq!(
+            message["result"]["contents"],
+            serde_json::json!([
+                {"uri": "mock://guide", "mimeType": "text/plain", "text": "resource body"}
+            ]),
+            "{body}"
+        );
     }
 }
 
