@@ -2640,14 +2640,6 @@ impl UpstreamPool {
                         // success paths below commit the complete new manifest
                         // and a failure keeps these old claims.
                         guard.resources = new_manifest.resources.clone();
-                        entry.report_undeclared_resources(
-                            &guard,
-                            classification_guards.iter().any(|conn_guard| {
-                                conn_guard
-                                    .as_ref()
-                                    .is_some_and(|conn| conn.resource_capability_advertised)
-                            }),
-                        );
                     }
                     if tool_classification_changed {
                         let catalog_change = self.tool_catalog_epoch.begin_change();
@@ -2761,6 +2753,26 @@ impl UpstreamPool {
                         guard.trust = new_manifest.trust;
                         guard.identity = new_manifest.identity.clone();
                         guard.forward_trace_context = new_manifest.forward_trace_context;
+                        // Both the declarations and the identity fields that
+                        // decide whether resources are readable at all were
+                        // just applied in place; judge the condition against
+                        // all of them. A shape change instead reports from the
+                        // redial or rebuild that commits the new manifest, and
+                        // with no lane up there is nothing to judge until a
+                        // reconnect installs one.
+                        if classification_guards
+                            .iter()
+                            .any(|conn_guard| conn_guard.is_some())
+                        {
+                            entry.report_undeclared_resources(
+                                &guard,
+                                classification_guards.iter().any(|conn_guard| {
+                                    conn_guard
+                                        .as_ref()
+                                        .is_some_and(|conn| conn.resource_capability_advertised)
+                                }),
+                            );
+                        }
                     }
                     (
                         needs_redial,

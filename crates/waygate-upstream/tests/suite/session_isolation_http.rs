@@ -2551,18 +2551,31 @@ async fn undeclared_resources_are_reported_when_it_becomes_true_not_per_connecti
     let warnings = Arc::new(AtomicUsize::new(0));
     let _subscriber =
         tracing::subscriber::set_default(UndeclaredResourceWarnings(warnings.clone()));
-    // Another test thread may have registered the warning's callsite while no
-    // subscriber wanted it; recompute interest now that this one exists.
-    tracing::callsite::rebuild_interest_cache();
-
     let undeclared = legacy(manifest(addr, Some(SessionIsolation::Reuse)));
-    let pool =
-        UpstreamPool::connect(BTreeMap::from([("mock".to_owned(), undeclared.clone())])).await;
-    assert!(pool.resource_capability_advertised("mock").await);
+
+    // Connecting is also the control that this subscriber observes the
+    // warning at all; without it every "repeats nothing" below would pass
+    // vacuously. A test on another thread can register the warning's callsite
+    // while no subscriber wants it, caching it as disabled, so rebuild the
+    // cache and connect a fresh pool a bounded number of times. Once observed,
+    // later rebuilds include this subscriber and cannot disable it again.
+    let mut connected = None;
+    for _ in 0..20 {
+        warnings.store(0, Ordering::SeqCst);
+        tracing::callsite::rebuild_interest_cache();
+        let pool =
+            UpstreamPool::connect(BTreeMap::from([("mock".to_owned(), undeclared.clone())])).await;
+        assert!(pool.resource_capability_advertised("mock").await);
+        if warnings.load(Ordering::SeqCst) > 0 {
+            connected = Some(pool);
+            break;
+        }
+    }
+    let pool = connected.expect("connecting reports the undeclared resources");
     assert_eq!(
         warnings.load(Ordering::SeqCst),
         1,
-        "connecting an upstream that offers undeclared resources reports it",
+        "connecting an upstream that offers undeclared resources reports it once",
     );
 
     for _ in 0..2 {
