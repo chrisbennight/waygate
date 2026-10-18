@@ -432,7 +432,10 @@ pub trait UpstreamCatalog: Send + Sync + 'static {
         >())
     }
 
-    /// Read one resource from an upstream that advertised its URI.
+    /// Read one resource from an upstream that advertised its URI. A
+    /// completed read must carry `result_type: Some(COMPLETE)` even when a
+    /// legacy upstream omits it, as [`Self::call_tool`] results do; the MCP
+    /// SDK strips that default again for older clients.
     async fn read_resource(
         &self,
         _server: &str,

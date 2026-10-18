@@ -1421,8 +1421,8 @@ async fn tasks_client_gets_task_treatment_for_every_enqueueable_tool() {
 /// rmcp 3.0 constructor shape), but the SDK's routing layer strips the
 /// field for every peer that did not negotiate 2026-07-28 — which is
 /// every session on the legacy path, while 2026-07-28 peers are served
-/// statelessly with the field intact. Pin the legacy wire: neither
-/// `tools/list`, `resources/list`, nor `tools/call` responses may carry
+/// statelessly with the field intact. Pin the legacy wire: no `tools/list`,
+/// `resources/list`, `tools/call` or `resources/read` response may carry
 /// `resultType`, so a future SDK regression (or a gateway change that
 /// bypasses the strip) fails here instead of silently changing the
 /// 2025-11-25 wire.
@@ -1441,6 +1441,7 @@ async fn legacy_responses_carry_no_result_type_on_the_wire() {
             "tools/call",
             json!({"name": "demo.echo", "arguments": {}}),
         ),
+        (14, "resources/read", json!({"uri": "demo://guide"})),
     ] {
         let resp = client
             .post(&url)

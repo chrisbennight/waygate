@@ -219,7 +219,15 @@ async fn send_read_request(
         .await_response()
         .await?;
     match response {
-        ServerResult::ReadResourceResult(result) => Ok(result),
+        ServerResult::ReadResourceResult(mut result) => {
+            // Legacy upstreams omit the discriminator, but the gateway owes
+            // current clients a complete result. The SDK strips this default
+            // again when serializing for a legacy downstream peer.
+            result
+                .result_type
+                .get_or_insert(rmcp::model::ResultType::COMPLETE);
+            Ok(result)
+        }
         _ => Err(ServiceError::UnexpectedResponse),
     }
 }
