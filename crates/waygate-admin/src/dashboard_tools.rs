@@ -40,6 +40,9 @@ struct ToolsPage {
     /// Connected servers that contribute no rows, limited to the server
     /// filter when one is set.
     withheld: Vec<WithheldServer>,
+    /// The viewer passes the Blocked tools page's admin gate, so a withheld
+    /// server's blocked count links there.
+    blocked_links: bool,
 }
 
 struct ToolRow {
@@ -65,6 +68,13 @@ struct WithheldServer {
     /// `true` when the published list could not be read at all, as opposed
     /// to being read and found empty.
     unreadable: bool,
+}
+
+impl WithheldServer {
+    /// This server's view of the Blocked tools page.
+    fn blocked_tools_url(&self) -> String {
+        crate::dashboard_blocked_tools::server_url(&self.server)
+    }
 }
 
 /// Every upstream's tools, split into listed rows and servers withheld whole.
@@ -278,6 +288,9 @@ pub(crate) async fn tools_page(
         .collect();
     let (tools, total, truncated) = filter_tool_rows(rows, &filters);
     let tenant_ctx = tenant_ctx.map(|Extension(c)| c);
+    let blocked_links = crate::dashboard_catalog::principal_has_dashboard_admin(
+        user.as_ref().map(|Extension(p)| p),
+    );
     render(&ToolsPage {
         chrome: PageChrome::build(
             &state,
@@ -294,6 +307,7 @@ pub(crate) async fn tools_page(
         total,
         truncated,
         withheld,
+        blocked_links,
     })
 }
 

@@ -3,7 +3,145 @@
 //! This module is a child of [`super`], so admission stays close to the pool
 //! without expanding the pool's transport and lifecycle implementation.
 
+use super::contract_binding::DiscoveryReads;
 use super::*;
+use waygate_catalog::tool_reviews::ReviewDecision;
+
+/// Whether resolving a tool may act beyond returning its decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Effects {
+    /// The call and discovery paths: log each refusal, tell concurrent
+    /// discovery about an authoritative catalog read failure, and record the
+    /// first observation of a protected contract.
+    Record,
+    /// A status query: reach the same decision and do nothing else.
+    ReadOnly,
+}
+
+impl Effects {
+    pub(super) fn records(self) -> bool {
+        matches!(self, Self::Record)
+    }
+}
+
+/// One tool's review and catalog reads, taken in a bounded batch before its
+/// admission is decided.
+pub(super) struct BatchReads {
+    /// The stored review decision, or `Err` when the review store could not
+    /// be read. `Ok(None)` when no review store is configured.
+    pub(super) review: Result<Option<ReviewDecision>, ()>,
+    /// The catalog row, or `None` when no catalog is configured.
+    pub(super) catalog:
+        Option<Result<waygate_catalog::ResolvedTool, Arc<waygate_catalog::CatalogError>>>,
+    /// The manifest/catalog transition observed before the reads.
+    pub(super) transition: Option<CatalogTransition>,
+}
+
+/// Where admission's review and catalog reads come from. The source also
+/// decides the [`Effects`]: only the call path records anything.
+pub(super) enum AdmissionSource {
+    /// The call path reads through the generation cache.
+    Call,
+    /// A status query supplies batch reads.
+    Status(BatchReads),
+}
+
+impl UpstreamPool {
+    /// Decide whether `tool_name` on `server` runs, and why not. Invocation
+    /// and the read-only [`UpstreamPool::refusals`] query both come here, so
+    /// they apply the same checks in the same order; they differ only in
+    /// where the reads come from and in whether anything is recorded.
+    pub(super) async fn admit(
+        &self,
+        tenant: &str,
+        server: &str,
+        tool_name: &str,
+        source: AdmissionSource,
+    ) -> ResolvedInvocationTool {
+        let effects = match source {
+            AdmissionSource::Call => Effects::Record,
+            AdmissionSource::Status(_) => Effects::ReadOnly,
+        };
+        // Without durable review storage, the in-process quarantine is the
+        // authority. With storage, the snapshot resolver checks the durable
+        // decision so an acceptance on another replica can take effect.
+        // Clone the entry out from under the lock-free `load()` BEFORE the
+        // `.await` — an `if let` scrutinee's temporary (the arc-swap guard)
+        // would otherwise live across the await, holding the guard over a
+        // suspension point.
+        let entry = self.entries.load().get(server).cloned();
+        // ONE manifest snapshot governs admission, mode, hash, and facts;
+        // the separately read published contract is bound to this generation
+        // inside the resolver (published behavior hash == approved hash).
+        let manifest = entry.as_ref().map(|entry| entry.manifest_snapshot());
+        if let (Some(entry), Some(manifest)) = (entry.as_ref(), manifest.as_ref()) {
+            if self.tool_reviews.is_none() && entry.is_quarantined(tool_name).await {
+                if effects.records() {
+                    tracing::info!(
+                        %tenant, %server, tool = %tool_name,
+                        "tool is in-process quarantined (drift-triggered); refusing dispatch",
+                    );
+                }
+                return ResolvedInvocationTool::refused(
+                    server,
+                    tool_name,
+                    ToolRefusal::DriftQuarantined,
+                );
+            }
+            let admission = entry_tool_admission(entry, manifest, tool_name).await;
+            if let Some(refusal) = admission.refusal(server, tool_name) {
+                if effects.records() {
+                    tracing::info!(
+                        %tenant, %server, tool = %tool_name, ?admission,
+                        "tool is not admitted by the current classification mode and behavior hash",
+                    );
+                }
+                return refusal;
+            }
+        }
+        let published =
+            schema_admission::published_tool_contract(entry.as_deref(), tool_name).await;
+        let mode = manifest
+            .as_ref()
+            .map_or(crate::ClassificationMode::Manifest, |manifest| {
+                manifest.classification_mode
+            });
+        let advertised = published.advertised_definition.as_ref();
+        let reads = match source {
+            AdmissionSource::Call => {
+                self.admission_reads(tenant, server, tool_name, mode, advertised)
+                    .await
+            }
+            AdmissionSource::Status(batch) => Some(DiscoveryReads {
+                review: match batch.review {
+                    Ok(review) => {
+                        self.review_admission_with(
+                            server,
+                            tool_name,
+                            advertised,
+                            mode,
+                            review,
+                            Effects::ReadOnly,
+                        )
+                        .await
+                    }
+                    Err(()) => Admission::Unavailable(TemporaryUnavailability::ReviewUnavailable),
+                },
+                catalog: batch.catalog,
+                transition: batch.transition,
+            }),
+        };
+        self.resolve_snapshot_with_reads(
+            tenant,
+            server,
+            tool_name,
+            contract_binding::snapshot_inputs_for(manifest.as_ref(), server, tool_name, published),
+            reads,
+            effects,
+        )
+        .await
+    }
+}
 
 /// One admission decision and, when it does not admit, why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

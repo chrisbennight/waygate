@@ -1,7 +1,7 @@
 //! Persist observed contracts before serving replacement sessions. Durable
 //! review is an additional refusal gate; it never grants catalog admission.
 
-use super::admission::Admission;
+use super::admission::{Admission, Effects};
 use super::*;
 use waygate_catalog::tool_reviews::{PgCatalogStore, ReviewDecision};
 
@@ -258,7 +258,7 @@ impl UpstreamPool {
         contract: Option<&Tool>,
         mode: crate::ClassificationMode,
     ) -> bool {
-        self.review_admission(server, tool, contract, mode)
+        self.review_admission(server, tool, contract, mode, Effects::Record)
             .await
             .is_admitted()
     }
@@ -270,6 +270,7 @@ impl UpstreamPool {
         tool: &str,
         contract: Option<&Tool>,
         mode: crate::ClassificationMode,
+        effects: Effects,
     ) -> Admission {
         let Some(store) = self.tool_reviews.as_ref() else {
             return Admission::Admitted;
@@ -280,15 +281,17 @@ impl UpstreamPool {
         {
             Ok(review) => review,
             Err(_) => {
-                tracing::warn!(
-                    server,
-                    tool,
-                    "tool review storage unavailable; refusing admission"
-                );
+                if effects.records() {
+                    tracing::warn!(
+                        server,
+                        tool,
+                        "tool review storage unavailable; refusing admission"
+                    );
+                }
                 return Admission::Unavailable(TemporaryUnavailability::ReviewUnavailable);
             }
         };
-        self.review_admission_with(server, tool, contract, mode, review)
+        self.review_admission_with(server, tool, contract, mode, review, effects)
             .await
     }
 
@@ -302,7 +305,7 @@ impl UpstreamPool {
         mode: crate::ClassificationMode,
         review: Option<ReviewDecision>,
     ) -> bool {
-        self.review_admission_with(server, tool, contract, mode, review)
+        self.review_admission_with(server, tool, contract, mode, review, Effects::Record)
             .await
             .is_admitted()
     }
@@ -316,6 +319,7 @@ impl UpstreamPool {
         contract: Option<&Tool>,
         mode: crate::ClassificationMode,
         review: Option<ReviewDecision>,
+        effects: Effects,
     ) -> Admission {
         let protected = self.entries.load().get(server).is_some_and(|entry| {
             let manifest = entry.manifest_snapshot();
@@ -330,13 +334,14 @@ impl UpstreamPool {
                     )
                 })
         });
-        self.review_admission_from_state(server, tool, contract, mode, protected, review)
+        self.review_admission_from_state(server, tool, contract, mode, protected, review, effects)
             .await
     }
 
     /// Apply the same decision to a row fetched alone or in a discovery batch.
     /// A missing protected observation keeps the existing first-observation
     /// reconciliation path; normal publication has already recorded it.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn review_admission_from_state(
         &self,
         server: &str,
@@ -345,6 +350,7 @@ impl UpstreamPool {
         mode: crate::ClassificationMode,
         protected: bool,
         review: Option<ReviewDecision>,
+        effects: Effects,
     ) -> Admission {
         let Some(store) = self.tool_reviews.as_ref() else {
             return Admission::Admitted;
@@ -362,6 +368,26 @@ impl UpstreamPool {
         let (hash, value) = review_contract(contract, mode);
         if let Some(review) = review {
             return review_decision_admission(&review, &hash, protected);
+        }
+        if !effects.records() {
+            // Only the call path records a first observation. Read the
+            // decision that observation would leave, without writing it.
+            return match store
+                .first_observation_requires_review(
+                    waygate_core::TenantId::DEFAULT,
+                    server,
+                    tool,
+                    &value,
+                )
+                .await
+            {
+                Ok(Some(true)) => Admission::Refused(ToolRefusal::ReviewRequired),
+                Ok(Some(false)) => Admission::Admitted,
+                // Observation records nothing until catalog reconciliation
+                // has created the tool's identity.
+                Ok(None) => Admission::Refused(ToolRefusal::NotInCatalog),
+                Err(_) => Admission::Unavailable(TemporaryUnavailability::ReviewUnavailable),
+            };
         }
         if store
             .observe(

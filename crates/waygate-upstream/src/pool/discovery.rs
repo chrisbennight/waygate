@@ -196,6 +196,7 @@ impl UpstreamPool {
                         manifest.classification_mode,
                         protected,
                         reviews.get(name).cloned(),
+                        admission::Effects::Record,
                     )
                     .await;
                 let inputs = snapshot_inputs_for_classification(
@@ -216,6 +217,7 @@ impl UpstreamPool {
                             catalog,
                             transition,
                         }),
+                        admission::Effects::Record,
                     )
                     .await,
                 );

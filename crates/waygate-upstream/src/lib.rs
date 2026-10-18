@@ -31,9 +31,10 @@ pub use pool::health::{
 };
 pub use pool::reload::resource_shape_change_requires_restart;
 pub use pool::{
-    list_all_tools, CatalogFreshnessTrigger, CatalogRefreshOutcome, CatalogRefreshReport,
-    ExchangeBundle, ListedCatalog, ObservedContracts, ObservedToolContract, RejectedOutputSchema,
-    ReloadReport, ScheduledCatalogRefresh, UpstreamHealth, UpstreamPool, UpstreamStatus,
+    list_all_tools, BlockedTool, CatalogFreshnessTrigger, CatalogRefreshOutcome,
+    CatalogRefreshReport, ExchangeBundle, ListedCatalog, ObservedContracts, ObservedToolContract,
+    RejectedOutputSchema, ReloadReport, ScheduledCatalogRefresh, ServerRefusals, ToolBlock,
+    UpstreamHealth, UpstreamPool, UpstreamStatus, REFUSAL_REPORT_TOOL_LIMIT,
 };
 pub use transport::{client_config, default_auto_lifecycle, legacy_bridge_lifecycle};
 

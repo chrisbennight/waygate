@@ -1920,6 +1920,9 @@ fn build_active_filter_chips(
 struct ActivityDrawer {
     review_url: String,
     review_label: &'static str,
+    /// The Blocked tools page for the event's server, when the event records
+    /// a refused or temporarily unavailable tool call.
+    blocked_url: Option<String>,
     ts_abs: String,
     outcome: String,
     action_label_opt: Option<String>,
@@ -2224,6 +2227,17 @@ pub(crate) async fn activity_drawer(
         (None, Some(server), Some(tool)) => crate::dashboard_tool_reviews::review_url(server, tool),
         _ => "/servers/tool-changes".into(),
     };
+    let blocked_url = row
+        .reason
+        .as_deref()
+        .filter(|reason| crate::dashboard_blocked_tools::is_refusal_reason(reason))
+        .map(|_| {
+            let path = match row.server.as_deref() {
+                Some(server) => crate::dashboard_blocked_tools::server_url(server),
+                None => crate::dashboard_blocked_tools::BLOCKED_TOOLS_PATH.to_owned(),
+            };
+            crate::tenant_ctx::nav_url(tenant.as_ref().map(|Extension(t)| t), &path)
+        });
     render(&ActivityDrawer {
         review_url: crate::tenant_ctx::nav_url(tenant.as_ref().map(|Extension(t)| t), &review_path),
         review_label: if drift_event.is_some() {
@@ -2231,6 +2245,7 @@ pub(crate) async fn activity_drawer(
         } else {
             "Review tool changes"
         },
+        blocked_url,
         ts_abs: format_ts_abs(row.ts),
         outcome: row.outcome.clone(),
         action_label_opt: Some(action_label(&row)),

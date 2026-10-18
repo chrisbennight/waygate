@@ -955,3 +955,280 @@ async fn call_database_round_trips_per_classification_mode() {
         );
     }
 }
+
+/// Serve [`ChangingContractUpstream`] over streamable HTTP on a free port.
+async fn serve_changing_contract(
+    descriptor: Arc<std::sync::RwLock<Tool>>,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let upstream = ChangingContractUpstream(descriptor);
+    let svc = StreamableHttpService::new(
+        move || Ok(upstream.clone()),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default().with_legacy_session_mode(true),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, axum::Router::new().nest_service("/mcp", svc))
+            .await
+            .unwrap();
+    });
+    (addr, task)
+}
+
+/// Import a manifest-mode server and its classified tools into the catalog.
+async fn import_manifest_server(db: &sqlx::PgPool, manifest: &UpstreamManifest) {
+    use waygate_catalog::{ImportServer, ImportTool, ManifestImporter};
+    ManifestImporter::new(db.clone())
+        .import_atomic(
+            "default",
+            &[ImportServer {
+                tenant_id: "default".into(),
+                name: manifest.name.clone(),
+                transport: "http".into(),
+                runtime_target: serde_json::json!({"url": manifest.url}),
+                classification_mode: "manifest".into(),
+                tools: manifest
+                    .tools
+                    .iter()
+                    .map(|t| ImportTool {
+                        name: t.name.clone(),
+                        approved_behavior_hash: None,
+                        risk: "low".into(),
+                        side_effects: false,
+                        pii: false,
+                        discriminator: None,
+                        operations: vec![],
+                    })
+                    .collect(),
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+}
+
+/// Every stored review of `server`'s tools and its drift-event count, so a
+/// test can prove a read changed neither.
+async fn review_state(
+    db: &sqlx::PgPool,
+    server: &str,
+) -> (Vec<(String, String, bool, i64, bool)>, i64) {
+    let reviews = sqlx::query_as(
+        "SELECT t.name, r.observed_hash, r.quarantined, r.generation, r.decided_at IS NOT NULL
+         FROM tool_contract_reviews r JOIN mcp_tools t ON t.id=r.tool_id
+         JOIN mcp_servers s ON s.id=t.server_id
+         WHERE s.tenant_id='default' AND s.name=$1 ORDER BY t.name",
+    )
+    .bind(server)
+    .fetch_all(db)
+    .await
+    .unwrap();
+    let drift = sqlx::query_scalar(
+        "SELECT count(*) FROM catalog_drift_events d JOIN mcp_tools t ON t.id=d.tool_id
+         JOIN mcp_servers s ON s.id=t.server_id WHERE s.name=$1",
+    )
+    .bind(server)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    (reviews, drift)
+}
+
+fn review_operator() -> waygate_oidc::Principal {
+    waygate_oidc::Principal {
+        sub: "review-operator".into(),
+        email: None,
+        groups: vec![],
+        issuer: "https://auth.example.test".into(),
+        scopes: vec!["mcp:admin".into()],
+        tenant: waygate_core::TenantId::default(),
+        auth_method: waygate_oidc::AuthMethod::Oauth,
+        raw_token: None,
+        roles: vec![],
+        scim: None,
+        enrichment_blocked: None,
+        api_key_profile_restrictions: None,
+    }
+}
+
+/// The refusal report gives a tool held for review, and one an operator kept
+/// blocked, the reason the call path gives, and writes no review, drift event,
+/// or audit record while doing so.
+#[tokio::test]
+async fn refusal_report_states_review_decisions_without_writing() {
+    use waygate_catalog::tool_reviews::PgCatalogStore;
+    use waygate_mcp::catalog::{ResolvedInvocationTool, ToolRefusal};
+    use waygate_upstream::ToolBlock;
+    let Some(db) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let descriptor = Arc::new(std::sync::RwLock::new(annotated_tool()));
+    let (addr, server_task) = serve_changing_contract(descriptor.clone()).await;
+    let mut manifest = manifest_at(addr, ClassificationMode::Manifest);
+    manifest.name = format!("refusals-{}", uuid::Uuid::new_v4());
+    let name = manifest.name.clone();
+    import_manifest_server(&db, &manifest).await;
+    let store = Arc::new(PgCatalogStore::new(db.clone()));
+    let sink = Arc::new(waygate_mcp::audit::InMemorySink::new());
+    let pool = UpstreamPool::connect(BTreeMap::from([(name.clone(), manifest)]))
+        .await
+        .with_quarantine_threshold(waygate_upstream::pool::QuarantineThreshold::All)
+        .with_evidence(sink.clone())
+        .with_tool_reviews(store.clone())
+        .await;
+    descriptor.write().unwrap().description = Some("changed search".into());
+    pool.refresh_server_catalog(&name, &review_operator())
+        .await
+        .unwrap();
+    // The refresh records its drift event without waiting for delivery.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !sink
+            .snapshot()
+            .await
+            .iter()
+            .any(|event| event.category == waygate_mcp::EvidenceCategory::CatalogDrift)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the refresh records drift");
+
+    for (expected, decide) in [
+        (ToolRefusal::ReviewRequired, false),
+        (ToolRefusal::KeptBlocked, true),
+    ] {
+        if decide {
+            let review = store
+                .get("default", &name, "stable")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(store.reject(&review, "review-operator").await.unwrap());
+        }
+        let stored = review_state(&db, &name).await;
+        let audited = sink.snapshot().await.len();
+        let report = pool.refusals("default", |server| server == name).await;
+        assert_eq!(report.len(), 1);
+        let blocks: Vec<_> = report[0]
+            .tools
+            .iter()
+            .map(|blocked| (blocked.tool.as_str(), blocked.block))
+            .collect();
+        assert_eq!(blocks, vec![("stable", ToolBlock::Refused(expected))]);
+        assert_eq!(
+            review_state(&db, &name).await,
+            stored,
+            "no review or drift write"
+        );
+        assert_eq!(sink.snapshot().await.len(), audited, "no audit record");
+        assert!(matches!(
+            pool.resolve_invocation_tool("default", &name, "stable").await,
+            ResolvedInvocationTool::Refused { reason, .. } if reason == expected
+        ));
+    }
+    server_task.abort();
+}
+
+/// A first observation too large to store for comparison is held for review.
+/// The refusal report reports that hold, as the call path decides it, without
+/// recording the observation.
+#[tokio::test]
+async fn refusal_report_holds_an_oversized_first_observation_for_review() {
+    use waygate_catalog::tool_reviews::PgCatalogStore;
+    use waygate_mcp::catalog::{ResolvedInvocationTool, ToolRefusal};
+    use waygate_upstream::ToolBlock;
+    let Some(db) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let mut tool = annotated_tool();
+    tool.description = Some("x".repeat(300_000).into());
+    let descriptor = Arc::new(std::sync::RwLock::new(tool));
+    let (addr, server_task) = serve_changing_contract(descriptor).await;
+    let mut manifest = manifest_at(addr, ClassificationMode::Manifest);
+    manifest.name = format!("refusals-{}", uuid::Uuid::new_v4());
+    let name = manifest.name.clone();
+    // Attached before the catalog knows the server, so nothing is seeded.
+    let pool = UpstreamPool::connect(BTreeMap::from([(name.clone(), manifest.clone())]))
+        .await
+        .with_quarantine_threshold(waygate_upstream::pool::QuarantineThreshold::All)
+        .with_tool_reviews(Arc::new(PgCatalogStore::new(db.clone())))
+        .await;
+    import_manifest_server(&db, &manifest).await;
+    assert!(review_state(&db, &name).await.0.is_empty());
+
+    let report = pool.refusals("default", |server| server == name).await;
+    assert_eq!(
+        report[0]
+            .tools
+            .iter()
+            .map(|blocked| (blocked.tool.as_str(), blocked.block))
+            .collect::<Vec<_>>(),
+        vec![("stable", ToolBlock::Refused(ToolRefusal::ReviewRequired))],
+    );
+    assert!(
+        !report[0].tools[0].review_recorded,
+        "no review is stored to link to yet"
+    );
+    assert!(
+        review_state(&db, &name).await.0.is_empty(),
+        "the report records no observation"
+    );
+    assert!(matches!(
+        pool.resolve_invocation_tool("default", &name, "stable")
+            .await,
+        ResolvedInvocationTool::Refused {
+            reason: ToolRefusal::ReviewRequired,
+            ..
+        }
+    ));
+    assert_eq!(
+        review_state(&db, &name).await.0.len(),
+        1,
+        "the call path records the observation the report left alone"
+    );
+    server_task.abort();
+}
+
+/// The call path records a protected contract's first observation; the
+/// refusal report reaches the same decision without recording it.
+#[tokio::test]
+async fn refusal_report_leaves_a_first_contract_observation_unrecorded() {
+    use waygate_catalog::tool_reviews::PgCatalogStore;
+    use waygate_mcp::catalog::ResolvedInvocationTool;
+    let Some(db) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let descriptor = Arc::new(std::sync::RwLock::new(annotated_tool()));
+    let (addr, server_task) = serve_changing_contract(descriptor).await;
+    let mut manifest = manifest_at(addr, ClassificationMode::Manifest);
+    manifest.name = format!("refusals-{}", uuid::Uuid::new_v4());
+    let name = manifest.name.clone();
+    // Attached before the catalog knows the server, so nothing is seeded.
+    let pool = UpstreamPool::connect(BTreeMap::from([(name.clone(), manifest.clone())]))
+        .await
+        .with_quarantine_threshold(waygate_upstream::pool::QuarantineThreshold::All)
+        .with_tool_reviews(Arc::new(PgCatalogStore::new(db.clone())))
+        .await;
+    import_manifest_server(&db, &manifest).await;
+    assert!(review_state(&db, &name).await.0.is_empty());
+
+    let report = pool.refusals("default", |server| server == name).await;
+    assert!(report[0].tools.is_empty(), "the first observation admits");
+    assert!(
+        review_state(&db, &name).await.0.is_empty(),
+        "the report records no observation"
+    );
+    assert!(matches!(
+        pool.resolve_invocation_tool("default", &name, "stable")
+            .await,
+        ResolvedInvocationTool::Ready(_)
+    ));
+    assert_eq!(
+        review_state(&db, &name).await.0.len(),
+        1,
+        "the call path records the observation the report left alone"
+    );
+    server_task.abort();
+}

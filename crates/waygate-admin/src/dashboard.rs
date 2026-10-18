@@ -230,7 +230,11 @@ const DESTINATIONS: &[DestDef] = &[
         "Tools",
         "/tools",
         "box",
-        &[("Tools", "/tools"), ("Catalog", "/catalog")],
+        &[
+            ("Tools", "/tools"),
+            ("Catalog", "/catalog"),
+            ("Blocked", "/tools/blocked"),
+        ],
     ),
     ("MCP Gateway", "Skills", "/skills", "file-text", &[]),
     ("MCP Gateway", "Federation", "/federation", "network", &[]),
@@ -589,6 +593,9 @@ fn page_routes(state: Arc<AdminState>) -> Router<()> {
         // servers + drift events).
         .merge(crate::dashboard_builtins::router())
         .merge(crate::dashboard_catalog::router())
+        // Blocked tools page (read-only report of the tools admission
+        // refuses, with the reason and the control that resolves it).
+        .merge(crate::dashboard_blocked_tools::router())
         // LLM models page (read-only operator view of
         // the inference-plane model catalog).
         .merge(crate::dashboard_llm_models::router())

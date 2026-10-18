@@ -308,7 +308,8 @@ async fn catalog_page(
 
 /// Authorization gate for the catalog dashboard page. Same
 /// shape as `dashboard_break_glass::principal_has_dashboard_admin`.
-fn principal_has_dashboard_admin(p: Option<&Principal>) -> bool {
+/// The Blocked tools page applies the same gate.
+pub(crate) fn principal_has_dashboard_admin(p: Option<&Principal>) -> bool {
     match p {
         None => false,
         Some(p) if p.auth_method == AuthMethod::PeerAssertion => false,
