@@ -621,6 +621,28 @@ Pass its `file.uri` to `gateway-files.prepare_download` and the
 file helper to retrieve bytes outside model context. A URI alone is not download
 authority. The upstream structured output schema remains separately validated.
 
+When an MCP result has structured data and additional content, Code Mode keeps
+the structured value's members and supplies distinct content blocks in
+`response["io.cacahuate.mcp-gateway/content"]`. Text blocks that only repeat the
+structured value are excluded. Other text, images and resource links retain
+their MCP block shapes. For example, a source reader can return a small status
+object and a complete JSON body in a separate text block:
+
+```js
+const response = await connectors.network.read(execution.input);
+const blocks = response["io.cacahuate.mcp-gateway/content"] ?? [];
+const source = blocks.find(block => block.type === "text" && block.text.startsWith("data: "));
+return source ? JSON.parse(source.text.slice(6)).rows.length : response;
+```
+
+If upstream structured data contains either gateway member name, that entire
+value is preserved under `data` before gateway members are added. A scalar
+structured value is also placed under `data` when content or delivery metadata
+needs an object. Results without structured data retain their MCP result
+envelope. The existing runtime materialization and heap limits apply to the
+complete connector value; content is inspected before this projection and no
+additional upstream request is made.
+
 If resource recovery or file staging fails after a confirmed mutation, the
 result preserves `operation_status: "succeeded"` with
 `delivery_status: "unavailable"`, a machine-readable `error`, and

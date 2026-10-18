@@ -69,6 +69,7 @@ mod stage;
 mod stream;
 mod tasks;
 mod validation;
+pub use files::mirrors_structured;
 use schema_cache::CachedValidator;
 pub use schema_cache::SchemaValidatorCache;
 pub use stage::{

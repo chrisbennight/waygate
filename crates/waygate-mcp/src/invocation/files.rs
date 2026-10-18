@@ -3,7 +3,7 @@ use super::*;
 /// Whether `text` only repeats `structured` for clients that cannot read
 /// structured content. The compact encoding is compared while it is produced;
 /// any other formatting of the same value is recognized by parsing it.
-fn mirrors_structured(text: &str, structured: &serde_json::Value) -> bool {
+pub fn mirrors_structured(text: &str, structured: &serde_json::Value) -> bool {
     struct Compare<'a> {
         expected: &'a [u8],
         position: usize,

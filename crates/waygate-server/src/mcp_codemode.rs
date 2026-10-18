@@ -59,6 +59,9 @@ use crate::process_mode::codemode_protocol::{
 };
 
 mod call_tasks;
+mod connector_result;
+
+use connector_result::connector_result_value;
 
 pub const NAMESPACE: &str = waygate_core::CODEMODE_BUILTIN_NAMESPACE;
 const DEFAULT_SEARCH_LIMIT: usize = waygate_mcp::discovery::DEFAULT_SEARCH_RESULTS;
@@ -4936,49 +4939,6 @@ fn admitted_call(
 /// authored at their sites.
 fn connector_error(code: &str, message: impl std::fmt::Display) -> String {
     format!("{code}: {message}")
-}
-
-fn connector_result_value(
-    result: CallToolResult,
-) -> Result<Value, waygate_invocation::InvocationError> {
-    if result.is_error.unwrap_or(false) {
-        return Err(waygate_invocation::InvocationError::Upstream(
-            McpError::internal_error(
-                "connector reported a tool error",
-                result.structured_content.clone(),
-            ),
-        ));
-    }
-    let delivery = result
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.get(waygate_mcp::files::RETAINED_DELIVERY_META_KEY))
-        .cloned();
-    if let Some(delivery) = delivery {
-        let mut value = result
-            .structured_content
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({}));
-        if let Some(object) = value.as_object_mut() {
-            object.insert("_gateway_delivery".to_owned(), delivery);
-            return Ok(value);
-        }
-        return Ok(serde_json::json!({"data":value, "_gateway_delivery":delivery}));
-    }
-    match result.structured_content.as_ref() {
-        Some(structured) if structured.get("_gateway_delivery").is_some() => {
-            // Only gateway metadata may populate the top-level delivery field.
-            // Preserve a colliding upstream object as ordinary nested data.
-            Ok(serde_json::json!({"data": structured}))
-        }
-        Some(structured) => Ok(structured.clone()),
-        None => serde_json::to_value(&result).map_err(|_| {
-            waygate_invocation::InvocationError::Upstream(McpError::internal_error(
-                "connector result could not be encoded",
-                None,
-            ))
-        }),
-    }
 }
 
 fn builtin_contract_changed(admitted: &AdmittedCall) -> waygate_invocation::InvocationError {
@@ -14845,6 +14805,56 @@ mod tests {
         assert_eq!(
             connector_result_value(trusted).unwrap(),
             json!({"value": 42, "_gateway_delivery": status})
+        );
+    }
+
+    #[test]
+    fn connector_projection_preserves_distinct_content_without_the_text_mirror() {
+        let structured = json!({"status": "collected", "dataInContent": true});
+        let body = format!(
+            "data: {}",
+            json!({"padding": "x".repeat(60_000), "marker": "source-tail"})
+        );
+        let mut result = CallToolResult::structured(structured.clone());
+        result
+            .content
+            .push(rmcp::model::ContentBlock::text(body.clone()));
+        let projected = connector_result_value(result).expect("connector value");
+        assert_eq!(projected["status"], structured["status"]);
+        assert_eq!(projected["dataInContent"], true);
+        let content = projected["io.cacahuate.mcp-gateway/content"]
+            .as_array()
+            .expect("distinct content is available to code");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["text"], body);
+        let runtime = rquickjs::Runtime::new().expect("JavaScript runtime");
+        let context = rquickjs::Context::full(&runtime).expect("JavaScript context");
+        context.with(|context| {
+            let value = context.json_parse(projected.to_string()).expect("connector JSON");
+            context.globals().set("response", value).expect("connector value");
+            let marker: String = context.eval(
+                r#"JSON.parse(response["io.cacahuate.mcp-gateway/content"][0].text.slice(6)).marker"#
+            ).expect("program reduces the complete source");
+            assert_eq!(marker, "source-tail");
+        });
+        assert_eq!(
+            connector_result_value(CallToolResult::structured(structured.clone())).unwrap(),
+            structured
+        );
+    }
+
+    #[test]
+    fn connector_projection_preserves_upstream_content_key_collisions() {
+        let upstream = json!({"io.cacahuate.mcp-gateway/content": ["upstream value"]});
+        let mut result = CallToolResult::structured(upstream.clone());
+        result
+            .content
+            .push(rmcp::model::ContentBlock::text("distinct source"));
+        let projected = connector_result_value(result).expect("connector value");
+        assert_eq!(projected["data"], upstream);
+        assert_eq!(
+            projected["io.cacahuate.mcp-gateway/content"][0]["text"],
+            "distinct source"
         );
     }
 
