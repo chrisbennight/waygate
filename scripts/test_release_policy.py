@@ -124,6 +124,8 @@ class PublishTests(unittest.TestCase):
             if args == ('git', 'rev-parse', 'HEAD'):
                 return SHA
             if args[:3] == ('docker', 'image', 'inspect'):
+                if args[-1] == '{{.Os}}/{{.Architecture}}':
+                    return 'linux/amd64'
                 return json.dumps(labels)
             if args[:2] == ('docker', 'push'):
                 images[args[2]] = DIGEST, labels
@@ -134,6 +136,7 @@ class PublishTests(unittest.TestCase):
                 os.chdir(directory)
                 env = {'GITHUB_EVENT_NAME': event, 'GITHUB_REF': 'refs/tags/v' + version,
                        'GITHUB_SHA': SHA, 'GITHUB_REPOSITORY': 'Test/Waygate',
+                       'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2',
                        'GATEWAY_IMAGE_PINNED': REPO + ':sha-' + SHA,
                        'GITHUB_STEP_SUMMARY': str(Path(directory) / 'summary')}
                 with patch.dict(os.environ, env), patch.object(publisher, 'run', side_effect=command), \
@@ -147,6 +150,9 @@ class PublishTests(unittest.TestCase):
                     else:
                         publisher.publish()
                         self.assertIn(DIGEST, Path('gateway-release-notes.txt').read_text())
+                        record = json.loads(Path('gateway-publication.json').read_text())
+                        self.assertEqual(record['images'][0]['tag'], version)
+                        self.assertEqual(record['images'][0]['digest'], DIGEST)
             finally:
                 os.chdir(previous)
         return commands
@@ -174,6 +180,8 @@ class PublishTests(unittest.TestCase):
             if args == ('git', 'rev-parse', 'HEAD'):
                 return SHA
             if args[:3] == ('docker', 'image', 'inspect'):
+                if args[-1] == '{{.Os}}/{{.Architecture}}':
+                    return 'linux/amd64'
                 return json.dumps(labels)
             return ''
 
@@ -187,11 +195,13 @@ class PublishTests(unittest.TestCase):
             summary = Path(directory) / 'summary'
             env = {'GITHUB_EVENT_NAME': 'push', 'GITHUB_REF': 'refs/heads/main',
                    'GITHUB_SHA': SHA, 'GITHUB_REPOSITORY': 'Test/Waygate',
+                   'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2',
                    'GATEWAY_IMAGE_PINNED': local, 'GITHUB_STEP_SUMMARY': str(summary)}
             with patch.dict(os.environ, env), patch.object(publisher, 'run', side_effect=command), \
                  patch.object(publisher, 'workspace_version', return_value='1.2.3'), \
                  patch.object(publisher, 'require_merged'), \
                  patch.object(publisher, 'remote_image', side_effect=remote), \
+                 patch.object(publisher, 'PUBLICATION_RECORD', Path(directory) / 'publication.json'), \
                  patch.object(publisher.subprocess, 'run', side_effect=AssertionError('unexpected process')):
                 publisher.publish()
             self.assertEqual([c for c in commands if c[:2] == ('docker', 'push')],
@@ -199,6 +209,22 @@ class PublishTests(unittest.TestCase):
             self.assertEqual(inspected, [local])
             self.assertFalse(any(c[:2] == ('gh', 'release') for c in commands))
             self.assertIn(REPO + '@' + DIGEST, summary.read_text())
+            record = json.loads((Path(directory) / 'publication.json').read_text())
+            self.assertEqual(record, {
+                'schema_version': 1, 'source_repository': 'test/waygate',
+                'source_commit': SHA, 'source_ref': 'refs/heads/main',
+                'workflow': '.github/workflows/image.yml',
+                'run_id': 123, 'run_attempt': 2,
+                'images': [{'repository': REPO, 'tag': 'sha-' + SHA,
+                            'digest': DIGEST, 'platforms': ['linux/amd64']}],
+            })
+
+    def test_invalid_build_identity_stops_before_publication(self):
+        for value in ('', '0', '-1', '1;invalid'):
+            with self.subTest(value=value), patch.dict(os.environ, {
+                'GITHUB_RUN_ID': value, 'GITHUB_RUN_ATTEMPT': '1',
+            }), self.assertRaises(ValueError):
+                publisher.build_identity()
 
     def test_existing_version_and_manual_run_never_publish(self):
         self.exercise_publish('1.2.3', existing=True)
