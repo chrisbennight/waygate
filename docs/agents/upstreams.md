@@ -10,7 +10,10 @@ Manifests are strict: a key the schema does not define, at the top level or
 inside any nested block, fails the load with an error naming the upstream and
 the key. Every path that reads manifests applies this, including the served
 directory, `import`, the dashboard editor and ledger recovery, so a misspelled
-setting can never be silently ignored. Remove obsolete keys before upgrading.
+setting can never be silently ignored. Remove obsolete keys from the served
+files before upgrading. A ledger snapshot stored before the upgrade may still
+carry such a key; the first clean load records the served set as a new
+snapshot, so recovery has a readable version again.
 
 ## Classification authority: claims are not policy
 
