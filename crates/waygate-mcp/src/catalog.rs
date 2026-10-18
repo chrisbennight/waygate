@@ -107,10 +107,11 @@ impl AdmittedResourceReadError {
     }
 }
 
-/// Private request metadata used only between the invocation pipeline and the
-/// gateway-owned upstream HTTP transport. It asks that transport to bound the
-/// raw JSON-RPC response before rmcp decodes it. Upstreams may ignore the
-/// extension; enforcement happens client-side.
+/// Private request metadata that carries one resource read's response budget
+/// from the gateway's read paths to the upstream pool. The pool removes it
+/// before the request is sent and asks its HTTP transport to bound the raw
+/// JSON-RPC response before rmcp decodes it, so the key never reaches an
+/// upstream and enforcement does not depend on the upstream.
 pub const RESPONSE_MATERIALIZATION_LIMIT_META_KEY: &str =
     "io.bennight.gateway/responseMaterializationLimitBytes";
 

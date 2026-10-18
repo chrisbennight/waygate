@@ -162,6 +162,9 @@ The hot path for one tool call:
    only source of resource ownership: a URI no declaration covers is not
    routed, and an upstream's own listing never makes it an owner. Resolution
    always completes before authorization and fails closed on URI collisions.
+   As with a tool call, a forwarded `resources/read` carries only request
+   metadata the gateway sets, never the caller's `_meta`; its response budget
+   bounds the upstream response inside the gateway and is not sent.
    An opt-in client schema profile adapts only the authorized `tools/list`
    copies before pagination. Invocation snapshots and inspection/Code Mode
    contracts keep the complete constraints; see
