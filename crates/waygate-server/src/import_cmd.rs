@@ -623,6 +623,9 @@ mod tests {
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,
+            trust: waygate_upstream::TrustLevel::Internal,
+            identity: None,
+            forward_trace_context: None,
             session: None,
         }
     }
@@ -936,7 +939,8 @@ mod tests {
         // self-check fails. Simulate by passing a serialized form whose
         // parsed names differ from the claimed set.
         let set = manifest_set(&["example-messages"]);
-        let wrong = "- name: different\n  transport: http\n  url: http://x/mcp\n";
+        let wrong =
+            "- name: different\n  transport: http\n  trust: internal\n  url: http://x/mcp\n";
         let err = validate_server_bundle_import(&set, wrong, std::path::Path::new("servers"))
             .expect_err("name mismatch must be refused");
         assert!(err.to_string().contains("did not round-trip"));

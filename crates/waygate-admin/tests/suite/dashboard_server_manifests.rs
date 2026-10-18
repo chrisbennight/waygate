@@ -30,7 +30,7 @@ const DRAFT_ID: &str = "00000000-0000-0000-0000-0000000000d2";
 const PUB_ID: &str = "00000000-0000-0000-0000-0000000000f1";
 
 fn yaml(v: i32) -> String {
-    format!("- name: u{v}\n  transport: http\n  url: http://u{v}/mcp\n")
+    format!("- name: u{v}\n  transport: http\n  trust: internal\n  url: http://u{v}/mcp\n")
 }
 
 /// Fake with a fixed two-version history: a publishable draft (v2) and a
@@ -584,7 +584,7 @@ async fn validate_form_renders_count() {
                 .uri("/server_manifests/validate")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(
-                    "csrf=dev-csrf&content=-+name:+a%0A++transport:+http%0A++url:+http://a/mcp%0A",
+                    "csrf=dev-csrf&content=-+name:+a%0A++transport:+http%0A++trust:+internal%0A++url:+http://a/mcp%0A",
                 ))
                 .unwrap(),
         )
@@ -610,7 +610,7 @@ async fn save_draft_redirects_on_valid_set() {
     let (status, loc) = post_form(
         app,
         "/server_manifests/save_draft",
-        "csrf=dev-csrf&content=-+name:+a%0A++transport:+http%0A++url:+http://a/mcp%0A",
+        "csrf=dev-csrf&content=-+name:+a%0A++transport:+http%0A++trust:+internal%0A++url:+http://a/mcp%0A",
     )
     .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
@@ -758,7 +758,7 @@ async fn preview_impact_renders_panel_and_echoes_content() {
     let (status, body) = post_form_body(
         app,
         "/server_manifests/preview_impact",
-        "csrf=dev-csrf&content=-%20name:%20bank%0A%20%20transport:%20http%0A%20%20url:%20http://bank",
+        "csrf=dev-csrf&content=-%20name:%20bank%0A%20%20transport:%20http%0A%20%20trust:%20internal%0A%20%20url:%20http://bank",
     )
     .await;
     assert_eq!(

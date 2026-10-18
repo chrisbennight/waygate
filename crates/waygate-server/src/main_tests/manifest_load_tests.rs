@@ -40,7 +40,7 @@ fn canon_hash(content: &str) -> String {
 
 #[test]
 fn disk_not_drifted_when_active_matches_disk() {
-    let content = "- name: a\n  transport: http\n  url: http://a/mcp\n";
+    let content = "- name: a\n  transport: http\n  trust: internal\n  url: http://a/mcp\n";
     assert!(!super::disk_drifted_from_active(
         content,
         &canon_hash(content)
@@ -49,8 +49,8 @@ fn disk_not_drifted_when_active_matches_disk() {
 
 #[test]
 fn disk_drifted_when_active_differs_from_disk() {
-    let active = "- name: a\n  transport: http\n  url: http://a/mcp\n";
-    let disk = "- name: b\n  transport: http\n  url: http://b/mcp\n";
+    let active = "- name: a\n  transport: http\n  trust: internal\n  url: http://a/mcp\n";
+    let disk = "- name: b\n  transport: http\n  trust: internal\n  url: http://b/mcp\n";
     assert!(super::disk_drifted_from_active(active, &canon_hash(disk)));
 }
 
@@ -60,8 +60,9 @@ fn disk_not_drifted_for_noncanonical_equivalent_active() {
     // fields reordered) of the same set that is on disk. It must NOT read as
     // drift — else every reload would synthesize a spurious filesystem row
     // (the same canonical-vs-raw subtlety as the turnstile).
-    let disk = "- name: a\n  transport: http\n  url: http://a/mcp\n";
-    let active_noncanonical = "# staged\n- url: http://a/mcp\n  transport: http\n  name: a\n";
+    let disk = "- name: a\n  transport: http\n  trust: internal\n  url: http://a/mcp\n";
+    let active_noncanonical =
+        "# staged\n- url: http://a/mcp\n  transport: http\n  trust: internal\n  name: a\n";
     assert!(!super::disk_drifted_from_active(
         active_noncanonical,
         &canon_hash(disk)
@@ -74,8 +75,9 @@ fn disk_drifted_when_active_content_no_longer_parses() {
     // the schema now rejects. Disk loaded cleanly, so it must read as drift:
     // that records a readable snapshot for ledger recovery instead of leaving
     // the unreadable row active forever.
-    let disk = "- name: a\n  transport: http\n  url: http://a/mcp\n";
-    let legacy_active = "- name: a\n  transport: http\n  url: http://a/mcp\n  obsolete_key: 1\n";
+    let disk = "- name: a\n  transport: http\n  trust: internal\n  url: http://a/mcp\n";
+    let legacy_active =
+        "- name: a\n  transport: http\n  trust: internal\n  url: http://a/mcp\n  obsolete_key: 1\n";
     assert!(super::disk_drifted_from_active(
         legacy_active,
         &canon_hash(disk)
@@ -149,7 +151,7 @@ impl TmpDir {
         std::fs::create_dir_all(&p).unwrap();
         std::fs::write(
             p.join("gamma.yaml"),
-            "name: gamma\ntransport: http\nurl: http://gamma/mcp\n",
+            "name: gamma\ntransport: http\ntrust: internal\nurl: http://gamma/mcp\n",
         )
         .unwrap();
         Self(p)
@@ -168,7 +170,7 @@ impl TmpDir {
         std::fs::create_dir_all(&p).unwrap();
         std::fs::write(
             p.join("broken.yaml"),
-            "transport: http\nurl: http://broken/mcp\n",
+            "transport: http\ntrust: internal\nurl: http://broken/mcp\n",
         )
         .unwrap();
         Self(p)
@@ -300,8 +302,8 @@ impl ManifestStore for FakeStore {
 
 // A two-upstream bundle so a count distinguishes which source won:
 // the store set has two, the filesystem dir has one.
-const TWO_UPSTREAMS: &str = "- name: alpha\n  transport: http\n  url: http://alpha/mcp\n\
-                             - name: beta\n  transport: http\n  url: http://beta/mcp\n";
+const TWO_UPSTREAMS: &str = "- name: alpha\n  transport: http\n  trust: internal\n  url: http://alpha/mcp\n\
+                             - name: beta\n  transport: http\n  trust: internal\n  url: http://beta/mcp\n";
 
 #[tokio::test]
 async fn no_store_loads_from_filesystem() {
@@ -568,8 +570,9 @@ async fn reload_manifests_only_defers_a_partial_coordinated_write() {
         std::sync::Arc::new(waygate_upstream::ConfigHealth::default());
     ch.set_healthy("serving the prior complete set");
     let mut pointer = pointer_at(time::OffsetDateTime::now_utc());
-    pointer.current_hash =
-        canon_hash("- name: delta\n  transport: http\n  url: http://delta/mcp\n");
+    pointer.current_hash = canon_hash(
+        "- name: delta\n  transport: http\n  trust: internal\n  url: http://delta/mcp\n",
+    );
     let store = FakeStore::bundle_with_pointer(TWO_UPSTREAMS, pointer);
     let mut deps = reload_deps_for(&dir.0, pool.clone(), ch.clone());
     deps.manifest_store = Some(store);

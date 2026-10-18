@@ -111,6 +111,14 @@ fn starter_manifest(
             env_passthrough,
         } => (None, Some(argv.clone()), env_passthrough.clone()),
     };
+    // The generated manifest must load, and a plain-HTTP url is valid only for
+    // an internal server. Anything else keeps the safer default for the
+    // operator to review.
+    let trust = if url.as_deref().is_some_and(|u| u.starts_with("http://")) {
+        waygate_upstream::TrustLevel::Internal
+    } else {
+        waygate_upstream::TrustLevel::External
+    };
     UpstreamManifest {
         classification_mode: Default::default(),
         approval_mode: Default::default(),
@@ -130,6 +138,9 @@ fn starter_manifest(
         mtls: None,
         tier_a_required: false,
         tier_c_peer: None,
+        trust,
+        identity: None,
+        forward_trace_context: None,
         session: None,
     }
 }

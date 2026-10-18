@@ -1189,7 +1189,7 @@ mod tests {
     async fn stage_preview_keeps_capability_projection_when_replay_is_unavailable() {
         let state = no_store_state().await;
         let params = json!({
-            "content": "- name: grounded-docs\n  transport: http\n  url: http://grounded-docs/mcp\n  tools:\n    - name: search_docs\n      risk: low\n"
+            "content": "- name: grounded-docs\n  transport: http\n  trust: internal\n  url: http://grounded-docs/mcp\n  tools:\n    - name: search_docs\n      risk: low\n"
         });
         let p = manifest_change_preview(
             &state,
@@ -1239,7 +1239,7 @@ mod tests {
     async fn effective_projection_requires_live_state_visibility_for_mcp_observers() {
         let state = no_store_state().await;
         let params = json!({
-            "content": "- name: grounded-docs\n  transport: http\n  url: http://grounded-docs/mcp\n  tools:\n    - name: search_docs\n      risk: low\n"
+            "content": "- name: grounded-docs\n  transport: http\n  trust: internal\n  url: http://grounded-docs/mcp\n  tools:\n    - name: search_docs\n      risk: low\n"
         });
         let maker = observer_with(vec!["mcp:read", "mcp:propose"]);
         let visible = manifest_change_preview(
@@ -1344,7 +1344,7 @@ mod tests {
         // the live set can't be read to merge into → the preview degrades on the
         // merge (the same error the executor would surface at approval), it does
         // not panic.
-        let ok_params = json!({ "content": "- name: x\n  transport: http\n  url: http://x/mcp\n" });
+        let ok_params = json!({ "content": "- name: x\n  transport: http\n  trust: internal\n  url: http://x/mcp\n" });
         let merged = manifest_change_preview(
             &state,
             "default",
@@ -1419,6 +1419,9 @@ mod tests {
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,
+            trust: waygate_upstream::TrustLevel::Internal,
+            identity: None,
+            forward_trace_context: None,
             session: None,
         }
     }
@@ -1547,7 +1550,7 @@ mod tests {
     fn annotation_candidate_params() -> serde_json::Value {
         let hash = "a".repeat(64);
         let content = format!(
-            "- name: anno\n  transport: http\n  url: http://anno.test/mcp\n\
+            "- name: anno\n  transport: http\n  trust: internal\n  url: http://anno.test/mcp\n\
              \x20 classification_mode: mcp_annotations\n  tools:\n\
              \x20   - name: t1\n      risk: low\n      approved_behavior_hash: {hash}\n"
         );
@@ -1681,7 +1684,7 @@ mod tests {
 
         // A manifest-mode candidate has no observed section at all.
         let manifest_mode = json!({
-            "content": "- name: plain\n  transport: http\n  url: http://plain.test/mcp\n"
+            "content": "- name: plain\n  transport: http\n  trust: internal\n  url: http://plain.test/mcp\n"
         });
         let plain = manifest_change_preview(
             &state,
@@ -1897,6 +1900,9 @@ mod tests {
                 mtls: None,
                 tier_a_required: false,
                 tier_c_peer: None,
+                trust: waygate_upstream::TrustLevel::Internal,
+                identity: None,
+                forward_trace_context: None,
                 session: None,
             },
         );
@@ -1945,8 +1951,8 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("manifest-remove-preview-{}", uuid::Uuid::now_v7()));
         let initial = waygate_upstream::parse_manifest_set(
-            "- name: alpha\n  transport: http\n  url: http://alpha/mcp\n\
-             - name: beta\n  transport: http\n  url: http://beta/mcp\n",
+            "- name: alpha\n  transport: http\n  trust: internal\n  url: http://alpha/mcp\n\
+             - name: beta\n  transport: http\n  trust: internal\n  url: http://beta/mcp\n",
         )
         .unwrap();
         waygate_upstream::write_manifest_set_to_dir(&dir, &initial).unwrap();
@@ -1956,8 +1962,8 @@ mod tests {
         };
 
         let changed = waygate_upstream::parse_manifest_set(
-            "- name: alpha\n  transport: http\n  url: http://alpha/mcp\n\
-             - name: beta\n  transport: http\n  url: http://beta-v2/mcp\n",
+            "- name: alpha\n  transport: http\n  trust: internal\n  url: http://alpha/mcp\n\
+             - name: beta\n  transport: http\n  trust: internal\n  url: http://beta-v2/mcp\n",
         )
         .unwrap();
         waygate_upstream::write_manifest_set_to_dir(&dir, &changed).unwrap();
@@ -2029,7 +2035,7 @@ mod tests {
             uuid::Uuid::now_v7()
         ));
         let initial = waygate_upstream::parse_manifest_set(
-            "- name: alpha\n  transport: http\n  url: http://alpha/mcp\n",
+            "- name: alpha\n  transport: http\n  trust: internal\n  url: http://alpha/mcp\n",
         )
         .unwrap();
         waygate_upstream::write_manifest_set_to_dir(&dir, &initial).unwrap();
@@ -2039,7 +2045,7 @@ mod tests {
         };
 
         let changed = waygate_upstream::parse_manifest_set(
-            "- name: alpha\n  transport: http\n  url: http://alpha-v2/mcp\n",
+            "- name: alpha\n  transport: http\n  trust: internal\n  url: http://alpha-v2/mcp\n",
         )
         .unwrap();
         waygate_upstream::write_manifest_set_to_dir(&dir, &changed).unwrap();
@@ -2047,11 +2053,11 @@ mod tests {
         for (action, content) in [
             (
                 "manifest.stage_and_publish",
-                "- name: beta\n  transport: http\n  url: http://beta/mcp\n",
+                "- name: beta\n  transport: http\n  trust: internal\n  url: http://beta/mcp\n",
             ),
             (
                 "manifest.upsert_servers",
-                "- name: beta\n  transport: http\n  url: http://beta/mcp\n",
+                "- name: beta\n  transport: http\n  trust: internal\n  url: http://beta/mcp\n",
             ),
         ] {
             let preview = manifest_change_preview_for_request(

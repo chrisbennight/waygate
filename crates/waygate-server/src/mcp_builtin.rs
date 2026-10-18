@@ -2073,7 +2073,7 @@ mod tests {
     async fn action_context_returns_complete_live_manifest_selected_from_wire() {
         let dir = std::env::temp_dir().join(format!("mcp-action-context-{}", Uuid::new_v4()));
         let manifests = waygate_upstream::parse_manifest_set(
-            "- name: alpha\n  transport: http\n  url: http://alpha.example/mcp\n",
+            "- name: alpha\n  transport: http\n  trust: internal\n  url: http://alpha.example/mcp\n",
         )
         .expect("fixture manifest parses");
         waygate_upstream::write_manifest_set_to_dir(&dir, &manifests)
@@ -2153,7 +2153,7 @@ mod tests {
             "response binds the selected manifest to the complete live set",
         );
 
-        let candidate = "- name: alpha\n  transport: http\n  url: http://proposed.example/mcp\n";
+        let candidate = "- name: alpha\n  transport: http\n  trust: internal\n  url: http://proposed.example/mcp\n";
         let preview = t
             .call(
                 "preview_change",
@@ -2194,7 +2194,7 @@ mod tests {
         );
 
         let changed = waygate_upstream::parse_manifest_set(
-            "- name: alpha\n  transport: http\n  url: http://changed.example/mcp\n",
+            "- name: alpha\n  transport: http\n  trust: internal\n  url: http://changed.example/mcp\n",
         )
         .expect("changed fixture manifest parses");
         waygate_upstream::write_manifest_set_to_dir(&dir, &changed)

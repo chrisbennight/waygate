@@ -18,6 +18,7 @@ use rmcp::transport::streamable_http_client::{
 };
 use sse_stream::Sse;
 
+use waygate_manifest_types::IdentityTokenPolicy;
 use waygate_oidc::{ExchangeRequest, IdentityIssuer, Principal, TokenCache, TokenExchangeClient};
 
 /// Header we stamp on every upstream request that carries a caller's
@@ -50,8 +51,8 @@ pub struct ExchangeSettings {
 ///    arrived with. Fallback when no durable upstream session row
 ///    exists (or it's expired and refresh-on-demand isn't wired yet).
 ///
-/// Tier-B (`X-MCP-Identity` JWT) is unconditional and unaffected by
-/// the order above.
+/// Tier-B (`X-MCP-Identity` JWT) is governed by `token_policy` and
+/// unaffected by the order above.
 #[derive(Clone, Debug)]
 pub struct IdentityContext {
     pub principal: Principal,
@@ -91,6 +92,10 @@ pub struct IdentityContext {
     /// `Authorization`; manifest load refuses
     /// `tier_c_peer + exchange` together.
     pub tier_c_audience: Option<String>,
+    /// Whether this upstream receives the gateway-signed token in
+    /// `X-MCP-Identity`, and which optional claims the token carries,
+    /// resolved from the upstream's manifest.
+    pub token_policy: IdentityTokenPolicy,
 }
 
 /// Shared mailbox that `UpstreamPool::call_tool` fills in before invoking the
@@ -118,8 +123,9 @@ impl IdentityCell {
 /// headers. Holds the issuer + cell + (optional) RFC 8693 client and cache.
 ///
 /// Two modes depending on manifest config:
-///   * **Tier B (always on)**: mint a gateway-signed identity JWT and add it
-///     as `X-MCP-Identity`. Cheap, no network round-trip.
+///   * **Tier B (per server)**: mint a gateway-signed identity JWT and add it
+///     as `X-MCP-Identity` when the context's `token_policy` sends it. Cheap,
+///     no network round-trip.
 ///   * **Tier A (opt-in, requires an IdP that speaks RFC 8693)**: if the
 ///     caller's raw subject token is available and the upstream declares an
 ///     exchange audience, swap the token at the IdP and add the result as
@@ -172,59 +178,57 @@ impl IdentityAugmenter {
         let Some(ctx) = self.cell.get() else {
             return out;
         };
-        // Tier B: gateway-minted JWT. Always attempted — cheap, always works.
-        // When the manifest also
-        // set `tier_c_peer:`, mint the JWT with the PEER's
-        // audience and ALSO stamp it as `Authorization:
-        // Bearer` so the remote gateway's PeerJwtValidator
-        // (which only reads Authorization, not
-        // X-MCP-Identity) actually verifies it. The
-        // X-MCP-Identity copy is still emitted so any
-        // existing upstream that consumes that header
-        // continues to work in mixed deployments.
-        let mint_audience = ctx
-            .tier_c_audience
-            .as_deref()
-            .unwrap_or(ctx.audience.as_str());
-        match self.issuer.mint(&ctx.principal, mint_audience) {
-            Ok(jwt) => {
-                match HeaderValue::from_str(&jwt) {
-                    Ok(val) => {
-                        out.insert(IDENTITY_HEADER, val.clone());
-                    }
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        "identity jwt not a valid http header value — dropped",
-                    ),
-                }
-                if ctx.tier_c_audience.is_some() {
-                    // Tier-C: the same JWT goes onto
-                    // Authorization. The remote gateway's
-                    // PeerJwtValidator looks here, not at
-                    // X-MCP-Identity. Tier-A's exchange path
-                    // below is mutually exclusive with
-                    // Tier-C (enforced at manifest load), so
-                    // there's no conflict over Authorization.
-                    let bearer = format!("Bearer {jwt}");
-                    match HeaderValue::from_str(&bearer) {
-                        Ok(mut val) => {
-                            val.set_sensitive(true);
-                            out.insert(http::header::AUTHORIZATION, val);
-                            return out;
+        // Tier B: the gateway-signed JWT, minted when this upstream receives
+        // it in `X-MCP-Identity` or when a Tier C peer assertion needs it.
+        // With `tier_c_peer:` the JWT carries the PEER's audience and is ALSO
+        // stamped as `Authorization: Bearer`, because the remote gateway's
+        // PeerJwtValidator reads only Authorization. The manifest's claim
+        // selection applies to both placements.
+        let policy = ctx.token_policy;
+        if policy.send_header || ctx.tier_c_audience.is_some() {
+            let mint_audience = ctx
+                .tier_c_audience
+                .as_deref()
+                .unwrap_or(ctx.audience.as_str());
+            let principal = principal_for_token(&ctx.principal, policy);
+            match self.issuer.mint(&principal, mint_audience) {
+                Ok(jwt) => {
+                    if policy.send_header {
+                        match HeaderValue::from_str(&jwt) {
+                            Ok(val) => {
+                                out.insert(IDENTITY_HEADER, val);
+                            }
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                "identity jwt not a valid http header value — dropped",
+                            ),
                         }
-                        Err(e) => tracing::warn!(
-                            error = %e,
-                            "tier-c minted JWT not a valid bearer http header value — dropped",
-                        ),
+                    }
+                    if ctx.tier_c_audience.is_some() {
+                        // Tier-A's exchange path below is mutually exclusive
+                        // with Tier-C (enforced at manifest load), so there's
+                        // no conflict over Authorization.
+                        let bearer = format!("Bearer {jwt}");
+                        match HeaderValue::from_str(&bearer) {
+                            Ok(mut val) => {
+                                val.set_sensitive(true);
+                                out.insert(http::header::AUTHORIZATION, val);
+                                return out;
+                            }
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                "tier-c minted JWT not a valid bearer http header value — dropped",
+                            ),
+                        }
                     }
                 }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    audience = %mint_audience,
+                    principal = %ctx.principal.sub,
+                    "mint identity jwt failed — calling upstream without X-MCP-Identity",
+                ),
             }
-            Err(e) => tracing::warn!(
-                error = %e,
-                audience = %mint_audience,
-                principal = %ctx.principal.sub,
-                "mint identity jwt failed — calling upstream without X-MCP-Identity",
-            ),
         }
 
         // Tier A: stamp the Authorization header.
@@ -314,6 +318,25 @@ impl IdentityAugmenter {
         }
         out
     }
+}
+
+/// The principal as the token for one upstream may describe it: optional
+/// claims the upstream's manifest leaves out are removed before minting.
+fn principal_for_token(
+    principal: &Principal,
+    policy: IdentityTokenPolicy,
+) -> std::borrow::Cow<'_, Principal> {
+    if policy.include_email && policy.include_groups {
+        return std::borrow::Cow::Borrowed(principal);
+    }
+    let mut limited = principal.clone();
+    if !policy.include_email {
+        limited.email = None;
+    }
+    if !policy.include_groups {
+        limited.groups.clear();
+    }
+    std::borrow::Cow::Owned(limited)
 }
 
 /// Wraps an inner [`StreamableHttpClient`] and, whenever an [`IdentityCell`]
@@ -576,6 +599,7 @@ mod tests {
             stored_upstream_subject_token: None,
             exchanged_bearer: None,
             tier_c_audience: None,
+            token_policy: waygate_manifest_types::IdentityTokenPolicy::FULL,
         });
 
         client
@@ -711,6 +735,7 @@ mod tests {
             stored_upstream_subject_token: Some(stored.into()),
             exchanged_bearer: None,
             tier_c_audience: None,
+            token_policy: waygate_manifest_types::IdentityTokenPolicy::FULL,
         });
 
         let headers = aug.headers().await;
@@ -769,6 +794,7 @@ mod tests {
             stored_upstream_subject_token: None,
             exchanged_bearer: None,
             tier_c_audience: None,
+            token_policy: waygate_manifest_types::IdentityTokenPolicy::FULL,
         });
 
         let headers = aug.headers().await;
@@ -810,6 +836,7 @@ mod tests {
             stored_upstream_subject_token: None,
             exchanged_bearer: None,
             tier_c_audience: None,
+            token_policy: waygate_manifest_types::IdentityTokenPolicy::FULL,
         });
         cell.clear();
 
@@ -824,5 +851,113 @@ mod tests {
             .await
             .expect("post");
         assert!(captured.lock().unwrap().is_empty());
+    }
+
+    fn caller() -> Principal {
+        Principal {
+            sub: "user-a".into(),
+            email: Some("a@ex.test".into()),
+            groups: vec!["mcp-users".into()],
+            issuer: "https://auth.test/".into(),
+            scopes: vec!["mcp:invoke".into()],
+            tenant: waygate_core::TenantId::default(),
+            auth_method: waygate_oidc::AuthMethod::Oauth,
+            raw_token: None,
+            roles: vec![],
+            scim: None,
+            enrichment_blocked: None,
+            api_key_profile_restrictions: None,
+        }
+    }
+
+    fn context(
+        token_policy: IdentityTokenPolicy,
+        tier_c_audience: Option<&str>,
+    ) -> IdentityContext {
+        IdentityContext {
+            principal: caller(),
+            audience: "example-messages".into(),
+            exchange: None,
+            stored_upstream_subject_token: None,
+            exchanged_bearer: None,
+            tier_c_audience: tier_c_audience.map(str::to_owned),
+            token_policy,
+        }
+    }
+
+    fn decode_token(issuer: &IdentityIssuer, jwt: &str, audience: &str) -> IdentityClaims {
+        let key = DecodingKey::from_jwk(&issuer.jwks().keys[0]).unwrap();
+        let mut v = Validation::new(Algorithm::EdDSA);
+        v.set_issuer(&["https://mcp.test"]);
+        v.set_audience(&[audience]);
+        decode::<IdentityClaims>(jwt, &key, &v).unwrap().claims
+    }
+
+    /// An upstream whose manifest withholds the token receives no identity
+    /// header at all, even with a caller in the cell.
+    #[tokio::test]
+    async fn a_withheld_token_sends_no_identity_header() {
+        let cell = IdentityCell::new();
+        let augmenter = IdentityAugmenter::new(test_issuer(), cell.clone());
+        cell.set(context(
+            IdentityTokenPolicy {
+                send_header: false,
+                ..IdentityTokenPolicy::FULL
+            },
+            None,
+        ));
+
+        assert!(augmenter.headers().await.is_empty());
+    }
+
+    /// The token carries only the optional claims the manifest selects; the
+    /// subject is always present.
+    #[tokio::test]
+    async fn the_token_carries_only_the_selected_optional_claims() {
+        let issuer = test_issuer();
+        let cell = IdentityCell::new();
+        let augmenter = IdentityAugmenter::new(issuer.clone(), cell.clone());
+        cell.set(context(
+            IdentityTokenPolicy {
+                send_header: true,
+                include_email: false,
+                include_groups: false,
+            },
+            None,
+        ));
+
+        let headers = augmenter.headers().await;
+        let jwt = headers.get(&IDENTITY_HEADER).expect("token sent");
+        let claims = decode_token(&issuer, jwt.to_str().unwrap(), "example-messages");
+        assert_eq!(claims.sub, "user-a");
+        assert_eq!(claims.email, None);
+        assert!(claims.groups.is_empty());
+    }
+
+    /// A Tier C peer assertion still reaches `Authorization` when the manifest
+    /// withholds the `X-MCP-Identity` copy.
+    #[tokio::test]
+    async fn a_tier_c_assertion_survives_a_withheld_identity_header() {
+        let issuer = test_issuer();
+        let cell = IdentityCell::new();
+        let augmenter = IdentityAugmenter::new(issuer.clone(), cell.clone());
+        cell.set(context(
+            IdentityTokenPolicy {
+                send_header: false,
+                ..IdentityTokenPolicy::FULL
+            },
+            Some("https://peer.test"),
+        ));
+
+        let headers = augmenter.headers().await;
+        assert!(!headers.contains_key(&IDENTITY_HEADER));
+        let bearer = headers
+            .get(&http::header::AUTHORIZATION)
+            .expect("peer assertion on Authorization")
+            .to_str()
+            .unwrap();
+        let jwt = bearer.strip_prefix("Bearer ").expect("bearer scheme");
+        let claims = decode_token(&issuer, jwt, "https://peer.test");
+        assert_eq!(claims.sub, "user-a");
     }
 }

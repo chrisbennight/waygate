@@ -13,6 +13,7 @@
 # negotiation.
 name: modern-smoke
 transport: http
+trust: internal
 url: http://gw-smoke-upstream-2026:9000/mcp
 tools:
   - name: ping

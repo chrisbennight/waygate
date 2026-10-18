@@ -517,6 +517,9 @@ mod tests {
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,
+            trust: crate::TrustLevel::Internal,
+            identity: None,
+            forward_trace_context: None,
             session: None,
         }
     }
@@ -544,6 +547,9 @@ mod tests {
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,
+            trust: crate::TrustLevel::Internal,
+            identity: None,
+            forward_trace_context: None,
             session: None,
         }
     }

@@ -281,8 +281,9 @@ pub struct UpstreamManifest {
     pub long_running_tools: Vec<String>,
     /// Opt-in RFC 8693 token exchange. When set, the gateway swaps the
     /// caller's access token for a downscoped one audienced at this upstream
-    /// (Tier A identity chaining). Absence = Tier B (gateway-minted identity
-    /// JWT in `X-MCP-Identity`).
+    /// (Tier A identity chaining). Absence leaves only Tier B, the
+    /// gateway-minted identity JWT in `X-MCP-Identity`, which `trust` and
+    /// `identity` govern.
     #[serde(default)]
     pub exchange: Option<ExchangeConfig>,
     /// Opt-in fail-closed Tier-A invariant. When
@@ -358,6 +359,145 @@ pub struct UpstreamManifest {
     /// dial fails.
     #[serde(default)]
     pub session: Option<SessionConfig>,
+    /// How far the gateway trusts this upstream, which selects the defaults
+    /// for what it sends. See [`TrustLevel`]; an unclassified server is
+    /// `external`. Always serialized so a saved manifest states it.
+    #[serde(default)]
+    pub trust: TrustLevel,
+    /// Per-server control of the gateway-signed `X-MCP-Identity` token.
+    /// Absent ⇒ the trust classification's default. See [`IdentityForwarding`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentityForwarding>,
+    /// Forward W3C trace context, including caller baggage, in tool-call
+    /// `_meta`. Absent ⇒ forwarded to `internal` servers only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward_trace_context: Option<bool>,
+}
+
+/// How far the gateway trusts an upstream server.
+///
+/// The classification selects defaults for what the gateway sends the
+/// server; the specific per-server settings override them. It applies to
+/// network transports, except that trace forwarding also covers stdio
+/// because trace context travels in the request body.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    utoipa::ToSchema,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustLevel {
+    /// Part of the deployment, typically reached over its own network. It
+    /// receives the caller's identity token and trace context and may be
+    /// reached over plain HTTP.
+    Internal,
+    /// A hosted or third-party service. By default it receives neither the
+    /// identity token nor trace context, and its URL must use HTTPS.
+    #[default]
+    External,
+}
+
+impl TrustLevel {
+    /// Serialized manifest spelling, for error messages and admin views.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            TrustLevel::Internal => "internal",
+            TrustLevel::External => "external",
+        }
+    }
+}
+
+/// Per-server control of the gateway-signed identity token sent in
+/// `X-MCP-Identity`. The token always carries the caller's subject, the
+/// issuer, the audience, its times and the gateway as actor; `claims`
+/// selects which optional claims it also carries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityForwarding {
+    /// Send the token. Absent ⇒ on for `internal` servers, off for
+    /// `external` ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward: Option<bool>,
+    /// Optional claims to include. Absent ⇒ both `email` and `groups`; an
+    /// empty list sends the subject only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claims: Option<Vec<IdentityClaim>>,
+}
+
+/// An optional claim of the gateway-signed identity token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityClaim {
+    Email,
+    Groups,
+}
+
+/// The effective identity-token policy for one upstream, resolved from its
+/// manifest. The token is minted only when the gateway has a signing key and
+/// the transport carries headers; this policy decides the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityTokenPolicy {
+    /// Send the token in `X-MCP-Identity`. A Tier C peer assertion is still
+    /// minted for `Authorization` when this is off.
+    pub send_header: bool,
+    pub include_email: bool,
+    pub include_groups: bool,
+}
+
+impl IdentityTokenPolicy {
+    /// The optional claims the token carries when it is sent, by manifest
+    /// name; empty when the token is withheld or carries the subject only.
+    pub fn sent_claims(&self) -> Vec<&'static str> {
+        if !self.send_header {
+            return Vec::new();
+        }
+        let mut claims = Vec::new();
+        if self.include_email {
+            claims.push("email");
+        }
+        if self.include_groups {
+            claims.push("groups");
+        }
+        claims
+    }
+
+    /// The policy for an internal server with no overrides: send the header
+    /// with every optional claim.
+    pub const FULL: Self = Self {
+        send_header: true,
+        include_email: true,
+        include_groups: true,
+    };
+}
+
+impl UpstreamManifest {
+    /// The effective identity-token policy for this server.
+    pub fn identity_token_policy(&self) -> IdentityTokenPolicy {
+        let identity = self.identity.as_ref();
+        let send_header = identity
+            .and_then(|identity| identity.forward)
+            .unwrap_or(self.trust == TrustLevel::Internal);
+        let claims = identity.and_then(|identity| identity.claims.as_deref());
+        let includes = |claim| claims.is_none_or(|claims| claims.contains(&claim));
+        IdentityTokenPolicy {
+            send_header,
+            include_email: includes(IdentityClaim::Email),
+            include_groups: includes(IdentityClaim::Groups),
+        }
+    }
+
+    /// Whether tool calls to this server carry trace context and baggage.
+    pub fn forwards_trace_context(&self) -> bool {
+        self.forward_trace_context
+            .unwrap_or(self.trust == TrustLevel::Internal)
+    }
 }
 
 /// One upstream-owned resource URI space and its gateway classification.
@@ -1862,6 +2002,51 @@ pub fn validate_manifest_invariants(m: &UpstreamManifest) -> Result<(), Upstream
             )));
         }
     }
+    // An external server sits across a boundary the deployment does not
+    // control, so its credentials and any forwarded identity must travel over
+    // TLS. Internal servers on the deployment's own network may use plain HTTP.
+    if m.transport.supports_identity_forwarding() && m.trust == TrustLevel::External {
+        let https = m.url.as_deref().is_some_and(|u| u.starts_with("https://"));
+        if !https {
+            return Err(UpstreamError::InvalidManifest(format!(
+                "upstream `{}` is classified `external` (the default when `trust` is unset), so \
+                 its url must use `https://`. Set `trust: internal` for a server on the \
+                 deployment's own network, or use an `https://` url.",
+                m.name,
+            )));
+        }
+    }
+    let identity_policy = m.identity_token_policy();
+    if let Some(identity) = m.identity.as_ref() {
+        if !m.transport.supports_identity_forwarding() {
+            return Err(UpstreamError::InvalidManifest(format!(
+                "upstream `{}`: `identity:` has no effect on `transport: stdio` — a child process \
+                 receives no identity token. Remove the `identity:` block.",
+                m.name,
+            )));
+        }
+        if identity.claims.is_some() && !identity_policy.send_header && m.tier_c_peer.is_none() {
+            return Err(UpstreamError::InvalidManifest(format!(
+                "upstream `{}`: `identity.claims` has no effect because this server does not \
+                 receive the identity token. Set `identity.forward: true`, or remove \
+                 `identity.claims`.",
+                m.name,
+            )));
+        }
+    }
+    // Catalog probe groups reach the upstream only as the identity token's
+    // `groups` claim.
+    if !catalog_probe_groups.is_empty()
+        && !(identity_policy.send_header && identity_policy.include_groups)
+    {
+        return Err(UpstreamError::InvalidManifest(format!(
+            "upstream `{}`: `auth.catalog_probe_groups` is delivered as the identity token's \
+             `groups` claim, which this server does not receive. Forward the identity token \
+             with its `groups` claim (`trust: internal`, or `identity.forward: true`), or remove \
+             the groups.",
+            m.name,
+        )));
+    }
     Ok(())
 }
 
@@ -2449,6 +2634,7 @@ mod tests {
         let yaml = r#"
 name: example-messages
 transport: http
+trust: internal
 url: http://example-messages/mcp
 tools:
   - name: send
@@ -2483,6 +2669,9 @@ tools:
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,
+            trust: TrustLevel::Internal,
+            identity: None,
+            forward_trace_context: None,
             session: None,
         }
     }
@@ -2494,7 +2683,7 @@ tools:
     #[test]
     fn classification_mode_defaults_to_legacy_and_rejects_mixed_authority() {
         let parsed: UpstreamManifest = serde_yaml::from_str(
-            "name: example-messages\ntransport: http\nurl: http://example-messages/mcp\ntools: []\n",
+            "name: example-messages\ntransport: http\ntrust: internal\nurl: http://example-messages/mcp\ntools: []\n",
         )
         .unwrap();
         assert_eq!(parsed.classification_mode, ClassificationMode::Manifest);
@@ -2524,7 +2713,7 @@ tools:
 
     #[test]
     fn inline_response_threshold_is_an_optional_positive_server_setting() {
-        let yaml = "- name: example-search\n  transport: http\n  url: http://example-search.test/mcp\n  tools: []\n";
+        let yaml = "- name: example-search\n  transport: http\n  trust: internal\n  url: http://example-search.test/mcp\n  tools: []\n";
         let defaults = parse_manifest_set(yaml).unwrap();
         assert!(defaults["example-search"]
             .inline_response_threshold_bytes
@@ -2564,7 +2753,7 @@ tools:
 
     #[test]
     fn long_running_tools_are_optional_and_name_classified_tools_once() {
-        let yaml = "- name: example-search\n  transport: http\n  url: http://example-search.test/mcp\n  tools:\n    - name: index\n      risk: low\n    - name: lookup\n      risk: low\n";
+        let yaml = "- name: example-search\n  transport: http\n  trust: internal\n  url: http://example-search.test/mcp\n  tools:\n    - name: index\n      risk: low\n    - name: lookup\n      risk: low\n";
         let defaults = parse_manifest_set(yaml).unwrap();
         assert!(defaults["example-search"].long_running_tools.is_empty());
         assert!(
@@ -2594,7 +2783,7 @@ tools:
     #[test]
     fn approval_mode_defaults_to_per_call_and_policy_only_is_explicit() {
         let parsed: UpstreamManifest = serde_yaml::from_str(
-            "name: ordinary\ntransport: http\nurl: http://ordinary.test/mcp\ntools: []\n",
+            "name: ordinary\ntransport: http\ntrust: internal\nurl: http://ordinary.test/mcp\ntools: []\n",
         )
         .unwrap();
         assert_eq!(parsed.approval_mode, ApprovalMode::PerCall);
@@ -2902,7 +3091,7 @@ tools:
         // A human-authored, non-canonical filename for upstream `example-messages`.
         std::fs::write(
             dir.0.join("example-messages-prod.yaml"),
-            "name: example-messages\ntransport: http\nurl: http://example-messages/mcp\n",
+            "name: example-messages\ntransport: http\ntrust: internal\nurl: http://example-messages/mcp\n",
         )
         .unwrap();
         write_manifest_set_to_dir(&dir.0, &manifest_set(vec![named("example-messages")])).unwrap();
@@ -3089,7 +3278,7 @@ tools:
     fn parse_manifest_set_rejects_reserved_builtin_namespace() {
         // The whole-set path (bundle publish / SIGHUP) must reject it too.
         let doc = format!(
-            "- name: {}\n  transport: http\n  url: http://x/mcp\n",
+            "- name: {}\n  transport: http\n  trust: internal\n  url: http://x/mcp\n",
             waygate_core::RESERVED_BUILTIN_NAMESPACE,
         );
         match parse_manifest_set(&doc) {
@@ -3218,6 +3407,7 @@ tools:
         let yaml = "\
 name: komodo
 transport: http
+trust: internal
 url: http://komodo-mcp:3000/mcp
 auth:
   bearer_env: KOMODO_BEARER
@@ -3238,6 +3428,7 @@ auth:
         let without_groups = "\
 name: komodo
 transport: http
+trust: internal
 url: http://komodo-mcp:3000/mcp
 auth:
   bearer_env: KOMODO_BEARER
@@ -3475,6 +3666,7 @@ auth:
         let with = "\
 name: searxng
 transport: http
+trust: internal
 url: http://searxng/mcp
 session:
   concurrency: 2
@@ -3489,6 +3681,7 @@ session:
         let without = "\
 name: searxng
 transport: http
+trust: internal
 url: http://searxng/mcp
 ";
         let m: UpstreamManifest = serde_yaml::from_str(without).expect("parse without session");
@@ -3505,6 +3698,7 @@ url: http://searxng/mcp
         let per_call = "\
 name: searxng
 transport: http
+trust: internal
 url: http://searxng/mcp
 session:
   isolation: per_call
@@ -3518,6 +3712,7 @@ session:
         let reuse = "\
 name: searxng
 transport: http
+trust: internal
 url: http://searxng/mcp
 session:
   isolation: reuse
@@ -3532,6 +3727,7 @@ session:
         let conc_only = "\
 name: searxng
 transport: http
+trust: internal
 url: http://searxng/mcp
 session:
   concurrency: 1
@@ -3546,6 +3742,7 @@ session:
         let shared = "\
 name: example-messages
 transport: http
+trust: internal
 url: http://example-messages/mcp
 session:
   isolation: reuse
@@ -3719,9 +3916,11 @@ session:
         let doc = "\
 - name: dup
   transport: http
+  trust: internal
   url: http://a/mcp
 - name: dup
   transport: http
+  trust: internal
   url: http://b/mcp
 ";
         match parse_manifest_set(doc) {
@@ -3739,9 +3938,11 @@ session:
             "\
 - name: ok
   transport: http
+  trust: internal
   url: http://ok/mcp
 - name: bad
   transport: http
+  trust: internal
   url: http://bad/mcp
   tier_c_peer: {}
   exchange:
@@ -3791,8 +3992,8 @@ session:
         ];
         for (level, extra) in cases {
             let doc = format!(
-                "- name: ok\n  transport: http\n  url: http://ok/mcp\n\
-                 - name: misspelled\n  transport: http\n  url: http://misspelled/mcp\n{extra}"
+                "- name: ok\n  transport: http\n  trust: internal\n  url: http://ok/mcp\n\
+                 - name: misspelled\n  transport: http\n  trust: internal\n  url: http://misspelled/mcp\n{extra}"
             );
             match parse_manifest_set(&doc) {
                 Err(UpstreamError::ManifestEntry { server, source }) => {
@@ -3812,7 +4013,7 @@ session:
         let dir = TmpDir::new();
         std::fs::write(
             dir.0.join("typo.yaml"),
-            "name: typo\ntransport: http\nurl: http://typo/mcp\ntrnasport: sse\n",
+            "name: typo\ntransport: http\ntrust: internal\nurl: http://typo/mcp\ntrnasport: sse\n",
         )
         .unwrap();
         let error = load_manifests(&dir.0).unwrap_err().to_string();
@@ -3825,7 +4026,8 @@ session:
     /// A document with no usable `name` still fails, as a plain YAML error.
     #[test]
     fn parse_manifest_document_rejects_unknown_keys_without_a_name() {
-        let error = parse_manifest_document(b"transport: http\nbogus: 1\n").unwrap_err();
+        let error =
+            parse_manifest_document(b"transport: http\ntrust: internal\nbogus: 1\n").unwrap_err();
         assert!(matches!(error, UpstreamError::Yaml(_)), "{error:?}");
     }
 
@@ -3858,7 +4060,8 @@ mod protocol_field_tests {
     #[test]
     fn protocol_field_round_trips_and_validates() {
         let absent: UpstreamManifest =
-            serde_yaml::from_str("name: a\ntransport: http\nurl: http://u/mcp\n").expect("parse");
+            serde_yaml::from_str("name: a\ntransport: http\ntrust: internal\nurl: http://u/mcp\n")
+                .expect("parse");
         assert_eq!(absent.protocol, UpstreamProtocol::Auto);
         assert!(
             !serde_yaml::to_string(&absent)
@@ -3873,7 +4076,7 @@ mod protocol_field_tests {
             ("\"2026-07-28\"", UpstreamProtocol::V20260728),
         ] {
             let m: UpstreamManifest = serde_yaml::from_str(&format!(
-                "name: a\ntransport: http\nurl: http://u/mcp\nprotocol: {spelling}\n"
+                "name: a\ntransport: http\ntrust: internal\nurl: http://u/mcp\nprotocol: {spelling}\n"
             ))
             .expect("parse");
             assert_eq!(m.protocol, expected, "{spelling}");
@@ -3887,7 +4090,7 @@ mod protocol_field_tests {
         }
 
         let sse_modern: UpstreamManifest = serde_yaml::from_str(
-            "name: a\ntransport: sse\nurl: http://u/mcp\nprotocol: \"2026-07-28\"\n",
+            "name: a\ntransport: sse\ntrust: internal\nurl: http://u/mcp\nprotocol: \"2026-07-28\"\n",
         )
         .expect("parse");
         let err = validate_manifest_invariants(&sse_modern)
@@ -3898,7 +4101,8 @@ mod protocol_field_tests {
         );
 
         let sse_auto: UpstreamManifest =
-            serde_yaml::from_str("name: a\ntransport: sse\nurl: http://u/mcp\n").expect("parse");
+            serde_yaml::from_str("name: a\ntransport: sse\ntrust: internal\nurl: http://u/mcp\n")
+                .expect("parse");
         validate_manifest_invariants(&sse_auto)
             .expect("auto on sse is fine — it resolves to the legacy handshake");
     }
@@ -4043,5 +4247,170 @@ mod auth_method_tests {
         for absent in ["header:", "query:", "basic:", "headers:"] {
             assert!(!yaml.contains(absent), "{absent} in {yaml}");
         }
+    }
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+
+    fn parse(yaml: &str) -> Result<UpstreamManifest, UpstreamError> {
+        let manifest = parse_manifest_document(yaml.as_bytes())?;
+        validate_manifest_invariants(&manifest)?;
+        Ok(manifest)
+    }
+
+    fn invalid(yaml: &str) -> String {
+        match parse(yaml) {
+            Err(UpstreamError::InvalidManifest(message)) => message,
+            other => panic!("expected InvalidManifest, got {other:?}"),
+        }
+    }
+
+    /// An unclassified server is external: it gets neither the identity token
+    /// nor trace context, and must be reached over HTTPS.
+    #[test]
+    fn an_unclassified_server_is_external() {
+        let m = parse("name: hosted\ntransport: http\nurl: https://mcp.example.test/mcp\n")
+            .expect("an external https server loads");
+        assert_eq!(m.trust, TrustLevel::External);
+        assert!(!m.identity_token_policy().send_header);
+        assert!(!m.forwards_trace_context());
+    }
+
+    #[test]
+    fn an_external_server_must_use_https_on_every_network_transport() {
+        for transport in ["http", "sse"] {
+            let message = invalid(&format!(
+                "name: plain\ntransport: {transport}\nurl: http://plain.example.test/mcp\n"
+            ));
+            assert!(
+                message.contains("plain") && message.contains("trust: internal"),
+                "{transport}: {message}"
+            );
+        }
+    }
+
+    /// Internal servers keep the previous behavior: plain HTTP, the full
+    /// identity token, and trace context.
+    #[test]
+    fn an_internal_server_keeps_identity_trace_context_and_plain_http() {
+        let m = parse("name: lan\ntransport: http\ntrust: internal\nurl: http://lan:8000/mcp\n")
+            .expect("an internal plain-http server loads");
+        assert_eq!(m.identity_token_policy(), IdentityTokenPolicy::FULL);
+        assert!(m.forwards_trace_context());
+    }
+
+    /// A stdio server has no URL, so the HTTPS rule does not apply; trace
+    /// context still follows the classification because it rides the body.
+    #[test]
+    fn a_stdio_server_needs_no_https_and_follows_its_trace_default() {
+        let m = parse("name: local\ntransport: stdio\ncommand: [\"server\"]\n")
+            .expect("an unclassified stdio server loads");
+        assert!(!m.forwards_trace_context());
+        let m = parse(
+            "name: local\ntransport: stdio\ncommand: [\"server\"]\nforward_trace_context: true\n",
+        )
+        .expect("stdio may opt into trace context");
+        assert!(m.forwards_trace_context());
+    }
+
+    /// Per-server settings override the classification's defaults.
+    #[test]
+    fn identity_and_trace_settings_override_the_classification() {
+        let m = parse(
+            "name: hosted\ntransport: http\nurl: https://mcp.example.test/mcp\n\
+             identity:\n  forward: true\n  claims: [email]\nforward_trace_context: true\n",
+        )
+        .expect("an external server may opt in");
+        assert_eq!(
+            m.identity_token_policy(),
+            IdentityTokenPolicy {
+                send_header: true,
+                include_email: true,
+                include_groups: false,
+            }
+        );
+        assert!(m.forwards_trace_context());
+
+        let m = parse(
+            "name: lan\ntransport: http\ntrust: internal\nurl: http://lan/mcp\n\
+             identity:\n  forward: false\nforward_trace_context: false\n",
+        )
+        .expect("an internal server may opt out");
+        assert!(!m.identity_token_policy().send_header);
+        assert!(!m.forwards_trace_context());
+
+        let m = parse(
+            "name: lan\ntransport: http\ntrust: internal\nurl: http://lan/mcp\n\
+             identity:\n  claims: []\n",
+        )
+        .expect("an empty claim list sends the subject only");
+        let policy = m.identity_token_policy();
+        assert!(policy.send_header && !policy.include_email && !policy.include_groups);
+    }
+
+    #[test]
+    fn sent_claims_lists_the_optional_claims_only_when_the_token_is_sent() {
+        assert_eq!(IdentityTokenPolicy::FULL.sent_claims(), ["email", "groups"]);
+        let subject_only = IdentityTokenPolicy {
+            send_header: true,
+            include_email: false,
+            include_groups: false,
+        };
+        assert!(subject_only.sent_claims().is_empty());
+        let withheld = IdentityTokenPolicy {
+            send_header: false,
+            ..IdentityTokenPolicy::FULL
+        };
+        assert!(withheld.sent_claims().is_empty());
+    }
+
+    #[test]
+    fn settings_that_would_do_nothing_are_refused() {
+        let message = invalid(
+            "name: local\ntransport: stdio\ncommand: [\"server\"]\nidentity:\n  forward: true\n",
+        );
+        assert!(message.contains("identity:"), "{message}");
+
+        let message = invalid(
+            "name: hosted\ntransport: http\nurl: https://mcp.example.test/mcp\n\
+             identity:\n  claims: [email]\n",
+        );
+        assert!(message.contains("identity.claims"), "{message}");
+    }
+
+    /// Catalog probe groups ride the token's `groups` claim, so a server that
+    /// does not receive that claim cannot use them.
+    #[test]
+    fn catalog_probe_groups_require_the_forwarded_groups_claim() {
+        let external = invalid(
+            "name: hosted\ntransport: http\nurl: https://mcp.example.test/mcp\n\
+             auth:\n  catalog_probe_groups: [operators]\n",
+        );
+        assert!(external.contains("catalog_probe_groups"), "{external}");
+
+        let no_groups = invalid(
+            "name: lan\ntransport: http\ntrust: internal\nurl: http://lan/mcp\n\
+             identity:\n  claims: [email]\nauth:\n  catalog_probe_groups: [operators]\n",
+        );
+        assert!(no_groups.contains("catalog_probe_groups"), "{no_groups}");
+
+        parse(
+            "name: lan\ntransport: http\ntrust: internal\nurl: http://lan/mcp\n\
+             auth:\n  catalog_probe_groups: [operators]\n",
+        )
+        .expect("an internal server forwards the groups claim");
+    }
+
+    /// A saved manifest states its classification, even the default.
+    #[test]
+    fn the_classification_is_always_serialized() {
+        let m = parse("name: hosted\ntransport: http\nurl: https://mcp.example.test/mcp\n")
+            .expect("parse");
+        let yaml = serde_yaml::to_string(&m).expect("serialize");
+        assert!(yaml.contains("trust: external"), "{yaml}");
+        assert!(!yaml.contains("identity:"), "{yaml}");
+        assert!(!yaml.contains("forward_trace_context"), "{yaml}");
     }
 }

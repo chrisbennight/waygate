@@ -301,7 +301,7 @@ ones fire per upstream.
 
 | Tier | Header | When it fires | Source |
 |---|---|---|---|
-| **B** (always on for HTTP/SSE) | `X-MCP-Identity: <gw-minted JWT>` | Every identity-forwarding call and the bounded catalog-discovery handshake. | `IdentityIssuer::mint(principal, audience=server_name)` |
+| **B** (per server; on for `internal`, off for `external`) | `X-MCP-Identity: <gw-minted JWT>` | Every identity-forwarding call and the bounded catalog-discovery handshake, to an HTTP/SSE upstream whose manifest lets it receive the token. | `IdentityIssuer::mint(principal, audience=server_name)` |
 | **A** (opt-in via `exchange:`) | `Authorization: Bearer <downscoped IdP token>` | When the manifest has `exchange:` AND the caller has a stored upstream session OR `principal.raw_token`. | RFC 8693 token exchange against the upstream IdP. |
 | **C** (opt-in via `tier_c_peer:`) | `Authorization: Bearer <gw-minted peer JWT>` AND `X-MCP-Identity` copy | When the manifest has `tier_c_peer: <peer_id>` and the gateway has the peer's JWKS cached. | `IdentityIssuer::mint(principal, audience=peer.issuer)` — the SAME mint as Tier B, but audienced at the remote gateway. |
 
@@ -311,13 +311,21 @@ either of them with any `auth:` method that writes `Authorization`
 (`bearer_env`, `basic`, or a `header` named `Authorization`). `load_manifests` returns `UpstreamError::InvalidManifest`
 on conflict; the `--import-manifests` path runs the same check.
 
+Whether an upstream receives the Tier B token is a per-server setting. An
+`internal` server receives it by default and an `external` one does not; the
+manifest's `identity.forward` overrides that, and `identity.claims` selects
+which optional claims (`email`, `groups`) the token carries, so a server that
+needs only the subject can be given only the subject. The subject, issuer,
+audience, times and actor are always present. See
+[trust classification](upstreams.md#trust-classification).
+
 Every tier's headers go only to the configured upstream's scheme, host, and
 port. Upstream requests never follow redirects, and a legacy-SSE message
 endpoint on another origin fails the connection; see
 [upstream request destinations](upstreams.md#upstream-request-destinations).
 
 The initial `initialize` and `tools/list` exchange has no end-user caller. For
-Tier-B HTTP/SSE upstreams, the pool mints a dedicated
+HTTP/SSE upstreams that receive the Tier B token, the pool mints a dedicated
 `mcp-tool-search-gateway:catalog-probe` identity with no email, scopes, or user
 token. Its groups are empty by default. A manifest may set
 `auth.catalog_probe_groups` when the upstream role-filters `tools/list` and the
@@ -360,9 +368,11 @@ peer.issuer)`. The JWT is stamped as BOTH:
    federation round-trip never works.
 2. `X-MCP-Identity: <jwt>` — the legacy Tier-B header,
    emitted alongside so upstreams that consume it in mixed
-   deployments still see it.
+   deployments still see it, unless the manifest withholds the
+   Tier B token from this server.
 
-Both headers carry the SAME JWT; only the placement differs.
+Both headers carry the SAME JWT, with the manifest's claim
+selection applied; only the placement differs.
 
 Tier C ALSO refuses dispatch fail-closed when
 `!entry.forwards_identity` (no IdentityIssuer at boot) or

@@ -1518,7 +1518,7 @@ mod tests {
             axum::serve(listener, app).await.expect("serve test app");
         });
         let manifest: UpstreamManifest = serde_yaml::from_str(&format!(
-            "name: stalled-sse\ntransport: sse\nurl: http://{addr}/mcp/sse\n"
+            "name: stalled-sse\ntransport: sse\ntrust: internal\nurl: http://{addr}/mcp/sse\n"
         ))
         .expect("parse test manifest");
         let deadline = Duration::from_millis(100);
@@ -1561,7 +1561,7 @@ mod tests {
             axum::serve(listener, app).await.expect("serve test app");
         });
         let manifest: UpstreamManifest = serde_yaml::from_str(&format!(
-            "name: stalled-http\ntransport: http\nurl: http://{addr}/mcp\n"
+            "name: stalled-http\ntransport: http\ntrust: internal\nurl: http://{addr}/mcp\n"
         ))
         .expect("parse test manifest");
         let deadline = Duration::from_millis(100);
@@ -1674,7 +1674,11 @@ mod tests {
             .expect("test identity issuer"),
         );
         let cell = IdentityCell::new();
-        cell.set(crate::catalog_probe::catalog_probe_identity(server, &[]));
+        cell.set(crate::catalog_probe::catalog_probe_identity(
+            server,
+            &[],
+            crate::IdentityTokenPolicy::FULL,
+        ));
         (issuer, cell)
     }
 
@@ -1724,7 +1728,7 @@ mod tests {
             )
             .await;
             let manifest: UpstreamManifest = serde_yaml::from_str(&format!(
-                "name: redirecting-http\ntransport: http\nurl: http://{addr}/mcp\nauth:\n  bearer_env: {env}\n"
+                "name: redirecting-http\ntransport: http\ntrust: internal\nurl: http://{addr}/mcp\nauth:\n  bearer_env: {env}\n"
             ))
             .expect("parse test manifest");
             let (issuer, cell) = catalog_probe_forwarding(&manifest.name);
@@ -1794,7 +1798,7 @@ mod tests {
             };
             let (addr, server) = serve_test_app(app).await;
             let manifest: UpstreamManifest = serde_yaml::from_str(&format!(
-                "name: redirecting-sse\ntransport: sse\nurl: http://{addr}/mcp/sse\nauth:\n  bearer_env: {env}\n"
+                "name: redirecting-sse\ntransport: sse\ntrust: internal\nurl: http://{addr}/mcp/sse\nauth:\n  bearer_env: {env}\n"
             ))
             .expect("parse test manifest");
             let (issuer, cell) = catalog_probe_forwarding(&manifest.name);
@@ -1866,7 +1870,7 @@ mod tests {
         );
         let (addr, server) = serve_test_app(app).await;
         let manifest: UpstreamManifest = serde_yaml::from_str(&format!(
-            "name: relocating-sse\ntransport: sse\nurl: http://{addr}/mcp/sse\nauth:\n  bearer_env: {env}\n"
+            "name: relocating-sse\ntransport: sse\ntrust: internal\nurl: http://{addr}/mcp/sse\nauth:\n  bearer_env: {env}\n"
         ))
         .expect("parse test manifest");
         let (issuer, cell) = catalog_probe_forwarding(&manifest.name);
@@ -2214,7 +2218,7 @@ mod tests {
         std::fs::write(&cert_path, b"first-certificate").expect("write initial certificate");
         std::fs::write(&key_path, b"stable-private-key").expect("write private key");
         let mut manifest: UpstreamManifest = serde_yaml::from_str(
-            "name: mtls-version\ntransport: http\nurl: https://upstream.example/mcp\n",
+            "name: mtls-version\ntransport: http\ntrust: internal\nurl: https://upstream.example/mcp\n",
         )
         .expect("parse mTLS version manifest");
         manifest.mtls = Some(MtlsConfig {
@@ -2248,7 +2252,7 @@ mod tests {
     #[test]
     fn credential_material_version_bounds_non_regular_sources() {
         let mut manifest: UpstreamManifest = serde_yaml::from_str(
-            "name: mtls-device\ntransport: http\nurl: https://upstream.example/mcp\n",
+            "name: mtls-device\ntransport: http\ntrust: internal\nurl: https://upstream.example/mcp\n",
         )
         .expect("parse mTLS device manifest");
         manifest.mtls = Some(MtlsConfig {
@@ -2444,6 +2448,7 @@ mod tests {
         let yaml = r#"
 name: secure-svc
 transport: http
+trust: internal
 url: https://mcp.internal/mcp
 mtls:
   cert_path: /etc/gateway/secure-svc.crt
@@ -2471,6 +2476,7 @@ mtls:
         let yaml = r#"
 name: plain-http
 transport: http
+trust: internal
 url: https://mcp.example/mcp
 "#;
         let parsed: crate::UpstreamManifest = serde_yaml::from_str(yaml).expect("parse yaml");

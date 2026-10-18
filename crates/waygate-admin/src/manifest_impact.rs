@@ -1311,6 +1311,7 @@ mod tests {
     const ACTIVE: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   tools:
     - name: pii_tool
@@ -1330,6 +1331,7 @@ mod tests {
     const CANDIDATE: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   tools:
     - name: pii_tool
@@ -1397,6 +1399,7 @@ mod tests {
         const ACTIVE_RESOURCES: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   resources:
     - uri_prefix: bank://statements/
@@ -1405,6 +1408,7 @@ mod tests {
         const CANDIDATE_RESOURCES: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   resources:
     - uri_prefix: bank://statements/
@@ -1437,6 +1441,7 @@ mod tests {
         const CANDIDATE_RESOURCES: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   resources:
     - uri_prefix: bank://statements/
@@ -1463,6 +1468,7 @@ mod tests {
         const ACTIVE_RESOURCES: &str = "\
 - name: archive
   transport: http
+  trust: internal
   url: http://archive.local
   resources:
     - uri_prefix: bank://statements/
@@ -1471,6 +1477,7 @@ mod tests {
         const CANDIDATE_RESOURCES: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   resources:
     - uri_prefix: bank://statements/
@@ -1520,6 +1527,7 @@ mod tests {
         let active = "\
 - name: docs
   transport: http
+  trust: internal
   url: http://docs.local
   tools:
     - name: publish
@@ -1546,6 +1554,7 @@ mod tests {
         const ACTIVE_MANIFEST: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   tools:
     - name: read
@@ -1554,6 +1563,7 @@ mod tests {
         const ANNOTATION_CANDIDATE: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   classification_mode: mcp_annotations
   tools:
@@ -1672,6 +1682,7 @@ mod tests {
         const ACTIVE_LOW: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   tools:
     - name: risk_tool
@@ -1680,6 +1691,7 @@ mod tests {
         const CANDIDATE_LOW: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   tools:
     - name: risk_tool
@@ -1725,6 +1737,7 @@ mod tests {
         const ADDED_PII: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   tools:
     - name: sensitive_search
@@ -1785,6 +1798,7 @@ mod tests {
         const ACTIVE_OPERATION: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   tools:
     - name: executor
@@ -1799,6 +1813,7 @@ mod tests {
         const CANDIDATE_OPERATION: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   tools:
     - name: executor
@@ -1853,6 +1868,7 @@ mod tests {
         const ACTIVE_DISCRIMINATOR: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   tools:
     - name: executor
@@ -1865,6 +1881,7 @@ mod tests {
         const CANDIDATE_DISCRIMINATOR: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   tools:
     - name: executor
@@ -1894,6 +1911,7 @@ mod tests {
         const ACTIVE_OPERATION: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   tools:
     - name: executor
@@ -1906,6 +1924,7 @@ mod tests {
         const CANDIDATE_OPERATION: &str = "\
 - name: bank
   transport: http
+  trust: internal
   url: http://bank.local
   tools:
     - name: executor
@@ -1955,7 +1974,7 @@ mod tests {
     #[test]
     fn prospective_sample_deduplicates_and_bounds_both_axes() {
         let mut candidate =
-            String::from("- name: bank\n  transport: http\n  url: http://bank.local\n  tools:\n");
+            String::from("- name: bank\n  transport: http\n  trust: internal\n  url: http://bank.local\n  tools:\n");
         for index in 0..(PROSPECTIVE_TARGET_LIMIT + 2) {
             candidate.push_str(&format!("    - name: tool_{index}\n      risk: low\n"));
         }

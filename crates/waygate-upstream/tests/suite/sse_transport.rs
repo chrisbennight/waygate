@@ -543,6 +543,7 @@ fn identity_augmenter_with_context() -> IdentityAugmenter {
         stored_upstream_subject_token: None,
         exchanged_bearer: None,
         tier_c_audience: None,
+        token_policy: waygate_upstream::IdentityTokenPolicy::FULL,
     });
     augmenter
 }
