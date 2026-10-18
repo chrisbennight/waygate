@@ -72,7 +72,7 @@ async fn state_with_manifest_impact_request(
     let exemplar = candidate.tools[0].clone();
     let operation_fixture = (!annotation_native).then(|| {
         let mut fixture = waygate_upstream::parse_manifest_set(
-            "- name: operation-fixture\n  transport: http\n  url: http://fixture.local\n  tools:\n    - name: executor\n      risk: low\n      discriminator: operation\n      operations:\n        - value: search\n          risk: low\n",
+            "- name: operation-fixture\n  transport: http\n  trust: internal\n  url: http://fixture.local\n  tools:\n    - name: executor\n      risk: low\n      discriminator: operation\n      operations:\n        - value: search\n          risk: low\n",
         )
         .expect("operation manifest fixture parses");
         let mut manifest = fixture

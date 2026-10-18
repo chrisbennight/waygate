@@ -561,6 +561,9 @@ fn manifest(addr: std::net::SocketAddr, isolation: Option<SessionIsolation>) -> 
         tier_c_peer: None,
         // concurrency: 1 ⇒ exactly one boot session, so the init counter is
         // unambiguous.
+        trust: waygate_upstream::TrustLevel::Internal,
+        identity: None,
+        forward_trace_context: None,
         session: Some(SessionConfig {
             concurrency: Some(1),
             isolation,
@@ -2310,4 +2313,125 @@ async fn busy_reuse_upstream_runs_extra_calls_on_fresh_sessions() {
         .await
         .unwrap_or_else(|error| panic!("reuse call failed: {error}"));
     assert_eq!(rig.inits.load(Ordering::SeqCst), lanes + EXTRA);
+}
+
+/// A server whose manifest withholds the identity token receives it on no
+/// request: neither the discovery probe nor a caller's dispatch.
+#[tokio::test]
+async fn a_withheld_identity_token_reaches_neither_discovery_nor_calls() {
+    let (addr, _, captured) = spawn_mock_upstream_with_identity_requirement(false).await;
+    let mut withheld = manifest(addr, None);
+    withheld.identity = Some(waygate_upstream::IdentityForwarding {
+        forward: Some(false),
+        claims: None,
+    });
+    let mut manifests = BTreeMap::new();
+    manifests.insert("mock".into(), withheld);
+
+    let pool = UpstreamPool::connect_with_identity(manifests, test_identity_issuer()).await;
+    assert!(pool.is_connected("mock").await);
+    let caller = waygate_oidc::Principal {
+        sub: "user-a".into(),
+        email: Some("a@example.test".into()),
+        groups: vec!["operators".into()],
+        issuer: "https://auth.example.test/".into(),
+        scopes: vec!["mcp:invoke".into()],
+        tenant: waygate_core::TenantId::default(),
+        auth_method: waygate_oidc::AuthMethod::Oauth,
+        raw_token: None,
+        roles: vec![],
+        scim: None,
+        enrichment_blocked: None,
+        api_key_profile_restrictions: None,
+    };
+    pool.call_tool("mock", "noop", None, Some(&caller), None)
+        .await
+        .expect("the call reaches the upstream");
+
+    assert!(
+        captured.tokens.lock().unwrap().is_empty(),
+        "no request to a server that withholds identity may carry the token",
+    );
+}
+
+fn forwarding_caller() -> waygate_oidc::Principal {
+    waygate_oidc::Principal {
+        sub: "user-a".into(),
+        email: Some("a@example.test".into()),
+        groups: vec!["operators".into()],
+        issuer: "https://auth.example.test/".into(),
+        scopes: vec!["mcp:invoke".into()],
+        tenant: waygate_core::TenantId::default(),
+        auth_method: waygate_oidc::AuthMethod::Oauth,
+        raw_token: None,
+        roles: vec![],
+        scim: None,
+        enrichment_blocked: None,
+        api_key_profile_restrictions: None,
+    }
+}
+
+fn withholding(mut m: UpstreamManifest) -> UpstreamManifest {
+    m.identity = Some(waygate_upstream::IdentityForwarding {
+        forward: Some(false),
+        claims: None,
+    });
+    m
+}
+
+/// Withholding identity on a running server takes effect on reload, without
+/// waiting for a reconnect.
+#[tokio::test]
+async fn a_reload_that_withholds_identity_stops_the_token_on_the_next_call() {
+    let (addr, _, captured) = spawn_mock_upstream_with_identity_requirement(false).await;
+    let mut manifests = BTreeMap::new();
+    manifests.insert("mock".into(), manifest(addr, None));
+    let pool = UpstreamPool::connect_with_identity(manifests.clone(), test_identity_issuer()).await;
+    let caller = forwarding_caller();
+    pool.call_tool("mock", "noop", None, Some(&caller), None)
+        .await
+        .expect("first call");
+    let before = captured.tokens.lock().unwrap().len();
+    assert!(before > 0, "an internal server receives the token");
+
+    manifests.insert("mock".into(), withholding(manifest(addr, None)));
+    let report = pool.reload_manifests(&manifests).await;
+    assert_eq!(report.identity_updated, vec!["mock".to_owned()]);
+    assert!(
+        report.redialed.is_empty(),
+        "a policy change needs no re-dial"
+    );
+
+    pool.call_tool("mock", "noop", None, Some(&caller), None)
+        .await
+        .expect("call after reload");
+    assert_eq!(
+        captured.tokens.lock().unwrap().len(),
+        before,
+        "no request after the reload may carry the token",
+    );
+}
+
+/// A reload that moves the server and withholds identity in one step must
+/// never pair the new address with the old policy.
+#[tokio::test]
+async fn a_reload_that_moves_the_server_applies_its_policy_with_the_new_connection() {
+    let (old_addr, _, _) = spawn_mock_upstream_with_identity_requirement(false).await;
+    let (new_addr, _, new_captured) = spawn_mock_upstream_with_identity_requirement(false).await;
+    let mut manifests = BTreeMap::new();
+    manifests.insert("mock".into(), manifest(old_addr, None));
+    let pool = UpstreamPool::connect_with_identity(manifests.clone(), test_identity_issuer()).await;
+
+    manifests.insert("mock".into(), withholding(manifest(new_addr, None)));
+    let report = pool.reload_manifests(&manifests).await;
+    assert_eq!(report.redialed, vec!["mock".to_owned()]);
+    assert_eq!(report.identity_updated, vec!["mock".to_owned()]);
+
+    pool.call_tool("mock", "noop", None, Some(&forwarding_caller()), None)
+        .await
+        .expect("call on the moved server");
+    assert!(
+        new_captured.tokens.lock().unwrap().is_empty(),
+        "the moved server must receive no identity token",
+    );
 }

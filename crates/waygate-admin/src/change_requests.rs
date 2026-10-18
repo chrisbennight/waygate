@@ -1857,7 +1857,8 @@ mod tests {
     fn a_full_manifest_set_no_longer_hits_the_scalar_params_ceiling() {
         // The concrete regression: a real manifest set outgrew the scalar
         // default and could not be proposed at all, by upload or inline.
-        let content = "- name: example-messages\n  transport: http\n".repeat(1_000);
+        let content =
+            "- name: example-messages\n  transport: http\n  trust: internal\n".repeat(1_000);
         let params = serde_json::json!({ "base_hash": "h", "content": content });
         let serialized_len = serde_json::to_vec(&params).unwrap().len();
         assert!(

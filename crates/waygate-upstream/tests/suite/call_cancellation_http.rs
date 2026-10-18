@@ -137,6 +137,9 @@ fn manifest(
         mtls: None,
         tier_a_required: false,
         tier_c_peer: None,
+        trust: waygate_upstream::TrustLevel::Internal,
+        identity: None,
+        forward_trace_context: None,
         session: Some(SessionConfig {
             concurrency: Some(1),
             isolation: Some(isolation),

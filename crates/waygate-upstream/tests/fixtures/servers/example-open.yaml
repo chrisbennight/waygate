@@ -4,6 +4,7 @@
 # shapes in the parse test.
 name: example-open
 transport: http
+trust: internal
 url: http://example.test/mcp
 tools:
   - name: ping

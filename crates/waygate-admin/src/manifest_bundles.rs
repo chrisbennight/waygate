@@ -903,6 +903,7 @@ mod tests {
     const S0: &str = "\
 - name: alpha
   transport: http
+  trust: internal
   url: http://alpha/mcp
 ";
 
@@ -918,7 +919,7 @@ mod tests {
         };
 
         // Upsert a NEW server `beta`.
-        let upsert = "- name: beta\n  transport: http\n  url: http://beta/mcp\n";
+        let upsert = "- name: beta\n  transport: http\n  trust: internal\n  url: http://beta/mcp\n";
         let (merged, base_hash) =
             merge_upserts_into_live_set(&state, upsert).expect("merge succeeds");
 
@@ -949,7 +950,8 @@ mod tests {
 
         // Upsert `alpha` with a new url — replaces the existing entry by name,
         // does not duplicate it.
-        let upsert = "- name: alpha\n  transport: http\n  url: http://alpha-v2/mcp\n";
+        let upsert =
+            "- name: alpha\n  transport: http\n  trust: internal\n  url: http://alpha-v2/mcp\n";
         let (merged, _base) = merge_upserts_into_live_set(&state, upsert).expect("merge succeeds");
 
         let set = waygate_upstream::parse_manifest_set(&merged).unwrap();
@@ -968,9 +970,11 @@ mod tests {
             "\
 - name: alpha
   transport: http
+  trust: internal
   url: http://alpha/mcp
 - name: beta
   transport: http
+  trust: internal
   url: http://beta/mcp
 ",
         );

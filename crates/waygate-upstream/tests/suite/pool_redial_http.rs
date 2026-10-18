@@ -461,6 +461,9 @@ fn manifest_at(addr: std::net::SocketAddr) -> UpstreamManifest {
         mtls: None,
         tier_a_required: false,
         tier_c_peer: None,
+        trust: waygate_upstream::TrustLevel::Internal,
+        identity: None,
+        forward_trace_context: None,
         session: Some(SessionConfig {
             concurrency: Some(1),
             isolation: Some(SessionIsolation::Reuse),

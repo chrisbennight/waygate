@@ -82,6 +82,9 @@ fn shape_manifest(transport: Transport, concurrency: Option<usize>) -> UpstreamM
         mtls: None,
         tier_a_required: false,
         tier_c_peer: None,
+        trust: crate::TrustLevel::Internal,
+        identity: None,
+        forward_trace_context: None,
         session: concurrency.map(|c| SessionConfig {
             concurrency: Some(c),
             ..Default::default()
@@ -359,6 +362,9 @@ fn pool_with_manifest_tool() -> UpstreamPool {
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,
+            trust: crate::TrustLevel::Internal,
+            identity: None,
+            forward_trace_context: None,
             session: None,
         },
     );
@@ -391,6 +397,9 @@ fn annotation_native_tool_facts_stay_conservative_until_policy_enforcement() {
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,
+            trust: crate::TrustLevel::Internal,
+            identity: None,
+            forward_trace_context: None,
             session: None,
         },
     );
@@ -625,6 +634,9 @@ async fn catalog_transition_fence_tracks_generation_without_erasing_catalog_over
                 mtls: None,
                 tier_a_required: false,
                 tier_c_peer: None,
+                trust: crate::TrustLevel::Internal,
+                identity: None,
+                forward_trace_context: None,
                 session: None,
             },
         );
@@ -1464,6 +1476,9 @@ fn manifest_with(tier_a_required: bool) -> UpstreamManifest {
         mtls: None,
         tier_a_required,
         tier_c_peer: None,
+        trust: crate::TrustLevel::Internal,
+        identity: None,
+        forward_trace_context: None,
         session: None,
     }
 }
@@ -2795,6 +2810,9 @@ async fn boot_dial_timeout_bounds_a_hung_upstream() {
         mtls: None,
         tier_a_required: false,
         tier_c_peer: None,
+        trust: crate::TrustLevel::Internal,
+        identity: None,
+        forward_trace_context: None,
         session: None,
     };
     let (slots, error_class) =

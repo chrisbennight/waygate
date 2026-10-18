@@ -749,14 +749,16 @@ pub(super) fn require_complete(
 ///
 /// The MRTR retry payload (SEP-2322) — the caller's answers and the
 /// upstream's opaque `requestState` — is forwarded exactly as received; the
-/// gateway neither inspects nor rewrites it. W3C trace context rides
-/// `params._meta` so the upstream continues this trace (OTel MCP semconv);
-/// injection writes nothing when no tracer provider is installed.
+/// gateway neither inspects nor rewrites it. When the upstream's manifest
+/// allows it, W3C trace context and caller baggage ride `params._meta` so the
+/// upstream continues this trace (OTel MCP semconv); injection writes nothing
+/// when no tracer provider is installed.
 pub(super) fn build_call_params(
     tool_name: &str,
     args: Option<Map<String, Value>>,
     input_responses: Option<rmcp::model::InputResponses>,
     request_state: Option<String>,
+    forward_trace_context: bool,
 ) -> rmcp::model::CallToolRequestParams {
     let mut params = rmcp::model::CallToolRequestParams::new(tool_name.to_owned());
     if let Some(a) = args {
@@ -768,10 +770,12 @@ pub(super) fn build_call_params(
     if let Some(state) = request_state {
         params = params.with_request_state(state);
     }
-    let mut meta = rmcp::model::RequestMetaObject::new();
-    waygate_telemetry::propagation::inject_span(&tracing::Span::current(), &mut meta.0);
-    if !meta.0.is_empty() {
-        params.set_meta(meta);
+    if forward_trace_context {
+        let mut meta = rmcp::model::RequestMetaObject::new();
+        waygate_telemetry::propagation::inject_span(&tracing::Span::current(), &mut meta.0);
+        if !meta.0.is_empty() {
+            params.set_meta(meta);
+        }
     }
     params
 }
@@ -1150,9 +1154,10 @@ mod tests {
         // caller-supplied retry fields must never force a lifecycle the
         // configuration disabled. `auto` (and explicit 2026) admit the
         // continuation, whose dial is then pinned.
-        let auto: crate::UpstreamManifest =
-            serde_yaml::from_str("name: mock\ntransport: http\nurl: http://127.0.0.1:1/mcp\n")
-                .expect("manifest parses");
+        let auto: crate::UpstreamManifest = serde_yaml::from_str(
+            "name: mock\ntransport: http\ntrust: internal\nurl: http://127.0.0.1:1/mcp\n",
+        )
+        .expect("manifest parses");
         assert!(manifest_continuation_refusal("mock", true, &auto).is_none());
         assert!(manifest_continuation_refusal("mock", false, &auto).is_none());
 
@@ -1161,17 +1166,19 @@ mod tests {
         assert!(manifest_continuation_refusal("mock", true, &legacy).is_some());
         assert!(manifest_continuation_refusal("mock", false, &legacy).is_none());
 
-        let sse: crate::UpstreamManifest =
-            serde_yaml::from_str("name: mock\ntransport: sse\nurl: http://127.0.0.1:1/sse\n")
-                .expect("sse manifest parses");
+        let sse: crate::UpstreamManifest = serde_yaml::from_str(
+            "name: mock\ntransport: sse\ntrust: internal\nurl: http://127.0.0.1:1/sse\n",
+        )
+        .expect("sse manifest parses");
         assert!(manifest_continuation_refusal("mock", true, &sse).is_some());
     }
 
     #[test]
     fn pinned_manifest_requires_discovery() {
-        let manifest: crate::UpstreamManifest =
-            serde_yaml::from_str("name: mock\ntransport: http\nurl: http://127.0.0.1:1/mcp\n")
-                .expect("minimal manifest parses");
+        let manifest: crate::UpstreamManifest = serde_yaml::from_str(
+            "name: mock\ntransport: http\ntrust: internal\nurl: http://127.0.0.1:1/mcp\n",
+        )
+        .expect("minimal manifest parses");
         assert_eq!(
             pinned_2026_manifest(&manifest).protocol,
             crate::UpstreamProtocol::V20260728,
