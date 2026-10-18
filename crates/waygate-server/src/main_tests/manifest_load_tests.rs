@@ -69,9 +69,18 @@ fn disk_not_drifted_for_noncanonical_equivalent_active() {
 }
 
 #[test]
-fn disk_not_drifted_when_active_content_unparseable() {
-    // Don't synthesize a convergence row off an unparseable ledger row.
-    assert!(!super::disk_drifted_from_active(
+fn disk_drifted_when_active_content_no_longer_parses() {
+    // A draft stored verbatim before manifests became strict can carry a key
+    // the schema now rejects. Disk loaded cleanly, so it must read as drift:
+    // that records a readable snapshot for ledger recovery instead of leaving
+    // the unreadable row active forever.
+    let disk = "- name: a\n  transport: http\n  url: http://a/mcp\n";
+    let legacy_active = "- name: a\n  transport: http\n  url: http://a/mcp\n  obsolete_key: 1\n";
+    assert!(super::disk_drifted_from_active(
+        legacy_active,
+        &canon_hash(disk)
+    ));
+    assert!(super::disk_drifted_from_active(
         "this is not: [[[ valid manifest yaml",
         &content_hash("whatever"),
     ));

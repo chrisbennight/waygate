@@ -713,14 +713,17 @@ pub(crate) async fn ensure_manifest_snapshot_ready_for_boot(
 /// (`content_hash(serialize_manifest_set(parse_manifest_set(_)))`) so a
 /// published row that stored a *non-canonical* raw serialization doesn't read as
 /// drift on every reload — the same canonical subtlety as the turnstile.
-/// Returns `false` when the active content can't parse: don't synthesize
-/// a convergence row off an unparseable ledger row.
+/// Returns `true` when the active content no longer parses, for example a
+/// draft stored verbatim with a key the strict schema now rejects: the disk
+/// set was just loaded under the current schema, so recording it gives ledger
+/// recovery a snapshot it can read again, and the disk set must not be
+/// reported as matching an unreadable version.
 pub(crate) fn disk_drifted_from_active(active_content: &str, disk_hash: &str) -> bool {
     match waygate_upstream::parse_manifest_set(active_content)
         .and_then(|s| waygate_upstream::serialize_manifest_set(&s))
     {
         Ok(c) => waygate_manifest_store::content_hash(&c) != disk_hash,
-        Err(_) => false,
+        Err(_) => true,
     }
 }
 

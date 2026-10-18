@@ -65,7 +65,7 @@ fn load_manifests_lenient(dir: &Path) -> std::io::Result<LenientLoad> {
                 continue;
             }
         };
-        match serde_yaml::from_slice::<UpstreamManifest>(&bytes) {
+        match waygate_upstream::parse_manifest_document(&bytes) {
             Ok(m) => {
                 // Enforce the same manifest invariants the normal
                 // `load_manifests` path enforces. Without
