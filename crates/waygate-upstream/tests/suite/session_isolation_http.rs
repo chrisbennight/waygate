@@ -55,9 +55,9 @@ use waygate_mcp::{
 };
 use waygate_oidc::{IdentityClaims, IdentityIssuer};
 use waygate_upstream::{
-    tool_behavior_hash, ClassificationMode, SessionConfig, SessionIsolation, SessionScope,
-    ToolClassification, Transport, UpstreamAuth, UpstreamManifest, UpstreamPool, UpstreamProtocol,
-    IDENTITY_HEADER,
+    tool_behavior_hash, ClassificationMode, ResourceClassification, SessionConfig,
+    SessionIsolation, SessionScope, ToolClassification, Transport, UpstreamAuth, UpstreamManifest,
+    UpstreamPool, UpstreamProtocol, IDENTITY_HEADER,
 };
 
 use super::test_identity_issuer;
@@ -1021,12 +1021,20 @@ async fn closing_the_pool_ends_every_lane_session() {
 #[tokio::test]
 async fn native_response_limit_provenance_survives_rmcp_transport_erasure() {
     let (addr, _) = spawn_mock_upstream().await;
-    let pool = connect_legacy(addr, Some(SessionIsolation::Reuse)).await;
+    let mut declared = legacy(manifest(addr, Some(SessionIsolation::Reuse)));
+    declared.resources = vec![ResourceClassification {
+        uri_prefix: "mock://".to_owned(),
+        risk: RiskTier::Low,
+    }];
+    let pool = UpstreamPool::connect(BTreeMap::from([("mock".to_owned(), declared)])).await;
     let routing = pool.resource_routing_snapshot().await;
     let admission = ResourceReadAdmission {
         generation: routing.generation,
         server: "mock".to_owned(),
-        claim: None,
+        claim: waygate_mcp::catalog::ResourceClaim {
+            uri_prefix: "mock://".to_owned(),
+            risk: RiskTier::Low,
+        },
     };
 
     let mut bounded = ReadResourceRequestParams::new("mock://guide");

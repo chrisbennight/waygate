@@ -1175,6 +1175,19 @@ async fn dial(
     let negotiated_protocol = peer_info.as_ref().map(|i| i.protocol_version.to_string());
     let resource_capability_advertised =
         peer_info.is_some_and(|i| i.capabilities.resources.is_some());
+    // Resource reads and listings reach an upstream only through prefixes its
+    // manifest declares, so an upstream that offers resources without any
+    // declaration is unreachable for them. Say so where the operator sees it.
+    if resource_capability_advertised
+        && manifest.resources.is_empty()
+        && resources::manifest_supports_resource_operations(manifest)
+    {
+        tracing::warn!(
+            server = %manifest.name,
+            "upstream advertises MCP resources but its manifest declares no resource prefix; \
+             the gateway does not route resource reads or listings to it",
+        );
+    }
     Ok(Connection {
         client: connected.service,
         network_destination: connected.network_destination,

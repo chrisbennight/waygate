@@ -1,5 +1,16 @@
 # Release notes
 
+## Unreleased
+
+- **Breaking for undeclared resource upstreams:** native resource reads and
+  listings reach an upstream only through `resources` URI prefixes declared in
+  its manifest. The gateway no longer finds a resource's owner by asking
+  upstreams what they list, because an upstream could list another upstream's
+  URIs and receive its reads. Before upgrading, declare a prefix for every
+  upstream whose resources should stay readable; the gateway logs a warning
+  for an upstream that advertises resources without one. See
+  [upstreams](agents/upstreams.md).
+
 ## 1.1.0
 
 - Persist review and quarantine of changed upstream tool contracts, with a

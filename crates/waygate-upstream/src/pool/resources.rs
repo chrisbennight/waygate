@@ -264,14 +264,12 @@ impl UpstreamPool {
             .entry(server)
             .map_err(AdmittedResourceReadError::Upstream)?;
         let manifest = entry.manifest_snapshot();
-        let identity_matches = match admitted.claim.as_ref() {
-            Some(claim) => manifest.resources.iter().any(|current| {
-                current.uri_prefix == claim.uri_prefix
-                    && current.risk == claim.risk
-                    && params.uri.starts_with(&current.uri_prefix)
-            }),
-            None => manifest.resources.is_empty(),
-        };
+        let claim = &admitted.claim;
+        let identity_matches = manifest.resources.iter().any(|current| {
+            current.uri_prefix == claim.uri_prefix
+                && current.risk == claim.risk
+                && params.uri.starts_with(&current.uri_prefix)
+        });
         if !identity_matches {
             return Err(AdmittedResourceReadError::RoutingChanged);
         }

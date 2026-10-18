@@ -451,22 +451,17 @@ fn ambiguous_resource(uri: &str) -> McpError {
     )
 }
 
-/// Why the gateway could not determine which upstreams serve a URI. `detail`
-/// can name another upstream and its connection state, so it goes to the
-/// audit row and the log, never to the caller.
-struct OwnerLookupFailure {
-    detail: String,
-    /// Whether the same lookup can succeed later without a configuration
-    /// change: an unreachable upstream or a missed deadline can recover, while
-    /// an exhausted page budget or a repeating cursor recurs.
-    retryable: bool,
+/// Whether `uri` starts with one of an upstream's declared resource prefixes.
+fn within_declared_prefixes(uri: &str, claims: &[ResourceClaim]) -> bool {
+    claims
+        .iter()
+        .any(|claim| uri.starts_with(&claim.uri_prefix))
 }
 
-/// The caller's answer when owner lookup fails. It names only the URI the
-/// caller asked for and says the read was not sent, so it cannot be mistaken
-/// for an answer from whichever upstream failed. `trace_id` ties it to the
-/// audit row and log line that record the cause.
-fn owner_lookup_failed(uri: &str, retryable: bool, trace_id: &str) -> McpError {
+/// The caller's answer when owner lookup misses its deadline. It names only
+/// the URI the caller asked for and says the read was not sent. `trace_id`
+/// ties it to the audit row and log line that record the cause.
+fn owner_lookup_failed(uri: &str, trace_id: &str) -> McpError {
     McpError::internal_error(
         format!(
             "could not determine which upstream serves resource `{uri}`, so the read was not \
@@ -474,7 +469,7 @@ fn owner_lookup_failed(uri: &str, retryable: bool, trace_id: &str) -> McpError {
         ),
         Some(json!({
             "error": "resource_owner_lookup_failed",
-            "retryable": retryable,
+            "retryable": true,
             "trace_id": trace_id,
         })),
     )
@@ -1388,10 +1383,15 @@ impl GatewayServer {
         visible
     }
 
+    /// Upstreams whose resources this caller can list: they declare at least
+    /// one resource prefix, support resource operations, and are visible to
+    /// the caller. An upstream that declares nothing has no readable
+    /// resources, so it is not asked to list any.
     async fn visible_resource_servers(&self, principal: Option<&Principal>) -> Vec<String> {
         self.visible_upstream_servers(principal)
             .await
             .into_iter()
+            .filter(|server| !self.catalog.resource_claims(server).is_empty())
             .filter(|server| {
                 !principal.is_some_and(|principal| profile_blocks_resources(principal, server))
             })
@@ -1515,6 +1515,7 @@ impl GatewayServer {
             };
 
         for (index, server) in servers.iter().enumerate().skip(start) {
+            let claims = self.catalog.resource_claims(server);
             loop {
                 if pages_remaining == 0 {
                     return Err(McpError::internal_error(
@@ -1533,7 +1534,7 @@ impl GatewayServer {
                         seen_upstream_cursors.push(fingerprint);
                     }
                 }
-                let listed = match self
+                let mut listed = match self
                     .catalog
                     .list_resources(
                         server,
@@ -1546,6 +1547,12 @@ impl GatewayServer {
                     Err(error) if error.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND => break,
                     Err(error) => return Err(error),
                 };
+                // Only URIs this upstream's own declarations cover are
+                // readable through it; anything else it lists would advertise
+                // a URI that is unreadable or routes to a different upstream.
+                listed
+                    .resources
+                    .retain(|resource| within_declared_prefixes(&resource.uri, &claims));
                 let next_upstream_cursor =
                     listed.next_cursor.clone().filter(|next| !next.is_empty());
                 if let Some(next) = next_upstream_cursor.as_deref() {
@@ -1621,6 +1628,7 @@ impl GatewayServer {
             let mut template_bytes = 0_usize;
             let mut pages_remaining = MAX_RESOURCE_RESOLUTION_PAGES;
             for server in self.visible_resource_list_servers(principal).await {
+                let claims = self.catalog.resource_claims(&server);
                 let mut cursor = None;
                 let mut seen = HashSet::new();
                 loop {
@@ -1634,7 +1642,7 @@ impl GatewayServer {
                         ));
                     }
                     pages_remaining -= 1;
-                    let listed = match self
+                    let mut listed = match self
                         .catalog
                         .list_resource_templates(
                             &server,
@@ -1649,6 +1657,12 @@ impl GatewayServer {
                         }
                         Err(error) => return Err(error),
                     };
+                    // A template whose literal start is not under one of this
+                    // upstream's declared prefixes could expand to URIs it does
+                    // not own, so it is not advertised.
+                    listed.resource_templates.retain(|template| {
+                        within_declared_prefixes(&template.uri_template, &claims)
+                    });
                     let next_count = templates
                         .len()
                         .checked_add(listed.resource_templates.len())
@@ -2026,34 +2040,22 @@ impl GatewayServer {
             crate::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY.to_owned(),
             json!(self.resource_response_max_bytes),
         );
-        let resolved = match tokio::time::timeout(
+        let owners = match tokio::time::timeout(
             RESOURCE_RESOLUTION_TIMEOUT,
             self.resolve_resource_owners(&params.uri, principal),
         )
         .await
         {
-            Ok(resolved) => resolved,
-            Err(_) => Err(OwnerLookupFailure {
-                detail: "resource ownership resolution exceeded the 30-second deadline".to_owned(),
-                retryable: true,
-            }),
-        };
-        let owners = match resolved {
             Ok(owners) => owners,
-            Err(failure) => {
-                // Resolution itself failed — a deadline, an upstream that could
-                // not list, a repeated cursor, an exhausted page budget. The
-                // caller still asked to read this URI, and an attempt that
-                // leaves no evidence is exactly what a caller probing an
-                // unhealthy fleet would rely on. Recorded as an execution
-                // error, because upstreams were reached and one of them is why
-                // this failed.
+            Err(_) => {
+                // The caller still asked to read this URI, so a lookup that
+                // missed its deadline leaves evidence like any other refusal,
+                // tied to the caller's error by its trace id.
                 let trace_id = waygate_telemetry::correlation::current_trace_id()
                     .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
                 tracing::warn!(
-                    detail = %failure.detail,
                     %trace_id,
-                    "refusing resource read: owner lookup failed",
+                    "refusing resource read: owner lookup exceeded the 30-second deadline",
                 );
                 if let Some(principal) = principal {
                     self.audit
@@ -2063,19 +2065,14 @@ impl GatewayServer {
                                 &params.uri,
                                 AuditOutcome::ExecutionError,
                             )
-                            .with_reason(format!(
-                                "resource ownership resolution failed: {}",
-                                failure.detail
-                            ))
+                            .with_reason(
+                                "resource ownership resolution exceeded the 30-second deadline",
+                            )
                             .with_trace_id(trace_id.as_str()),
                         )
                         .await;
                 }
-                return Err(owner_lookup_failed(
-                    &params.uri,
-                    failure.retryable,
-                    &trace_id,
-                ));
+                return Err(owner_lookup_failed(&params.uri, &trace_id));
             }
         };
         let Some(principal) = principal else {
@@ -2611,123 +2608,45 @@ impl GatewayServer {
         }
     }
 
-    /// Caller-visible upstreams advertising `uri`, in fleet order.
+    /// Caller-visible upstreams whose declared prefix covers `uri`, in fleet
+    /// order.
+    ///
+    /// Ownership comes only from manifest declarations. No upstream is asked
+    /// what it lists: a listing is the upstream's own claim, so an upstream
+    /// that listed another upstream's URI could otherwise receive its reads.
+    /// A URI no declaration covers has no owner.
     async fn resolve_resource_owners(
         &self,
         uri: &str,
         principal: Option<&Principal>,
-    ) -> Result<Vec<ResourceOwner>, OwnerLookupFailure> {
+    ) -> Vec<ResourceOwner> {
         if crate::files::is_reserved_file_uri(uri) {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         let routing = self.catalog.resource_routing_snapshot().await;
-        let declared: Vec<(String, ResourceClaim)> = routing
+        let mut owners = Vec::new();
+        for (server, claim) in routing
             .claims
-            .iter()
+            .into_iter()
             .filter(|(_, claim)| uri.starts_with(&claim.uri_prefix))
-            .cloned()
-            .collect();
-        if !declared.is_empty() {
-            let mut owners = Vec::with_capacity(declared.len());
-            for (server, claim) in declared {
-                if !self
-                    .declared_resource_server_visible(principal, &server)
-                    .await
-                {
-                    continue;
-                }
-                owners.push(ResourceOwner {
-                    risk: claim.risk,
-                    admission: ResourceReadAdmission {
-                        generation: routing.generation,
-                        server: server.clone(),
-                        claim: Some(claim),
-                    },
-                    server,
-                });
-            }
-            return Ok(owners);
-        }
-
-        let visible = self.visible_resource_servers(principal).await;
-        let mut owners: Vec<ResourceOwner> = Vec::new();
-        let mut pages_remaining = MAX_RESOURCE_RESOLUTION_PAGES;
-        for server in visible {
-            // A declaring upstream owns only the URI spaces it registered.
-            // Enumeration remains solely as the compatibility path for
-            // existing resource servers whose manifests declare nothing.
-            if routing
-                .claims
-                .iter()
-                .any(|(claimed_server, _)| claimed_server == &server)
+        {
+            if !self
+                .declared_resource_server_visible(principal, &server)
+                .await
             {
                 continue;
             }
-            let mut cursor = None;
-            let mut seen = HashSet::new();
-            loop {
-                if pages_remaining == 0 {
-                    return Err(OwnerLookupFailure {
-                        detail: format!(
-                            "resource ownership resolution exceeded the \
-                             {MAX_RESOURCE_RESOLUTION_PAGES}-page fleet limit"
-                        ),
-                        retryable: false,
-                    });
-                }
-                pages_remaining -= 1;
-                let listed = match self
-                    .catalog
-                    .list_resources(
-                        &server,
-                        Some(PaginatedRequestParams::default().with_cursor(cursor.clone())),
-                        principal,
-                    )
-                    .await
-                {
-                    Ok(listed) => listed,
-                    Err(error) if error.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND => break,
-                    Err(error) => {
-                        return Err(OwnerLookupFailure {
-                            detail: format!(
-                                "upstream `{server}` could not list resources: {}",
-                                error.message
-                            ),
-                            retryable: true,
-                        })
-                    }
-                };
-                if listed.resources.iter().any(|resource| resource.uri == uri)
-                    && !owners.iter().any(|existing| existing.server == server)
-                {
-                    owners.push(ResourceOwner {
-                        server: server.clone(),
-                        risk: RiskTier::Low,
-                        admission: ResourceReadAdmission {
-                            generation: routing.generation,
-                            server: server.clone(),
-                            claim: None,
-                        },
-                    });
-                }
-                match listed.next_cursor {
-                    Some(next) if !next.is_empty() => {
-                        if !seen.insert(next.clone()) {
-                            return Err(OwnerLookupFailure {
-                                detail: format!(
-                                    "upstream `{server}` repeated a resources/list cursor"
-                                ),
-                                retryable: false,
-                            });
-                        }
-                        cursor = Some(next);
-                    }
-                    _ => break,
-                }
-            }
+            owners.push(ResourceOwner {
+                risk: claim.risk,
+                admission: ResourceReadAdmission {
+                    generation: routing.generation,
+                    server: server.clone(),
+                    claim,
+                },
+                server,
+            });
         }
-
-        Ok(owners)
+        owners
     }
 
     /// The full `tools/list` payload: authorized gateway built-ins and every

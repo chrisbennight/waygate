@@ -106,6 +106,16 @@ impl UpstreamCatalog for DemoCatalog {
         vec!["demo".into()]
     }
 
+    fn resource_claims(&self, server: &str) -> Vec<waygate_mcp::catalog::ResourceClaim> {
+        if server != "demo" {
+            return Vec::new();
+        }
+        vec![waygate_mcp::catalog::ResourceClaim {
+            uri_prefix: "demo://".into(),
+            risk: waygate_mcp::protocol::RiskTier::Low,
+        }]
+    }
+
     fn long_running_tool(&self, server: &str, tool: &str) -> bool {
         server == "demo" && self.long_running_tools.iter().any(|name| name == tool)
     }

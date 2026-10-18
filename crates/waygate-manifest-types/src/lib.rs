@@ -230,8 +230,9 @@ pub struct UpstreamManifest {
     pub tools: Vec<ToolClassification>,
     /// URI-prefix claims owned by this upstream. These declarations are both
     /// the routing table for dynamic `resources/read` requests and the source
-    /// of the resource risk presented to Cedar. An empty list preserves the
-    /// legacy discovery-by-enumeration path for existing resource servers.
+    /// of the resource risk presented to Cedar. They are the only source of
+    /// resource ownership: with an empty list, no native resource read or
+    /// listing reaches this upstream.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<ResourceClassification>,
     /// Select whether behavior and sensitivity are supplied by legacy

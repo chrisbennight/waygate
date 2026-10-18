@@ -381,8 +381,9 @@ pub fn resource_shape_change_requires_restart(
 
 /// Whether a reload changes declared ownership or whether an existing server
 /// may participate in native resource operations. Eligibility is part of the
-/// routing table even for undeclared legacy servers because enumeration can
-/// make one newly eligible server an additional owner of an exact URI.
+/// routing table because a declared owner that stops supporting resource
+/// operations is hidden from reads; an eligibility change on a server that
+/// declares nothing advances the generation too, which is conservative.
 fn resource_routing_changed(
     current: &HashMap<String, Arc<UpstreamEntry>>,
     fresh: &BTreeMap<String, UpstreamManifest>,
@@ -2866,12 +2867,12 @@ impl UpstreamPool {
             }
         }
 
-        // An undeclared legacy resource server has no routing-table row, but
-        // adding or removing it can still change enumeration ownership and
-        // ambiguity. Its potentially slow dial ran concurrently under the read
-        // side above. Upgrade only now, immediately before structural publish,
-        // so an admitted old-generation read drains before the topology and
-        // generation become observable without serializing independent dials.
+        // Adding or removing a server conservatively advances the routing
+        // generation even when it declares no resource prefix. Its potentially
+        // slow dial ran concurrently under the read side above. Upgrade only
+        // now, immediately before structural publish, so an admitted
+        // old-generation read drains before the topology and generation
+        // become observable without serializing independent dials.
         let mut late_resource_routing_write_guard = None;
         if resource_topology_change_requested && resource_routing_write_guard.is_none() {
             drop(resource_routing_read_guard.take());

@@ -40,8 +40,7 @@ pub struct ResourceClaim {
 ///
 /// Resolution may release this snapshot while Cedar evaluates the selected
 /// owner. The generation is carried back into dispatch so the pool can refuse
-/// before the upstream RPC if any claim or legacy-server membership changed in
-/// between.
+/// before the upstream RPC if routing changed in between.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceRoutingSnapshot {
     pub generation: u64,
@@ -50,13 +49,14 @@ pub struct ResourceRoutingSnapshot {
 
 /// Resource ownership and risk identity admitted by the gateway handler.
 ///
-/// `claim` is `None` only for the compatibility path where a server with no
-/// declarations advertised the exact URI through `resources/list`.
+/// Ownership comes only from a manifest declaration. What an upstream lists
+/// never makes it the owner of a URI, so a read always carries the declared
+/// claim it was routed by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceReadAdmission {
     pub generation: u64,
     pub server: String,
-    pub claim: Option<ResourceClaim>,
+    pub claim: ResourceClaim,
 }
 
 /// Provenance-preserving result of dispatching an admitted resource read.
@@ -251,8 +251,7 @@ pub trait UpstreamCatalog: Send + Sync + 'static {
     }
 
     /// Manifest-declared resource routing entries for one upstream. Empty
-    /// means this is a legacy server whose ownership must still be discovered
-    /// through `resources/list` for compatibility.
+    /// means native resource reads and listings never reach this upstream.
     fn resource_claims(&self, _server: &str) -> Vec<ResourceClaim> {
         Vec::new()
     }

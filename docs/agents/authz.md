@@ -242,10 +242,9 @@ Native MCP reads authorize a distinct `Resource` entity. Its
 `resource.server` attribute names the owning upstream and `resource.uri`
 contains the exact, unmodified MCP URI, allowing policies to permit or forbid
 one resource independently of others on that server. `resource.risk` comes
-from the manifest URI-prefix declaration; an undeclared legacy upstream that
-is found by catalog enumeration remains low risk. This makes ordinary
-step-up policy apply to resource reads without publishing a Cedar context
-attribute the request path cannot populate truthfully. `ListResources` remains
+from the manifest URI-prefix declaration that routed the read. This makes
+ordinary step-up policy apply to resource reads without publishing a Cedar
+context attribute the request path cannot populate truthfully. `ListResources` remains
 a server-level action. API-key profiles with a populated `allowed_tools` list
 do not expose native resources because an exact tool grant cannot imply access
 to a separate data surface. The synthetic fixture's

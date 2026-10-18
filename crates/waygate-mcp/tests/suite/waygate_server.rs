@@ -77,6 +77,15 @@ impl FakeCatalog {
     }
 
     fn with_resources(resources: Vec<(String, Vec<Resource>)>) -> Arc<Self> {
+        let resource_claims = resources
+            .iter()
+            .map(|(server, listed)| {
+                (
+                    server.clone(),
+                    declared_schemes(listed.iter().map(|resource| resource.uri.as_str())),
+                )
+            })
+            .collect();
         Arc::new(Self {
             servers: resources
                 .iter()
@@ -84,7 +93,7 @@ impl FakeCatalog {
                 .collect(),
             resources,
             resource_templates: HashMap::new(),
-            resource_claims: HashMap::new(),
+            resource_claims,
             resource_meta: HashMap::new(),
             resource_operations_unsupported: HashSet::new(),
             endless_resource_pages: false,
@@ -125,7 +134,7 @@ impl FakeCatalog {
             servers: vec![(server.into(), Vec::new())],
             resources: Vec::new(),
             resource_templates: HashMap::new(),
-            resource_claims: HashMap::new(),
+            resource_claims: declared_for(server, "loop://"),
             resource_meta: HashMap::new(),
             resource_operations_unsupported: HashSet::new(),
             endless_resource_pages: true,
@@ -147,7 +156,7 @@ impl FakeCatalog {
             servers: vec![(server.into(), Vec::new())],
             resources: Vec::new(),
             resource_templates: HashMap::new(),
-            resource_claims: HashMap::new(),
+            resource_claims: declared_for(server, "repeat://"),
             resource_meta: HashMap::new(),
             resource_operations_unsupported: HashSet::new(),
             endless_resource_pages: false,
@@ -169,7 +178,7 @@ impl FakeCatalog {
             servers: vec![(server.into(), Vec::new())],
             resources: Vec::new(),
             resource_templates: HashMap::new(),
-            resource_claims: HashMap::new(),
+            resource_claims: declared_for(server, "cycle://"),
             resource_meta: HashMap::new(),
             resource_operations_unsupported: HashSet::new(),
             endless_resource_pages: false,
@@ -216,6 +225,15 @@ impl FakeCatalog {
         templates: impl IntoIterator<Item = (String, Vec<ResourceTemplate>)>,
     ) -> Arc<Self> {
         let resource_templates: HashMap<_, _> = templates.into_iter().collect();
+        let resource_claims = resource_templates
+            .iter()
+            .map(|(server, listed): (&String, &Vec<ResourceTemplate>)| {
+                (
+                    server.clone(),
+                    declared_schemes(listed.iter().map(|template| template.uri_template.as_str())),
+                )
+            })
+            .collect();
         Arc::new(Self {
             servers: resource_templates
                 .keys()
@@ -223,9 +241,57 @@ impl FakeCatalog {
                 .map(|server| (server, Vec::new()))
                 .collect(),
             resource_templates,
+            resource_claims,
             ..Self::default()
         })
     }
+
+    /// Adds a Low-risk declaration for `server`, for fixtures whose server
+    /// lists nothing yet must still take part in resource listing.
+    fn declaring(mut catalog: Arc<Self>, server: &str, prefix: &str) -> Arc<Self> {
+        Arc::get_mut(&mut catalog)
+            .expect("new catalog has one owner")
+            .resource_claims
+            .entry(server.to_owned())
+            .or_default()
+            .push(ResourceClaim {
+                uri_prefix: prefix.to_owned(),
+                risk: RiskTier::Low,
+            });
+        catalog
+    }
+}
+
+/// One Low-risk declaration per distinct `scheme://` in `uris`. Resource
+/// reads and listings only reach declared prefixes, so a fixture declares the
+/// schemes its server lists to exercise ordinary routing.
+fn declared_schemes<'a>(uris: impl Iterator<Item = &'a str>) -> Vec<ResourceClaim> {
+    let mut prefixes: Vec<String> = uris
+        .filter_map(|uri| {
+            uri.split_once("://")
+                .map(|(scheme, _)| format!("{scheme}://"))
+        })
+        .collect();
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes
+        .into_iter()
+        .map(|uri_prefix| ResourceClaim {
+            uri_prefix,
+            risk: RiskTier::Low,
+        })
+        .collect()
+}
+
+/// `server` declaring one Low-risk prefix.
+fn declared_for(server: &str, prefix: &str) -> HashMap<String, Vec<ResourceClaim>> {
+    HashMap::from([(
+        server.to_owned(),
+        vec![ResourceClaim {
+            uri_prefix: prefix.to_owned(),
+            risk: RiskTier::Low,
+        }],
+    )])
 }
 
 struct NeedleInspector {
@@ -573,7 +639,7 @@ async fn resources_preserve_upstream_uris_and_paginate_by_server() {
 
 #[tokio::test]
 async fn empty_resource_page_preserves_meta_and_advances_one_server() {
-    let catalog: SharedCatalog = FakeCatalog::with_resource_meta(
+    let catalog = FakeCatalog::with_resource_meta(
         vec![
             ("empty".into(), Vec::new()),
             (
@@ -586,6 +652,7 @@ async fn empty_resource_page_preserves_meta_and_advances_one_server() {
             Meta(obj(json!({"source": "empty-upstream"}))),
         )]),
     );
+    let catalog: SharedCatalog = FakeCatalog::declaring(catalog, "empty", "empty://");
     let server = GatewayServer::new(catalog);
 
     let first = server
@@ -980,7 +1047,11 @@ async fn metadata_free_empty_upstreams_do_not_consume_client_pages() {
         "printable".into(),
         vec![resource("printable://design/product-v1", "Product kit")],
     ));
-    let catalog = FakeCatalog::with_resources(resources);
+    let mut catalog = FakeCatalog::with_resources(resources);
+    for index in 0..21 {
+        let name = format!("empty-{index:02}");
+        catalog = FakeCatalog::declaring(catalog, &name, &format!("{name}://"));
+    }
     let server = GatewayServer::new(catalog.clone());
 
     let listed = server
@@ -995,11 +1066,15 @@ async fn metadata_free_empty_upstreams_do_not_consume_client_pages() {
 
 #[tokio::test]
 async fn finite_all_empty_resource_fleet_exhausts_in_one_client_page() {
-    let catalog = FakeCatalog::with_resources(
+    let mut catalog = FakeCatalog::with_resources(
         (0..21)
             .map(|index| (format!("empty-{index:02}"), Vec::new()))
             .collect(),
     );
+    for index in 0..21 {
+        let name = format!("empty-{index:02}");
+        catalog = FakeCatalog::declaring(catalog, &name, &format!("{name}://"));
+    }
     let server = GatewayServer::new(catalog.clone());
 
     let listed = server
@@ -1087,100 +1162,118 @@ async fn read_resource_rejects_ambiguous_upstream_owners() {
     assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
 }
 
-/// An upstream that cannot list its resources stops owner lookup for an
-/// undeclared URI, because skipping it could hide a second owner. The caller
-/// learns only that the lookup failed and the read was not sent; which
-/// upstream failed, and why, is recorded for operators under the same trace id.
+/// Resource ownership comes only from manifest declarations. An upstream that
+/// lists URIs another upstream declares, or URIs nobody declares, can neither
+/// receive reads for them nor advertise them, and deciding a read never asks
+/// any upstream what it lists.
 #[tokio::test]
-async fn failed_owner_lookup_reports_the_lookup_not_the_failing_upstream() {
-    const URI: &str = "printable://contracts";
-    const CONNECTION_DETAIL: &str = "upstream `fetchlayer` is not connected";
-
-    struct UnreachableListerCatalog;
-
-    #[async_trait]
-    impl UpstreamCatalog for UnreachableListerCatalog {
-        async fn list_servers(&self) -> Vec<String> {
-            vec!["fetchlayer".to_owned(), "printable".to_owned()]
-        }
-
-        async fn list_tools(&self, _server: &str) -> Result<Vec<Tool>, McpError> {
-            Ok(Vec::new())
-        }
-
-        async fn call_tool(
-            &self,
-            _server: &str,
-            _tool_name: &str,
-            _args: Option<Map<String, Value>>,
-            _principal: Option<&Principal>,
-            _admitted: Option<&waygate_mcp::catalog::InvocationContractIdentity>,
-        ) -> Result<CallToolResult, McpError> {
-            unreachable!("resource test never dispatches a tool")
-        }
-
-        async fn list_resources(
-            &self,
-            server: &str,
-            _params: Option<PaginatedRequestParams>,
-            _principal: Option<&Principal>,
-        ) -> Result<ListResourcesResult, McpError> {
-            match server {
-                "fetchlayer" => Err(McpError::internal_error(CONNECTION_DETAIL, None)),
-                _ => Ok(ListResourcesResult::with_all_items(vec![resource(
-                    URI,
-                    "Contracts",
-                )])),
-            }
-        }
-    }
-
-    let sink = Arc::new(InMemorySink::new());
-    let server = GatewayServer::with_deps(
-        Arc::new(UnreachableListerCatalog),
-        Arc::new(ResourceAuthz {
-            list_allowed: true,
-            read_verdict: ResourceAuthz::allow_read(),
-        }),
-        sink.clone(),
+async fn an_upstream_cannot_capture_or_advertise_another_upstreams_uris() {
+    let mut catalog = FakeCatalog::with_resources(vec![
+        (
+            "printable".into(),
+            vec![
+                resource("printable://contracts", "Contracts"),
+                resource("other://leak", "Outside printable's prefix"),
+            ],
+        ),
+        (
+            "fetchlayer".into(),
+            vec![
+                resource("printable://contracts/scad_build/build", "Spoofed contract"),
+                resource("unclaimed://notes", "Undeclared resource"),
+            ],
+        ),
+    ]);
+    let claims = &mut Arc::get_mut(&mut catalog)
+        .expect("new catalog has one owner")
+        .resource_claims;
+    claims.insert(
+        "printable".into(),
+        vec![ResourceClaim {
+            uri_prefix: "printable://".into(),
+            risk: RiskTier::Low,
+        }],
     );
+    claims.insert("fetchlayer".into(), Vec::new());
+    let server = GatewayServer::new(catalog.clone());
 
-    let error = server
-        .read_visible_resource(ReadResourceRequestParams::new(URI), Some(&maker()))
+    let read = server
+        .read_visible_resource(
+            ReadResourceRequestParams::new("printable://contracts/scad_build/build"),
+            None,
+        )
         .await
-        .expect_err("an upstream that cannot list stops owner lookup");
-    assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
-    assert!(error.message.contains(URI));
-    assert!(error.message.contains("not sent"));
-    let data = error.data.expect("stable error data");
-    assert_eq!(data["error"], "resource_owner_lookup_failed");
-    assert_eq!(data["retryable"], true);
-    let trace_id = data["trace_id"].as_str().expect("trace id").to_owned();
-    assert!(!trace_id.is_empty());
-    for caller_text in [error.message.to_string(), data.to_string()] {
-        assert!(
-            !caller_text.contains("fetchlayer") && !caller_text.contains("not connected"),
-            "the caller's error must not carry another upstream's state: {caller_text}"
-        );
-    }
-
-    let events = sink.snapshot().await;
-    let reads: Vec<_> = events
-        .iter()
-        .filter(|event| event.action == "ReadResource")
-        .collect();
-    assert_eq!(reads.len(), 1);
-    assert_eq!(reads[0].outcome, AuditOutcome::ExecutionError);
-    let reason = reads[0].reason.as_deref().expect("recorded cause");
-    assert!(
-        reason.contains(CONNECTION_DETAIL),
-        "the audit row keeps the cause: {reason}"
+        .expect("the declared owner serves every URI under its prefix");
+    assert!(matches!(
+        &read.contents[0],
+        ResourceContents::TextResourceContents { text, .. } if text == "body from printable"
+    ));
+    let error = server
+        .read_visible_resource(ReadResourceRequestParams::new("unclaimed://notes"), None)
+        .await
+        .expect_err("a URI no declaration covers is not routed, whoever lists it");
+    assert_eq!(error.code, rmcp::model::ErrorCode::RESOURCE_NOT_FOUND);
+    assert_eq!(
+        catalog.resource_list_calls.load(Ordering::Relaxed),
+        0,
+        "reads never ask an upstream what it lists",
     );
-    assert_eq!(reads[0].trace_id.as_deref(), Some(trace_id.as_str()));
+
+    let listed = server
+        .list_visible_resources(None, None)
+        .await
+        .expect("listing");
+    let uris: Vec<_> = listed
+        .resources
+        .iter()
+        .map(|resource| resource.uri.as_str())
+        .collect();
+    assert_eq!(uris, vec!["printable://contracts"]);
+    assert!(listed.next_cursor.is_none());
+    assert_eq!(
+        catalog.resource_list_calls.load(Ordering::Relaxed),
+        1,
+        "an upstream that declares nothing is not asked to list",
+    );
+}
+
+/// A template is advertised only when its literal start is under the serving
+/// upstream's own declaration; anything else could expand to URIs it does not
+/// own.
+#[tokio::test]
+async fn resource_templates_outside_the_servers_declarations_are_not_advertised() {
+    let mut catalog = FakeCatalog::with_resource_templates([(
+        "printable".to_owned(),
+        vec![
+            ResourceTemplate::new("printable://contracts/{tool}/{action}", "Contract"),
+            ResourceTemplate::new("other://{path}", "Elsewhere"),
+        ],
+    )]);
+    Arc::get_mut(&mut catalog)
+        .expect("new catalog has one owner")
+        .resource_claims
+        .insert(
+            "printable".into(),
+            vec![ResourceClaim {
+                uri_prefix: "printable://".into(),
+                risk: RiskTier::Low,
+            }],
+        );
+
+    let listed = GatewayServer::new(catalog)
+        .list_visible_resource_templates(None)
+        .await
+        .expect("template listing");
+    let templates: Vec<_> = listed
+        .resource_templates
+        .iter()
+        .map(|template| template.uri_template.as_str())
+        .collect();
+    assert_eq!(templates, vec!["printable://contracts/{tool}/{action}"]);
 }
 
 #[tokio::test]
-async fn legacy_resource_enumeration_cannot_claim_the_gateway_file_namespace() {
+async fn an_upstream_cannot_claim_the_gateway_file_namespace() {
     let catalog = FakeCatalog::with_resources(vec![(
         "legacy".to_owned(),
         vec![resource(
@@ -1203,7 +1296,7 @@ async fn legacy_resource_enumeration_cannot_claim_the_gateway_file_namespace() {
 }
 
 #[tokio::test]
-async fn declared_resource_route_skips_enumeration_and_supplies_risk_to_authz() {
+async fn declared_resource_route_supplies_risk_to_authz() {
     struct CaptureRisk {
         risk: Mutex<Option<RiskTier>>,
         discovered: Mutex<Vec<String>>,
@@ -1379,26 +1472,38 @@ async fn unsupported_resource_upstream_does_not_block_supported_products() {
     ));
 }
 
+/// A URI no declaration covers has no owner. Deciding that never asks an
+/// upstream what it lists, however many resources it would page through.
 #[tokio::test]
-async fn resource_owner_resolution_has_one_fleet_wide_page_budget() {
-    let catalog = FakeCatalog::with_endless_resource_pages("looping");
+async fn an_undeclared_uri_is_refused_without_listing_any_upstream() {
+    // An upstream that declares nothing and would page through resources
+    // forever if asked.
+    let mut catalog = FakeCatalog::with_endless_resource_pages("looping");
+    Arc::get_mut(&mut catalog)
+        .expect("new catalog has one owner")
+        .resource_claims
+        .clear();
     let server = GatewayServer::new(catalog.clone());
 
     let error = server
         .read_visible_resource(ReadResourceRequestParams::new("missing://resource"), None)
         .await
-        .expect_err("unbounded resource catalog must fail within the fleet budget");
-    assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
-    assert_eq!(catalog.resource_list_calls.load(Ordering::Relaxed), 50);
+        .expect_err("an undeclared URI has no owner");
+    assert_eq!(error.code, rmcp::model::ErrorCode::RESOURCE_NOT_FOUND);
+    assert_eq!(catalog.resource_list_calls.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
 async fn resource_listing_has_one_fleet_wide_page_budget() {
-    let catalog = FakeCatalog::new(
+    let mut catalog = FakeCatalog::new(
         (0..51)
             .map(|index| (format!("unsupported-{index}"), Vec::new()))
             .collect(),
     );
+    for index in 0..51 {
+        let name = format!("unsupported-{index}");
+        catalog = FakeCatalog::declaring(catalog, &name, &format!("{name}://"));
+    }
     let server = GatewayServer::new(catalog.clone());
 
     let error = server
@@ -1526,7 +1631,7 @@ async fn resource_discovery_honors_principal_server_restrictions() {
 }
 
 #[tokio::test]
-async fn hidden_declared_owner_reserves_its_prefix_from_legacy_fallback() {
+async fn hidden_declared_owner_reserves_its_prefix_from_other_upstreams() {
     const URI: &str = "private://operations/runbook";
     let mut catalog = FakeCatalog::with_resources(vec![
         (
@@ -1535,16 +1640,25 @@ async fn hidden_declared_owner_reserves_its_prefix_from_legacy_fallback() {
         ),
         ("private-docs".into(), Vec::new()),
     ]);
-    Arc::get_mut(&mut catalog)
+    let claims = &mut Arc::get_mut(&mut catalog)
         .expect("new catalog has one owner")
-        .resource_claims
-        .insert(
-            "private-docs".into(),
-            vec![ResourceClaim {
-                uri_prefix: "private://operations/".into(),
-                risk: RiskTier::High,
-            }],
-        );
+        .resource_claims;
+    claims.insert(
+        "private-docs".into(),
+        vec![ResourceClaim {
+            uri_prefix: "private://operations/".into(),
+            risk: RiskTier::High,
+        }],
+    );
+    // printable lists a URI under private-docs' prefix but declares only its
+    // own prefix, as prefixes cannot overlap in a loaded manifest set.
+    claims.insert(
+        "printable".into(),
+        vec![ResourceClaim {
+            uri_prefix: "printable://".into(),
+            risk: RiskTier::Low,
+        }],
+    );
     let mut principal = maker();
     principal.api_key_profile_restrictions = Some(ApiKeyProfileRestrictions {
         profile_id: "printable-only".into(),
@@ -1556,13 +1670,13 @@ async fn hidden_declared_owner_reserves_its_prefix_from_legacy_fallback() {
     let error = GatewayServer::new(catalog.clone())
         .read_visible_resource(ReadResourceRequestParams::new(URI), Some(&principal))
         .await
-        .expect_err("an invisible declared owner must not open legacy fallback");
+        .expect_err("an invisible declared owner's prefix is not served by another upstream");
 
     assert_eq!(error.code, rmcp::model::ErrorCode::RESOURCE_NOT_FOUND);
     assert_eq!(
         catalog.resource_list_calls.load(Ordering::Relaxed),
         0,
-        "the fleet-wide declaration must settle ownership before enumeration",
+        "ownership is settled from declarations without asking any upstream what it lists",
     );
 }
 
@@ -1954,46 +2068,6 @@ async fn ambiguity_is_decided_among_upstreams_the_caller_may_actually_read() {
     assert_eq!(error.code, rmcp::model::ErrorCode::RESOURCE_NOT_FOUND);
 }
 
-/// Resolution itself can fail — an upstream that cannot list, a repeated
-/// cursor, an exhausted page budget, an expired deadline. The caller still
-/// asked to read the URI, and an attempt that leaves no evidence is what
-/// probing an unhealthy fleet would rely on, so the failure is recorded too.
-#[tokio::test]
-async fn a_read_whose_resolution_fails_is_still_recorded() {
-    let catalog: SharedCatalog = FakeCatalog::with_repeated_resource_cursor("printable");
-    let sink = Arc::new(InMemorySink::new());
-    let error = GatewayServer::with_deps(
-        catalog,
-        Arc::new(ResourceAuthz {
-            list_allowed: true,
-            read_verdict: ResourceAuthz::allow_read(),
-        }),
-        sink.clone(),
-    )
-    .read_visible_resource(
-        ReadResourceRequestParams::new("printable://design/product-v1"),
-        Some(&maker()),
-    )
-    .await
-    .expect_err("a repeated cursor aborts resolution");
-
-    let events = sink.snapshot().await;
-    let decision = events
-        .iter()
-        .find(|event| event.action == "ReadResource")
-        .expect("a failed resolution still records the attempt");
-    // Upstreams were reached and one of them is why this failed, which is what
-    // an execution error means.
-    assert_eq!(decision.outcome, AuditOutcome::ExecutionError);
-    assert_eq!(
-        decision.target.as_deref(),
-        Some("printable://design/product-v1"),
-    );
-    assert!(decision.principal.is_some());
-    // The caller still learns nothing beyond the failure itself.
-    assert!(!error.message.is_empty());
-}
-
 /// A read for a URI nothing visible serves is still an attempt this caller
 /// made, and it is the shape a sweep for resource URIs takes. Without a row it
 /// would leave no evidence at all, so the refusal is recorded even though no
@@ -2014,11 +2088,11 @@ async fn a_read_for_an_unserved_uri_is_still_recorded() {
         sink.clone(),
     )
     .read_visible_resource(
-        ReadResourceRequestParams::new("printable://nothing/serves-this"),
+        ReadResourceRequestParams::new("unserved://nothing/serves-this"),
         Some(&maker()),
     )
     .await
-    .expect_err("no upstream advertises the URI");
+    .expect_err("no declaration covers the URI");
     assert_eq!(error.code, rmcp::model::ErrorCode::RESOURCE_NOT_FOUND);
 
     let events = sink.snapshot().await;
@@ -2029,7 +2103,7 @@ async fn a_read_for_an_unserved_uri_is_still_recorded() {
     assert_eq!(decision.outcome, AuditOutcome::Denied);
     assert_eq!(
         decision.target.as_deref(),
-        Some("printable://nothing/serves-this"),
+        Some("unserved://nothing/serves-this"),
     );
     assert!(
         decision.policy_ids.is_empty(),
