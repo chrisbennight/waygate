@@ -35,6 +35,25 @@ pub(super) struct ReviewObservations {
     pub(super) drift_events: HashMap<String, uuid::Uuid>,
 }
 
+/// Drift events recorded while observing each session of one publication.
+/// A tool that changed more than once keeps none: its single Activity row
+/// cannot say which of those changes it shows.
+pub(super) fn publication_drift_events(
+    sessions: impl IntoIterator<Item = HashMap<String, uuid::Uuid>>,
+) -> HashMap<String, uuid::Uuid> {
+    let mut events = HashMap::new();
+    let mut changed_again = std::collections::HashSet::new();
+    for session in sessions {
+        for (tool, event) in session {
+            if events.insert(tool.clone(), event).is_some() {
+                changed_again.insert(tool);
+            }
+        }
+    }
+    events.retain(|tool, _| !changed_again.contains(tool));
+    events
+}
+
 impl UpstreamPool {
     pub(super) fn runtime_quarantine_threshold(&self) -> QuarantineThreshold {
         if self.tool_reviews.is_some() {

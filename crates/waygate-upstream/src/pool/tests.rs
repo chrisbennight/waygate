@@ -3082,6 +3082,21 @@ async fn record_observed_schemas_returns_drift_reports() {
 /// Drift rows use the trace captured before a bare task handoff, and
 /// `emit_drift_audit` preserves one row per event — a quarantined drift as
 /// `Denied` (the tool is now blocked), an informational drift as `Success`.
+#[test]
+fn publication_drift_events_drop_tools_changed_by_more_than_one_session() {
+    let (first, second, other) = (
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+    );
+    let events = super::tool_reviews::publication_drift_events([
+        HashMap::from([("search".to_string(), first), ("list".to_string(), other)]),
+        HashMap::new(),
+        HashMap::from([("search".to_string(), second)]),
+    ]);
+    assert_eq!(events, HashMap::from([("list".to_string(), other)]));
+}
+
 #[tokio::test]
 async fn detached_drift_audit_preserves_pre_handoff_trace_and_event_contract() {
     let sink = std::sync::Arc::new(waygate_mcp::audit::InMemorySink::new());

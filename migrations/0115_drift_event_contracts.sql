@@ -12,7 +12,6 @@ CREATE TABLE tool_contract_versions (
     tool_id uuid NOT NULL REFERENCES mcp_tools(id) ON DELETE CASCADE,
     contract_hash text NOT NULL,
     contract jsonb NOT NULL,
-    first_recorded_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (tool_id, contract_hash),
     CHECK (jsonb_typeof(contract) = 'object'),
     CHECK (octet_length(contract::text) <= 262144)

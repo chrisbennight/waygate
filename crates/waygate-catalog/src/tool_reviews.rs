@@ -531,12 +531,11 @@ impl PgCatalogStore {
         tenant: &str,
         id: Uuid,
     ) -> Result<Option<DriftChange>, CatalogError> {
-        let row = sqlx::query(
+        let row = sqlx::query(concat!(
             "SELECT e.id, e.tenant_id, e.tool_id, s.name AS server, t.name AS tool,
-                    e.observed_hash, e.approved_hash, e.previous_hash, e.changed_fields,
-                    CASE WHEN observed.first_recorded_at < e.observed_at
-                         THEN observed.first_recorded_at END AS earlier_recorded_at,
-                    e.severity, e.observed_at,
+                    e.observed_hash, e.approved_hash, e.previous_hash, e.changed_fields, ",
+            earlier_recorded_at!(),
+            " AS earlier_recorded_at, e.severity, e.observed_at,
                     previous.contract AS previous_contract,
                     observed.contract AS observed_contract,
                     COALESCE(r.quarantined, false) AS quarantined
@@ -548,8 +547,8 @@ impl PgCatalogStore {
              LEFT JOIN tool_contract_versions observed
                ON observed.tool_id=e.tool_id AND observed.contract_hash=e.observed_hash
              LEFT JOIN tool_contract_reviews r ON r.tool_id=e.tool_id
-             WHERE e.tenant_id=$1 AND e.id=$2",
-        )
+             WHERE e.tenant_id=$1 AND e.id=$2"
+        ))
         .bind(tenant)
         .bind(id)
         .fetch_optional(&self.pool)

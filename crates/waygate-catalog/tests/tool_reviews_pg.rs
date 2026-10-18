@@ -1145,15 +1145,42 @@ async fn drift_events_keep_both_contracts_and_identify_returns() {
         Some(vec!["description".to_owned()])
     );
     assert_eq!(change.previous_contract, Some(first));
-    assert_eq!(change.observed_contract, Some(third));
+    assert_eq!(change.observed_contract, Some(third.clone()));
     assert!(change.quarantined);
 
     // A contract over the storage limit keeps its identity, not its content.
     let oversized = json!({"description": "x".repeat(300 * 1024)});
-    let large = observe("d", oversized, false).await.drift_event.unwrap();
+    let large = observe("d", oversized.clone(), false)
+        .await
+        .drift_event
+        .unwrap();
     let change = store.drift_change(&tenant, large).await.unwrap().unwrap();
     assert_eq!(change.event.previous_hash.as_deref(), Some("c"));
     assert_eq!(change.event.changed_fields, None);
     assert!(change.previous_contract.is_some());
     assert_eq!(change.observed_contract, None);
+    assert!(change.event.earlier_recorded_at.is_none(), "d was new");
+
+    // History, not retained content, identifies a return to that contract.
+    observe("c", third, false).await.drift_event.unwrap();
+    let large_again = observe("d", oversized, false).await.drift_event.unwrap();
+    let change = store
+        .drift_change(&tenant, large_again)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(change.observed_contract, None);
+    assert_eq!(
+        change.event.earlier_recorded_at,
+        Some(
+            store
+                .drift_change(&tenant, large)
+                .await
+                .unwrap()
+                .unwrap()
+                .event
+                .observed_at
+        ),
+        "a return names when the contract was first recorded"
+    );
 }

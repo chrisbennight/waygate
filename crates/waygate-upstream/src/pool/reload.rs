@@ -1880,7 +1880,7 @@ impl UpstreamPool {
         // (`!needs_redial`) also moves these fields, so it too trips the CAS and
         // we defer to it rather than overwrite it.
         let review_manifest = entry.manifest_snapshot();
-        let mut drift_events = HashMap::new();
+        let mut session_drift_events = Vec::new();
         for conn in dialed.iter().filter_map(Option::as_ref) {
             let Ok(observed) = self
                 .observe_tool_reviews(entry, name, &review_manifest, &conn.live_tools, false)
@@ -1889,8 +1889,9 @@ impl UpstreamPool {
                 tracing::warn!(server = %name, "replacement session refused: tool review storage unavailable");
                 return RedialOutcome::Failed;
             };
-            drift_events.extend(observed.drift_events);
+            session_drift_events.push(observed.drift_events);
         }
+        let drift_events = super::tool_reviews::publication_drift_events(session_drift_events);
         {
             let mut manifest_guard = entry.manifest.write().expect("manifest lock poisoned");
             if !redial_committed_fields_eq(&manifest_guard, from_shape) {

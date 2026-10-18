@@ -701,24 +701,19 @@ impl CatalogStore for PgCatalogStore {
         // ceiling. An operator paging through a noisy upstream
         // can still walk the full history page by page.
         let effective_limit = limit.min(500) as i64;
-        let rows = sqlx::query(
-            r#"
-            SELECT e.id, e.tenant_id, e.tool_id, s.name AS server, t.name AS tool,
-                   e.observed_hash, e.approved_hash, e.previous_hash, e.changed_fields,
-                   v.first_recorded_at AS earlier_recorded_at, e.severity, e.observed_at
+        let rows = sqlx::query(concat!(
+            "SELECT e.id, e.tenant_id, e.tool_id, s.name AS server, t.name AS tool,
+                    e.observed_hash, e.approved_hash, e.previous_hash, e.changed_fields, ",
+            earlier_recorded_at!(),
+            " AS earlier_recorded_at, e.severity, e.observed_at
               FROM catalog_drift_events e
               JOIN mcp_tools t ON t.id = e.tool_id
               JOIN mcp_servers s ON s.id = t.server_id
-              LEFT JOIN tool_contract_versions v
-                ON v.tool_id = e.tool_id
-               AND v.contract_hash = e.observed_hash
-               AND v.first_recorded_at < e.observed_at
              WHERE e.tenant_id = $1
                AND e.observed_at >= $2
              ORDER BY e.observed_at DESC
-             LIMIT $3
-            "#,
-        )
+             LIMIT $3"
+        ))
         .bind(tenant_id)
         .bind(since)
         .bind(effective_limit)

@@ -20,6 +20,18 @@
 //! crates can depend on the catalog types without pulling in transport
 //! machinery.
 
+/// When an earlier drift event of the same tool first named, on either side
+/// of its change, the contract that drift event `e` observed. Non-NULL means
+/// the tool returned to an earlier definition. History, not retained content,
+/// decides this, so oversized and pre-history contracts are recognized too.
+macro_rules! earlier_recorded_at {
+    () => {
+        "(SELECT min(p.observed_at) FROM catalog_drift_events p
+          WHERE p.tool_id = e.tool_id AND p.observed_at < e.observed_at
+            AND e.observed_hash IN (p.observed_hash, p.previous_hash))"
+    };
+}
+
 pub mod grant_sweeper;
 mod import;
 mod schema_hash;
