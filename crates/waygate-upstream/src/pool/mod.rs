@@ -1165,9 +1165,12 @@ async fn dial(
     let dialed =
         transport::connect_with_destination(manifest, issuer, identity_cell.as_ref(), exchange)
             .await?;
-    let listed = list_all_tools(dialed.service())
-        .await
-        .map_err(|error| dialed.with_http_exchanges(DialError::list_tools(error)))?;
+    let listed = list_all_tools(dialed.service()).await.map_err(|error| {
+        match dialed.refused_redirect() {
+            Some(refused) => DialError::redirect_refused(&manifest.name, refused),
+            None => dialed.with_http_exchanges(DialError::list_tools(error)),
+        }
+    })?;
     // The catalog is the last request of the dial; recording stops before the
     // connection can serve a caller.
     let connected = dialed.finish_dial();

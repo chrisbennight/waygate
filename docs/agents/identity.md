@@ -311,6 +311,11 @@ Tier C + `auth.bearer_env` (static per-upstream bearer, same
 header). `load_manifests` returns `UpstreamError::InvalidManifest`
 on conflict; the `--import-manifests` path runs the same check.
 
+Every tier's headers go only to the configured upstream's scheme, host, and
+port. Upstream requests never follow redirects, and a legacy-SSE message
+endpoint on another origin fails the connection; see
+[upstream request destinations](upstreams.md#upstream-request-destinations).
+
 The initial `initialize` and `tools/list` exchange has no end-user caller. For
 Tier-B HTTP/SSE upstreams, the pool mints a dedicated
 `mcp-tool-search-gateway:catalog-probe` identity with no email, scopes, or user

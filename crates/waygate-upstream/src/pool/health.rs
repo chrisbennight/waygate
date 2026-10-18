@@ -98,7 +98,9 @@ impl UpstreamErrorClass {
             | DialError::MtlsUnsupportedForTransport { .. }
             | DialError::MtlsClientBuild(_)
             | DialError::HttpClientBuild(_)
-            | DialError::MtlsRequiresHttps { .. } => Self::Configuration,
+            | DialError::MtlsRequiresHttps { .. }
+            | DialError::RedirectRefused { .. }
+            | DialError::SseEndpointRefused { .. } => Self::Configuration,
         }
     }
 }

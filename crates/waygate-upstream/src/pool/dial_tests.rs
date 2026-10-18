@@ -59,6 +59,8 @@ enum ToolsListReply {
     /// Answer `tools/list` with one JSON-RPC error that names no request id,
     /// which the SDK cannot route, then end the stream.
     ErrorWithoutId,
+    /// Answer `tools/list`, after a successful handshake, with a redirect.
+    Redirect,
 }
 
 /// What the bearer-gated upstream observed.
@@ -164,6 +166,13 @@ async fn gate(
                 .header(header::CONTENT_TYPE, "text/event-stream")
                 .body(Body::empty())
                 .expect("event-stream response");
+        }
+        (Some("tools/list"), _, ToolsListReply::Redirect) => {
+            return Response::builder()
+                .status(StatusCode::TEMPORARY_REDIRECT)
+                .header(header::LOCATION, "http://127.0.0.1:9/elsewhere")
+                .body(Body::empty())
+                .expect("redirect response");
         }
         (Some("tools/list"), _, ToolsListReply::ErrorWithoutId) => {
             return Response::builder()
@@ -302,6 +311,35 @@ async fn a_tools_list_stream_that_closes_without_a_response_is_named_in_the_dial
     );
     assert!(!text.contains(FIXTURE_BEARER), "{text}");
     assert_eq!(observed.unauthenticated.load(Ordering::SeqCst), 0);
+}
+
+/// A redirect that arrives after the handshake is still a refused redirect,
+/// reported as the configuration error it is rather than a catalog failure.
+#[tokio::test]
+async fn a_redirected_tools_list_fails_the_dial_as_a_refused_redirect() {
+    let bearer = BearerEnv::set("GW_TEST_DIAL_REDIRECTED_LIST_BEARER");
+    let (address, _observed) = spawn_bearer_upstream(None, ToolsListReply::Redirect).await;
+
+    let error = match dial(&manifest(address, "legacy", &bearer), None, None).await {
+        Ok(_) => panic!("a redirected catalog must fail the dial"),
+        Err(error) => error,
+    };
+
+    let text = error.to_string();
+    assert!(
+        matches!(
+            &error,
+            DialError::RedirectRefused { server, status }
+                if server == "bearer-upstream" && *status == StatusCode::TEMPORARY_REDIRECT
+        ),
+        "{text}"
+    );
+    assert_eq!(
+        crate::pool::health::UpstreamErrorClass::from_dial_error(&error),
+        crate::pool::health::UpstreamErrorClass::Configuration,
+    );
+    assert!(!text.contains("elsewhere"), "{text}");
+    assert!(!text.contains(FIXTURE_BEARER), "{text}");
 }
 
 /// The SDK drops an error that names no request id without reporting it, so
