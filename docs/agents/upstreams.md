@@ -6,6 +6,15 @@ is the code of record. The gateway repo carries representative fixtures under
 [`crates/waygate-upstream/tests/fixtures/servers/`](../../crates/waygate-upstream/tests/fixtures/servers/);
 a deployment supplies the served set through its servers volume.
 
+Manifests are strict: a key the schema does not define, at the top level or
+inside any nested block, fails the load with an error naming the upstream and
+the key. Every path that reads manifests applies this, including the served
+directory, `import`, the dashboard editor and ledger recovery, so a misspelled
+setting can never be silently ignored. Remove obsolete keys from the served
+files before upgrading. A ledger snapshot stored before the upgrade may still
+carry such a key; the first clean load records the served set as a new
+snapshot, so recovery has a readable version again.
+
 ## Classification authority: claims are not policy
 
 There are two explicit classification modes. They are compatibility modes, not
@@ -651,6 +660,28 @@ transport closes the peer task and response body rather than leaving a detached
 receive request in the connection pool. Do not add a generic read timeout to the
 receive client; quiet streams are valid unless an upstream protocol declares a
 heartbeat contract.
+
+## Upstream request destinations
+
+An HTTP or legacy-SSE dial resolves the configured `url` host and sends that
+connection's requests only to the resolved addresses. The requests carry the
+`auth.bearer_env` bearer, the caller's identity headers, and on streamable HTTP
+the MCP session headers, so they stay on the configured scheme, host, and port:
+
+- Upstream requests never follow redirects, on either transport. A redirect
+  fails the request with an error that names the server and the redirect
+  status and says the redirect was refused. The error does not repeat the
+  redirect target. Set `url` to the address that serves MCP without
+  redirecting.
+- A legacy-SSE `endpoint` event may name any path on the configured origin,
+  as a relative or an absolute URL. An endpoint with another scheme, host, or
+  port fails the connection with an error that names the server and the
+  announced origin and says the endpoint was refused. A server behind a proxy
+  that announces its internal address must announce a relative path or the
+  configured origin instead.
+
+The runtime dialer and `classify` CLI share this client policy through
+`waygate_upstream::http_policy`.
 
 ## Upstream call cancellation
 

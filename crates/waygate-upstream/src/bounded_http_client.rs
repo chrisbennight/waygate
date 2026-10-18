@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc,
+    Arc, OnceLock,
 };
 
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use waygate_core::http_client::{read_body_capped, ReadBodyError};
 
 use crate::dial_trace::ExchangeRecorder;
+use crate::http_policy::RedirectRefused;
 
 const JSON_MIME_TYPE: &str = "application/json";
 const EVENT_STREAM_MIME_TYPE: &str = "text/event-stream";
@@ -80,6 +81,7 @@ pub(crate) fn response_materialization_limit(error: &ServiceError) -> Option<usi
 pub(crate) struct BoundedResponseClient {
     inner: reqwest::Client,
     connection_failed: Arc<AtomicBool>,
+    refused_redirect: Arc<OnceLock<RedirectRefused>>,
     open_requests: CancellationToken,
     exchanges: ExchangeRecorder,
 }
@@ -89,6 +91,7 @@ impl BoundedResponseClient {
         Self {
             inner,
             connection_failed: Arc::new(AtomicBool::new(false)),
+            refused_redirect: Arc::default(),
             open_requests: CancellationToken::new(),
             exchanges,
         }
@@ -121,12 +124,27 @@ impl BoundedResponseClient {
         self.connection_failed.load(Ordering::Relaxed)
     }
 
-    fn observe_connection_failure<T>(
-        &self,
-        result: &Result<T, StreamableHttpError<reqwest::Error>>,
-    ) {
-        if matches!(result, Err(StreamableHttpError::Client(error)) if error.is_connect()) {
+    /// The first redirect this client refused. The SDK reports the failed
+    /// request only as a transport error, so a dial reads this to say why.
+    pub(crate) fn refused_redirect(&self) -> Option<RedirectRefused> {
+        self.refused_redirect.get().copied()
+    }
+
+    /// The slot recording that refusal, shared by every clone of this client,
+    /// so a connection can report it after the dial's handshake.
+    pub(crate) fn refused_redirect_slot(&self) -> Arc<OnceLock<RedirectRefused>> {
+        Arc::clone(&self.refused_redirect)
+    }
+
+    fn observe_failure<T>(&self, result: &Result<T, StreamableHttpError<reqwest::Error>>) {
+        let Err(StreamableHttpError::Client(error)) = result else {
+            return;
+        };
+        if error.is_connect() {
             self.connection_failed.store(true, Ordering::Relaxed);
+        }
+        if let Some(refused) = RedirectRefused::from_reqwest(error) {
+            let _ = self.refused_redirect.set(refused);
         }
     }
 
@@ -309,7 +327,7 @@ impl StreamableHttpClient for BoundedResponseClient {
                 custom_headers,
             ))
             .await;
-        self.observe_connection_failure(&result);
+        self.observe_failure(&result);
         exchange.post_result(result)
     }
 
@@ -344,7 +362,7 @@ impl StreamableHttpClient for BoundedResponseClient {
             ))
             .await
         };
-        self.observe_connection_failure(&result);
+        self.observe_failure(&result);
         exchange.post_result(result)
     }
 
@@ -360,7 +378,7 @@ impl StreamableHttpClient for BoundedResponseClient {
             .inner
             .delete_session(uri, session_id, auth_header, custom_headers)
             .await;
-        self.observe_connection_failure(&result);
+        self.observe_failure(&result);
         exchange.unit_result(result)
     }
 
@@ -377,7 +395,7 @@ impl StreamableHttpClient for BoundedResponseClient {
             .inner
             .get_stream(uri, session_id, last_event_id, auth_header, custom_headers)
             .await;
-        self.observe_connection_failure(&result);
+        self.observe_failure(&result);
         exchange.stream_result(result)
     }
 
@@ -402,7 +420,7 @@ impl StreamableHttpClient for BoundedResponseClient {
                 max_sse_event_size,
             )
             .await;
-        self.observe_connection_failure(&result);
+        self.observe_failure(&result);
         exchange.stream_result(result)
     }
 }
