@@ -547,11 +547,10 @@ reuses the address set pinned when that connection was opened — and the
 upstream's live MCP connection must itself be wholly cleartext.
 
 Streamable HTTP qualifies when its manifest URL is cleartext HTTP. Legacy SSE
-qualifies only after its endpoint handshake has shown that both the receive URL
-and the server-issued message endpoint are cleartext HTTP on the same host.
-Mixed-scheme or cross-host SSE connections do not qualify. Stdio never
-qualifies, even if a permissive manifest carries a URL which its local-process
-dial path ignores.
+qualifies on the same condition: the gateway refuses a server-issued message
+endpoint with another scheme, host, or port, so both legs of a connected SSE
+upstream share that URL's origin. Stdio never qualifies, even if a permissive
+manifest carries a URL which its local-process dial path ignores.
 
 The reasoning is that TLS on that leg would protect nothing. The gateway has
 already sent that upstream its tool arguments, any inline `data:` payload, and

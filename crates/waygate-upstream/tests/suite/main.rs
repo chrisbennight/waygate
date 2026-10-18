@@ -57,6 +57,7 @@ mod pool_redial_http;
 mod pool_reload;
 mod pool_stdio;
 mod pool_tool_facts;
+mod resource_read_meta_http;
 mod session_isolation_http;
 mod sse_dropped_connection;
 mod sse_transport;

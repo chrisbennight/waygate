@@ -6,9 +6,10 @@
 //! 1. The client opens a long-lived `GET /sse-url` with
 //!    `Accept: text/event-stream`.
 //! 2. The first event the server emits is `event: endpoint` with the
-//!    session-bound POST URL in `data:` (relative or absolute against the SSE
-//!    URL). All subsequent server-to-client traffic is `event: message` with
-//!    a JSON-RPC payload.
+//!    session-bound POST URL in `data:`, resolved against the SSE URL. The
+//!    resolved URL must keep the SSE URL's scheme, host, and port; any other
+//!    endpoint fails the connection. All subsequent server-to-client traffic
+//!    is `event: message` with a JSON-RPC payload.
 //! 3. The client POSTs JSON-RPC requests to the messages URL with
 //!    `Content-Type: application/json`. The server replies `202 Accepted`
 //!    with no body and delivers the real JSON-RPC response back over the
@@ -20,6 +21,7 @@
 //! for `RoleClient` (see `rmcp::transport::sink_stream`).
 
 use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -34,6 +36,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::{CancellationToken, PollSendError, PollSender};
 use url::Url;
 
+use crate::dial_trace::bounded_text;
+use crate::http_policy::RedirectRefused;
 use crate::identity_client::IdentityAugmenter;
 
 /// Buffer size for both inbound and outbound JSON-RPC channels. rmcp pumps
@@ -47,6 +51,9 @@ pub type SseClientTransport = (SseClientSink, ReceiverStream<ServerJsonRpcMessag
 pub(crate) struct ConnectedSse {
     pub(crate) transport: SseClientTransport,
     pub(crate) cleartext_control_plane: bool,
+    /// Set when the writer stops because a message POST was redirected, before
+    /// it closes the transport, so a failed handshake can say why.
+    pub(crate) refused_redirect: Arc<OnceLock<RedirectRefused>>,
 }
 
 /// Outbound half of the legacy SSE transport. Dropping or closing the sink
@@ -96,7 +103,15 @@ pub enum SseConnectError {
     #[error("invalid sse url: {0}")]
     Url(#[from] url::ParseError),
     #[error("http transport: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(#[source] reqwest::Error),
+    #[error(transparent)]
+    RedirectRefused(RedirectRefused),
+    /// The endpoint event named a message URL on another origin. Only that
+    /// origin is kept: the path and query can carry a session credential.
+    #[error(
+        "message endpoint on {announced} refused: it must use the SSE URL's scheme, host, and port"
+    )]
+    EndpointRefused { announced: String },
     #[error("upstream returned status {0}")]
     Status(http::StatusCode),
     #[error("missing endpoint event before timeout ({0:?})")]
@@ -110,6 +125,19 @@ pub enum SseConnectError {
     #[error("sse stream ended before endpoint event")]
     StreamEndedEarly,
 }
+
+impl From<reqwest::Error> for SseConnectError {
+    fn from(error: reqwest::Error) -> Self {
+        match RedirectRefused::from_reqwest(&error) {
+            Some(refused) => Self::RedirectRefused(refused),
+            None => Self::Http(error),
+        }
+    }
+}
+
+/// A DNS name is at most 253 bytes, so this keeps every real origin whole while
+/// bounding what an upstream can place in an operator-facing error.
+const MAX_ANNOUNCED_ORIGIN_BYTES: usize = 300;
 
 /// Open an SSE-transport connection to `base_url`.
 ///
@@ -209,13 +237,14 @@ pub(crate) async fn connect_with_control_plane(
     let endpoint_data = endpoint_event
         .data
         .ok_or(SseConnectError::EndpointMissingData)?;
-    let messages_url = base.join(&endpoint_data)?;
+    let messages_url = message_endpoint(&base, &endpoint_data)?;
     let cleartext_control_plane = wholly_cleartext_control_plane(&base, &messages_url);
 
     let (inbound_tx, inbound_rx) = mpsc::channel::<ServerJsonRpcMessage>(CHANNEL_BUFFER);
     let (outbound_tx, outbound_rx) = mpsc::channel::<ClientJsonRpcMessage>(CHANNEL_BUFFER);
     let cancel = CancellationToken::new();
     let sink = SseClientSink::new(PollSender::new(outbound_tx), cancel.clone());
+    let refused_redirect = Arc::new(OnceLock::new());
 
     tokio::spawn(reader_task(sse, inbound_tx, cancel.clone()));
     tokio::spawn(writer_task(
@@ -226,12 +255,34 @@ pub(crate) async fn connect_with_control_plane(
         write_timeout,
         outbound_rx,
         cancel,
+        Arc::clone(&refused_redirect),
     ));
 
     Ok(ConnectedSse {
         transport: (sink, ReceiverStream::new(inbound_rx)),
         cleartext_control_plane,
+        refused_redirect,
     })
+}
+
+/// Resolve the endpoint event's data against the SSE URL and keep it only on
+/// that URL's origin.
+///
+/// Every message POST carries the static bearer and the caller's identity
+/// headers, and the dial pinned only the configured host's addresses. An
+/// endpoint may name any path on the configured origin, but an endpoint on
+/// another scheme, host, or port would move those credentials elsewhere.
+fn message_endpoint(base: &Url, announced: &str) -> Result<Url, SseConnectError> {
+    let messages_url = base.join(announced)?;
+    if messages_url.origin() != base.origin() {
+        return Err(SseConnectError::EndpointRefused {
+            announced: bounded_text(
+                &messages_url.origin().ascii_serialization(),
+                MAX_ANNOUNCED_ORIGIN_BYTES,
+            ),
+        });
+    }
+    Ok(messages_url)
 }
 
 fn wholly_cleartext_control_plane(receive_url: &Url, messages_url: &Url) -> bool {
@@ -298,6 +349,7 @@ async fn reader_task(
     tracing::debug!("sse upstream closed inbound stream");
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn writer_task(
     http: reqwest::Client,
     messages_url: Url,
@@ -306,6 +358,7 @@ async fn writer_task(
     write_timeout: Duration,
     mut rx: mpsc::Receiver<ClientJsonRpcMessage>,
     cancel: CancellationToken,
+    refused_redirect: Arc<OnceLock<RedirectRefused>>,
 ) {
     loop {
         let msg = tokio::select! {
@@ -353,7 +406,16 @@ async fn writer_task(
                 break;
             }
             Err(e) => {
-                tracing::warn!(error = %e, "sse upstream post failed");
+                match RedirectRefused::from_reqwest(&e) {
+                    Some(refused) => {
+                        let _ = refused_redirect.set(refused);
+                        tracing::warn!(
+                            status = %refused.status,
+                            "sse upstream redirected an outbound jsonrpc post; redirect refused",
+                        );
+                    }
+                    None => tracing::warn!(error = %e, "sse upstream post failed"),
+                }
                 break;
             }
         }
@@ -364,6 +426,58 @@ async fn writer_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_message_endpoint_may_name_any_path_on_the_sse_url_origin() {
+        let base = Url::parse("http://upstream.example/mcp/sse").unwrap();
+        for (announced, expected) in [
+            (
+                "/messages?session_id=s1",
+                "http://upstream.example/messages?session_id=s1",
+            ),
+            ("messages", "http://upstream.example/mcp/messages"),
+            (
+                "http://upstream.example/messages",
+                "http://upstream.example/messages",
+            ),
+            (
+                "http://UPSTREAM.example:80/messages",
+                "http://upstream.example/messages",
+            ),
+        ] {
+            let resolved = message_endpoint(&base, announced)
+                .unwrap_or_else(|error| panic!("{announced} must be accepted: {error}"));
+            assert_eq!(resolved.as_str(), expected, "{announced}");
+        }
+    }
+
+    #[test]
+    fn a_message_endpoint_on_another_scheme_host_or_port_is_refused() {
+        let base = Url::parse("http://upstream.example/mcp/sse").unwrap();
+        for (announced, origin) in [
+            (
+                "http://messages.example/messages?session_id=s1",
+                "http://messages.example",
+            ),
+            ("//messages.example/messages", "http://messages.example"),
+            (
+                "https://upstream.example/messages",
+                "https://upstream.example",
+            ),
+            (
+                "http://upstream.example:8080/messages",
+                "http://upstream.example:8080",
+            ),
+            ("data:text/plain,messages", "null"),
+        ] {
+            match message_endpoint(&base, announced) {
+                Err(SseConnectError::EndpointRefused { announced: got }) => {
+                    assert_eq!(got, origin, "{announced}");
+                }
+                other => panic!("{announced} must be refused, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn cleartext_control_plane_requires_both_sse_legs_on_the_same_host() {

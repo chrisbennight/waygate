@@ -2448,11 +2448,15 @@ async fn request_context_file_capability_enables_governed_resource_download() {
                 "uri": "demo://guide",
                 "_meta": {
                     "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                    "io.modelcontextprotocol/clientCapabilities": {"files": files},
+                    "io.modelcontextprotocol/clientCapabilities": {
+                        "files": files,
+                        "experimental": {"example.test/caller-capability": {}}
+                    },
                     "io.modelcontextprotocol/clientInfo": {
                         "name": "governed-resource-test",
                         "version": "0.0.0"
-                    }
+                    },
+                    "example.test/caller": 1
                 }
             }
         }))
@@ -2474,15 +2478,22 @@ async fn request_context_file_capability_enables_governed_resource_download() {
         .expect("upstream received request metadata");
     let forwarded = &forwarded.0 .0;
     assert_eq!(
-        forwarded
-            .get(waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY)
-            .and_then(|capabilities| {
-                capabilities.get(waygate_mcp::files::FILES_CAPABILITY_MEMBER)
-            }),
-        Some(&waygate_mcp::files::stateless_client_file_capability(
+        forwarded.get(waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY),
+        waygate_mcp::files::stateless_client_capability_meta(
             waygate_mcp::files::FileOperation::Download,
-        )),
+        )
+        .get(waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY),
         "the gateway must forward only the capability it can honor",
+    );
+    let mut keys = forwarded.keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY,
+            waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY,
+        ],
+        "the upstream read carries gateway metadata, never the caller's",
     );
     server.shutdown().await;
 }

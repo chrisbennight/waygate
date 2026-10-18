@@ -571,6 +571,7 @@ mod tests {
             protocol: Default::default(),
             url: Some("http://127.0.0.1:9/mcp".to_owned()),
             command: None,
+            env_passthrough: Vec::new(),
             tools: Vec::new(),
             resources: Vec::new(),
             exchange: None,

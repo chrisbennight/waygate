@@ -37,7 +37,9 @@ pub use pool::{
     UpstreamHealth, UpstreamPool, UpstreamStatus, DEFAULT_CALL_RESPONSE_MAX_BYTES,
     REFUSAL_REPORT_TOOL_LIMIT,
 };
-pub use transport::{client_config, default_auto_lifecycle, legacy_bridge_lifecycle};
+pub use transport::{
+    client_config, default_auto_lifecycle, legacy_bridge_lifecycle, stdio_command,
+};
 
 /// Canonical behavior hash of a live tool descriptor — the exact value an
 /// annotation-native manifest entry must carry in `approved_behavior_hash`
@@ -52,9 +54,9 @@ pub fn tool_behavior_hash(tool: &rmcp::model::Tool) -> String {
 // path (the `RiskTier` pattern).
 pub use waygate_manifest_types::{
     enforce_no_prod_stdio, load_manifests, manifest_write_in_progress, parse_manifest_document,
-    parse_manifest_set, serialize_manifest_set, validate_manifest_invariants,
-    write_manifest_set_to_dir, write_manifest_set_to_dir_from_base, ApprovalMode,
-    ClassificationMode, ExchangeConfig, MtlsConfig, OperationClassification,
+    parse_manifest_set, serialize_manifest_set, valid_env_passthrough_name,
+    validate_manifest_invariants, write_manifest_set_to_dir, write_manifest_set_to_dir_from_base,
+    ApprovalMode, ClassificationMode, ExchangeConfig, MtlsConfig, OperationClassification,
     ResourceClassification, SessionConfig, SessionIsolation, SessionScope, ToolClassification,
     Transport, UpstreamAuth, UpstreamError, UpstreamLimits, UpstreamManifest, UpstreamProtocol,
     MANIFEST_WRITE_MARKER, MAX_CALL_RESPONSE_BYTES, MIN_CALL_TIMEOUT_SECONDS,

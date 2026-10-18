@@ -1,13 +1,13 @@
 //! Per-request response bounds for gateway-originated MCP requests.
 //!
 //! Ordinary MCP traffic delegates unchanged to rmcp's reqwest client. A
-//! request that carries the private materialization-limit metadata value is
-//! read under that raw-byte ceiling before rmcp can decode an untrusted body
-//! into the shared gateway process. A native resource read or call-scoped
-//! retained-response read is consumed here up to its one JSON-RPC response.
-//! Any other bounded request, such as a tool call, keeps its event stream:
-//! rmcp still receives the upstream's notifications, requests and resumable
-//! event IDs, and only the byte count is enforced here.
+//! request whose response budget rides in a [`ResponseByteLimit`] request
+//! extension is read under that raw-byte ceiling before rmcp can decode an
+//! untrusted body into the shared gateway process. A native resource read or
+//! call-scoped retained-response read is consumed here up to its one JSON-RPC
+//! response. Any other bounded request, such as a tool call, keeps its event
+//! stream: rmcp still receives the upstream's notifications, requests and
+//! resumable event IDs, and only the byte count is enforced here.
 //!
 //! Every request also reports its outcome to the dial's exchange recorder,
 //! which records only while the dial that built this client is in progress.
@@ -23,7 +23,8 @@ use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use http::{HeaderName, HeaderValue};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use rmcp::model::{
-    ClientJsonRpcMessage, ClientRequest, ErrorData, JsonRpcMessage, RequestId, ServerJsonRpcMessage,
+    ClientJsonRpcMessage, ClientRequest, ErrorData, GetExtensions, JsonRpcMessage, RequestId,
+    ServerJsonRpcMessage,
 };
 use rmcp::service::ServiceError;
 use rmcp::transport::streamable_http_client::{
@@ -33,13 +34,21 @@ use sse_stream::{Sse, SseStream};
 use tokio_util::sync::CancellationToken;
 
 use waygate_core::http_client::{read_body_capped, ReadBodyError};
-use waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY;
 
 use crate::dial_trace::ExchangeRecorder;
+use crate::http_policy::RedirectRefused;
 
 const JSON_MIME_TYPE: &str = "application/json";
 const EVENT_STREAM_MIME_TYPE: &str = "text/event-stream";
 const SESSION_HEADER: &str = "mcp-session-id";
+
+/// The raw-byte budget for the response to one outgoing request.
+///
+/// It rides in the request's in-process extensions rather than its `_meta`:
+/// rmcp serializes only metadata objects from extensions, so the budget stays
+/// inside the gateway while the message passes through the SDK to this client.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ResponseByteLimit(pub(crate) usize);
 
 #[derive(Debug, thiserror::Error)]
 #[error("upstream response exceeded the {limit_bytes}-byte materialization limit")]
@@ -107,6 +116,7 @@ pub(crate) fn response_materialization_limit(error: &ServiceError) -> Option<usi
 pub(crate) struct BoundedResponseClient {
     inner: reqwest::Client,
     connection_failed: Arc<AtomicBool>,
+    refused_redirect: Arc<OnceLock<RedirectRefused>>,
     open_requests: CancellationToken,
     exchanges: ExchangeRecorder,
 }
@@ -116,6 +126,7 @@ impl BoundedResponseClient {
         Self {
             inner,
             connection_failed: Arc::new(AtomicBool::new(false)),
+            refused_redirect: Arc::default(),
             open_requests: CancellationToken::new(),
             exchanges,
         }
@@ -148,23 +159,39 @@ impl BoundedResponseClient {
         self.connection_failed.load(Ordering::Relaxed)
     }
 
-    fn observe_connection_failure<T>(
-        &self,
-        result: &Result<T, StreamableHttpError<reqwest::Error>>,
-    ) {
-        if matches!(result, Err(StreamableHttpError::Client(error)) if error.is_connect()) {
+    /// The first redirect this client refused. The SDK reports the failed
+    /// request only as a transport error, so a dial reads this to say why.
+    pub(crate) fn refused_redirect(&self) -> Option<RedirectRefused> {
+        self.refused_redirect.get().copied()
+    }
+
+    /// The slot recording that refusal, shared by every clone of this client,
+    /// so a connection can report it after the dial's handshake.
+    pub(crate) fn refused_redirect_slot(&self) -> Arc<OnceLock<RedirectRefused>> {
+        Arc::clone(&self.refused_redirect)
+    }
+
+    fn observe_failure<T>(&self, result: &Result<T, StreamableHttpError<reqwest::Error>>) {
+        let Err(StreamableHttpError::Client(error)) = result else {
+            return;
+        };
+        if error.is_connect() {
             self.connection_failed.store(true, Ordering::Relaxed);
+        }
+        if let Some(refused) = RedirectRefused::from_reqwest(error) {
+            let _ = self.refused_redirect.set(refused);
         }
     }
 
     fn response_limit(message: &ClientJsonRpcMessage) -> Option<usize> {
-        serde_json::to_value(message)
-            .ok()?
-            .get("params")?
-            .get("_meta")?
-            .get(RESPONSE_MATERIALIZATION_LIMIT_META_KEY)?
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
+        let JsonRpcMessage::Request(request) = message else {
+            return None;
+        };
+        request
+            .request
+            .extensions()
+            .get::<ResponseByteLimit>()
+            .map(|limit| limit.0)
             .filter(|value| *value > 0)
     }
 
@@ -432,7 +459,7 @@ impl StreamableHttpClient for BoundedResponseClient {
                 custom_headers,
             ))
             .await;
-        self.observe_connection_failure(&result);
+        self.observe_failure(&result);
         exchange.post_result(result)
     }
 
@@ -467,7 +494,7 @@ impl StreamableHttpClient for BoundedResponseClient {
             ))
             .await
         };
-        self.observe_connection_failure(&result);
+        self.observe_failure(&result);
         exchange.post_result(result)
     }
 
@@ -483,7 +510,7 @@ impl StreamableHttpClient for BoundedResponseClient {
             .inner
             .delete_session(uri, session_id, auth_header, custom_headers)
             .await;
-        self.observe_connection_failure(&result);
+        self.observe_failure(&result);
         exchange.unit_result(result)
     }
 
@@ -500,7 +527,7 @@ impl StreamableHttpClient for BoundedResponseClient {
             .inner
             .get_stream(uri, session_id, last_event_id, auth_header, custom_headers)
             .await;
-        self.observe_connection_failure(&result);
+        self.observe_failure(&result);
         exchange.stream_result(result)
     }
 
@@ -525,7 +552,7 @@ impl StreamableHttpClient for BoundedResponseClient {
                 max_sse_event_size,
             )
             .await;
-        self.observe_connection_failure(&result);
+        self.observe_failure(&result);
         exchange.stream_result(result)
     }
 }
@@ -542,28 +569,53 @@ mod tests {
     use super::*;
 
     fn read_request(limit: Option<usize>) -> ClientJsonRpcMessage {
-        let mut params = json!({"uri": "connector-response:/large/0"});
-        if let Some(limit) = limit {
-            params["_meta"] = json!({RESPONSE_MATERIALIZATION_LIMIT_META_KEY: limit});
-        }
-        serde_json::from_value(json!({
+        let mut message: ClientJsonRpcMessage = serde_json::from_value(json!({
             "jsonrpc": "2.0",
             "id": 7,
             "method": "resources/read",
-            "params": params,
+            "params": {"uri": "connector-response:/large/0"},
         }))
-        .expect("valid resources/read request")
+        .expect("valid resources/read request");
+        if let (Some(limit), JsonRpcMessage::Request(request)) = (limit, &mut message) {
+            request
+                .request
+                .extensions_mut()
+                .insert(ResponseByteLimit(limit));
+        }
+        message
     }
 
     #[test]
-    fn only_the_private_request_marker_selects_a_response_limit() {
-        assert_eq!(
-            BoundedResponseClient::response_limit(&read_request(Some(73))),
-            Some(73)
+    fn only_the_in_process_budget_selects_a_response_limit() {
+        let bounded = read_request(Some(73));
+        assert_eq!(BoundedResponseClient::response_limit(&bounded), Some(73));
+        assert!(
+            serde_json::to_value(&bounded).unwrap()["params"]
+                .get("_meta")
+                .is_none(),
+            "the budget must not serialize onto the upstream request"
         );
         assert_eq!(
             BoundedResponseClient::response_limit(&read_request(None)),
             None
+        );
+
+        let wire_shaped: ClientJsonRpcMessage = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "resources/read",
+            "params": {
+                "uri": "connector-response:/large/0",
+                "_meta": {
+                    waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY: 73
+                },
+            },
+        }))
+        .expect("valid resources/read request");
+        assert_eq!(
+            BoundedResponseClient::response_limit(&wire_shaped),
+            None,
+            "request metadata is not the budget's carrier"
         );
     }
 
@@ -712,7 +764,7 @@ mod tests {
             "params": {
                 "name": "large",
                 "arguments": {},
-                "_meta": {RESPONSE_MATERIALIZATION_LIMIT_META_KEY: limit},
+                "_meta": {waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY: limit},
             },
         }))
         .expect("valid tools/call request")

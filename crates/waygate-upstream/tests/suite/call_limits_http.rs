@@ -211,6 +211,7 @@ fn manifest(
         },
         url: Some(format!("http://{}/mcp", addr)),
         command: None,
+        env_passthrough: Vec::new(),
         tools: ["small", "large", "lookalike", "wait"]
             .into_iter()
             .map(|name| ToolClassification::new(name, RiskTier::Low, true, false))
