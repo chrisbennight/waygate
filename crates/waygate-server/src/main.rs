@@ -1925,13 +1925,10 @@ async fn gateway_main() -> anyhow::Result<()> {
     // routing and can't influence path matching.
     let app = NormalizePathLayer::trim_trailing_slash().layer(app);
 
-    listener.install(app);
-
     tracing::info!(addr = %cfg.listen_addr, "gateway listening");
 
-    // NOW that the listener serves the application (the serving point — the
-    // fallible startup is done), record the boot activation event built earlier. A boot
-    // that failed before here never persists it.
+    // NOW that the fallible startup is done, record the boot activation event
+    // built earlier. A boot that failed before here never persists it.
     if let Some(event) = boot_activation {
         audit_sink.record_best_effort(event).await;
     }
@@ -2475,6 +2472,10 @@ async fn gateway_main() -> anyhow::Result<()> {
     let drain_started = std::sync::Arc::new(tokio::sync::Notify::new());
     let drain_started_signal = drain_started.clone();
     let drain_timeout = cfg.drain_timeout;
+    // The complete application serves requests only from here, once the
+    // registration and background tasks above are in place; until now the
+    // listener has answered only the identity keys.
+    listener.install(app);
     let stop_serving = listener.stop_token();
     tokio::spawn(async move {
         shutdown_signal().await;
