@@ -32,9 +32,10 @@ pub struct ReloadReport {
     /// changed without replacing sessions.
     pub response_policy_updated: Vec<String>,
     /// Upstreams whose connection-shape changed (transport / url / command /
-    /// auth / mtls / session) and were re-dialed or REBUILT live (no restart),
-    /// adopting the new shape with a fresh identity cell, a re-resolved bearer,
-    /// and freshly read mTLS material. Two mechanisms land here:
+    /// env_passthrough / auth / mtls / session) and were re-dialed or REBUILT
+    /// live (no restart), adopting the new shape with a fresh identity cell, a
+    /// re-resolved bearer, and freshly read mTLS material. Two mechanisms land
+    /// here:
     ///
     ///   - same slot count ⇒ the existing session(s) are torn down and
     ///     re-dialed in place (`redial_entry`), and
@@ -329,13 +330,13 @@ struct CatalogPublication<'a> {
 }
 
 /// Whether two manifests agree on EVERY field a [`UpstreamPool::redial_entry`]
-/// commit writes: the connection-shape fields (transport / url / command / auth
-/// / mtls / session) AND the coupled identity fields (exchange /
-/// tier_a_required / tier_c_peer) that a re-dial now advances atomically with
-/// the shape. Used as the commit-time CAS: a re-dial advances the stored
-/// manifest only if every field it is about to write still equals what it
-/// dialed FROM, so a slow older re-dial can neither roll back a newer one's
-/// shape NOR clobber a newer reload's identity / Authorization posture.
+/// commit writes: the connection-shape fields (transport / url / command /
+/// env_passthrough / auth / mtls / session) AND the coupled identity fields
+/// (exchange / tier_a_required / tier_c_peer) that a re-dial now advances
+/// atomically with the shape. Used as the commit-time CAS: a re-dial advances
+/// the stored manifest only if every field it is about to write still equals
+/// what it dialed FROM, so a slow older re-dial can neither roll back a newer
+/// one's shape NOR clobber a newer reload's identity / Authorization posture.
 /// Classification (`tools`) is deliberately excluded — it is not
 /// written here and is allowed to drift in the same reload set.
 fn connection_shape_eq(a: &UpstreamManifest, b: &UpstreamManifest) -> bool {
@@ -343,6 +344,7 @@ fn connection_shape_eq(a: &UpstreamManifest, b: &UpstreamManifest) -> bool {
         && a.protocol == b.protocol
         && a.url == b.url
         && a.command == b.command
+        && a.env_passthrough == b.env_passthrough
         && auth_eq(a.auth.as_ref(), b.auth.as_ref())
         && a.mtls == b.mtls
         && session_connection_shape_eq(a.session.as_ref(), b.session.as_ref())
@@ -1667,12 +1669,12 @@ impl UpstreamPool {
     }
 
     /// Live re-dial. The connection-shape (transport / url / command /
-    /// auth / mtls / session) of `name` changed on reload, and the change keeps
-    /// the same slot count (see [`slot_count_stable`]), so we tear down the old
-    /// session(s) and re-dial in place with the new shape — applying it live
-    /// (no restart), picking up a fresh identity cell, a re-resolved bearer,
-    /// and freshly read mTLS material (the three things baked at dial time that
-    /// a reload otherwise cannot touch).
+    /// env_passthrough / auth / mtls / session) of `name` changed on reload,
+    /// and the change keeps the same slot count (see [`slot_count_stable`]),
+    /// so we tear down the old session(s) and re-dial in place with the new
+    /// shape — applying it live (no restart), picking up a fresh identity
+    /// cell, a re-resolved bearer, and freshly read mTLS material (the three
+    /// things baked at dial time that a reload otherwise cannot touch).
     ///
     /// Ordering is the whole reason this isn't a naive in-place swap:
     ///   1. Dial EVERY lane from the new shape FIRST, outside the slot locks,
@@ -2017,6 +2019,7 @@ impl UpstreamPool {
             manifest_guard.protocol = new.protocol;
             manifest_guard.url = new.url.clone();
             manifest_guard.command = new.command.clone();
+            manifest_guard.env_passthrough = new.env_passthrough.clone();
             manifest_guard.auth = new.auth.clone();
             manifest_guard.mtls = new.mtls.clone();
             manifest_guard.session = new.session.clone();
@@ -2544,17 +2547,10 @@ impl UpstreamPool {
                     (false, false, None, false, false, false)
                 } else {
                     entry.last_reload_gen.store(my_gen, Ordering::Release);
-                    let transport_changed =
-                        !matches_transport(&guard.transport, &new_manifest.transport)
-                            || guard.protocol != new_manifest.protocol
-                            || guard.url != new_manifest.url
-                            || guard.command != new_manifest.command
-                            || !auth_eq(guard.auth.as_ref(), new_manifest.auth.as_ref())
-                            || guard.mtls != new_manifest.mtls
-                            || !session_connection_shape_eq(
-                                guard.session.as_ref(),
-                                new_manifest.session.as_ref(),
-                            );
+                    // The same predicate the re-dial commit compares under, so a
+                    // connection-shape field cannot be detected here and missed
+                    // there, or the reverse.
+                    let transport_changed = !connection_shape_eq(&guard, new_manifest);
                     // A connection-shape change that keeps the same slot count is
                     // re-dialed live below — the old session is torn down
                     // and re-dialed in place with the new shape (fresh identity

@@ -20,6 +20,7 @@ fn manifest() -> UpstreamManifest {
         protocol: Default::default(),
         url: Some("http://unused.test/mcp".into()),
         command: None,
+        env_passthrough: Vec::new(),
         tools: vec![
             ToolClassification::new("list_contacts", RiskTier::Low, false, false),
             ToolClassification::new("send_message", RiskTier::High, true, true),

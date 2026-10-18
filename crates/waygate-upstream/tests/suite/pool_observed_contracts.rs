@@ -617,6 +617,7 @@ fn manifest_at(addr: std::net::SocketAddr, mode: ClassificationMode) -> Upstream
         protocol: Default::default(),
         url: Some(format!("http://{addr}/mcp")),
         command: None,
+        env_passthrough: Vec::new(),
         tools,
         resources: Vec::new(),
         exchange: None,

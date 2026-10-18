@@ -8,9 +8,11 @@
 //!   own.
 //! - `stdio` — spawns the configured `command` and speaks rmcp over its
 //!   stdin/stdout via `TokioChildProcess`. The child inherits the gateway's
-//!   stderr for logging. A child that exits is respawned by the reconnect
-//!   scheduler with backoff, like any failed upstream; the breaker trips
-//!   after the configured failure budget.
+//!   stderr for logging, but not its environment: it receives a non-secret
+//!   baseline plus the variables the manifest's `env_passthrough` names (see
+//!   [`crate::transport::stdio_command`]). A child that exits is respawned
+//!   by the reconnect scheduler with backoff, like any failed upstream; the
+//!   breaker trips after the configured failure budget.
 //!
 //! Identity forwarding (`X-MCP-Identity`) and RFC 8693 token exchange are
 //! HTTP-only (http + sse). Stdio upstreams run inside the gateway's own
@@ -1165,9 +1167,12 @@ async fn dial(
     let dialed =
         transport::connect_with_destination(manifest, issuer, identity_cell.as_ref(), exchange)
             .await?;
-    let listed = list_all_tools(dialed.service())
-        .await
-        .map_err(|error| dialed.with_http_exchanges(DialError::list_tools(error)))?;
+    let listed = list_all_tools(dialed.service()).await.map_err(|error| {
+        match dialed.refused_redirect() {
+            Some(refused) => DialError::redirect_refused(&manifest.name, refused),
+            None => dialed.with_http_exchanges(DialError::list_tools(error)),
+        }
+    })?;
     // The catalog is the last request of the dial; recording stops before the
     // connection can serve a caller.
     let connected = dialed.finish_dial();

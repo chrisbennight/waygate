@@ -143,6 +143,24 @@ pub(crate) enum DialError {
         timeout: Duration,
         exchanges: Option<String>,
     },
+    /// The upstream answered a request with a redirect. Upstream requests
+    /// never follow one, because the request carries the gateway's credentials
+    /// and the caller's identity and the target is outside the pinned host.
+    #[error(
+        "upstream `{server}` answered with a redirect (HTTP {status}); redirect refused. \
+         Set its `url` to the address that serves MCP without redirecting"
+    )]
+    RedirectRefused {
+        server: String,
+        status: http::StatusCode,
+    },
+    /// A legacy-SSE upstream announced a message endpoint on another origin.
+    /// `announced` holds only that origin, never the endpoint's path or query.
+    #[error(
+        "upstream `{server}` announced an SSE message endpoint on {announced}; endpoint refused \
+         because it must use the scheme, host, and port of the configured `url`"
+    )]
+    SseEndpointRefused { server: String, announced: String },
     /// Security guard: `mtls:` is
     /// configured but the upstream URL is plaintext
     /// `http://`. mTLS only activates during a TLS
@@ -209,6 +227,13 @@ impl DialError {
             exchanges: None,
         }
     }
+
+    pub(crate) fn redirect_refused(server: &str, refused: http_policy::RedirectRefused) -> Self {
+        Self::RedirectRefused {
+            server: server.to_owned(),
+            status: refused.status,
+        }
+    }
 }
 
 fn exchange_suffix(exchanges: Option<&str>) -> String {
@@ -217,11 +242,32 @@ fn exchange_suffix(exchanges: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-fn map_client_initialize_error(error: ClientInitializeError, connection_failed: bool) -> DialError {
-    if connection_failed {
+fn map_client_initialize_error(
+    server: &str,
+    error: ClientInitializeError,
+    probe: &BoundedResponseClient,
+) -> DialError {
+    if let Some(refused) = probe.refused_redirect() {
+        DialError::redirect_refused(server, refused)
+    } else if probe.connection_failed() {
         DialError::connect(error)
     } else {
         DialError::init(error)
+    }
+}
+
+fn map_sse_connect_error(server: &str, error: sse_client::SseConnectError) -> DialError {
+    match error {
+        sse_client::SseConnectError::RedirectRefused(refused) => {
+            DialError::redirect_refused(server, refused)
+        }
+        sse_client::SseConnectError::EndpointRefused { announced } => {
+            DialError::SseEndpointRefused {
+                server: server.to_owned(),
+                announced,
+            }
+        }
+        other => DialError::init(other),
     }
 }
 
@@ -266,6 +312,10 @@ pub(crate) struct ConnectedService {
     /// upstream before the service closes. Only streamable HTTP holds a
     /// request open that the service's own shutdown cannot reach.
     pub(crate) open_requests: tokio_util::sync::CancellationToken,
+    /// Set when this connection refused a redirect. A dial request after the
+    /// handshake fails only as a generic request error, so the dial reads this
+    /// to report the refusal instead.
+    pub(crate) refused_redirect: std::sync::Arc<std::sync::OnceLock<http_policy::RedirectRefused>>,
 }
 
 /// A connection whose dial is still recording its HTTP exchanges.
@@ -288,6 +338,11 @@ impl DialedService {
     /// `error` followed by a summary of this dial's HTTP exchanges.
     pub(crate) fn with_http_exchanges(&self, error: DialError) -> DialError {
         error.with_http_exchanges(&self.exchanges)
+    }
+
+    /// The redirect this connection refused, if a dial request was redirected.
+    pub(crate) fn refused_redirect(&self) -> Option<http_policy::RedirectRefused> {
+        self.connected.refused_redirect.get().copied()
     }
 
     /// End the dial: stop recording and hand over the connection.
@@ -528,9 +583,9 @@ async fn connect_with_handshake_timeout_and_destination(
 
     let dialed = match dialed {
         // Only the handshake itself is bridgeable. A timeout, a failed
-        // subprocess spawn, or a rejected `auth:`/`mtls:` block would fail
-        // the same way twice, and retrying a timeout would spend the
-        // handshake budget a second time.
+        // subprocess spawn, a refused redirect, or a rejected `auth:`/`mtls:`
+        // block would fail the same way twice, and retrying a timeout would
+        // spend the handshake budget a second time.
         Err(DialError::Init(_)) if matches!(lifecycle, ClientLifecycleMode::Auto { .. }) => {
             dial_once(
                 manifest,
@@ -635,7 +690,7 @@ async fn dial_once(
                     .await
                     .map_err(|_| DialError::handshake_timeout(handshake_timeout))?
                     .map_err(|error| {
-                        map_client_initialize_error(error, connection_probe.connection_failed())
+                        map_client_initialize_error(&manifest.name, error, &connection_probe)
                     })
                 }
                 _ => {
@@ -647,7 +702,7 @@ async fn dial_once(
                     .await
                     .map_err(|_| DialError::handshake_timeout(handshake_timeout))?
                     .map_err(|error| {
-                        map_client_initialize_error(error, connection_probe.connection_failed())
+                        map_client_initialize_error(&manifest.name, error, &connection_probe)
                     })
                 }
             }?;
@@ -657,6 +712,7 @@ async fn dial_once(
                 cleartext_control_plane: url::Url::parse(&url)
                     .is_ok_and(|url| url.scheme() == "http"),
                 open_requests,
+                refused_redirect: connection_probe.refused_redirect_slot(),
             })
         }
         Transport::Sse => {
@@ -705,15 +761,18 @@ async fn dial_once(
                     http_policy::WRITE_TIMEOUT,
                 )
                 .await
-                .map_err(DialError::init)?;
+                .map_err(|error| map_sse_connect_error(&manifest.name, error))?;
                 let cleartext_control_plane = connected.cleartext_control_plane;
-                let service = info
-                    .serve(connected.transport)
-                    .await
-                    .map_err(DialError::init)?;
-                Ok::<_, DialError>((service, cleartext_control_plane))
+                let refused_redirect = connected.refused_redirect;
+                let service = info.serve(connected.transport).await.map_err(|error| {
+                    refused_redirect.get().map_or_else(
+                        || DialError::init(error),
+                        |refused| DialError::redirect_refused(&manifest.name, *refused),
+                    )
+                })?;
+                Ok::<_, DialError>((service, cleartext_control_plane, refused_redirect))
             };
-            let (service, cleartext_control_plane) =
+            let (service, cleartext_control_plane, refused_redirect) =
                 tokio::time::timeout(handshake_timeout, handshake)
                     .await
                     .map_err(|_| DialError::handshake_timeout(handshake_timeout))??;
@@ -722,6 +781,7 @@ async fn dial_once(
                 network_destination: Some(destination),
                 cleartext_control_plane,
                 open_requests: Default::default(),
+                refused_redirect,
             })
         }
         Transport::Stdio => {
@@ -747,10 +807,19 @@ async fn dial_once(
                     "exchange: block ignored for stdio upstream — identity forwarding is HTTP-only",
                 );
             }
-            let mut cmd = tokio::process::Command::new(&argv[0]);
-            if argv.len() > 1 {
-                cmd.args(&argv[1..]);
+            for name in manifest
+                .env_passthrough
+                .iter()
+                .filter(|name| std::env::var_os(name).is_none())
+            {
+                tracing::warn!(
+                    server = %manifest.name,
+                    variable = %name,
+                    "env_passthrough names a variable the gateway has not set; the stdio child \
+                     starts without it",
+                );
             }
+            let cmd = stdio_command(&argv[0], &argv[1..], &manifest.env_passthrough);
             let transport = TokioChildProcess::new(cmd).map_err(DialError::Spawn)?;
             let service = info
                 .serve_with_lifecycle(transport, lifecycle)
@@ -761,9 +830,57 @@ async fn dial_once(
                 network_destination: None,
                 cleartext_control_plane: false,
                 open_requests: Default::default(),
+                refused_redirect: Default::default(),
             })
         }
     }
+}
+
+/// Gateway environment variables every stdio child receives when the gateway
+/// has them set. None carries a credential: `PATH` resolves the command and
+/// any program it starts (launchers such as `npx` and `uvx` depend on it),
+/// `HOME` and `TMPDIR` are where runtimes keep caches and scratch files, and
+/// `LANG`, `LC_ALL` and `TZ` keep text encoding and timestamps consistent with
+/// the gateway. Anything else reaches the child only through the manifest's
+/// `env_passthrough`.
+const STDIO_BASELINE_ENV: &[&str] = &["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ"];
+
+/// Build the command that starts a stdio upstream. The child's environment
+/// starts empty, so it inherits none of the gateway's variables, then
+/// receives [`STDIO_BASELINE_ENV`] and the variables `env_passthrough` names,
+/// each with the gateway's own value. A named variable the gateway has not
+/// set is left out rather than failing the start.
+///
+/// The gateway dial and the `classify` CLI both start upstream servers here,
+/// so a scaffolded server sees the environment it will be served with.
+pub fn stdio_command(
+    program: &str,
+    args: &[String],
+    env_passthrough: &[String],
+) -> tokio::process::Command {
+    stdio_command_with_env(program, args, env_passthrough, |name| {
+        std::env::var_os(name)
+    })
+}
+
+fn stdio_command_with_env(
+    program: &str,
+    args: &[String],
+    env_passthrough: &[String],
+    gateway_env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args).env_clear();
+    let names = STDIO_BASELINE_ENV
+        .iter()
+        .copied()
+        .chain(env_passthrough.iter().map(String::as_str));
+    for name in names {
+        if let Some(value) = gateway_env(name) {
+            cmd.env(name, value);
+        }
+    }
+    cmd
 }
 
 async fn resolve_network_destination(
@@ -1179,11 +1296,13 @@ fn resolve_static_bearer(
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use axum::extract::State;
     use axum::http::StatusCode;
     use axum::response::sse::{Event, Sse};
+    use axum::response::IntoResponse;
     use axum::routing::{get, post};
     use axum::Router;
     use tokio::sync::{mpsc, Mutex};
@@ -1303,6 +1422,321 @@ mod tests {
             text.contains("HTTP exchanges on this dial: POST server/discover -> "),
             "{text}"
         );
+    }
+
+    type SeenHeaders = Arc<Mutex<Vec<axum::http::HeaderMap>>>;
+
+    /// The host a redirect or an announced message endpoint points at. It
+    /// answers anything and counts every request, so a test can prove the
+    /// gateway sent it nothing at all.
+    struct OtherHost {
+        addr: std::net::SocketAddr,
+        requests: Arc<AtomicUsize>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    async fn spawn_other_host() -> OtherHost {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&requests);
+        let app = Router::new().fallback(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            async { StatusCode::OK }
+        });
+        let (addr, server) = serve_test_app(app).await;
+        OtherHost {
+            addr,
+            requests,
+            server,
+        }
+    }
+
+    async fn serve_test_app(app: Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        (addr, server)
+    }
+
+    #[derive(Clone)]
+    struct RedirectState {
+        status: StatusCode,
+        location: String,
+        seen: SeenHeaders,
+    }
+
+    async fn redirect_handler(
+        State(state): State<RedirectState>,
+        headers: axum::http::HeaderMap,
+    ) -> impl IntoResponse {
+        state.seen.lock().await.push(headers);
+        (
+            state.status,
+            [(axum::http::header::LOCATION, state.location.clone())],
+        )
+    }
+
+    /// The identity a dial stamps during catalog discovery, signed by a
+    /// synthetic test key.
+    fn catalog_probe_forwarding(server: &str) -> (SharedIdentityIssuer, IdentityCell) {
+        use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+
+        let key = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
+        let pem = key
+            .to_pkcs8_pem(LineEnding::LF)
+            .expect("encode test signing key");
+        let issuer = Arc::new(
+            waygate_oidc::IdentityIssuer::from_ed25519_pkcs8_pem(
+                &pem,
+                "gw-test",
+                "https://gateway.test",
+                "gateway-main",
+                Duration::from_secs(60),
+            )
+            .expect("test identity issuer"),
+        );
+        let cell = IdentityCell::new();
+        cell.set(crate::catalog_probe::catalog_probe_identity(
+            server,
+            &[],
+            crate::IdentityTokenPolicy::FULL,
+        ));
+        (issuer, cell)
+    }
+
+    /// The configured host received the static bearer and the identity token,
+    /// so both were in play, and the other host received no request at all.
+    async fn assert_credentials_stayed_on_the_configured_host(
+        seen: &SeenHeaders,
+        bearer: &str,
+        other: &OtherHost,
+    ) {
+        let expected_authorization = format!("Bearer {bearer}");
+        assert!(
+            seen.lock().await.iter().any(|headers| {
+                headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .is_some_and(|value| value.as_bytes() == expected_authorization.as_bytes())
+                    && headers.contains_key(crate::identity_client::IDENTITY_HEADER)
+            }),
+            "the configured host must receive the bearer and the identity token",
+        );
+        assert_eq!(
+            other.requests.load(Ordering::SeqCst),
+            0,
+            "no request may reach a host other than the configured one",
+        );
+    }
+
+    #[tokio::test]
+    async fn http_dial_refuses_a_redirect_and_sends_its_target_nothing() {
+        let env = "GW_TEST_TRANSPORT_HTTP_REDIRECT_BEARER";
+        let bearer = "synthetic-http-bearer";
+        unsafe { std::env::set_var(env, bearer) };
+        for status in [
+            StatusCode::TEMPORARY_REDIRECT,
+            StatusCode::PERMANENT_REDIRECT,
+        ] {
+            let other = spawn_other_host().await;
+            let state = RedirectState {
+                status,
+                location: format!("http://{}/mcp?token=synthetic-location-token", other.addr),
+                seen: SeenHeaders::default(),
+            };
+            let (addr, server) = serve_test_app(
+                Router::new()
+                    .route("/mcp", axum::routing::any(redirect_handler))
+                    .with_state(state.clone()),
+            )
+            .await;
+            let manifest: UpstreamManifest = serde_yaml::from_str(&format!(
+                "name: redirecting-http\ntransport: http\ntrust: internal\nurl: http://{addr}/mcp\nauth:\n  bearer_env: {env}\n"
+            ))
+            .expect("parse test manifest");
+            let (issuer, cell) = catalog_probe_forwarding(&manifest.name);
+
+            let result = connect_with_handshake_timeout(
+                &manifest,
+                Some(&issuer),
+                Some(&cell),
+                None,
+                ClientCapabilities::default(),
+                Duration::from_secs(5),
+            )
+            .await;
+            server.abort();
+            other.server.abort();
+
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("{status}: a redirected dial must not connect"),
+            };
+            assert!(
+                matches!(
+                    &error,
+                    DialError::RedirectRefused { server, status: refused }
+                        if server == "redirecting-http" && *refused == status
+                ),
+                "{status}: {error:?}",
+            );
+            let text = error.to_string();
+            assert!(
+                text.contains("`redirecting-http`") && text.contains("redirect refused"),
+                "{text}"
+            );
+            assert!(
+                !text.contains("synthetic-location-token")
+                    && !text.contains(&other.addr.to_string()),
+                "the error must not quote the redirect target: {text}"
+            );
+            assert_credentials_stayed_on_the_configured_host(&state.seen, bearer, &other).await;
+        }
+        unsafe { std::env::remove_var(env) };
+    }
+
+    /// The receive stream and the message POST are separate requests, and each
+    /// one carries the credentials, so a redirect on either fails the dial.
+    #[tokio::test]
+    async fn sse_dial_refuses_a_redirect_on_the_stream_or_a_message_post() {
+        let env = "GW_TEST_TRANSPORT_SSE_REDIRECT_BEARER";
+        let bearer = "synthetic-sse-bearer";
+        unsafe { std::env::set_var(env, bearer) };
+        for redirected in ["/mcp/sse", "/mcp/messages"] {
+            let other = spawn_other_host().await;
+            let state = RedirectState {
+                status: StatusCode::TEMPORARY_REDIRECT,
+                location: format!("http://{}{redirected}", other.addr),
+                seen: SeenHeaders::default(),
+            };
+            let redirect = axum::routing::any(redirect_handler).with_state(state.clone());
+            let app = match redirected {
+                "/mcp/sse" => Router::new().route("/mcp/sse", redirect),
+                _ => Router::new()
+                    .route(
+                        "/mcp/sse",
+                        get(stalled_handshake_sse).with_state(StalledHandshakeState::default()),
+                    )
+                    .route("/mcp/messages", redirect),
+            };
+            let (addr, server) = serve_test_app(app).await;
+            let manifest: UpstreamManifest = serde_yaml::from_str(&format!(
+                "name: redirecting-sse\ntransport: sse\ntrust: internal\nurl: http://{addr}/mcp/sse\nauth:\n  bearer_env: {env}\n"
+            ))
+            .expect("parse test manifest");
+            let (issuer, cell) = catalog_probe_forwarding(&manifest.name);
+
+            let result = connect_with_handshake_timeout(
+                &manifest,
+                Some(&issuer),
+                Some(&cell),
+                None,
+                ClientCapabilities::default(),
+                Duration::from_secs(5),
+            )
+            .await;
+            server.abort();
+            other.server.abort();
+
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("{redirected}: a redirected dial must not connect"),
+            };
+            assert!(
+                matches!(
+                    &error,
+                    DialError::RedirectRefused { server, status }
+                        if server == "redirecting-sse" && *status == StatusCode::TEMPORARY_REDIRECT
+                ),
+                "{redirected}: {error:?}",
+            );
+            assert!(
+                error.to_string().contains("redirect refused"),
+                "{redirected}: {error}"
+            );
+            assert_credentials_stayed_on_the_configured_host(&state.seen, bearer, &other).await;
+        }
+        unsafe { std::env::remove_var(env) };
+    }
+
+    #[tokio::test]
+    async fn sse_dial_refuses_a_message_endpoint_on_another_origin() {
+        let env = "GW_TEST_TRANSPORT_SSE_ENDPOINT_BEARER";
+        let bearer = "synthetic-endpoint-bearer";
+        unsafe { std::env::set_var(env, bearer) };
+        let other = spawn_other_host().await;
+        let endpoint = format!(
+            "http://{}/mcp/messages?session_id=synthetic-session",
+            other.addr
+        );
+        let seen = SeenHeaders::default();
+        let open_streams: Arc<Mutex<Vec<TestEventSender>>> = Arc::default();
+        let app = Router::new().route(
+            "/mcp/sse",
+            get({
+                let seen = Arc::clone(&seen);
+                move |headers: axum::http::HeaderMap| {
+                    let seen = Arc::clone(&seen);
+                    let open_streams = Arc::clone(&open_streams);
+                    let endpoint = endpoint.clone();
+                    async move {
+                        seen.lock().await.push(headers);
+                        let (tx, rx) = mpsc::channel(4);
+                        tx.send(Ok(Event::default().event("endpoint").data(endpoint)))
+                            .await
+                            .expect("send endpoint event");
+                        open_streams.lock().await.push(tx);
+                        Sse::new(ReceiverStream::new(rx))
+                    }
+                }
+            }),
+        );
+        let (addr, server) = serve_test_app(app).await;
+        let manifest: UpstreamManifest = serde_yaml::from_str(&format!(
+            "name: relocating-sse\ntransport: sse\ntrust: internal\nurl: http://{addr}/mcp/sse\nauth:\n  bearer_env: {env}\n"
+        ))
+        .expect("parse test manifest");
+        let (issuer, cell) = catalog_probe_forwarding(&manifest.name);
+
+        let result = connect_with_handshake_timeout(
+            &manifest,
+            Some(&issuer),
+            Some(&cell),
+            None,
+            ClientCapabilities::default(),
+            Duration::from_secs(5),
+        )
+        .await;
+        server.abort();
+        other.server.abort();
+        unsafe { std::env::remove_var(env) };
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("an endpoint on another origin must not connect"),
+        };
+        let expected_origin = format!("http://{}", other.addr);
+        assert!(
+            matches!(
+                &error,
+                DialError::SseEndpointRefused { server, announced }
+                    if server == "relocating-sse" && *announced == expected_origin
+            ),
+            "{error:?}",
+        );
+        let text = error.to_string();
+        assert!(
+            text.contains("`relocating-sse`") && text.contains("endpoint refused"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("synthetic-session"),
+            "the error must not quote the endpoint's query: {text}"
+        );
+        assert_credentials_stayed_on_the_configured_host(&seen, bearer, &other).await;
     }
 
     #[tokio::test]
@@ -1873,6 +2307,175 @@ url: https://mcp.example/mcp
 "#;
         let parsed: crate::UpstreamManifest = serde_yaml::from_str(yaml).expect("parse yaml");
         assert!(parsed.mtls.is_none(), "mtls must default to None");
+    }
+
+    /// The stdio child's environment, observed from real child processes.
+    /// Failure messages name variables but never print a value, because a
+    /// regression would expose the test process's own environment.
+    #[cfg(unix)]
+    mod stdio_environment {
+        use std::collections::BTreeMap;
+        use std::ffi::OsString;
+
+        use super::*;
+
+        /// The entries `env -0` prints, keyed by name. NUL separation keeps a
+        /// multi-line value from being read as further entries.
+        fn parse_env_report(report: &[u8]) -> BTreeMap<String, Vec<u8>> {
+            report
+                .split(|byte| *byte == 0)
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| {
+                    let split = entry.iter().position(|byte| *byte == b'=');
+                    let (name, value) = entry.split_at(split.unwrap_or(entry.len()));
+                    let value = value.get(1..).unwrap_or_default();
+                    (String::from_utf8_lossy(name).into_owned(), value.to_vec())
+                })
+                .collect()
+        }
+
+        /// Assert that `observed` holds exactly the `expected` names, each
+        /// with its expected value.
+        fn assert_child_env(observed: &BTreeMap<String, Vec<u8>>, expected: &[(&str, &str)]) {
+            let mut expected_names: Vec<&str> = expected.iter().map(|(name, _)| *name).collect();
+            expected_names.sort_unstable();
+            let observed_names: Vec<&str> = observed.keys().map(String::as_str).collect();
+            assert_eq!(observed_names, expected_names, "stdio child variable names");
+            for (name, value) in expected {
+                assert!(
+                    observed[*name] == value.as_bytes(),
+                    "`{name}` did not carry the gateway's value",
+                );
+            }
+        }
+
+        /// Run `env -0` as a stdio child whose gateway environment is
+        /// `gateway_env`, and return the environment it reports.
+        async fn child_environment(
+            gateway_env: &[(&str, &str)],
+            env_passthrough: &[String],
+        ) -> BTreeMap<String, Vec<u8>> {
+            let args = ["-0".to_owned()];
+            let output = stdio_command_with_env("/usr/bin/env", &args, env_passthrough, |name| {
+                gateway_env
+                    .iter()
+                    .find(|(candidate, _)| *candidate == name)
+                    .map(|(_, value)| OsString::from(value))
+            })
+            .output()
+            .await
+            .expect("run env as a stdio child");
+            assert!(output.status.success(), "env exited with {}", output.status);
+            parse_env_report(&output.stdout)
+        }
+
+        #[tokio::test]
+        async fn stdio_child_receives_only_the_baseline_and_named_variables() {
+            // A stand-in gateway environment holding the identity signing key,
+            // an `auth.bearer_env` credential and database settings next to two
+            // baseline variables. The values are synthetic.
+            let gateway_env = [
+                ("PATH", "/usr/bin:/bin"),
+                ("LANG", "C.UTF-8"),
+                ("GATEWAY_IDENTITY_SIGNING_KEY_PEM", "fixture-signing-key"),
+                ("EXAMPLE_UPSTREAM_BEARER", "fixture-upstream-bearer"),
+                ("GATEWAY_DATABASE_URL", "fixture-gateway-database"),
+                ("AUDIT_DATABASE_URL", "fixture-audit-database"),
+                ("GATEWAY_AS_DATABASE_URL", "fixture-as-database"),
+            ];
+            let baseline = [("PATH", "/usr/bin:/bin"), ("LANG", "C.UTF-8")];
+
+            // An exact name match also proves that nothing from the test
+            // process's own environment reached the child.
+            assert_child_env(&child_environment(&gateway_env, &[]).await, &baseline);
+
+            // Naming a variable passes the gateway's value through. A named
+            // variable the gateway has not set is left out without failing the
+            // start, and unnamed secrets stay withheld.
+            let named = [
+                "EXAMPLE_UPSTREAM_BEARER".to_owned(),
+                "AUDIT_DATABASE_URL".to_owned(),
+                "EXAMPLE_UNSET_VARIABLE".to_owned(),
+            ];
+            let mut expected = baseline.to_vec();
+            expected.extend([
+                ("EXAMPLE_UPSTREAM_BEARER", "fixture-upstream-bearer"),
+                ("AUDIT_DATABASE_URL", "fixture-audit-database"),
+            ]);
+            assert_child_env(&child_environment(&gateway_env, &named).await, &expected);
+        }
+
+        #[tokio::test]
+        async fn stdio_dial_withholds_unnamed_gateway_variables_from_the_child() {
+            let named = "GW_TEST_STDIO_ENV_NAMED_TOKEN";
+            let unnamed = "GW_TEST_STDIO_ENV_UNNAMED_TOKEN";
+            // SAFETY: `set_var` is process-global; both names are unique to this
+            // test, so no concurrent reader can observe them.
+            unsafe {
+                std::env::set_var(named, "fixture-named-token");
+                std::env::set_var(unnamed, "fixture-unnamed-token");
+            }
+            let dir = std::env::temp_dir().join(format!("gateway-stdio-env-{}", Uuid::new_v4()));
+            std::fs::create_dir(&dir).expect("create isolated stdio env test directory");
+            let report = dir.join("child-env");
+            // The child writes its environment to `report` and exits without
+            // speaking MCP. The shell holds the child's stdout open until `env`
+            // has finished, so the dial fails only after the report is complete.
+            let manifest: UpstreamManifest = serde_json::from_value(serde_json::json!({
+                "name": "env-report",
+                "transport": "stdio",
+                "protocol": "legacy",
+                "command": [
+                    "/bin/sh",
+                    "-c",
+                    "/usr/bin/env -0 > \"$1\"",
+                    "sh",
+                    report.to_str().expect("temporary path is UTF-8"),
+                ],
+                "env_passthrough": [named],
+            }))
+            .expect("test manifest parses");
+
+            let dialed = tokio::time::timeout(
+                Duration::from_secs(10),
+                connect(&manifest, None, None, None),
+            )
+            .await
+            .expect("a stdio child that exits must not hang the dial");
+            // SAFETY: as above, the names are unique to this test.
+            unsafe {
+                std::env::remove_var(named);
+                std::env::remove_var(unnamed);
+            }
+            assert!(
+                dialed.is_err(),
+                "a child that never speaks MCP cannot connect"
+            );
+            let observed = parse_env_report(&std::fs::read(&report).expect("child wrote its env"));
+            std::fs::remove_dir_all(&dir).expect("remove isolated stdio env test directory");
+
+            assert!(
+                observed
+                    .get(named)
+                    .is_some_and(|value| value == b"fixture-named-token"),
+                "the named variable must carry the gateway's value",
+            );
+            assert!(
+                !observed.contains_key(unnamed),
+                "an unnamed variable must be withheld"
+            );
+            // Nothing else from the test process's environment arrived: only the
+            // baseline, the named variable, and what the shell sets for itself.
+            let shell_maintained = ["PWD", "OLDPWD", "SHLVL", "_"];
+            for name in observed.keys() {
+                assert!(
+                    STDIO_BASELINE_ENV.contains(&name.as_str())
+                        || name == named
+                        || shell_maintained.contains(&name.as_str()),
+                    "stdio child received unlisted variable `{name}`",
+                );
+            }
+        }
     }
 }
 

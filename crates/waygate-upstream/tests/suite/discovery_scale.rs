@@ -168,6 +168,7 @@ async fn discovery_latency_and_database_queries() {
             protocol: Default::default(),
             url: Some(upstream.url.clone()),
             command: None,
+            env_passthrough: Vec::new(),
             classification_mode: Default::default(),
             approval_mode: Default::default(),
             inline_response_threshold_bytes: None,

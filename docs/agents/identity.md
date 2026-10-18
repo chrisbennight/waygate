@@ -319,6 +319,11 @@ needs only the subject can be given only the subject. The subject, issuer,
 audience, times and actor are always present. See
 [trust classification](upstreams.md#trust-classification).
 
+Every tier's headers go only to the configured upstream's scheme, host, and
+port. Upstream requests never follow redirects, and a legacy-SSE message
+endpoint on another origin fails the connection; see
+[upstream request destinations](upstreams.md#upstream-request-destinations).
+
 The initial `initialize` and `tools/list` exchange has no end-user caller. For
 HTTP/SSE upstreams that receive the Tier B token, the pool mints a dedicated
 `mcp-tool-search-gateway:catalog-probe` identity with no email, scopes, or user

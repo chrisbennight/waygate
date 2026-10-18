@@ -74,6 +74,7 @@ fn shape_manifest(transport: Transport, concurrency: Option<usize>) -> UpstreamM
         protocol: Default::default(),
         url: Some("http://unused.test/mcp".into()),
         command: Some(vec!["cmd".into()]),
+        env_passthrough: Vec::new(),
         tools: Vec::new(),
         resources: Vec::new(),
         exchange: None,
@@ -150,6 +151,9 @@ fn redial_committed_fields_eq_covers_shape_and_identity_not_classifications() {
     let mut command = base.clone();
     command.command = Some(vec!["other".into()]);
     assert!(!redial_committed_fields_eq(&base, &command));
+    let mut env_passthrough = base.clone();
+    env_passthrough.env_passthrough = vec!["EXAMPLE_API_TOKEN".into()];
+    assert!(!redial_committed_fields_eq(&base, &env_passthrough));
     let mut transport = base.clone();
     transport.transport = Transport::Sse;
     assert!(!redial_committed_fields_eq(&base, &transport));
@@ -350,6 +354,7 @@ fn pool_with_manifest_tool() -> UpstreamPool {
             protocol: Default::default(),
             url: Some("http://example-messages.test/mcp".into()),
             command: None,
+            env_passthrough: Vec::new(),
             tools: vec![ToolClassification::new("send", RiskTier::High, true, false)],
             resources: Vec::new(),
             exchange: None,
@@ -381,6 +386,7 @@ fn annotation_native_tool_facts_stay_conservative_until_policy_enforcement() {
             protocol: Default::default(),
             url: Some("http://komodo.test/mcp".into()),
             command: None,
+            env_passthrough: Vec::new(),
             tools: vec![ToolClassification {
                 approved_behavior_hash: Some("a".repeat(64)),
                 ..ToolClassification::new("stacks.config.read", RiskTier::High, false, false)
@@ -617,6 +623,7 @@ async fn catalog_transition_fence_tracks_generation_without_erasing_catalog_over
                 protocol: Default::default(),
                 url: Some("http://example-messages.test/mcp".into()),
                 command: None,
+                env_passthrough: Vec::new(),
                 tools: vec![
                     ToolClassification::new("send", risk, true, false),
                     ToolClassification::new("receive", RiskTier::Low, false, false),
@@ -1456,6 +1463,7 @@ fn manifest_with(tier_a_required: bool) -> UpstreamManifest {
         protocol: Default::default(),
         url: Some("http://example-messages:8000/mcp".into()),
         command: None,
+        env_passthrough: Vec::new(),
         tools: vec![ToolClassification::new(
             "send_message",
             RiskTier::Low,
@@ -2794,6 +2802,7 @@ async fn boot_dial_timeout_bounds_a_hung_upstream() {
         // initialize read blocks indefinitely (a true post-spawn wedge, the
         // shape of the prod incident).
         command: Some(vec!["sleep".into(), "86400".into()]),
+        env_passthrough: Vec::new(),
         tools: Vec::new(),
         resources: Vec::new(),
         exchange: None,

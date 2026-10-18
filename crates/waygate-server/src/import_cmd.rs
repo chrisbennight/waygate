@@ -480,6 +480,14 @@ fn to_import_server(m: &UpstreamManifest) -> ImportServer {
         }
         Transport::Stdio => {
             rt.insert("command".into(), serde_json::json!(m.command));
+            // The child's environment is part of how it is started, so the
+            // named variables survive the import like the command does.
+            if !m.env_passthrough.is_empty() {
+                rt.insert(
+                    "env_passthrough".into(),
+                    serde_json::json!(m.env_passthrough),
+                );
+            }
         }
     }
     // The lifecycle override is connection-relevant exactly like `url` /
@@ -596,6 +604,7 @@ mod tests {
             protocol: Default::default(),
             url: Some("http://x.test/mcp".into()),
             command: None,
+            env_passthrough: Vec::new(),
             tools: vec![waygate_upstream::ToolClassification::new(
                 "send",
                 waygate_mcp::protocol::RiskTier::High,
@@ -699,6 +708,15 @@ mod tests {
         let s = to_import_server(&m);
         assert_eq!(s.transport, "stdio");
         assert_eq!(s.runtime_target["command"][0], "/bin/foo");
+        assert!(s.runtime_target.get("env_passthrough").is_none());
+
+        m.env_passthrough = vec!["EXAMPLE_API_TOKEN".into()];
+        let s = to_import_server(&m);
+        assert_eq!(
+            s.runtime_target["env_passthrough"],
+            serde_json::json!(["EXAMPLE_API_TOKEN"]),
+            "the variables a stdio child receives must survive the import",
+        );
     }
 
     #[test]

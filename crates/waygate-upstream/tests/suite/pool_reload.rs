@@ -65,6 +65,7 @@ fn manifest(name: &str, url: &str, tools: Vec<ToolClassification>) -> UpstreamMa
         protocol: Default::default(),
         url: Some(url.into()),
         command: None,
+        env_passthrough: Vec::new(),
         tools,
         resources: Vec::new(),
         exchange: None,
