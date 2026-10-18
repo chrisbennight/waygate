@@ -22,6 +22,7 @@ fn stdio_manifest(name: &str, command: Vec<String>) -> UpstreamManifest {
         protocol: Default::default(),
         url: None,
         command: Some(command),
+        env_passthrough: Vec::new(),
         tools: Vec::new(),
         resources: Vec::new(),
         exchange: None,
