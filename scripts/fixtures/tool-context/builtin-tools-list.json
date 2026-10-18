@@ -39,12 +39,6 @@
             "created_at"
           ],
           "$defs": {
-            "ContractVersion": {
-              "type": "string",
-              "enum": [
-                "1"
-              ]
-            },
             "ArtifactReference": {
               "type": "object",
               "properties": {
@@ -69,7 +63,7 @@
           "properties": {
             "contract_version": {
               "description": "Version of the Code Mode artifact contract.",
-              "$ref": "#/$defs/ContractVersion"
+              "type": "string"
             },
             "reference": {
               "description": "Stable reference used for this retrieval.",
@@ -144,12 +138,6 @@
             "artifacts"
           ],
           "$defs": {
-            "ContractVersion": {
-              "type": "string",
-              "enum": [
-                "1"
-              ]
-            },
             "ArtifactSummary": {
               "type": "object",
               "properties": {
@@ -191,7 +179,7 @@
           "properties": {
             "contract_version": {
               "description": "Version of the Code Mode artifact contract.",
-              "$ref": "#/$defs/ContractVersion"
+              "type": "string"
             },
             "execution_id": {
               "description": "Durable execution that owns every returned artifact.",
@@ -247,7 +235,7 @@
           "properties": {
             "contract_version": {
               "description": "Version of the Code Mode execution-status contract.",
-              "$ref": "#/$defs/ContractVersion"
+              "type": "string"
             },
             "execution_id": {
               "description": "Durable execution this status describes.",
@@ -323,12 +311,6 @@
             }
           },
           "$defs": {
-            "ContractVersion": {
-              "type": "string",
-              "enum": [
-                "1"
-              ]
-            },
             "SourceReference": {
               "type": "object",
               "properties": {
@@ -469,7 +451,7 @@
               "properties": {
                 "contract_version": {
                   "description": "Version of the runtime-neutral connector contract.",
-                  "$ref": "#/$defs/ContractVersion"
+                  "type": "string"
                 },
                 "binding": {
                   "description": "Stable raw names used by generated connector bindings.",
@@ -521,7 +503,7 @@
                   "type": "boolean"
                 },
                 "contract_version": {
-                  "$ref": "#/$defs/ContractVersion"
+                  "type": "string"
                 },
                 "binding": {
                   "$ref": "#/$defs/ConnectorBinding"
@@ -539,12 +521,6 @@
             }
           ],
           "$defs": {
-            "ContractVersion": {
-              "type": "string",
-              "enum": [
-                "1"
-              ]
-            },
             "ConnectorBinding": {
               "type": "object",
               "properties": {
@@ -898,25 +874,6 @@
             "artifacts"
           ],
           "$defs": {
-            "ContractVersion": {
-              "type": "string",
-              "enum": [
-                "1"
-              ]
-            },
-            "SdkContractVersion": {
-              "description": "The caller-facing spelling of the stamps a row carries. These are the same\ntwo numbers as `SDK_CONTRACT_VERSION` and `RUNNER_CONTRACT_VERSION` and must\nadvance with them: a response that advertised the previous contract while\nthe sandbox offered a new one would tell a client the program surface is\nsomething other than what it ran against.",
-              "type": "string",
-              "enum": [
-                "7"
-              ]
-            },
-            "RunnerContractVersion": {
-              "type": "string",
-              "enum": [
-                "10"
-              ]
-            },
             "SourceReference": {
               "type": "object",
               "properties": {
@@ -1143,15 +1100,15 @@
           "properties": {
             "contract_version": {
               "description": "Version of the Code Mode execution contract.",
-              "$ref": "#/$defs/ContractVersion"
+              "type": "string"
             },
             "sdk_contract_version": {
               "description": "Version of the `connectors[server][operation]` binding contract.",
-              "$ref": "#/$defs/SdkContractVersion"
+              "type": "string"
             },
             "runner_contract_version": {
               "description": "Version of the parent/runner capability protocol.",
-              "$ref": "#/$defs/RunnerContractVersion"
+              "type": "string"
             },
             "execution_id": {
               "description": "Parent identity stamped onto every governed nested invocation and its\nevidence rows.",
@@ -1273,19 +1230,13 @@
             "executions"
           ],
           "$defs": {
-            "ContractVersion": {
-              "type": "string",
-              "enum": [
-                "1"
-              ]
-            },
             "ExecutionStatusResponse": {
               "description": "Decision-shaped projection of one durable execution.\n\nDeliberately excludes the stored result and any artifact content. This is\nthe shape a caller polls in a loop, so its size must not grow with the work\nthe program did; retrieval stays with `codemode.result` and the artifact\ntools, which a caller reaches for once, after this reports there is\nsomething to fetch.",
               "type": "object",
               "properties": {
                 "contract_version": {
                   "description": "Version of the Code Mode execution-status contract.",
-                  "$ref": "#/$defs/ContractVersion"
+                  "type": "string"
                 },
                 "execution_id": {
                   "description": "Durable execution this status describes.",
@@ -1427,7 +1378,7 @@
           "properties": {
             "contract_version": {
               "description": "Version of the Code Mode execution contract.",
-              "$ref": "#/$defs/ContractVersion"
+              "type": "string"
             },
             "executions": {
               "description": "The caller's own in-flight executions, newest submission first, in\nthe status poll's vocabulary. Entries never carry a checkpoint — a\npage's size is bounded by its row count, not by what the listed\nprograms stored — so poll a discovered identifier with\n`codemode.status` to read its checkpoint.",
@@ -1734,12 +1685,6 @@
             "result"
           ],
           "$defs": {
-            "ContractVersion": {
-              "type": "string",
-              "enum": [
-                "1"
-              ]
-            },
             "ExecutionResultReference": {
               "type": "object",
               "properties": {
@@ -1804,7 +1749,7 @@
           "properties": {
             "contract_version": {
               "description": "Version of the Code Mode stored-result contract.",
-              "$ref": "#/$defs/ContractVersion"
+              "type": "string"
             },
             "reference": {
               "description": "Stable reference used for this retrieval.",
@@ -1887,25 +1832,6 @@
             "artifacts"
           ],
           "$defs": {
-            "ContractVersion": {
-              "type": "string",
-              "enum": [
-                "1"
-              ]
-            },
-            "SdkContractVersion": {
-              "description": "The caller-facing spelling of the stamps a row carries. These are the same\ntwo numbers as `SDK_CONTRACT_VERSION` and `RUNNER_CONTRACT_VERSION` and must\nadvance with them: a response that advertised the previous contract while\nthe sandbox offered a new one would tell a client the program surface is\nsomething other than what it ran against.",
-              "type": "string",
-              "enum": [
-                "7"
-              ]
-            },
-            "RunnerContractVersion": {
-              "type": "string",
-              "enum": [
-                "10"
-              ]
-            },
             "SourceReference": {
               "type": "object",
               "properties": {
@@ -2132,15 +2058,15 @@
           "properties": {
             "contract_version": {
               "description": "Version of the Code Mode execution contract.",
-              "$ref": "#/$defs/ContractVersion"
+              "type": "string"
             },
             "sdk_contract_version": {
               "description": "Version of the `connectors[server][operation]` binding contract.",
-              "$ref": "#/$defs/SdkContractVersion"
+              "type": "string"
             },
             "runner_contract_version": {
               "description": "Version of the parent/runner capability protocol.",
-              "$ref": "#/$defs/RunnerContractVersion"
+              "type": "string"
             },
             "execution_id": {
               "description": "Parent identity stamped onto every governed nested invocation and its\nevidence rows.",
@@ -2274,12 +2200,6 @@
             "tools"
           ],
           "$defs": {
-            "ContractVersion": {
-              "type": "string",
-              "enum": [
-                "1"
-              ]
-            },
             "ConnectorSummary": {
               "type": "object",
               "properties": {
@@ -2308,7 +2228,7 @@
           "properties": {
             "contract_version": {
               "description": "Version of the runtime-neutral connector contract.",
-              "$ref": "#/$defs/ContractVersion"
+              "type": "string"
             },
             "tools": {
               "description": "Governed tools admitted for this caller.",
@@ -2470,7 +2390,7 @@
           "properties": {
             "contract_version": {
               "description": "Version of the Code Mode execution-status contract.",
-              "$ref": "#/$defs/ContractVersion"
+              "type": "string"
             },
             "execution_id": {
               "description": "Durable execution this status describes.",
@@ -2546,12 +2466,6 @@
             }
           },
           "$defs": {
-            "ContractVersion": {
-              "type": "string",
-              "enum": [
-                "1"
-              ]
-            },
             "SourceReference": {
               "type": "object",
               "properties": {
@@ -2665,7 +2579,7 @@
           "properties": {
             "contract_version": {
               "description": "Version of the Code Mode execution-status contract.",
-              "$ref": "#/$defs/ContractVersion"
+              "type": "string"
             },
             "execution_id": {
               "description": "Durable execution this status describes.",
@@ -2741,12 +2655,6 @@
             }
           },
           "$defs": {
-            "ContractVersion": {
-              "type": "string",
-              "enum": [
-                "1"
-              ]
-            },
             "SourceReference": {
               "type": "object",
               "properties": {
@@ -2840,7 +2748,7 @@
           "properties": {
             "contract_version": {
               "description": "Version of the Code Mode execution-status contract.",
-              "$ref": "#/$defs/ContractVersion"
+              "type": "string"
             },
             "execution_id": {
               "description": "Durable execution this status describes.",
@@ -2916,12 +2824,6 @@
             }
           },
           "$defs": {
-            "ContractVersion": {
-              "type": "string",
-              "enum": [
-                "1"
-              ]
-            },
             "SourceReference": {
               "type": "object",
               "properties": {
