@@ -2603,6 +2603,14 @@ impl UpstreamPool {
                         // success paths below commit the complete new manifest
                         // and a failure keeps these old claims.
                         guard.resources = new_manifest.resources.clone();
+                        super::resources::warn_if_resources_undeclared(
+                            &guard,
+                            classification_guards.iter().any(|conn_guard| {
+                                conn_guard
+                                    .as_ref()
+                                    .is_some_and(|conn| conn.resource_capability_advertised)
+                            }),
+                        );
                     }
                     if tool_classification_changed {
                         let catalog_change = self.tool_catalog_epoch.begin_change();

@@ -333,7 +333,13 @@ async fn resource_reload_invalidates_an_earlier_read_admission() {
 
 #[tokio::test]
 async fn resource_eligibility_reload_invalidates_an_earlier_read_admission() {
-    let alpha = manifest("alpha", "http://unused.test/alpha", vec![]);
+    // alpha declares the prefix the admission names, so only the stale
+    // generation can refuse the read below.
+    let mut alpha = manifest("alpha", "http://unused.test/alpha", vec![]);
+    alpha.resources = vec![ResourceClassification {
+        uri_prefix: "shared://resource/".to_owned(),
+        risk: RiskTier::Low,
+    }];
     let mut gated = manifest("gated", "http://unused.test/gated", vec![]);
     gated.tier_c_peer = Some(uuid::Uuid::from_u128(0x967));
     let pool = UpstreamPool::from_manifests_disconnected(BTreeMap::from([
