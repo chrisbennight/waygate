@@ -451,6 +451,35 @@ fn ambiguous_resource(uri: &str) -> McpError {
     )
 }
 
+/// Why the gateway could not determine which upstreams serve a URI. `detail`
+/// can name another upstream and its connection state, so it goes to the
+/// audit row and the log, never to the caller.
+struct OwnerLookupFailure {
+    detail: String,
+    /// Whether the same lookup can succeed later without a configuration
+    /// change: an unreachable upstream or a missed deadline can recover, while
+    /// an exhausted page budget or a repeating cursor recurs.
+    retryable: bool,
+}
+
+/// The caller's answer when owner lookup fails. It names only the URI the
+/// caller asked for and says the read was not sent, so it cannot be mistaken
+/// for an answer from whichever upstream failed. `trace_id` ties it to the
+/// audit row and log line that record the cause.
+fn owner_lookup_failed(uri: &str, retryable: bool, trace_id: &str) -> McpError {
+    McpError::internal_error(
+        format!(
+            "could not determine which upstream serves resource `{uri}`, so the read was not \
+             sent to any upstream (trace id {trace_id})"
+        ),
+        Some(json!({
+            "error": "resource_owner_lookup_failed",
+            "retryable": retryable,
+            "trace_id": trace_id,
+        })),
+    )
+}
+
 fn public_resource_read_error(error: AdmittedResourceReadError) -> McpError {
     error.into_mcp_error()
 }
@@ -2004,14 +2033,14 @@ impl GatewayServer {
         .await
         {
             Ok(resolved) => resolved,
-            Err(_) => Err(McpError::internal_error(
-                "resource ownership resolution exceeded the 30-second deadline",
-                None,
-            )),
+            Err(_) => Err(OwnerLookupFailure {
+                detail: "resource ownership resolution exceeded the 30-second deadline".to_owned(),
+                retryable: true,
+            }),
         };
         let owners = match resolved {
             Ok(owners) => owners,
-            Err(error) => {
+            Err(failure) => {
                 // Resolution itself failed — a deadline, an upstream that could
                 // not list, a repeated cursor, an exhausted page budget. The
                 // caller still asked to read this URI, and an attempt that
@@ -2019,6 +2048,13 @@ impl GatewayServer {
                 // unhealthy fleet would rely on. Recorded as an execution
                 // error, because upstreams were reached and one of them is why
                 // this failed.
+                let trace_id = waygate_telemetry::correlation::current_trace_id()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+                tracing::warn!(
+                    detail = %failure.detail,
+                    %trace_id,
+                    "refusing resource read: owner lookup failed",
+                );
                 if let Some(principal) = principal {
                     self.audit
                         .record_chained_best_effort(
@@ -2029,12 +2065,17 @@ impl GatewayServer {
                             )
                             .with_reason(format!(
                                 "resource ownership resolution failed: {}",
-                                error.message
-                            )),
+                                failure.detail
+                            ))
+                            .with_trace_id(trace_id.as_str()),
                         )
                         .await;
                 }
-                return Err(error);
+                return Err(owner_lookup_failed(
+                    &params.uri,
+                    failure.retryable,
+                    &trace_id,
+                ));
             }
         };
         let Some(principal) = principal else {
@@ -2575,7 +2616,7 @@ impl GatewayServer {
         &self,
         uri: &str,
         principal: Option<&Principal>,
-    ) -> Result<Vec<ResourceOwner>, McpError> {
+    ) -> Result<Vec<ResourceOwner>, OwnerLookupFailure> {
         if crate::files::is_reserved_file_uri(uri) {
             return Ok(Vec::new());
         }
@@ -2626,13 +2667,13 @@ impl GatewayServer {
             let mut seen = HashSet::new();
             loop {
                 if pages_remaining == 0 {
-                    return Err(McpError::internal_error(
-                        format!(
+                    return Err(OwnerLookupFailure {
+                        detail: format!(
                             "resource ownership resolution exceeded the \
                              {MAX_RESOURCE_RESOLUTION_PAGES}-page fleet limit"
                         ),
-                        None,
-                    ));
+                        retryable: false,
+                    });
                 }
                 pages_remaining -= 1;
                 let listed = match self
@@ -2646,7 +2687,15 @@ impl GatewayServer {
                 {
                     Ok(listed) => listed,
                     Err(error) if error.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND => break,
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        return Err(OwnerLookupFailure {
+                            detail: format!(
+                                "upstream `{server}` could not list resources: {}",
+                                error.message
+                            ),
+                            retryable: true,
+                        })
+                    }
                 };
                 if listed.resources.iter().any(|resource| resource.uri == uri)
                     && !owners.iter().any(|existing| existing.server == server)
@@ -2664,10 +2713,12 @@ impl GatewayServer {
                 match listed.next_cursor {
                     Some(next) if !next.is_empty() => {
                         if !seen.insert(next.clone()) {
-                            return Err(McpError::internal_error(
-                                format!("upstream `{server}` repeated a resources/list cursor"),
-                                None,
-                            ));
+                            return Err(OwnerLookupFailure {
+                                detail: format!(
+                                    "upstream `{server}` repeated a resources/list cursor"
+                                ),
+                                retryable: false,
+                            });
                         }
                         cursor = Some(next);
                     }

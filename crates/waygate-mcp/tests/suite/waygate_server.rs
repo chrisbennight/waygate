@@ -1087,6 +1087,98 @@ async fn read_resource_rejects_ambiguous_upstream_owners() {
     assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
 }
 
+/// An upstream that cannot list its resources stops owner lookup for an
+/// undeclared URI, because skipping it could hide a second owner. The caller
+/// learns only that the lookup failed and the read was not sent; which
+/// upstream failed, and why, is recorded for operators under the same trace id.
+#[tokio::test]
+async fn failed_owner_lookup_reports_the_lookup_not_the_failing_upstream() {
+    const URI: &str = "printable://contracts";
+    const CONNECTION_DETAIL: &str = "upstream `fetchlayer` is not connected";
+
+    struct UnreachableListerCatalog;
+
+    #[async_trait]
+    impl UpstreamCatalog for UnreachableListerCatalog {
+        async fn list_servers(&self) -> Vec<String> {
+            vec!["fetchlayer".to_owned(), "printable".to_owned()]
+        }
+
+        async fn list_tools(&self, _server: &str) -> Result<Vec<Tool>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn call_tool(
+            &self,
+            _server: &str,
+            _tool_name: &str,
+            _args: Option<Map<String, Value>>,
+            _principal: Option<&Principal>,
+            _admitted: Option<&waygate_mcp::catalog::InvocationContractIdentity>,
+        ) -> Result<CallToolResult, McpError> {
+            unreachable!("resource test never dispatches a tool")
+        }
+
+        async fn list_resources(
+            &self,
+            server: &str,
+            _params: Option<PaginatedRequestParams>,
+            _principal: Option<&Principal>,
+        ) -> Result<ListResourcesResult, McpError> {
+            match server {
+                "fetchlayer" => Err(McpError::internal_error(CONNECTION_DETAIL, None)),
+                _ => Ok(ListResourcesResult::with_all_items(vec![resource(
+                    URI,
+                    "Contracts",
+                )])),
+            }
+        }
+    }
+
+    let sink = Arc::new(InMemorySink::new());
+    let server = GatewayServer::with_deps(
+        Arc::new(UnreachableListerCatalog),
+        Arc::new(ResourceAuthz {
+            list_allowed: true,
+            read_verdict: ResourceAuthz::allow_read(),
+        }),
+        sink.clone(),
+    );
+
+    let error = server
+        .read_visible_resource(ReadResourceRequestParams::new(URI), Some(&maker()))
+        .await
+        .expect_err("an upstream that cannot list stops owner lookup");
+    assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+    assert!(error.message.contains(URI));
+    assert!(error.message.contains("not sent"));
+    let data = error.data.expect("stable error data");
+    assert_eq!(data["error"], "resource_owner_lookup_failed");
+    assert_eq!(data["retryable"], true);
+    let trace_id = data["trace_id"].as_str().expect("trace id").to_owned();
+    assert!(!trace_id.is_empty());
+    for caller_text in [error.message.to_string(), data.to_string()] {
+        assert!(
+            !caller_text.contains("fetchlayer") && !caller_text.contains("not connected"),
+            "the caller's error must not carry another upstream's state: {caller_text}"
+        );
+    }
+
+    let events = sink.snapshot().await;
+    let reads: Vec<_> = events
+        .iter()
+        .filter(|event| event.action == "ReadResource")
+        .collect();
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0].outcome, AuditOutcome::ExecutionError);
+    let reason = reads[0].reason.as_deref().expect("recorded cause");
+    assert!(
+        reason.contains(CONNECTION_DETAIL),
+        "the audit row keeps the cause: {reason}"
+    );
+    assert_eq!(reads[0].trace_id.as_deref(), Some(trace_id.as_str()));
+}
+
 #[tokio::test]
 async fn legacy_resource_enumeration_cannot_claim_the_gateway_file_namespace() {
     let catalog = FakeCatalog::with_resources(vec![(
