@@ -191,6 +191,7 @@ pub(crate) fn bundle_content_with_stdio() -> String {
         protocol: Default::default(),
         url: None,
         command: Some(vec!["echo".into()]),
+        env_passthrough: Vec::new(),
         tools: vec![],
         resources: vec![],
         exchange: None,

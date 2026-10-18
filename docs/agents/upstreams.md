@@ -310,7 +310,9 @@ This document covers:
 
 - The `UpstreamManifest` schema: `name`, `transport` (HTTP / SSE / stdio),
   `protocol` (MCP client lifecycle: `auto` | `legacy` | `2026-07-28`),
-  `url` / `command`, `auth` (bearer-env), `exchange` (RFC 8693 token
+  `url` / `command`, `env_passthrough` (variables a stdio child receives; see
+  [stdio child environment](#stdio-child-environment)), `auth` (bearer-env),
+  `exchange` (RFC 8693 token
   exchange config), `tools` (per-tool classification), `resources`
   (URI-prefix ownership and risk classification), `session`
   (per-upstream connection-pool tuning). `protocol` defaults to `auto`:
@@ -566,7 +568,8 @@ This document covers:
   review the result. Switching to annotation mode is a separate reviewed
   change.
 - Transport configuration: HTTP/SSE upstreams behind Docker networks,
-  stdio for local development only.
+  stdio for local development only, with the child environment described in
+  [stdio child environment](#stdio-child-environment).
 - Reload semantics: SIGHUP (or the Postgres doorbell / dashboard **Reload
   manifests**) triggers a manifest re-read with atomic swap; **adding or
   removing a server applies live** — a newly-listed server is dialed and
@@ -641,6 +644,53 @@ dispatch:
   manifest guard can't see whether the LLM path is configured), so a manifest
   with `name: llm` is refused at load even on an MCP-only deployment. This is a
   reserved name: choose another name for an MCP upstream.
+
+## Stdio child environment
+
+A `transport: stdio` upstream runs as a child process of the gateway. The child
+does not inherit the gateway's environment. It receives only these variables,
+each with the gateway's value when the gateway has it set:
+
+- `PATH`, so the command and any program it starts can be found;
+- `HOME` and `TMPDIR`, where language runtimes and package launchers keep
+  caches and temporary files; and
+- `LANG`, `LC_ALL`, and `TZ`, so text encoding and timestamps match the
+  gateway.
+
+None of these carries a credential. Every other gateway variable is withheld,
+including the identity signing key (`GATEWAY_IDENTITY_SIGNING_KEY_PEM`), the
+upstream credentials that manifests name in `auth.bearer_env`, and database
+connection settings.
+
+To give the child another variable, name it in `env_passthrough`:
+
+```yaml
+name: example-tools
+transport: stdio
+command: [/usr/local/bin/example-tools, --stdio]
+env_passthrough:
+  - EXAMPLE_TOOLS_API_TOKEN
+  - http_proxy
+```
+
+Each entry is a variable name, never a value. The gateway passes its own value
+through, so a secret stays in the gateway's environment and out of the manifest
+and its version history. A name uses ASCII letters, digits, and underscores and
+does not start with a digit; a repeated name is refused. If the gateway has not
+set a named variable, the child starts without it and the gateway logs a
+warning that names the variable, never a value. Manifest load refuses
+`env_passthrough` on HTTP and SSE upstreams, which start no child process.
+Changing the list re-dials the upstream like any other connection-shape change.
+
+The `classify` CLI starts a stdio server with the same environment. Pass
+`--env-passthrough NAME` once for each variable the server needs; the
+scaffolded manifest lists the same names.
+
+The child still runs as the gateway's operating-system user. The filter keeps
+secrets out of a well-behaved server's environment, and so out of anything the
+server logs or forwards from it, but it is not a sandbox: a hostile server
+running as the same user can still inspect the gateway process. The `prod`
+deployment profile refuses stdio upstreams for that reason.
 
 ## Network transport deadlines
 
@@ -870,8 +920,8 @@ observes the tombstone (`entry.removed`) is refused, and new lookups miss
 immediately. The dispatch hot path reads the map lock-free and clones out the
 entry it needs, so a structural swap never yanks an entry from under a live
 call.
-Connection-shape changes (`url` / `command` / `auth` / `mtls` / `protocol` /
-the `session` block) are **re-dialed live** when the slot count is
+Connection-shape changes (`url` / `command` / `env_passthrough` / `auth` /
+`mtls` / `protocol` / the `session` block) are **re-dialed live** when the slot count is
 unchanged: the
 old session is torn down and the new shape dialed in place — a fresh identity
 cell, a re-resolved bearer, freshly read mTLS material — no restart (reported

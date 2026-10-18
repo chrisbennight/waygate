@@ -538,6 +538,7 @@ fn manifest(addr: std::net::SocketAddr, isolation: Option<SessionIsolation>) -> 
         protocol: Default::default(),
         url: Some(format!("http://{addr}/mcp")),
         command: None,
+        env_passthrough: Vec::new(),
         tools: vec![ToolClassification::new("noop", RiskTier::Low, false, false)],
         resources: Vec::new(),
         exchange: None,

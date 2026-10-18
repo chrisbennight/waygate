@@ -453,6 +453,7 @@ fn manifest_at(addr: std::net::SocketAddr) -> UpstreamManifest {
         protocol: Default::default(),
         url: Some(format!("http://{addr}/mcp")),
         command: None,
+        env_passthrough: Vec::new(),
         tools: vec![ToolClassification::new("ping", RiskTier::Low, false, false)],
         resources: Vec::new(),
         exchange: None,

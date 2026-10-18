@@ -9,10 +9,13 @@
 //! Usage:
 //!   classify --name <server-name> [--transport http|sse|stdio] \
 //!       [--url <http-endpoint>] [--output <path>] [--force] \
-//!       [-- <cmd> <args...>]
+//!       [--env-passthrough <NAME>]... [-- <cmd> <args...>]
 //!
 //! `http` / `sse` require `--url`. `stdio` requires a trailing `-- cmd args…`
-//! argv (everything after `--` becomes the manifest's `command:` vec).
+//! argv (everything after `--` becomes the manifest's `command:` vec). A stdio
+//! server starts with the environment the gateway would give it: the
+//! non-secret baseline plus each `--env-passthrough` name, which is also
+//! written to the manifest's `env_passthrough`.
 //! `--output -` writes to stdout; default is `./servers/<name>.yaml`.
 
 use std::path::PathBuf;
@@ -28,7 +31,8 @@ use rmcp::{RoleClient, ServiceExt};
 
 use waygate_mcp::protocol::RiskTier;
 use waygate_upstream::{
-    http_policy, sse_client, tool_behavior_hash, ToolClassification, Transport, UpstreamManifest,
+    http_policy, sse_client, stdio_command, tool_behavior_hash, valid_env_passthrough_name,
+    ToolClassification, Transport, UpstreamManifest,
 };
 
 const HEADER_COMMENT: &str = "\
@@ -45,7 +49,10 @@ const HEADER_COMMENT: &str = "\
 enum Endpoint {
     Http(String),
     Sse(String),
-    Stdio(Vec<String>),
+    Stdio {
+        argv: Vec<String>,
+        env_passthrough: Vec<String>,
+    },
 }
 
 impl Endpoint {
@@ -53,7 +60,7 @@ impl Endpoint {
         match self {
             Endpoint::Http(_) => Transport::Http,
             Endpoint::Sse(_) => Transport::Sse,
-            Endpoint::Stdio(_) => Transport::Stdio,
+            Endpoint::Stdio { .. } => Transport::Stdio,
         }
     }
 }
@@ -97,9 +104,12 @@ fn starter_manifest(
             }),
         }
     }
-    let (url, command) = match endpoint {
-        Endpoint::Http(u) | Endpoint::Sse(u) => (Some(u.clone()), None),
-        Endpoint::Stdio(argv) => (None, Some(argv.clone())),
+    let (url, command, env_passthrough) = match endpoint {
+        Endpoint::Http(u) | Endpoint::Sse(u) => (Some(u.clone()), None, Vec::new()),
+        Endpoint::Stdio {
+            argv,
+            env_passthrough,
+        } => (None, Some(argv.clone()), env_passthrough.clone()),
     };
     UpstreamManifest {
         classification_mode: Default::default(),
@@ -111,6 +121,7 @@ fn starter_manifest(
         protocol: Default::default(),
         url,
         command,
+        env_passthrough,
         tools,
         resources: Vec::new(),
         exchange: None,
@@ -227,7 +238,8 @@ classify — introspect an MCP server and write a starter servers/<name>.yaml
 
 USAGE:
     classify --name <name> [--transport http|sse|stdio] [--url <url>] \\
-             [--output <path>] [--force] [-- <cmd> <args...>]
+             [--output <path>] [--force] [--env-passthrough <NAME>]... \\
+             [-- <cmd> <args...>]
 
 OPTIONS:
     --name <name>         Logical name for this upstream (matches manifest key)
@@ -235,6 +247,11 @@ OPTIONS:
     --url <url>           HTTP endpoint (required for http and sse)
     --output <path>       Destination path (default: ./servers/<name>.yaml; `-` for stdout)
     --force               Overwrite an existing output file
+    --env-passthrough <NAME>
+                          stdio only, repeatable: pass this environment
+                          variable to the server and list it in the manifest's
+                          env_passthrough. The server otherwise receives only
+                          PATH, HOME, TMPDIR, LANG, LC_ALL and TZ.
     -h, --help            Print this help
 
 After `--`, remaining arguments form the subprocess argv for `--transport stdio`.
@@ -260,6 +277,7 @@ fn parse_args() -> Result<Args, String> {
     let mut output: Option<String> = None;
     let mut transport: Option<String> = None;
     let mut command: Option<Vec<String>> = None;
+    let mut env_passthrough: Vec<String> = Vec::new();
     let mut force = false;
 
     let mut it = std::env::args().skip(1);
@@ -274,6 +292,21 @@ fn parse_args() -> Result<Args, String> {
             "--url" => url = Some(it.next().ok_or("--url requires a value")?),
             "--output" => output = Some(it.next().ok_or("--output requires a value")?),
             "--transport" => transport = Some(it.next().ok_or("--transport requires a value")?),
+            "--env-passthrough" => {
+                let name = it.next().ok_or("--env-passthrough requires a value")?;
+                // The value is not echoed: an invalid one may be a pasted secret.
+                if !valid_env_passthrough_name(&name) {
+                    return Err(
+                        "--env-passthrough takes an environment variable name made of \
+                         ASCII letters, digits and underscores, not a value"
+                            .into(),
+                    );
+                }
+                if env_passthrough.contains(&name) {
+                    return Err(format!("--env-passthrough repeats {name}"));
+                }
+                env_passthrough.push(name);
+            }
             "--" => {
                 command = Some(it.by_ref().collect());
                 break;
@@ -284,6 +317,9 @@ fn parse_args() -> Result<Args, String> {
 
     let name = name.ok_or("--name is required")?;
     let transport = transport.as_deref().unwrap_or("http");
+    if transport != "stdio" && !env_passthrough.is_empty() {
+        return Err("--env-passthrough applies only to --transport stdio".into());
+    }
     let endpoint = match transport {
         "http" => {
             if command.as_ref().is_some_and(|c| !c.is_empty()) {
@@ -304,7 +340,10 @@ fn parse_args() -> Result<Args, String> {
             let argv = command
                 .filter(|c| !c.is_empty())
                 .ok_or("--transport stdio requires a trailing `-- cmd args...`")?;
-            Endpoint::Stdio(argv)
+            Endpoint::Stdio {
+                argv,
+                env_passthrough,
+            }
         }
         other => return Err(format!("--transport must be http|sse|stdio (got {other})")),
     };
@@ -415,11 +454,11 @@ async fn main() -> ExitCode {
                 }
             }
         }
-        Endpoint::Stdio(argv) => {
-            let mut cmd = tokio::process::Command::new(&argv[0]);
-            if argv.len() > 1 {
-                cmd.args(&argv[1..]);
-            }
+        Endpoint::Stdio {
+            argv,
+            env_passthrough,
+        } => {
+            let cmd = stdio_command(&argv[0], &argv[1..], env_passthrough);
             let transport = match TokioChildProcess::new(cmd) {
                 Ok(t) => t,
                 Err(e) => {
@@ -435,10 +474,7 @@ async fn main() -> ExitCode {
             // process's pipes unusable, so the legacy attempt re-spawns it.
             let dialed = match discovered {
                 Err(_) => {
-                    let mut cmd = tokio::process::Command::new(&argv[0]);
-                    if argv.len() > 1 {
-                        cmd.args(&argv[1..]);
-                    }
+                    let cmd = stdio_command(&argv[0], &argv[1..], env_passthrough);
                     match TokioChildProcess::new(cmd) {
                         Ok(transport) => {
                             info.serve_with_lifecycle(
@@ -735,7 +771,10 @@ mod tests {
     fn starter_manifest_stdio_populates_command_not_url() {
         let m = starter_manifest(
             "local",
-            &Endpoint::Stdio(vec!["/usr/bin/echo-mcp".into(), "--flag".into()]),
+            &Endpoint::Stdio {
+                argv: vec!["/usr/bin/echo-mcp".into(), "--flag".into()],
+                env_passthrough: Vec::new(),
+            },
             vec![live("greet")],
         );
         assert!(matches!(m.transport, Transport::Stdio));
@@ -770,7 +809,10 @@ mod tests {
     fn rendered_yaml_round_trips_stdio_manifest() {
         let manifest = starter_manifest(
             "local-stdio",
-            &Endpoint::Stdio(vec!["/opt/mcp/server".into(), "--stdio".into()]),
+            &Endpoint::Stdio {
+                argv: vec!["/opt/mcp/server".into(), "--stdio".into()],
+                env_passthrough: vec!["EXAMPLE_API_TOKEN".into()],
+            },
             vec![live("do_thing")],
         );
         let yaml = render_manifest_yaml(&manifest).unwrap();
@@ -781,5 +823,10 @@ mod tests {
             Some(&["/opt/mcp/server".to_string(), "--stdio".to_string()][..]),
         );
         assert!(reparsed.url.is_none());
+        // The names the scaffold started the server with are the names the
+        // gateway will pass, and the emitted manifest loads.
+        assert_eq!(reparsed.env_passthrough, vec!["EXAMPLE_API_TOKEN"]);
+        waygate_upstream::validate_manifest_invariants(&reparsed)
+            .expect("scaffolded stdio manifest loads");
     }
 }

@@ -3908,6 +3908,7 @@ mod tests {
             protocol: Default::default(),
             url: Some(format!("http://{address}/mcp")),
             command: None,
+            env_passthrough: Vec::new(),
             tools: vec![
                 ToolClassification::new("render", RiskTier::Low, false, false),
                 ToolClassification::new("import", RiskTier::Low, true, false),
