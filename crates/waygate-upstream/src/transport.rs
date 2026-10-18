@@ -2536,7 +2536,7 @@ url: https://mcp.example/mcp
 
         #[tokio::test]
         async fn a_header_secret_and_fixed_headers_reach_an_http_upstream() {
-            let _env = Env::set(&[("GW_TEST_CRED_HEADER_SECRET", "header-secret-41f2")]);
+            let _env = Env::set(&[("GW_TEST_CRED_HEADER_SECRET", "synthetic-header-value")]);
             let (addr, seen) = spawn_capture().await;
             let m = manifest(&format!(
                 "name: hosted\ntransport: http\nprotocol: legacy\nurl: http://{addr}/mcp\n\
@@ -2547,7 +2547,7 @@ url: https://mcp.example/mcp
             assert!(connect(&m, None, None, None).await.is_err());
 
             let (headers, _) = first_request(&seen);
-            assert_eq!(headers["x-api-key"], "header-secret-41f2");
+            assert_eq!(headers["x-api-key"], "synthetic-header-value");
             assert_eq!(headers["x-client-name"], "waygate-test");
             assert!(!headers.contains_key(http::header::AUTHORIZATION));
         }
