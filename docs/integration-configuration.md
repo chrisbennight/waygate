@@ -51,6 +51,7 @@ The gateway adds these identifiers of its own to MCP messages. Standard
 | Identifier | Where it appears | Direction | Purpose |
 | --- | --- | --- | --- |
 | `io.cacahuate.mcp-gateway/retained-delivery` | `CallToolResult._meta` | To clients | Describes a result delivered as a gateway file, or an attachment that is unavailable. It matches `structuredContent._gateway_delivery`. An upstream cannot set it: the gateway removes it from upstream results. |
+| `io.cacahuate.mcp-gateway/content` | A Code Mode connector value member | Inside Code Mode | Distinct MCP content blocks accompanying structured data, excluding text that only mirrors that data. Colliding upstream objects are preserved under `data`; see [connector result delivery](codemode.md#runner-authority). |
 | `io.cacahuate.mcp-gateway/catalog-revision` | `_meta` of skill prompts in `prompts/list` | To clients | The skills catalog revision a prompt was listed from. |
 | `io.cacahuate.mcp-gateway.code-mode` | Skill frontmatter `metadata` | Read from skill sources | Optional skill-script compatibility metadata. |
 | `io.bennight.gateway/responseMaterializationLimitBytes` | Request `_meta` of the gateway's own `resources/read` calls, inside the gateway only | Internal | The largest response the gateway will materialize for that read. The upstream pool removes it before sending, and the gateway's HTTP transport enforces the limit; upstreams never receive it. |

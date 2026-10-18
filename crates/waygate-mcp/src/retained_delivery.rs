@@ -12,6 +12,8 @@ use crate::files::{FileValue, RETAINED_DELIVERY_META_KEY};
 pub const FIELD: &str = "_gateway_delivery";
 /// Envelope member carrying a filed result's preview text.
 pub const PREVIEW_FIELD: &str = "_gateway_preview";
+/// Distinct MCP content accompanying a structured connector value in Code Mode.
+pub const CODEMODE_CONTENT_FIELD: &str = "io.cacahuate.mcp-gateway/content";
 
 #[derive(Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
