@@ -1,8 +1,8 @@
 //! Per-request response bounds for gateway-internal MCP reads.
 //!
 //! Ordinary MCP traffic delegates unchanged to rmcp's reqwest client. A native
-//! resource read or call-scoped retained-response read carries a private
-//! request metadata value naming its serialized materialization budget. For
+//! resource read or call-scoped retained-response read carries its serialized
+//! materialization budget as a [`ResponseByteLimit`] request extension. For
 //! that request only, this wrapper consumes one JSON-RPC response under the
 //! raw-byte ceiling before rmcp can decode an untrusted body into the shared
 //! gateway process.
@@ -20,7 +20,7 @@ use std::sync::{
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use http::{HeaderName, HeaderValue};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
-use rmcp::model::{ClientJsonRpcMessage, JsonRpcMessage, ServerJsonRpcMessage};
+use rmcp::model::{ClientJsonRpcMessage, GetExtensions, JsonRpcMessage, ServerJsonRpcMessage};
 use rmcp::service::ServiceError;
 use rmcp::transport::streamable_http_client::{
     SseError, StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
@@ -29,7 +29,6 @@ use sse_stream::{Sse, SseStream};
 use tokio_util::sync::CancellationToken;
 
 use waygate_core::http_client::{read_body_capped, ReadBodyError};
-use waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY;
 
 use crate::dial_trace::ExchangeRecorder;
 use crate::http_policy::RedirectRefused;
@@ -37,6 +36,14 @@ use crate::http_policy::RedirectRefused;
 const JSON_MIME_TYPE: &str = "application/json";
 const EVENT_STREAM_MIME_TYPE: &str = "text/event-stream";
 const SESSION_HEADER: &str = "mcp-session-id";
+
+/// The raw-byte budget for the response to one outgoing request.
+///
+/// It rides in the request's in-process extensions rather than its `_meta`:
+/// rmcp serializes only metadata objects from extensions, so the budget stays
+/// inside the gateway while the message passes through the SDK to this client.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ResponseByteLimit(pub(crate) usize);
 
 #[derive(Debug, thiserror::Error)]
 #[error("upstream response exceeded the {limit_bytes}-byte materialization limit")]
@@ -142,13 +149,14 @@ impl BoundedResponseClient {
     }
 
     fn response_limit(message: &ClientJsonRpcMessage) -> Option<usize> {
-        serde_json::to_value(message)
-            .ok()?
-            .get("params")?
-            .get("_meta")?
-            .get(RESPONSE_MATERIALIZATION_LIMIT_META_KEY)?
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
+        let JsonRpcMessage::Request(request) = message else {
+            return None;
+        };
+        request
+            .request
+            .extensions()
+            .get::<ResponseByteLimit>()
+            .map(|limit| limit.0)
             .filter(|value| *value > 0)
     }
 
@@ -429,28 +437,53 @@ mod tests {
     use super::*;
 
     fn read_request(limit: Option<usize>) -> ClientJsonRpcMessage {
-        let mut params = json!({"uri": "connector-response:/large/0"});
-        if let Some(limit) = limit {
-            params["_meta"] = json!({RESPONSE_MATERIALIZATION_LIMIT_META_KEY: limit});
-        }
-        serde_json::from_value(json!({
+        let mut message: ClientJsonRpcMessage = serde_json::from_value(json!({
             "jsonrpc": "2.0",
             "id": 7,
             "method": "resources/read",
-            "params": params,
+            "params": {"uri": "connector-response:/large/0"},
         }))
-        .expect("valid resources/read request")
+        .expect("valid resources/read request");
+        if let (Some(limit), JsonRpcMessage::Request(request)) = (limit, &mut message) {
+            request
+                .request
+                .extensions_mut()
+                .insert(ResponseByteLimit(limit));
+        }
+        message
     }
 
     #[test]
-    fn only_the_private_request_marker_selects_a_response_limit() {
-        assert_eq!(
-            BoundedResponseClient::response_limit(&read_request(Some(73))),
-            Some(73)
+    fn only_the_in_process_budget_selects_a_response_limit() {
+        let bounded = read_request(Some(73));
+        assert_eq!(BoundedResponseClient::response_limit(&bounded), Some(73));
+        assert!(
+            serde_json::to_value(&bounded).unwrap()["params"]
+                .get("_meta")
+                .is_none(),
+            "the budget must not serialize onto the upstream request"
         );
         assert_eq!(
             BoundedResponseClient::response_limit(&read_request(None)),
             None
+        );
+
+        let wire_shaped: ClientJsonRpcMessage = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "resources/read",
+            "params": {
+                "uri": "connector-response:/large/0",
+                "_meta": {
+                    waygate_mcp::catalog::RESPONSE_MATERIALIZATION_LIMIT_META_KEY: 73
+                },
+            },
+        }))
+        .expect("valid resources/read request");
+        assert_eq!(
+            BoundedResponseClient::response_limit(&wire_shaped),
+            None,
+            "request metadata is not the budget's carrier"
         );
     }
 
