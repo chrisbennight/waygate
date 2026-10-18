@@ -501,6 +501,11 @@ fn to_import_server(m: &UpstreamManifest) -> ImportServer {
     if m.auth.is_some() {
         rt.insert("auth".into(), serde_json::json!(m.auth));
     }
+    // Fixed headers go out on every request, so they belong to the dial the
+    // catalog row describes, and a header-only edit must change the row.
+    if !m.headers.is_empty() {
+        rt.insert("headers".into(), serde_json::json!(m.headers));
+    }
     if m.exchange.is_some() {
         rt.insert("exchange".into(), serde_json::json!(m.exchange));
     }
@@ -614,6 +619,7 @@ mod tests {
             resources: Vec::new(),
             exchange: None,
             auth: None,
+            headers: Default::default(),
             mtls: None,
             tier_a_required: false,
             tier_c_peer: None,
@@ -727,6 +733,9 @@ mod tests {
         let mut m = manifest("ha", Transport::Http);
         m.auth = Some(waygate_upstream::UpstreamAuth {
             bearer_env: Some("HA_BEARER".into()),
+            header: None,
+            query: None,
+            basic: None,
             catalog_probe_groups: vec!["ha-admin".into()],
         });
         let s = to_import_server(&m);
@@ -737,6 +746,34 @@ mod tests {
         assert_eq!(
             s.runtime_target["auth"]["catalog_probe_groups"][0], "ha-admin",
             "auth.catalog_probe_groups must round-trip into runtime_target",
+        );
+    }
+
+    #[test]
+    fn header_auth_and_fixed_headers_are_preserved_in_runtime_target() {
+        let mut m = manifest("hosted", Transport::Http);
+        m.auth = Some(waygate_upstream::UpstreamAuth {
+            header: Some(waygate_upstream::SecretHeader {
+                name: "x-api-key".into(),
+                value_env: "HOSTED_KEY".into(),
+                prefix: None,
+            }),
+            ..Default::default()
+        });
+        m.headers = [("x-client-name".to_owned(), "waygate".to_owned())].into();
+
+        let s = to_import_server(&m);
+
+        assert_eq!(s.runtime_target["auth"]["header"]["name"], "x-api-key");
+        assert_eq!(
+            s.runtime_target["auth"]["header"]["value_env"],
+            "HOSTED_KEY"
+        );
+        assert_eq!(s.runtime_target["headers"]["x-client-name"], "waygate");
+        assert_ne!(
+            to_import_server(&manifest("hosted", Transport::Http)).runtime_target,
+            s.runtime_target,
+            "a header-only difference must change the stored runtime target",
         );
     }
 
@@ -762,6 +799,7 @@ mod tests {
         // null `auth`/`exchange`/`mtls`/`session` keys — only what's present.
         let s = to_import_server(&manifest("plain", Transport::Http));
         assert!(s.runtime_target.get("auth").is_none());
+        assert!(s.runtime_target.get("headers").is_none());
         assert!(s.runtime_target.get("exchange").is_none());
         assert!(s.runtime_target.get("tier_a_required").is_none());
         assert!(s.runtime_target.get("mtls").is_none());

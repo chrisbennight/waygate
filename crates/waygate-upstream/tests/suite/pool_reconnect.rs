@@ -27,6 +27,7 @@ fn stdio_manifest(name: &str, command: Vec<String>) -> UpstreamManifest {
         resources: Vec::new(),
         exchange: None,
         auth: None,
+        headers: Default::default(),
         mtls: None,
         tier_a_required: false,
         tier_c_peer: None,

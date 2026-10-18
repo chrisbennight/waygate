@@ -18,6 +18,7 @@ use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
+use http::{HeaderName, HeaderValue};
 use rmcp::model::{ClientCapabilities, ClientConfig, Implementation, ProtocolVersion};
 use rmcp::service::{ClientInitializeError, ClientLifecycleMode, ClientServiceExt, RunningService};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -59,8 +60,15 @@ pub(crate) enum DialError {
     Init(String),
     #[error("tools/list failed: {0}")]
     ListTools(String),
-    #[error("auth.bearer_env env var `{env}` and its `{env}_FILE` companion are unset or empty")]
+    #[error("auth env var `{env}` and its `{env}_FILE` companion are unset or empty")]
     MissingAuthEnv { env: String },
+    /// A resolved secret cannot be sent as a header value, for example because
+    /// it contains a line break. Only the variable name is reported.
+    #[error("auth secret from `{env}` is not a valid HTTP header value")]
+    AuthSecretNotHeaderSafe { env: String },
+    /// A fixed `headers:` entry the manifest validator should have refused.
+    #[error("`headers:` entry `{name}` is not a valid HTTP header")]
+    InvalidFixedHeader { name: String },
     #[error("auth bearer file named by `{file_env}` could not be read: {source}")]
     AuthFileRead {
         file_env: String,
@@ -641,10 +649,16 @@ async fn dial_once(
             let destination = resolve_network_destination(&manifest.name, &url).await?;
             // Resolve `auth:` from process env *before* building the transport
             // — a missing env var must fail the dial, not silently leak an
-            // unauthenticated request to the configured URL.
+            // unauthenticated request to the configured URL. The query secret,
+            // if any, is added only by the bounded client, so `url` and every
+            // error built from it stay free of it.
+            let credentials = resolve_request_credentials(manifest)?;
             let mut config = StreamableHttpClientTransportConfig::with_uri(url.clone());
-            if let Some(token) = resolve_static_bearer(&manifest.name, manifest.auth.as_ref())? {
+            if let Some(token) = credentials.bearer {
                 config = config.auth_header(token);
+            }
+            if !credentials.headers.is_empty() {
+                config = config.custom_headers(credentials.headers.into_iter().collect());
             }
             // Build exactly one shared-policy streaming client per dial. The
             // non-mTLS and mTLS paths share the same no-total-timeout, bounded
@@ -671,7 +685,8 @@ async fn dial_once(
                 }
                 None => build_streaming_client(Some(&destination))?,
             };
-            let http = BoundedResponseClient::new(http, exchanges);
+            let http =
+                BoundedResponseClient::new(http, exchanges).with_query_secret(credentials.query);
             let connection_probe = http.clone();
             let open_requests = http.open_requests();
             let service = match (issuer, cell) {
@@ -716,12 +731,12 @@ async fn dial_once(
             })
         }
         Transport::Sse => {
-            // Static per-upstream bearer (`auth.bearer_env`): resolve from
-            // process env before dialing. A set-but-empty env fails the dial
-            // loud rather than leaking an unauthenticated SSE connection — same
-            // contract as the HTTP branch. `sse_client::connect` stamps the
-            // resolved token on both the SSE GET and every message POST.
-            let static_bearer = resolve_static_bearer(&manifest.name, manifest.auth.as_ref())?;
+            // Static per-upstream credentials (`auth:` and `headers:`): resolve
+            // from process env before dialing. A set-but-empty env fails the
+            // dial loud rather than leaking an unauthenticated SSE connection —
+            // same contract as the HTTP branch. `sse_client::connect` stamps
+            // them on both the SSE GET and every message POST.
+            let credentials = resolve_request_credentials(manifest)?.into_sse();
             // SSE flows through a different reqwest
             // client (`sse_client::connect`) that doesn't
             // wire per-upstream identity material today. Reject
@@ -756,7 +771,7 @@ async fn dial_once(
                     &url,
                     build_streaming_client(Some(&destination))?,
                     augmenter,
-                    static_bearer,
+                    credentials,
                     handshake_timeout,
                     http_policy::WRITE_TIMEOUT,
                 )
@@ -1122,27 +1137,26 @@ pub(crate) fn credential_material_version(
     let mut version = blake3::Hasher::new_keyed(key);
     version.update(b"mcp-gateway/upstream-credential-material/v1");
 
-    match manifest
+    // Every secret the `auth:` block reads, in a fixed order, so rotating any
+    // one of them changes the version.
+    let secret_envs = manifest
         .auth
         .as_ref()
-        .and_then(|auth| auth.bearer_env.as_ref())
-    {
-        Some(env) => {
-            version.update(b"bearer-present");
-            hash_public_component(&mut version, env.as_bytes());
-            let value = Zeroizing::new(std::env::var(env).unwrap_or_default());
-            if value.is_empty() {
-                let file_env = format!("{env}_FILE");
-                let path = std::env::var(&file_env).unwrap_or_default();
-                version.update(b"bearer-file");
-                hash_file_component(&mut version, key, path.as_ref(), MAX_AUTH_FILE_BYTES);
-            } else {
-                version.update(b"bearer-env");
-                hash_secret_component(&mut version, key, value.as_bytes());
-            }
-        }
-        None => {
-            version.update(b"bearer-absent");
+        .map(UpstreamAuth::secret_env_names)
+        .unwrap_or_default();
+    version.update(&(secret_envs.len() as u64).to_le_bytes());
+    for env in secret_envs {
+        version.update(b"secret-present");
+        hash_public_component(&mut version, env.as_bytes());
+        let value = Zeroizing::new(std::env::var(env).unwrap_or_default());
+        if value.is_empty() {
+            let file_env = format!("{env}_FILE");
+            let path = std::env::var(&file_env).unwrap_or_default();
+            version.update(b"secret-file");
+            hash_file_component(&mut version, key, path.as_ref(), MAX_AUTH_FILE_BYTES);
+        } else {
+            version.update(b"secret-env");
+            hash_secret_component(&mut version, key, value.as_bytes());
         }
     }
 
@@ -1229,6 +1243,12 @@ fn hash_file_component(
 
 fn resolve_auth_token(server: &str, auth: &UpstreamAuth) -> Result<String, DialError> {
     let env = auth.bearer_env.as_deref().ok_or(DialError::EmptyAuth)?;
+    resolve_secret_env(server, env)
+}
+
+/// Read one secret from `env`, or from the bounded file its `<env>_FILE`
+/// companion names when `env` is unset or empty.
+fn resolve_secret_env(server: &str, env: &str) -> Result<String, DialError> {
     let raw = std::env::var(env).unwrap_or_default();
     if !raw.is_empty() {
         return Ok(raw);
@@ -1277,10 +1297,11 @@ fn resolve_auth_token(server: &str, auth: &UpstreamAuth) -> Result<String, DialE
     Ok(token)
 }
 
-/// Resolve the optional static bearer without treating a group-only auth block
-/// as empty. An explicitly empty `auth: {}` remains an operator error and must
-/// fail before transport I/O, while `catalog_probe_groups` may stand alone
-/// because the signed identity header supplies that separate auth mechanism.
+/// Resolve the optional static bearer without treating a group-only or
+/// non-bearer auth block as empty. An explicitly empty `auth: {}` remains an
+/// operator error and must fail before transport I/O, while
+/// `catalog_probe_groups` may stand alone because the signed identity header
+/// supplies that separate auth mechanism.
 fn resolve_static_bearer(
     server: &str,
     auth: Option<&UpstreamAuth>,
@@ -1288,9 +1309,162 @@ fn resolve_static_bearer(
     match auth {
         None => Ok(None),
         Some(auth) if auth.bearer_env.is_some() => resolve_auth_token(server, auth).map(Some),
-        Some(auth) if auth.catalog_probe_groups.is_empty() => Err(DialError::EmptyAuth),
+        Some(auth)
+            if auth.catalog_probe_groups.is_empty() && auth.secret_env_names().is_empty() =>
+        {
+            Err(DialError::EmptyAuth)
+        }
         Some(_) => Ok(None),
     }
+}
+
+/// A secret query parameter added to every request URL. It is applied only
+/// where a request leaves the gateway, so configured URLs, logs and errors
+/// never carry it. There is deliberately no `Debug` implementation.
+pub(crate) struct QuerySecret {
+    name: String,
+    value: zeroize::Zeroizing<String>,
+}
+
+impl QuerySecret {
+    /// `url` with this parameter appended.
+    pub(crate) fn apply(&self, url: &url::Url) -> url::Url {
+        let mut url = url.clone();
+        url.query_pairs_mut().append_pair(&self.name, &self.value);
+        url
+    }
+
+    /// `uri` with this parameter appended, for the SDK's string URIs. A URI
+    /// that does not parse is returned unchanged; the request then fails at
+    /// the HTTP layer exactly as it would have without the parameter.
+    pub(crate) fn apply_str(&self, uri: &str) -> String {
+        match url::Url::parse(uri) {
+            Ok(url) => self.apply(&url).into(),
+            Err(_) => uri.to_owned(),
+        }
+    }
+}
+
+/// The static credential and fixed headers a manifest attaches to every
+/// request, resolved from the environment at dial time. Secret header values
+/// are marked sensitive, and nothing here implements `Debug`.
+pub(crate) struct RequestCredentials {
+    /// The `auth.bearer_env` token, which the streamable-HTTP transport sends
+    /// through its own `Authorization: Bearer` slot.
+    pub(crate) bearer: Option<String>,
+    /// The same token as a ready `Authorization` value for the SSE client.
+    bearer_header: Option<HeaderValue>,
+    /// The `auth.header` or `auth.basic` header and the fixed `headers:`.
+    pub(crate) headers: Vec<(HeaderName, HeaderValue)>,
+    pub(crate) query: Option<std::sync::Arc<QuerySecret>>,
+}
+
+/// [`RequestCredentials`] for the legacy SSE client, which stamps every
+/// header itself, the bearer included.
+pub(crate) struct SseCredentials {
+    pub(crate) headers: Vec<(HeaderName, HeaderValue)>,
+    pub(crate) query: Option<std::sync::Arc<QuerySecret>>,
+}
+
+impl RequestCredentials {
+    pub(crate) fn into_sse(self) -> SseCredentials {
+        let mut headers = self.headers;
+        if let Some(value) = self.bearer_header {
+            headers.insert(0, (http::header::AUTHORIZATION, value));
+        }
+        SseCredentials {
+            headers,
+            query: self.query,
+        }
+    }
+}
+
+fn sensitive_header_value(env: &str, value: &str) -> Result<HeaderValue, DialError> {
+    let mut value =
+        HeaderValue::from_str(value).map_err(|_| DialError::AuthSecretNotHeaderSafe {
+            env: env.to_owned(),
+        })?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
+/// Resolve `auth:` and `headers:` for one dial. Every secret is read from
+/// its environment variable or `<NAME>_FILE` companion; a missing one fails
+/// the dial before any request is sent.
+pub(crate) fn resolve_request_credentials(
+    manifest: &UpstreamManifest,
+) -> Result<RequestCredentials, DialError> {
+    let server = manifest.name.as_str();
+    let auth = manifest.auth.as_ref();
+    let bearer = resolve_static_bearer(server, auth)?;
+    let bearer_header = match (
+        bearer.as_deref(),
+        auth.and_then(|a| a.bearer_env.as_deref()),
+    ) {
+        (Some(token), Some(env)) => Some(sensitive_header_value(
+            env,
+            &zeroize::Zeroizing::new(format!("Bearer {token}")),
+        )?),
+        _ => None,
+    };
+    let mut credentials = RequestCredentials {
+        bearer,
+        bearer_header,
+        headers: Vec::new(),
+        query: None,
+    };
+    if let Some(auth) = auth {
+        if let Some(header) = auth.header.as_ref() {
+            let name = HeaderName::from_bytes(header.name.as_bytes()).map_err(|_| {
+                DialError::InvalidFixedHeader {
+                    name: header.name.clone(),
+                }
+            })?;
+            let secret = zeroize::Zeroizing::new(resolve_secret_env(server, &header.value_env)?);
+            let value = zeroize::Zeroizing::new(format!(
+                "{}{}",
+                header.prefix.as_deref().unwrap_or_default(),
+                secret.as_str()
+            ));
+            credentials
+                .headers
+                .push((name, sensitive_header_value(&header.value_env, &value)?));
+        }
+        if let Some(basic) = auth.basic.as_ref() {
+            use base64::Engine as _;
+            let username =
+                zeroize::Zeroizing::new(resolve_secret_env(server, &basic.username_env)?);
+            let password = match basic.password_env.as_deref() {
+                Some(env) => zeroize::Zeroizing::new(resolve_secret_env(server, env)?),
+                None => zeroize::Zeroizing::new(String::new()),
+            };
+            let encoded =
+                zeroize::Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(format!(
+                    "{}:{}",
+                    username.as_str(),
+                    password.as_str()
+                )));
+            let value = zeroize::Zeroizing::new(format!("Basic {}", encoded.as_str()));
+            credentials.headers.push((
+                http::header::AUTHORIZATION,
+                sensitive_header_value(&basic.username_env, &value)?,
+            ));
+        }
+        if let Some(query) = auth.query.as_ref() {
+            credentials.query = Some(std::sync::Arc::new(QuerySecret {
+                name: query.name.clone(),
+                value: zeroize::Zeroizing::new(resolve_secret_env(server, &query.value_env)?),
+            }));
+        }
+    }
+    for (name, value) in &manifest.headers {
+        let invalid = || DialError::InvalidFixedHeader { name: name.clone() };
+        credentials.headers.push((
+            HeaderName::from_bytes(name.as_bytes()).map_err(|_| invalid())?,
+            HeaderValue::from_str(value).map_err(|_| invalid())?,
+        ));
+    }
+    Ok(credentials)
 }
 
 #[cfg(test)]
@@ -2307,6 +2481,211 @@ url: https://mcp.example/mcp
 "#;
         let parsed: crate::UpstreamManifest = serde_yaml::from_str(yaml).expect("parse yaml");
         assert!(parsed.mtls.is_none(), "mtls must default to None");
+    }
+    /// Static credentials and fixed headers on the wire, observed by a server
+    /// that records each request's headers and query string and refuses it.
+    mod request_credentials {
+        use super::*;
+
+        type Seen = Arc<std::sync::Mutex<Vec<(http::HeaderMap, Option<String>)>>>;
+
+        async fn spawn_capture() -> (std::net::SocketAddr, Seen) {
+            let seen: Seen = Arc::default();
+            let recorded = Arc::clone(&seen);
+            let app = Router::new().fallback(move |request: axum::extract::Request| {
+                let recorded = Arc::clone(&recorded);
+                async move {
+                    recorded.lock().unwrap().push((
+                        request.headers().clone(),
+                        request.uri().query().map(str::to_owned),
+                    ));
+                    StatusCode::UNAUTHORIZED
+                }
+            });
+            let (addr, _server) = serve_test_app(app).await;
+            (addr, seen)
+        }
+
+        fn manifest(yaml: &str) -> UpstreamManifest {
+            serde_yaml::from_str(yaml).expect("test manifest")
+        }
+
+        /// Sets test-only variables for one test; each name is unique to it.
+        struct Env(Vec<&'static str>);
+
+        impl Env {
+            fn set(pairs: &[(&'static str, &str)]) -> Self {
+                for (name, value) in pairs {
+                    // SAFETY: process-global, but every name is unique to one test.
+                    unsafe { std::env::set_var(name, value) };
+                }
+                Self(pairs.iter().map(|(name, _)| *name).collect())
+            }
+        }
+
+        impl Drop for Env {
+            fn drop(&mut self) {
+                for name in &self.0 {
+                    // SAFETY: as in `set`.
+                    unsafe { std::env::remove_var(name) };
+                }
+            }
+        }
+
+        fn first_request(seen: &Seen) -> (http::HeaderMap, Option<String>) {
+            seen.lock()
+                .unwrap()
+                .first()
+                .cloned()
+                .expect("the upstream received a request")
+        }
+
+        #[tokio::test]
+        async fn a_header_secret_and_fixed_headers_reach_an_http_upstream() {
+            let _env = Env::set(&[("GW_TEST_CRED_HEADER_SECRET", "synthetic-header-value")]);
+            let (addr, seen) = spawn_capture().await;
+            let m = manifest(&format!(
+                "name: hosted\ntransport: http\nprotocol: legacy\nurl: http://{addr}/mcp\n\
+                 auth:\n  header:\n    name: x-api-key\n    value_env: GW_TEST_CRED_HEADER_SECRET\n\
+                 headers:\n  x-client-name: waygate-test\n"
+            ));
+
+            assert!(connect(&m, None, None, None).await.is_err());
+
+            let (headers, _) = first_request(&seen);
+            assert_eq!(headers["x-api-key"], "synthetic-header-value");
+            assert_eq!(headers["x-client-name"], "waygate-test");
+            assert!(!headers.contains_key(http::header::AUTHORIZATION));
+        }
+
+        #[tokio::test]
+        async fn a_prefixed_authorization_header_and_basic_auth_are_sent_as_configured() {
+            let _env = Env::set(&[
+                ("GW_TEST_CRED_TOKEN_SECRET", "token-secret-9c1d"),
+                ("GW_TEST_CRED_BASIC_USER", "api-user"),
+                ("GW_TEST_CRED_BASIC_PASSWORD", "basic-secret-2b7e"),
+            ]);
+            let (addr, seen) = spawn_capture().await;
+            let token = manifest(&format!(
+                "name: hosted\ntransport: http\nprotocol: legacy\nurl: http://{addr}/mcp\n\
+                 auth:\n  header:\n    name: Authorization\n    prefix: \"Token \"\n    \
+                 value_env: GW_TEST_CRED_TOKEN_SECRET\n"
+            ));
+            assert!(connect(&token, None, None, None).await.is_err());
+            assert_eq!(
+                first_request(&seen).0[http::header::AUTHORIZATION],
+                "Token token-secret-9c1d"
+            );
+
+            let (addr, seen) = spawn_capture().await;
+            let basic = manifest(&format!(
+                "name: hosted\ntransport: http\nprotocol: legacy\nurl: http://{addr}/mcp\n\
+                 auth:\n  basic:\n    username_env: GW_TEST_CRED_BASIC_USER\n    \
+                 password_env: GW_TEST_CRED_BASIC_PASSWORD\n"
+            ));
+            assert!(connect(&basic, None, None, None).await.is_err());
+            assert_eq!(
+                first_request(&seen).0[http::header::AUTHORIZATION],
+                // base64("api-user:basic-secret-2b7e")
+                "Basic YXBpLXVzZXI6YmFzaWMtc2VjcmV0LTJiN2U="
+            );
+        }
+
+        #[tokio::test]
+        async fn a_query_secret_is_added_beside_the_configured_query() {
+            let _env = Env::set(&[("GW_TEST_CRED_QUERY_SECRET", "query-secret-77a9")]);
+            let (addr, seen) = spawn_capture().await;
+            let m = manifest(&format!(
+                "name: hosted\ntransport: http\nprotocol: legacy\nurl: http://{addr}/mcp?tools=a\n\
+                 auth:\n  query:\n    name: apiKey\n    value_env: GW_TEST_CRED_QUERY_SECRET\n"
+            ));
+
+            assert!(connect(&m, None, None, None).await.is_err());
+
+            let (_, query) = first_request(&seen);
+            assert_eq!(query.as_deref(), Some("tools=a&apiKey=query-secret-77a9"));
+        }
+
+        /// A transport failure on a URL carrying the query secret must not
+        /// repeat that URL, on either network transport.
+        #[tokio::test]
+        async fn a_failed_dial_never_repeats_the_query_secret() {
+            let _env = Env::set(&[("GW_TEST_CRED_QUERY_LEAK", "query-secret-3e58")]);
+            let unused = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = unused.local_addr().unwrap();
+            drop(unused);
+            for transport in ["http", "sse"] {
+                let m = manifest(&format!(
+                    "name: hosted\ntransport: {transport}\nprotocol: legacy\n\
+                     url: http://{addr}/mcp\nauth:\n  query:\n    name: apiKey\n    \
+                     value_env: GW_TEST_CRED_QUERY_LEAK\n"
+                ));
+                let error = match connect(&m, None, None, None).await {
+                    Ok(_) => panic!("{transport}: nothing listens there"),
+                    Err(error) => error.to_string(),
+                };
+                assert!(
+                    !error.contains("query-secret-3e58"),
+                    "{transport}: the dial error repeated the secret"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn sse_sends_credentials_and_fixed_headers_on_the_stream_request() {
+            let _env = Env::set(&[("GW_TEST_CRED_SSE_SECRET", "sse-secret-5f10")]);
+            let (addr, seen) = spawn_capture().await;
+            let m = manifest(&format!(
+                "name: hosted\ntransport: sse\nurl: http://{addr}/sse\n\
+                 auth:\n  query:\n    name: key\n    value_env: GW_TEST_CRED_SSE_SECRET\n\
+                 headers:\n  x-client-name: waygate-test\n"
+            ));
+
+            assert!(connect(&m, None, None, None).await.is_err());
+
+            let (headers, query) = first_request(&seen);
+            assert_eq!(query.as_deref(), Some("key=sse-secret-5f10"));
+            assert_eq!(headers["x-client-name"], "waygate-test");
+        }
+
+        #[test]
+        fn a_missing_or_unsafe_secret_fails_the_dial_naming_only_the_variable() {
+            let m = manifest(
+                "name: hosted\ntransport: http\nurl: http://hosted/mcp\n\
+                 auth:\n  header:\n    name: x-api-key\n    value_env: GW_TEST_CRED_UNSET\n",
+            );
+            assert!(matches!(
+                resolve_request_credentials(&m),
+                Err(DialError::MissingAuthEnv { env }) if env == "GW_TEST_CRED_UNSET"
+            ));
+
+            let _env = Env::set(&[("GW_TEST_CRED_MULTILINE", "line-one\nsecret-line-two")]);
+            let m = manifest(
+                "name: hosted\ntransport: http\nurl: http://hosted/mcp\n\
+                 auth:\n  header:\n    name: x-api-key\n    value_env: GW_TEST_CRED_MULTILINE\n",
+            );
+            let error = match resolve_request_credentials(&m) {
+                Err(error @ DialError::AuthSecretNotHeaderSafe { .. }) => error.to_string(),
+                Err(other) => panic!("expected an unsafe-secret error, got {other}"),
+                Ok(_) => panic!("a multi-line secret cannot be a header value"),
+            };
+            assert!(error.contains("GW_TEST_CRED_MULTILINE"));
+            assert!(!error.contains("secret-line-two"));
+        }
+
+        #[test]
+        fn rotating_any_secret_changes_the_credential_version() {
+            let key = [7u8; 32];
+            let m = manifest(
+                "name: hosted\ntransport: http\nurl: http://hosted/mcp\n\
+                 auth:\n  header:\n    name: x-api-key\n    value_env: GW_TEST_CRED_ROTATE\n",
+            );
+            let _env = Env::set(&[("GW_TEST_CRED_ROTATE", "first-value")]);
+            let before = credential_material_version(&m, &key);
+            // SAFETY: the name is unique to this test.
+            unsafe { std::env::set_var("GW_TEST_CRED_ROTATE", "second-value") };
+            assert_ne!(before, credential_material_version(&m, &key));
+        }
     }
 
     /// The stdio child's environment, observed from real child processes.

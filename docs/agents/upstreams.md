@@ -360,7 +360,9 @@ This document covers:
 - The `UpstreamManifest` schema: `name`, `transport` (HTTP / SSE / stdio),
   `protocol` (MCP client lifecycle: `auto` | `legacy` | `2026-07-28`),
   `url` / `command`, `env_passthrough` (variables a stdio child receives; see
-  [stdio child environment](#stdio-child-environment)), `auth` (bearer-env),
+  [stdio child environment](#stdio-child-environment)), `auth` (static
+  credentials) and `headers` (fixed request headers; see
+  [static upstream credentials](#static-upstream-credentials)),
   `exchange` (RFC 8693 token
   exchange config), `tools` (per-tool classification), `resources`
   (URI-prefix ownership and risk classification), `session`
@@ -765,11 +767,62 @@ receive request in the connection pool. Do not add a generic read timeout to the
 receive client; quiet streams are valid unless an upstream protocol declares a
 heartbeat contract.
 
+## Static upstream credentials
+
+An HTTP or SSE server can require a static credential. The `auth:` block
+configures at most one of four ways to send it, each read from a named
+environment variable, or from the bounded file its `<NAME>_FILE` companion
+names, so a manifest never holds a secret value:
+
+| Setting | Sent as |
+|---|---|
+| `bearer_env: NAME` | `Authorization: Bearer <value>` |
+| `header: {name, value_env, prefix}` | `<name>: <prefix><value>`, for example `x-api-key` |
+| `query: {name, value_env}` | a `name=<value>` parameter added to every request URL |
+| `basic: {username_env, password_env}` | HTTP Basic; an absent `password_env` sends an empty password |
+
+A hosted server that asks for its key in a header, such as Exa:
+
+```yaml
+name: exa
+transport: http
+url: https://mcp.exa.ai/mcp
+auth:
+  header:
+    name: x-api-key
+    value_env: MCP_GATEWAY_UPSTREAM_KEY_EXA
+```
+
+`header.name` may be `Authorization` with a `prefix` such as `Token ` for a
+service that uses another scheme. `basic`, and a `header` named
+`Authorization`, write the same header as `exchange:` and `tier_c_peer:`, so a
+manifest may use only one of them. A query-parameter secret is added only where
+the request leaves the gateway: the configured URL, logs and errors never
+contain it, and transport errors are reported without their URL.
+
+`headers:` adds fixed, non-secret request headers to every request over HTTP
+or SSE:
+
+```yaml
+headers:
+  x-client-name: waygate
+```
+
+Header names the gateway or the MCP transport sets itself, such as `Accept`,
+`Content-Type`, `Host`, `X-MCP-Identity` and the `Mcp-*` headers, are refused,
+as is `Authorization`; credentials belong in `auth:`. Names must be valid HTTP
+field names, values may contain only visible characters, spaces and tabs, and a
+header may not repeat the `auth.header` name. Both blocks are refused on stdio
+servers. Changing either re-dials the server. A rotated secret value is read by
+every new dial: each per-call session, which is the default, every reconnect
+and every recovery attempt. A session kept with `session.isolation: reuse`
+keeps the value it dialed with until it reconnects.
+
 ## Upstream request destinations
 
 An HTTP or legacy-SSE dial resolves the configured `url` host and sends that
 connection's requests only to the resolved addresses. The requests carry the
-`auth.bearer_env` bearer, the caller's identity headers, and on streamable HTTP
+static credential from `auth:`, the caller's identity headers, and on streamable HTTP
 the MCP session headers, so they stay on the configured scheme, host, and port:
 
 - Upstream requests never follow redirects, on either transport. A redirect
@@ -930,10 +983,11 @@ in authority: the file wins, the store records.
   preserves every unselected manifest and conditionally publishes the result
   against the inspected `base_hash`.
 
-A version's `content` references `auth.bearer_env` *names*, never token
-values, so it is safe to display and export. At dial time the gateway first
-uses that environment variable's non-empty value; otherwise it reads a token
-of at most 16 KiB from the path in the conventional `<NAME>_FILE` companion.
+A version's `content` references the environment variable *names* that
+`auth:` reads, never secret values, so it is safe to display and export. At
+dial time the gateway first uses each variable's non-empty value; otherwise it
+reads a value of at most 16 KiB from the path in the conventional
+`<NAME>_FILE` companion.
 The file path is runtime configuration and never enters the manifest ledger;
 missing, empty, unreadable, oversized, or non-UTF-8 files fail the dial closed.
 Credential paths must resolve to regular files; devices and FIFOs are refused.

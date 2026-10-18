@@ -124,7 +124,9 @@ following (mirrored, once each):
 
    `tier_c_peer:` and `exchange:` are mutually exclusive
    (both write `Authorization: Bearer` — see "Invariants"
-   below). Same for `tier_c_peer:` and `auth.bearer_env`.
+   below). Same for `tier_c_peer:` and any `auth:` method that
+   writes `Authorization` (`bearer_env`, `basic`, or a `header`
+   named `Authorization`).
 
 5. **Reload.** `SIGHUP` re-reads manifests; the
    `reload_manifests` path copies `tier_c_peer` through to
@@ -263,8 +265,8 @@ Refused at `load_manifests` time:
 
 - `tier_c_peer:` + `exchange:` (Tier-A) — both write
   Authorization.
-- `tier_c_peer:` + `auth.bearer_env` — both write
-  Authorization.
+- `tier_c_peer:` + an `auth:` method that writes Authorization
+  (`bearer_env`, `basic`, or a `header` named `Authorization`).
 
 The import path (`waygate-server::import_cmd`) calls the
 same `validate_manifest_invariants` so `--import-manifests`
