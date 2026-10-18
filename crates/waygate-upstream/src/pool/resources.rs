@@ -71,12 +71,21 @@ impl UpstreamEntry {
     /// condition clears and comes back, such as a reload removing the last
     /// declaration, or when a reload builds a new entry. Returns whether it
     /// warned.
+    ///
+    /// `resource_capability_advertised` is `None` when no lane is up to say
+    /// whether the upstream offers resources. A declaration, or a manifest the
+    /// gateway cannot read resources through, settles the condition anyway;
+    /// otherwise what was last reported stands until a lane connects.
     pub(super) fn report_undeclared_resources(
         &self,
         manifest: &UpstreamManifest,
-        resource_capability_advertised: bool,
+        resource_capability_advertised: Option<bool>,
     ) -> bool {
-        let undeclared = resources_undeclared(manifest, resource_capability_advertised);
+        let undeclared = match resource_capability_advertised {
+            Some(advertised) => resources_undeclared(manifest, advertised),
+            None if resources_undeclared(manifest, true) => return false,
+            None => false,
+        };
         let already_reported = self
             .undeclared_resources_reported
             .swap(undeclared, Ordering::AcqRel);

@@ -855,17 +855,18 @@ impl UpstreamPool {
                 break;
             }
         }
-        // With no lane up there is nothing to judge yet; the first reconnect
-        // that installs one reports instead.
-        let mut connected = false;
-        let mut resource_capability_advertised = false;
+        // With no lane up the capability is unknown; the first reconnect that
+        // installs one reports instead.
+        let mut resource_capability_advertised = None;
         for slot in &entry.slots {
             if let Some(conn) = slot.conn.read().await.as_ref() {
-                connected = true;
-                resource_capability_advertised |= conn.resource_capability_advertised;
+                resource_capability_advertised = Some(
+                    resource_capability_advertised.unwrap_or(false)
+                        || conn.resource_capability_advertised,
+                );
             }
         }
-        if connected {
+        {
             let manifest = entry.manifest.read().expect("manifest lock poisoned");
             entry.report_undeclared_resources(&manifest, resource_capability_advertised);
         }

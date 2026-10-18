@@ -1471,7 +1471,7 @@ impl UpstreamPool {
                     .is_some_and(|conn| conn.resource_capability_advertised)
             });
             let manifest = entry.manifest.read().expect("manifest lock poisoned");
-            entry.report_undeclared_resources(&manifest, resource_capability_advertised);
+            entry.report_undeclared_resources(&manifest, Some(resource_capability_advertised));
         }
         // Sampled under the guards that installed the healed lanes, for the
         // same reason as the re-dial path.
@@ -2078,7 +2078,7 @@ impl UpstreamPool {
                     .as_ref()
                     .is_some_and(|conn| conn.resource_capability_advertised)
             });
-            entry.report_undeclared_resources(new, resource_capability_advertised);
+            entry.report_undeclared_resources(new, Some(resource_capability_advertised));
         }
         // Linearize recovery of the shared failure budget with the lane swap.
         // A call cannot fail on a newly installed lane until its writer drops,
@@ -2757,22 +2757,22 @@ impl UpstreamPool {
                         // decide whether resources are readable at all were
                         // just applied in place; judge the condition against
                         // all of them. A shape change instead reports from the
-                        // redial or rebuild that commits the new manifest, and
-                        // with no lane up there is nothing to judge until a
-                        // reconnect installs one.
-                        if classification_guards
+                        // redial or rebuild that commits the new manifest. This
+                        // runs on every poll, so a moment with no lane up must
+                        // not read as the upstream offering no resources.
+                        let lanes_up = classification_guards
                             .iter()
-                            .any(|conn_guard| conn_guard.is_some())
-                        {
-                            entry.report_undeclared_resources(
-                                &guard,
+                            .any(|conn_guard| conn_guard.is_some());
+                        entry.report_undeclared_resources(
+                            &guard,
+                            lanes_up.then(|| {
                                 classification_guards.iter().any(|conn_guard| {
                                     conn_guard
                                         .as_ref()
                                         .is_some_and(|conn| conn.resource_capability_advertised)
-                                }),
-                            );
-                        }
+                                })
+                            }),
+                        );
                     }
                     (
                         needs_redial,

@@ -5290,29 +5290,48 @@ fn undeclared_resources_are_reported_only_when_the_condition_becomes_true() {
         .expect("entry");
 
     assert!(
-        !entry.report_undeclared_resources(&undeclared, false),
+        !entry.report_undeclared_resources(&undeclared, Some(false)),
         "an upstream offering no resources has nothing to report",
     );
-    assert!(entry.report_undeclared_resources(&undeclared, true));
+    assert!(entry.report_undeclared_resources(&undeclared, Some(true)));
     assert!(
-        !entry.report_undeclared_resources(&undeclared, true),
+        !entry.report_undeclared_resources(&undeclared, Some(true)),
         "an unchanged condition repeats nothing",
     );
     assert!(
-        !entry.report_undeclared_resources(&declared, true),
+        !entry.report_undeclared_resources(&declared, Some(true)),
         "a declaration clears the condition without a report",
     );
     assert!(
-        entry.report_undeclared_resources(&undeclared, true),
+        entry.report_undeclared_resources(&undeclared, Some(true)),
         "removing the last declaration makes it true again",
     );
-    assert!(!entry.report_undeclared_resources(&undeclared, false));
+    assert!(!entry.report_undeclared_resources(&undeclared, Some(false)));
     assert!(
-        entry.report_undeclared_resources(&undeclared, true),
+        entry.report_undeclared_resources(&undeclared, Some(true)),
         "the upstream offering resources again makes it true again",
     );
     assert!(
-        !entry.report_undeclared_resources(&manifest_with(true), true),
+        !entry.report_undeclared_resources(&manifest_with(true), Some(true)),
         "an upstream the gateway cannot read resources from is not reported",
+    );
+
+    // With no lane up the capability is unknown.
+    assert!(entry.report_undeclared_resources(&undeclared, Some(true)));
+    assert!(
+        !entry.report_undeclared_resources(&undeclared, None),
+        "a moment with no lane up neither reports nor clears",
+    );
+    assert!(
+        !entry.report_undeclared_resources(&undeclared, Some(true)),
+        "so the next connection repeats nothing",
+    );
+    assert!(
+        !entry.report_undeclared_resources(&declared, None),
+        "a declaration settles the condition even with no lane up",
+    );
+    assert!(
+        entry.report_undeclared_resources(&undeclared, Some(true)),
+        "a declaration added and removed while disconnected still clears it",
     );
 }
