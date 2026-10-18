@@ -242,7 +242,13 @@ a row. Preserve these properties when changing the page:
 - **Links.** A control is linked only when the viewer's tenant owns what it
   changes: the catalog row for **Propose unquarantine** and **Approve** on the
   Catalog tab, and the default tenant for Server manifests, Servers operations,
-  and tool-change review. A retired server and a temporary state have none.
+  and tool-change review. A retired server and a temporary state have none. A
+  review link opens the exact comparison only when the review is stored; a
+  first observation held for review before the gateway records it opens the
+  Tool changes list instead.
+- **No false reassurance.** Say a state clears on its own only when it cannot
+  persist. A tool missing on a disconnected server may also be missing from the
+  catalog, so that row offers Reload manifests rather than "no action needed".
 - **Entry points.** The Tools tab bar, an Overview attention item with the
   count when it is not zero, the command palette, and the Activity detail of an
   event whose reason starts with `refused:` or `unavailable:`, which links to

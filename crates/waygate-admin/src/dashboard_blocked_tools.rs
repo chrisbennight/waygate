@@ -163,7 +163,13 @@ impl Links<'_> {
 
 /// Explain one blocked tool on `server`. `connected` is whether any session
 /// to the server is connected.
-fn explain(server: &str, blocked: &BlockedTool, connected: bool, links: &Links<'_>) -> Explanation {
+fn explain(
+    server: &str,
+    blocked: &BlockedTool,
+    connected: bool,
+    review_recorded: bool,
+    links: &Links<'_>,
+) -> Explanation {
     let audit_reason = match blocked.block {
         ToolBlock::Refused(reason) => format!("refused:{}", reason.code()),
         ToolBlock::Unavailable(reason) => format!("unavailable:{}", reason.code()),
@@ -200,12 +206,14 @@ fn explain(server: &str, blocked: &BlockedTool, connected: bool, links: &Links<'
             SCOPE_CATALOG,
             None,
         ),
-        ToolBlock::Refused(ToolRefusal::NotInCatalog) if !connected => clears(
+        ToolBlock::Refused(ToolRefusal::NotInCatalog) if !connected => refused(
             "Server not connected",
-            "No session to this server is connected, so the gateway cannot read the tool's \
-             current definition and refuses calls to it. This should clear on its own once \
-             the gateway reconnects to the server.",
+            "No session to this server is connected and the gateway has no current record of \
+             this tool to admit, so it refuses calls to it. If the governed catalog has the \
+             tool, this clears once the gateway reconnects. If it remains after the server \
+             reconnects, reloading manifests imports the configured tools into the catalog.",
             SCOPE_CONNECTIONS,
+            links.configuration("/servers", "Reload manifests on Servers"),
         ),
         ToolBlock::Refused(ToolRefusal::NotInCatalog) if blocked.advertised => refused(
             "Not in the catalog",
@@ -254,6 +262,14 @@ fn explain(server: &str, blocked: &BlockedTool, connected: bool, links: &Links<'
              server's quarantine on the Servers page releases it.",
             SCOPE_UNTIL_RESTART,
             links.configuration("/servers", "Clear the quarantine on Servers"),
+        ),
+        ToolBlock::Refused(ToolRefusal::ReviewRequired) if !review_recorded => refused(
+            "Held for review",
+            "The tool's definition is larger than the gateway can store for comparison, so \
+             the gateway holds it for review. Its review appears under Tool changes once the \
+             gateway records it, on the next call to the tool or catalog refresh.",
+            SCOPE_CATALOG,
+            links.configuration("/servers/tool-changes", "Open Tool changes"),
         ),
         ToolBlock::Refused(ToolRefusal::ReviewRequired) => refused(
             "Definition change awaits review",
@@ -366,6 +382,9 @@ impl CatalogRows {
 struct Report {
     catalog: CatalogRows,
     servers: Vec<ServerRefusals>,
+    /// Review-required tools with no stored review to link to: a first
+    /// observation held for review that the gateway has not recorded yet.
+    unrecorded_reviews: std::collections::HashSet<(String, String)>,
 }
 
 async fn read_report(state: &AdminState, tenant: &str, only: Option<&str>) -> Report {
@@ -378,7 +397,45 @@ async fn read_report(state: &AdminState, tenant: &str, only: Option<&str>) -> Re
                 && (default_tenant || catalog.get(server).is_some())
         })
         .await;
-    Report { catalog, servers }
+    Report {
+        catalog,
+        servers,
+        unrecorded_reviews: Default::default(),
+    }
+}
+
+/// The review-required tools in `report` whose tool-change review is not
+/// stored, so a link to its comparison would find nothing. An unreadable
+/// review store counts as not stored.
+async fn unrecorded_reviews(
+    state: &AdminState,
+    report: &Report,
+) -> std::collections::HashSet<(String, String)> {
+    let mut unrecorded = std::collections::HashSet::new();
+    for server in &report.servers {
+        for blocked in &server.tools {
+            if blocked.block != ToolBlock::Refused(ToolRefusal::ReviewRequired) {
+                continue;
+            }
+            let stored = match state.servers.tool_reviews.get() {
+                Some(store) => matches!(
+                    store
+                        .get(
+                            waygate_core::TenantId::DEFAULT,
+                            &server.server,
+                            &blocked.tool
+                        )
+                        .await,
+                    Ok(Some(_))
+                ),
+                None => false,
+            };
+            if !stored {
+                unrecorded.insert((server.server.clone(), blocked.tool.clone()));
+            }
+        }
+    }
+    unrecorded
 }
 
 /// The number of tools the gateway does not run for `principal`'s tenant,
@@ -414,7 +471,16 @@ fn blocked_rows(
         };
         let mut groups: Vec<BlockedRow> = Vec::new();
         for blocked in &server.tools {
-            let explanation = explain(&server.server, blocked, server.connected, &links);
+            let review_recorded = !report
+                .unrecorded_reviews
+                .contains(&(server.server.clone(), blocked.tool.clone()));
+            let explanation = explain(
+                &server.server,
+                blocked,
+                server.connected,
+                review_recorded,
+                &links,
+            );
             match groups
                 .iter_mut()
                 .find(|group| group.explanation == explanation)
@@ -449,13 +515,16 @@ async fn blocked_tools_page(
     let (rows, catalog_unavailable, truncated) = if insufficient_scope {
         (Vec::new(), false, Vec::new())
     } else {
-        let report = read_report(&state, &tenant, server_filter.as_deref()).await;
+        let mut report = read_report(&state, &tenant, server_filter.as_deref()).await;
         // Tool-change review also requires the URL tenant to be the default
         // tenant, so a cross-tenant view offers no configuration links.
         let owns_configuration = tenant == waygate_core::TenantId::DEFAULT
             && tenant_ctx
                 .as_ref()
                 .is_none_or(|ctx| ctx.slug == waygate_core::TenantId::DEFAULT);
+        if owns_configuration {
+            report.unrecorded_reviews = unrecorded_reviews(&state, &report).await;
+        }
         let rows = blocked_rows(
             &report,
             &tenant,
@@ -547,6 +616,7 @@ mod tests {
                     .collect(),
                 truncated: false,
             }],
+            unrecorded_reviews: Default::default(),
         }
     }
 
@@ -692,9 +762,9 @@ mod tests {
                 refused(ToolRefusal::NotInCatalog),
                 false,
                 false,
-                "should clear on its own once the gateway reconnects",
+                "If it remains after the server reconnects, reloading manifests",
                 SCOPE_CONNECTIONS,
-                None,
+                Some("/admin/servers".into()),
             ),
             case(
                 unavailable(TemporaryUnavailability::CatalogUnavailable),
@@ -881,6 +951,27 @@ mod tests {
         );
         let html = page(rows);
         assert!(html.contains("2 tools"));
+    }
+
+    /// A review-required tool with no stored review explains the hold and
+    /// opens the Tool changes list, since its comparison does not exist yet.
+    #[test]
+    fn a_held_first_observation_opens_tool_changes_rather_than_a_missing_review() {
+        let mut report = report(
+            None,
+            true,
+            &[("t", ToolBlock::Refused(ToolRefusal::ReviewRequired), true)],
+        );
+        report
+            .unrecorded_reviews
+            .insert(("garage".to_owned(), "t".to_owned()));
+        let html = page(blocked_rows(&report, "default", None, true, true));
+        assert!(html.contains("larger than the gateway can store for comparison"));
+        assert!(
+            html.contains(r#"href="/admin/servers/tool-changes""#),
+            "{html}"
+        );
+        assert!(!html.contains("tool-changes?server="), "{html}");
     }
 
     #[test]
