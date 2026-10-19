@@ -12,6 +12,17 @@ import subprocess
 from release_policy import image_plan, parse_version, require_merged, run, workspace_version
 
 RELEASE_LABEL = 'io.waygate.release.version'
+PUBLICATION_RECORD = Path('gateway-publication.json')
+
+
+def build_identity():
+    values = {}
+    for key in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'):
+        value = os.environ.get(key, '')
+        if not re.fullmatch(r'[1-9][0-9]*', value):
+            raise ValueError('publication requires a valid GitHub build identity')
+        values[key] = int(value)
+    return values
 
 
 def remote_image(reference):
@@ -72,6 +83,10 @@ def publish():
     labels = json.loads(run('docker', 'image', 'inspect', local, '--format', '{{json .Config.Labels}}')) or {}
     if labels.get('org.opencontainers.image.revision') != sha or labels.get(RELEASE_LABEL, '') != version:
         raise ValueError('local image provenance does not match the event')
+    identity = build_identity()
+    platform = run('docker', 'image', 'inspect', local, '--format', '{{.Os}}/{{.Architecture}}')
+    if not re.fullmatch(r'linux/(?:amd64|arm64)', platform):
+        raise ValueError('unsupported publication platform')
     if kind == 'main':
         digest = push_tag(local, local)
     else:
@@ -99,6 +114,21 @@ def publish():
         run(*args)
     with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as handle:
         handle.write(f'Published verified image: `{repository}@{digest}`\n')
+    PUBLICATION_RECORD.write_text(json.dumps({
+        'schema_version': 1,
+        'source_repository': os.environ['GITHUB_REPOSITORY'].lower(),
+        'source_commit': sha,
+        'source_ref': os.environ['GITHUB_REF'],
+        'workflow': '.github/workflows/image.yml',
+        'run_id': identity['GITHUB_RUN_ID'],
+        'run_attempt': identity['GITHUB_RUN_ATTEMPT'],
+        'images': [{
+            'repository': repository,
+            'tag': 'sha-' + sha if kind == 'main' else version,
+            'digest': digest,
+            'platforms': [platform],
+        }],
+    }, indent=2) + '\n')
 
 
 if __name__ == '__main__':

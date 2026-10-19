@@ -42,6 +42,16 @@ reviewed recovery change; rebuilding and rerunning is not an overwrite mechanism
 A failure to authenticate or read registry metadata also stops publication.
 Successful releases record the source commit and image digest in GitHub notes.
 
+Successful publication also retains a `gateway-publication-<run-id>-<attempt>`
+Actions artifact containing `gateway-publication.json`. The record identifies
+the full source commit and ref, workflow, build attempt, and published image
+tag, digest, and platform. Consumers must retrieve it from that repository's
+successful publication run and verify the immutable image; the record or an
+image label by itself does not establish a successful build. A rerun receives
+a distinct artifact, so consumers can distinguish rebuilds of the same source.
+The artifact contains no deployment settings or credentials. Historical runs
+without this record need separate verification before automated selection.
+
 The job uses the repository's short-lived identity with `packages: write` and
 `contents: write`; build-only jobs retain read-only repository permissions. No
 home secret provider is required. Protect `main` and release tags, restrict
