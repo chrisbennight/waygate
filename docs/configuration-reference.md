@@ -7,6 +7,7 @@ settings absent; source readers define the behavior of the deployed version.
 | Var | What |
 |-----|------|
 | `GATEWAY_LISTEN_ADDR` | Listener address; default `0.0.0.0:8080`. Use loopback for a native local listener. Container interface binding and host publication are separate controls. |
+| `GATEWAY_ADMISSION_FILE` | Optional Linux HTTP admission file in a stable root-owned read-only directory mount. Unset preserves normal admission. Only exact `open\n` bytes in a protected regular file admit business requests; all other file results refuse them. See [traffic admission](operations.md#control-traffic-admission). |
 | `GATEWAY_AUDIENCE` | Expected access-token audience; defaults to the public URL. |
 | `GATEWAY_SKILLS_GIT_API_URL` / `GATEWAY_SKILLS_GIT_REPOSITORY` / `GATEWAY_SKILLS_GIT_ROOTS` | Required together for Git skills; see [source configuration](skills-git-source.md). |
 | `GATEWAY_SKILLS_SOURCE_ID` | Explicit stable identity for the Git skills source and its `skill://` namespace. |

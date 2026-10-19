@@ -108,6 +108,48 @@ After rollout, verify its plan uses the tenant and timestamp as index conditions
 without sorting the matching history. This does not change the activity
 browser's ID-based pagination.
 
+## Control traffic admission
+
+A deployment worker can set `GATEWAY_ADMISSION_FILE` to an absolute Linux path,
+for example `/run/gateway-admission/state`, to keep the same gateway process
+closed to business traffic during candidate acceptance. Leave it unset for the
+existing admission behavior. An empty or relative path is invalid configuration.
+
+The deployment owns this control. Provision a local root-owned directory without
+group or world write permission and mount that **directory** read-only into the
+nonroot gateway. Keep the directory and its mount stable for the process lifetime;
+the gateway pins its directory descriptor at startup. A missing, symlinked, or
+unsafe directory prevents startup. The complete mount path must be controlled by
+the deployment; do not place it beneath an untrusted writable ancestor.
+
+The worker opens admission by atomically replacing the file **within that same
+directory** with a root-owned regular file containing exactly `open` followed by
+a newline (`open\n`). A mode such as `0644` lets the nonroot process read it.
+Group/world-writable files, symlinks, directories, FIFOs, missing or unreadable
+files, and every other content value close admission. Each new business request
+reads the file afresh; concurrent checks are bounded and excess checks fail
+closed. There is no HTTP endpoint, database flag, cache, or background watcher
+that can independently open this gate.
+
+The check runs before authentication and routing, for both the startup listener
+and the installed application. Closed admission returns HTTP 503 for every path
+and method except exact GET or HEAD requests to `/.well-known/jwks.json`,
+`/healthz`, and `/readyz`. Those requests retain their normal behavior: startup
+serves available identity keys and refuses other paths until the full router is
+installed; readiness continues to report application health. Publishing the
+identity keys before the first upstream connection remains necessary for
+upstreams that verify gateway-signed identity tokens. OAuth, dashboard, MCP,
+inference, file-transfer, SCIM, and metrics requests are all closed.
+
+Closing admission prevents **new** requests from entering the application. A
+request that already passed the check may still finish or mutate an upstream,
+and existing streams and background workers keep running. The deployment must
+separately drain or stop all writers before taking a coordinated backup. An
+admission file does not isolate outbound traffic or prove upgrade compatibility;
+restore qualification still needs isolated disposable upstreams and identity
+endpoints. Before opening admission, the worker must durably record release
+intent and verify the accepted process, image, configuration, keys, and health.
+
 ## Roll back the appropriate state
 
 Image, configuration, and database rollback are separate decisions:

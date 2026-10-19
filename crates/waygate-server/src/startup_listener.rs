@@ -25,6 +25,8 @@ use tower::{Service, ServiceExt};
 use tower_http::normalize_path::NormalizePath;
 use waygate_oidc::SharedIdentityKeyring;
 
+use crate::admission::AdmissionGate;
+
 /// The complete application the listener serves once startup is done.
 pub(crate) type GatewayApp = NormalizePath<Router>;
 
@@ -49,7 +51,11 @@ pub(crate) struct StartupListener {
 
 impl StartupListener {
     /// Bind `addr` and start serving `starting` on it.
-    pub(crate) async fn bind(addr: SocketAddr, starting: Router) -> anyhow::Result<Self> {
+    pub(crate) async fn bind(
+        addr: SocketAddr,
+        starting: Router,
+        admission: AdmissionGate,
+    ) -> anyhow::Result<Self> {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .with_context(|| format!("bind {addr}"))?;
@@ -59,6 +65,7 @@ impl StartupListener {
         let service = Switch {
             app: app.clone(),
             starting,
+            admission,
         };
         let server = axum::serve(listener, Shared::new(service))
             .with_graceful_shutdown(stop.clone().cancelled_owned());
@@ -97,6 +104,7 @@ impl StartupListener {
 struct Switch {
     app: Arc<OnceLock<GatewayApp>>,
     starting: Router,
+    admission: AdmissionGate,
 }
 
 impl Service<Request> for Switch {
@@ -109,16 +117,22 @@ impl Service<Request> for Switch {
     }
 
     fn call(&mut self, request: Request) -> Self::Future {
-        match self.app.get() {
-            Some(app) => {
-                let app = app.clone();
-                Box::pin(async move { Ok(app.oneshot(request).await.into_response()) })
+        let admission = self.admission.clone();
+        let app = self.app.get().cloned();
+        let starting = self.starting.clone();
+        Box::pin(async move {
+            if !admission.admits(request.method(), request.uri()).await {
+                return Ok((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "gateway admission is closed",
+                )
+                    .into_response());
             }
-            None => {
-                let starting = self.starting.clone();
-                Box::pin(async move { starting.oneshot(request).await })
+            match app {
+                Some(app) => Ok(app.oneshot(request).await.into_response()),
+                None => starting.oneshot(request).await,
             }
-        }
+        })
     }
 }
 
@@ -157,7 +171,7 @@ mod tests {
 
     #[tokio::test]
     async fn keys_are_served_before_the_application_is_installed() {
-        let listener = StartupListener::bind(any_port(), starting())
+        let listener = StartupListener::bind(any_port(), starting(), AdmissionGate::default())
             .await
             .expect("bind");
         let addr = listener.local_addr();
@@ -175,7 +189,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_installed_application_serves_every_later_request() {
-        let listener = StartupListener::bind(any_port(), starting())
+        let listener = StartupListener::bind(any_port(), starting(), AdmissionGate::default())
             .await
             .expect("bind");
         let addr = listener.local_addr();
@@ -195,9 +209,10 @@ mod tests {
 
     #[tokio::test]
     async fn without_identity_keys_the_starting_listener_serves_nothing() {
-        let listener = StartupListener::bind(any_port(), starting_router(None))
-            .await
-            .expect("bind");
+        let listener =
+            StartupListener::bind(any_port(), starting_router(None), AdmissionGate::default())
+                .await
+                .expect("bind");
         let addr = listener.local_addr();
 
         assert_eq!(get_text(addr, "/.well-known/jwks.json").await.0, 503);
@@ -206,14 +221,164 @@ mod tests {
         listener.into_task().await.unwrap().unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn admission_covers_both_routers_and_every_business_method_before_handlers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("admission");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let guarded = || {
+            let hits = hits.clone();
+            Router::new()
+                .route("/.well-known/jwks.json", get(|| async { "keys" }))
+                .route("/healthz", get(|| async { "alive" }))
+                .route("/readyz", get(|| async { "ready" }))
+                .fallback(move || {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        "business handler"
+                    }
+                })
+        };
+        let listener =
+            StartupListener::bind(any_port(), starting(), crate::admission::fixture(&path))
+                .await
+                .unwrap();
+        let addr = listener.local_addr();
+        let client = reqwest::Client::new();
+        for installed in [false, true] {
+            if installed {
+                listener.install(NormalizePathLayer::trim_trailing_slash().layer(guarded()));
+            }
+            for method in [reqwest::Method::GET, reqwest::Method::HEAD] {
+                for safe in ["/.well-known/jwks.json", "/healthz", "/readyz"] {
+                    let response = client
+                        .request(method.clone(), format!("http://{addr}{safe}"))
+                        .send()
+                        .await
+                        .unwrap();
+                    let expected = if installed || safe == "/.well-known/jwks.json" {
+                        200
+                    } else {
+                        503
+                    };
+                    assert_eq!(response.status(), expected);
+                }
+            }
+            for method in [
+                reqwest::Method::GET,
+                reqwest::Method::POST,
+                reqwest::Method::PUT,
+                reqwest::Method::PATCH,
+                reqwest::Method::DELETE,
+                reqwest::Method::OPTIONS,
+                reqwest::Method::HEAD,
+                reqwest::Method::CONNECT,
+                reqwest::Method::TRACE,
+            ] {
+                for business in [
+                    "/mcp",
+                    "/mcp/",
+                    "/api/v1/admin",
+                    "/admin/login",
+                    "/v1/chat/completions",
+                    "/files/upload",
+                    "/oauth/token",
+                    "/oauth/callback",
+                    "/scim/v2/Users",
+                    "/metrics",
+                    "/unknown",
+                ] {
+                    let response = client
+                        .request(method.clone(), format!("http://{addr}{business}"))
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), 503, "{method} {business}");
+                }
+            }
+            for safe in ["/.well-known/jwks.json", "/healthz", "/readyz"] {
+                assert_eq!(
+                    client
+                        .post(format!("http://{addr}{safe}"))
+                        .send()
+                        .await
+                        .unwrap()
+                        .status(),
+                    503
+                );
+            }
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+        }
+        listener.stop_token().cancel();
+        listener.into_task().await.unwrap().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn atomic_file_replacement_controls_new_work_without_restarting_or_cancelling_inflight() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("admission");
+        let replace = |content: &[u8]| {
+            let mut file = tempfile::NamedTempFile::new_in(root.path()).unwrap();
+            file.write_all(content).unwrap();
+            file.persist(&path).unwrap();
+        };
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new().route(
+            "/mcp",
+            get({
+                let entered = entered.clone();
+                let finish = finish.clone();
+                move || {
+                    let entered = entered.clone();
+                    let finish = finish.clone();
+                    async move {
+                        entered.notify_one();
+                        finish.notified().await;
+                        "completed"
+                    }
+                }
+            }),
+        );
+        let listener =
+            StartupListener::bind(any_port(), starting(), crate::admission::fixture(&path))
+                .await
+                .unwrap();
+        listener.install(NormalizePathLayer::trim_trailing_slash().layer(app));
+        let addr = listener.local_addr();
+        assert_eq!(get_text(addr, "/mcp").await.0, 503);
+        replace(b"open\n");
+        let active = tokio::spawn(get_text(addr, "/mcp"));
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        replace(b"closed\n");
+        assert_eq!(get_text(addr, "/mcp").await.0, 503);
+        finish.notify_one();
+        assert_eq!(active.await.unwrap(), (200, "completed".to_owned()));
+        replace(b"open\n");
+        finish.notify_one();
+        assert_eq!(get_text(addr, "/mcp").await, (200, "completed".to_owned()));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(get_text(addr, "/mcp").await.0, 503);
+        listener.stop_token().cancel();
+        listener.into_task().await.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn a_second_bind_of_the_same_address_fails_at_startup() {
-        let first = StartupListener::bind(any_port(), starting())
+        let first = StartupListener::bind(any_port(), starting(), AdmissionGate::default())
             .await
             .expect("bind");
         let taken = first.local_addr();
 
-        let error = StartupListener::bind(taken, starting())
+        let error = StartupListener::bind(taken, starting(), AdmissionGate::default())
             .await
             .err()
             .expect("the address is in use");

@@ -370,6 +370,7 @@ mod tests {
     fn test_config() -> Config {
         Config {
             listen_addr: "127.0.0.1:0".parse().unwrap(),
+            admission_file: None,
             public_url: "http://127.0.0.1:0".into(),
             authentik_issuer: None,
             audience: "test".into(),
