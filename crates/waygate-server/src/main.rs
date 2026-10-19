@@ -1,3 +1,4 @@
+mod admission;
 mod boot;
 mod catalog_freshness;
 mod change_notify;
@@ -97,6 +98,7 @@ async fn gateway_main() -> anyhow::Result<()> {
     // field out of Config: PEM bytes must not survive into the
     // long-lived Config clone in AppState.
     let mut cfg = Config::from_env().context("config load")?;
+    let admission = admission::AdmissionGate::new(cfg.admission_file.as_deref())?;
     codemode_limits::install(cfg.codemode_limits.clone())?;
     // Validated with the rest of the startup config — before the listener
     // binds and boot activation evidence persists — so a bad value fails
@@ -397,6 +399,7 @@ async fn gateway_main() -> anyhow::Result<()> {
     let listener = startup_listener::StartupListener::bind(
         cfg.listen_addr,
         startup_listener::starting_router(identity_keyring.as_ref()),
+        admission,
     )
     .await?;
     tracing::info!(

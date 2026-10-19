@@ -67,6 +67,7 @@ fn deployment_profile_from_env() -> Result<DeploymentProfile> {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen_addr: SocketAddr,
+    pub admission_file: Option<PathBuf>,
     pub public_url: String,
     pub authentik_issuer: Option<String>,
     pub audience: String,
@@ -951,6 +952,7 @@ impl Config {
 
         let cfg = Config {
             listen_addr,
+            admission_file: std::env::var_os("GATEWAY_ADMISSION_FILE").map(PathBuf::from),
             public_url,
             authentik_issuer,
             audience,
@@ -1637,6 +1639,7 @@ mod tests {
     fn base_cfg(profile: DeploymentProfile) -> Config {
         Config {
             listen_addr: "127.0.0.1:0".parse().unwrap(),
+            admission_file: None,
             public_url: "http://localhost".into(),
             authentik_issuer: None,
             audience: "http://localhost".into(),
