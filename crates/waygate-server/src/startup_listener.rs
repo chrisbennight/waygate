@@ -248,7 +248,9 @@ mod tests {
                 .await
                 .unwrap();
         let addr = listener.local_addr();
-        let client = reqwest::Client::new();
+        let client =
+            waygate_core::http_client::client(waygate_core::http_client::Profile::Standard)
+                .unwrap();
         for installed in [false, true] {
             if installed {
                 listener.install(NormalizePathLayer::trim_trailing_slash().layer(guarded()));
