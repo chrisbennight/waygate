@@ -1243,9 +1243,9 @@ async fn dial(
 }
 
 use lanes::dial_slots;
-pub use lanes::resolve_isolation;
 #[cfg(test)]
 use lanes::slot_count;
+pub use lanes::{resolve_isolation, SessionCloseError};
 
 #[async_trait]
 impl UpstreamCatalog for UpstreamPool {

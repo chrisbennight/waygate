@@ -5,6 +5,13 @@
 
 use super::*;
 
+/// Local pooled clients whose cancellation did not finish successfully.
+#[derive(Debug, thiserror::Error)]
+#[error("{failed} pooled upstream clients did not close cleanly")]
+pub struct SessionCloseError {
+    pub failed: usize,
+}
+
 /// An upstream's connection slots and the queue for checking one out. There
 /// is one permit per slot and only a checkout locks a slot's `in_use`. A call
 /// that holds a permit without a slot never locks one, so a caller holding a
@@ -99,7 +106,8 @@ pub(super) struct CallLane<'a> {
 }
 
 impl super::UpstreamPool {
-    /// End every pooled upstream session and return how many lanes were open.
+    /// Attempt every pooled session close and return how many lanes were open.
+    /// A failed client cancellation is reported after every lane was attempted.
     ///
     /// A stateful upstream keeps a lane's session until the client deletes it
     /// or the upstream's own idle expiry ends it, and an upstream with a fixed
@@ -113,7 +121,7 @@ impl super::UpstreamPool {
     /// already dialing finishes installing its lanes and they are closed here,
     /// and one still waiting for the guard finds the entry retired and does not
     /// dial. Call this only once nothing can check out a lane.
-    pub async fn close_sessions(&self) -> usize {
+    pub async fn close_sessions(&self) -> Result<usize, SessionCloseError> {
         let entries = self.entries.load_full();
         let closing = entries.iter().map(|(name, entry)| async move {
             let _session = entry.session_mutation.lock().await;
@@ -122,16 +130,26 @@ impl super::UpstreamPool {
                 let connection = slot.conn.write().await.take()?;
                 if let Err(error) = connection.client.cancel().await {
                     tracing::warn!(server = %name, %error, "upstream lane did not close cleanly");
+                    return Some(false);
                 }
-                Some(())
+                Some(true)
             });
             futures::future::join_all(lanes)
                 .await
                 .into_iter()
                 .flatten()
-                .count()
+                .collect::<Vec<_>>()
         });
-        futures::future::join_all(closing).await.into_iter().sum()
+        let attempts: Vec<bool> = futures::future::join_all(closing)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        let failed = attempts.iter().filter(|succeeded| !**succeeded).count();
+        if failed > 0 {
+            return Err(SessionCloseError { failed });
+        }
+        Ok(attempts.len())
     }
 
     /// Mark a slot's connection down so the per-upstream scheduler

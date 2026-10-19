@@ -242,7 +242,8 @@ impl CodeModeExecutionCapacity {
 
     /// Record every run still holding a claim as interrupted. Called when the
     /// drain window ends; a run that registers afterwards records itself.
-    pub(crate) async fn interrupt_remaining(&self, store: Option<&SharedExecutionStore>) {
+    /// Return the number selected, even when a journal write fails.
+    pub(crate) async fn interrupt_remaining(&self, store: Option<&SharedExecutionStore>) -> usize {
         let held: Vec<HeldClaim> = {
             let mut live = self
                 .live_claims
@@ -252,11 +253,12 @@ impl CodeModeExecutionCapacity {
             live.claims.values().cloned().collect()
         };
         let Some(store) = store else {
-            return;
+            return held.len();
         };
         // Concurrent, so a row held by another transaction delays only its
         // own record.
         futures::future::join_all(held.iter().map(|held| interrupt_held_claim(store, held))).await;
+        held.len()
     }
 
     fn spawn_detached<F>(&self, run: F)
@@ -14400,7 +14402,7 @@ mod tests {
             "a run keeps its claim while the window is open"
         );
 
-        capacity.interrupt_remaining(Some(&shared)).await;
+        assert_eq!(capacity.interrupt_remaining(Some(&shared)).await, 1);
         assert_eq!(*store.interrupted.lock().await, vec![claim.clone()]);
 
         // A run that registers after the window ended records itself.

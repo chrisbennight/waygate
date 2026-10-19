@@ -1066,7 +1066,10 @@ async fn closing_the_pool_ends_every_lane_session() {
         "each lane holds one session"
     );
 
-    assert_eq!(pool.close_sessions().await, LANES);
+    assert_eq!(
+        pool.close_sessions().await.expect("close every lane"),
+        LANES
+    );
     assert!(
         rig.open.lock().unwrap().is_empty(),
         "every lane session must be deleted when the pool closes",

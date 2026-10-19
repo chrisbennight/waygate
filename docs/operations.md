@@ -150,6 +150,26 @@ restore qualification still needs isolated disposable upstreams and identity
 endpoints. Before opening admission, the worker must durably record release
 intent and verify the accepted process, image, configuration, keys, and health.
 
+## Observe shutdown completion
+
+SIGTERM and SIGINT start the bounded cleanup configured by
+`GATEWAY_DRAIN_TIMEOUT_SECONDS`. The process returns a nonzero exit status if
+tracked work or HTTP connections exceed their deadline, a shutdown task fails,
+Code Mode work must be interrupted, accepted evidence queues cannot finish
+their bounded processing, pooled clients report a close failure, or the overall
+cleanup deadline expires. Cleanup still attempts the remaining steps within
+that budget; a reported failure does not undo completed work.
+
+A zero exit status reports completion of these local cleanup steps. It does
+not attest that every background operation persisted its final state, that
+best-effort evidence reached durable storage, or that external effects settled.
+Upstream-owned tasks can continue after this process stops. Preserve queued,
+dispatched and unknown outcome states unchanged. Historical unresolved work can
+remain in a complete backup; reconcile work crossing the backup/apply boundary
+where recovery could rewind a new disposition or enable duplicate application.
+Neither process exit nor an empty local task tracker authorizes replay or a
+database rewind.
+
 ## Roll back the appropriate state
 
 Image, configuration, and database rollback are separate decisions:

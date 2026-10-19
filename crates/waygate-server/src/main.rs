@@ -2499,6 +2499,7 @@ async fn gateway_main() -> anyhow::Result<()> {
     );
 
     let cleanup = async {
+        let mut clean = true;
         // Refuse new Code Mode runs, then let in-flight requests and detached
         // runs finish before the MCP transport closes its streams. Waiting for
         // work and for the HTTP server's own drain both end at one deadline
@@ -2512,6 +2513,7 @@ async fn gateway_main() -> anyhow::Result<()> {
             .await
             .is_err()
         {
+            clean = false;
             tracing::warn!(
                 in_flight = inflight_work.len(),
                 "in-flight MCP work did not finish within the drain window; closing the MCP transport"
@@ -2531,10 +2533,17 @@ async fn gateway_main() -> anyhow::Result<()> {
         // stream, closes when the process exits.
         match tokio::time::timeout_at(work_deadline, server_task).await {
             Ok(Ok(Ok(()))) => tracing::info!("axum drained cleanly"),
-            Ok(Ok(Err(e))) => tracing::warn!(error = %e, "axum returned error during drain"),
-            Ok(Err(e)) => tracing::warn!(error = %e, "axum task join failed"),
+            Ok(Ok(Err(e))) => {
+                clean = false;
+                tracing::warn!(error = %e, "axum returned error during drain");
+            }
+            Ok(Err(e)) => {
+                clean = false;
+                tracing::warn!(error = %e, "axum task join failed");
+            }
             Err(_) => {
-                tracing::warn!("HTTP connections were still open at the end of the drain window")
+                clean = false;
+                tracing::warn!("HTTP connections were still open at the end of the drain window");
             }
         }
         // Stop accepting best-effort evidence only after HTTP handlers have
@@ -2548,6 +2557,7 @@ async fn gateway_main() -> anyhow::Result<()> {
                 || report.dropped_chained_best_effort > 0
                 || report.dropped_best_effort > 0
             {
+                clean = false;
                 tracing::warn!(
                     timed_out = report.timed_out,
                     worker_failures = report.worker_failures,
@@ -2559,8 +2569,19 @@ async fn gateway_main() -> anyhow::Result<()> {
                 tracing::info!("bounded evidence queues drained cleanly");
             }
         }
-        if let Err(error) = interrupting.await {
-            tracing::warn!(%error, "recording interrupted Code Mode runs did not complete");
+        match interrupting.await {
+            Ok(0) => {}
+            Ok(interrupted) => {
+                clean = false;
+                tracing::warn!(
+                    interrupted,
+                    "Code Mode work was interrupted during shutdown"
+                );
+            }
+            Err(error) => {
+                clean = false;
+                tracing::warn!(%error, "recording interrupted Code Mode runs did not complete");
+            }
         }
         // No call can check out a lane now, so end each pooled upstream
         // session, including lanes a reconnect or catalog refresh is still
@@ -2574,30 +2595,43 @@ async fn gateway_main() -> anyhow::Result<()> {
         let closing = async {
             #[cfg(unix)]
             if let Err(error) = (&mut reload_task).await {
+                clean = false;
                 tracing::warn!(%error, "manifest reload task ended abnormally");
             }
             pool.close_sessions().await
         };
         match tokio::time::timeout(std::time::Duration::from_secs(5), closing).await {
-            Ok(closed) => tracing::info!(closed, "closed pooled upstream sessions"),
-            Err(_) => tracing::warn!("pooled upstream sessions did not all close in time"),
+            Ok(Ok(closed)) => tracing::info!(closed, "closed pooled upstream sessions"),
+            Ok(Err(error)) => {
+                clean = false;
+                tracing::warn!(%error, "pooled upstream session cleanup was incomplete");
+            }
+            Err(_) => {
+                clean = false;
+                tracing::warn!("pooled upstream sessions did not all close in time");
+            }
         }
         // Then close every isolated workload pool so connections are returned
         // to Postgres before the process exits.
         if let Some(pools) = &database_pools {
             pools.close().await;
         }
+        clean
     };
 
     match tokio::time::timeout(drain_timeout, cleanup).await {
-        Ok(()) => tracing::info!("gateway shutdown complete (within drain window)"),
-        Err(_) => tracing::warn!(
-            timeout_secs = drain_timeout.as_secs(),
-            "drain deadline reached with cleanup still pending; forcing exit \
-             (in-flight HTTP and DB connections drop on process exit). \
-             If this fires under normal load, raise GATEWAY_DRAIN_TIMEOUT_SECONDS \
-             or investigate the stuck handler / background task.",
-        ),
+        Ok(true) => tracing::info!("gateway shutdown complete (within drain window)"),
+        Ok(false) => anyhow::bail!("gateway shutdown cleanup was incomplete"),
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = drain_timeout.as_secs(),
+                "drain deadline reached with cleanup still pending; forcing exit \
+                 (in-flight HTTP and DB connections drop on process exit). \
+                 If this fires under normal load, raise GATEWAY_DRAIN_TIMEOUT_SECONDS \
+                 or investigate the stuck handler / background task.",
+            );
+            anyhow::bail!("gateway shutdown exceeded its cleanup deadline");
+        }
     }
 
     Ok(())
