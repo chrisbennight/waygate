@@ -106,7 +106,10 @@ gateway-global even though their callers are admin-gated. See the
 ## Review an upstream tool change
 
 With a configured database, set `GATEWAY_QUARANTINE_ON_DRIFT_RISK=all` to
-quarantine changed descriptions and schemas for every classified tool.
+quarantine changes to the complete tool descriptor for every classified tool.
+The fingerprint includes titles, descriptions, input and output schemas,
+annotations, icons, and arbitrary tool metadata in both classification modes.
+These fields can carry prompt injection even when the tool remains read-only.
 `high` and `medium` restrict automatic quarantine by the existing risk and
 side-effect thresholds; the default `off` observes changes without enabling
 automatic quarantine. This detects a changed contract, not whether its text is
@@ -132,6 +135,15 @@ For previously approved tools, the first observation establishes the comparison
 baseline. This workflow does
 not add upstream change-notification handling or inspect a server's internal
 implementation.
+
+The complete-descriptor fingerprint has a distinct hash identity from older
+schema-only and selected-metadata fingerprints. When upgrading an existing
+deployment with quarantine enabled, previous fingerprints are not silently
+accepted as approvals of the additional fields. Review and accept each held
+replacement; annotation-mode manifests also need the newly reviewed behavior
+hash. Keep the existing review database so the old comparison and any existing
+quarantine remain available. A first observation for a newly classified tool
+still establishes its baseline under the approved manifest.
 
 **Catalog → Recent drift events** lists each change to a classified tool,
 including changes accepted automatically, with its server, tool, changed fields,

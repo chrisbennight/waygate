@@ -193,7 +193,6 @@ impl UpstreamPool {
                         server,
                         name,
                         contract.advertised_definition.as_ref(),
-                        manifest.classification_mode,
                         protected,
                         reviews.get(name).cloned(),
                         admission::Effects::Record,

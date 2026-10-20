@@ -43,8 +43,8 @@ pub use transport::{
 
 /// Canonical behavior hash of a live tool descriptor — the exact value an
 /// annotation-native manifest entry must carry in `approved_behavior_hash`
-/// for the tool to be admitted. Covers name, description, input schema,
-/// output schema, standard annotations, and action metadata.
+/// for the tool to be admitted. Covers the complete serialized descriptor,
+/// including titles, input/output schemas, annotations, icons, and metadata.
 pub fn tool_behavior_hash(tool: &rmcp::model::Tool) -> String {
     security_metadata::behavior_hash(tool)
 }

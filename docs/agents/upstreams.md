@@ -98,9 +98,9 @@ Classifier values remain bounded open strings, as the experimental draft
 allows, and unknown action-metadata members are preserved in the behavior hash.
 The gateway does not freeze the draft into a private enum or discard future
 extension fields. A reviewed vocabulary evolution therefore requires an
-ordinary hash approval, not a gateway code change. The display-only annotation
-title is deliberately excluded, so presentation edits do not quarantine an
-otherwise unchanged capability.
+ordinary hash approval, not a gateway code change. Titles are included in the
+reviewed descriptor: presentation text can carry prompt injection just as a
+description or schema comment can.
 
 At invocation, annotation mode derives `side_effects` from `!readOnlyHint`.
 Input and output sensitivity come from the corresponding action-metadata
@@ -152,12 +152,14 @@ shells, or credential-store access that bypass those controls. Bounds and
 schemas constrain the requested operation; they must not redefine a useful
 upstream capability into an unusable special case.
 
-The behavior hash covers name, description, input schema, output schema,
-standard annotations, and the complete namespaced tool metadata — the
-action-metadata namespace plus any sibling namespaced claim, so an unknown
-extension changing under `_meta` re-hashes rather than drifting silently. Annotation mode requires that exact
-hash in `approved_behavior_hash`; importing the manifest records it as the
-approved tool-version identity.
+The behavior hash covers the complete serialized tool descriptor retained by
+the MCP client library: name, title, description, input and output schemas,
+all retained annotations, icons, and the entire `_meta` object. Arbitrary schema
+members and metadata values participate without interpreting their claims.
+Object key order is canonicalized; array order and field presence remain
+significant. Both classification modes use this fingerprint for drift review.
+Annotation mode also requires that exact hash in `approved_behavior_hash`;
+importing the manifest records it as the approved tool-version identity.
 
 **Obtaining the hashes without direct reach to the upstream.** The gateway
 already holds the connected sessions, so the manifest change preview reports

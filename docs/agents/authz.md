@@ -131,14 +131,14 @@ binding before its atomic claim.
 
 The reviewed `behavior_hash` is the approved tool-version identity, so what a
 change must alter to reuse an approval depends on the classification mode. For
-annotation-native tools it is the full behavior hash — name, description, input
-and output schema, standard annotations, and namespaced metadata — so any schema,
-annotation, or action-metadata change cannot reuse an approval issued for the
+annotation-native tools it is the complete descriptor hash, including titles,
+input and output schemas, annotations, icons, and arbitrary metadata, so any
+descriptor change cannot reuse an approval issued for the
 previous behavior, even when the call arguments are identical, and cannot be
 silently approved forward either. For manifest tools the reviewed contract is the
 classification tuple (name, risk, side-effects, pii); the manifest supplies no
 reviewed input schema (the catalog stores it `NULL`), so a classification change
-invalidates the approval, while live input-schema drift is governed by drift
+invalidates the approval, while live descriptor drift is governed by drift
 quarantine rather than by the approval binding. The historical
 database/API field remains named `argument_hash` for compatibility, but returned
 stored values are behavior-and-argument binding digests. Approval-needed

@@ -3017,7 +3017,7 @@ async fn record_observed_schemas_detects_change_and_updates_baseline() {
 }
 
 #[tokio::test]
-async fn annotation_only_drift_is_opt_in_to_annotation_mode() {
+async fn output_and_annotation_drift_is_observed_in_both_classification_modes() {
     let original = live("read");
     let mut changed = original.clone();
     changed.output_schema = Some(Arc::new(
@@ -3041,7 +3041,7 @@ async fn annotation_only_drift_is_opt_in_to_annotation_mode() {
         "test",
         QuarantineThreshold::Off,
     );
-    assert!(
+    assert_eq!(
         legacy
             .record_observed_schemas(
                 "legacy_output_drift",
@@ -3049,8 +3049,9 @@ async fn annotation_only_drift_is_opt_in_to_annotation_mode() {
                 "test",
                 QuarantineThreshold::Off,
             )
-            .is_empty(),
-        "legacy drift behavior must remain input-schema based"
+            .len(),
+        1,
+        "manifest mode must observe output and annotation drift"
     );
 
     let annotation_native = entry_with_slots(1);
