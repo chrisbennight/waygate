@@ -18,8 +18,9 @@
 //! "Canonical-JSON" here = recursively sort object keys (BTreeMap)
 //! before serializing. JSON arrays preserve their order (significant
 //! per the JSON Schema spec for things like `enum` / `oneOf`).
-//! [`behavior_hash`] extends the historical schema identity with the output
-//! schema and security metadata used for admission and drift detection.
+//! [`behavior_hash`] extends the historical schema identity with selected output
+//! and security facts. Upstream descriptor review separately hashes the complete
+//! serialized MCP tool through [`canonical_json_hash`].
 
 use std::collections::BTreeMap;
 
@@ -112,8 +113,7 @@ pub struct ClassifiedOperation<'a> {
     pub pii: bool,
 }
 
-/// Compute the stable hash of every security-relevant field advertised by a
-/// live MCP tool.
+/// Compute the stable hash of selected catalog schema and security facts.
 ///
 /// Unlike the historical [`schema_hash`], this includes the output schema,
 /// standard MCP annotations, and the namespaced tool metadata — callers pass

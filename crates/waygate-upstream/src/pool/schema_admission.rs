@@ -186,20 +186,11 @@ impl UpstreamEntry {
         // baseline lock (never await on the evidence sink while holding it).
         let mut drift_reports: Vec<DriftReport> = Vec::new();
         for tool in tools {
-            let (hash_kind, observed) = match classification_mode {
-                crate::ClassificationMode::Manifest => (
-                    "manifest:",
-                    waygate_catalog::schema_hash(
-                        tool.name.as_ref(),
-                        tool.description.as_deref(),
-                        &tool.input_schema,
-                    ),
-                ),
-                crate::ClassificationMode::McpAnnotations => (
-                    "mcp_annotations:",
-                    crate::security_metadata::behavior_hash(tool),
-                ),
+            let hash_kind = match classification_mode {
+                crate::ClassificationMode::Manifest => "manifest:",
+                crate::ClassificationMode::McpAnnotations => "mcp_annotations:",
             };
+            let observed = crate::security_metadata::behavior_hash(tool);
             let observed = format!("{hash_kind}{observed}");
             match baseline.get(tool.name.as_ref()) {
                 // Changing classification authority changes which contract is
@@ -222,7 +213,7 @@ impl UpstreamEntry {
                         risk = ?risk,
                         side_effects = side_effects,
                         quarantined = should_quarantine,
-                        "tool contract drift detected — the mode-specific admitted contract differs from the last observation",
+                        "tool contract drift detected — the complete descriptor differs from the last observation",
                     );
                     waygate_telemetry::metrics::record_tool_drift(name);
                     drift_reports.push(DriftReport {

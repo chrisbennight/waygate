@@ -16,8 +16,8 @@
 //! is lost. Nothing is invented — a malformed field is declined, never
 //! replaced with a synthesized one.
 //!
-//! Stripping cannot move a tool's drift hash: `waygate_catalog::schema_hash`
-//! digests name, description, and *input* schema only.
+//! Drift review hashes the original advertised descriptor before normalization;
+//! clearing a published field cannot change the approval identity.
 
 use rmcp::model::Tool;
 use serde_json::Value;

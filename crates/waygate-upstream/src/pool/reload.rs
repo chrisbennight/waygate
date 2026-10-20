@@ -545,8 +545,8 @@ fn lane_catalog_identity_hash(tool: &Tool, mode: crate::ClassificationMode) -> S
 /// schema, because a partial heal legitimately leaves lanes holding
 /// different catalog generations and the conservative answer to that
 /// disagreement is to withhold the CONTRACT, not the tool. Everything else
-/// the hash covers — name, description, input schema, annotations, and the
-/// namespaced metadata — still has to match on every lane.
+/// the descriptor carries, including titles, icons, annotations, and metadata,
+/// still has to match on every lane.
 fn behavior_hash_sans_output_schema(tool: &Tool) -> String {
     let mut tool = tool.clone();
     tool.output_schema = None;
@@ -3250,12 +3250,10 @@ mod catalog_refresh_tests {
         );
     }
 
-    /// The display title is excluded from the reviewed behavior hash, so a
-    /// rolling deployment whose lanes differ only in `ToolAnnotations.title`
-    /// must keep the tool published rather than dropping it from the
-    /// intersection (which annotation mode would then quarantine).
+    /// Titles can carry instructions, so all lanes must agree on the text
+    /// a client or model will see under an approved tool name.
     #[test]
-    fn common_catalog_ignores_display_title_differences() {
+    fn common_catalog_withholds_unreviewed_title_differences() {
         let mut titled = tool("shared", None);
         titled.annotations = Some(rmcp::model::ToolAnnotations::from_raw(
             Some("Renamed in the newer build".to_owned()),
@@ -3275,14 +3273,15 @@ mod catalog_refresh_tests {
         let first = vec![titled.clone()];
         let second = vec![untitled];
 
-        assert_eq!(
-            common_tool_catalog(
-                &[&first, &second],
-                crate::ClassificationMode::McpAnnotations,
-            ),
-            vec![titled],
-            "a title-only lane difference must not drop the shared tool",
-        );
+        for mode in [
+            crate::ClassificationMode::Manifest,
+            crate::ClassificationMode::McpAnnotations,
+        ] {
+            assert!(
+                common_tool_catalog(&[&first, &second], mode).is_empty(),
+                "a title-only lane difference must withhold the shared tool",
+            );
+        }
     }
 
     #[test]

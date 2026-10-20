@@ -5,24 +5,11 @@ use super::admission::{Admission, Effects};
 use super::*;
 use waygate_catalog::tool_reviews::{PgCatalogStore, ReviewDecision};
 
-pub(super) fn review_contract(
-    tool: &Tool,
-    mode: crate::ClassificationMode,
-) -> (String, serde_json::Value) {
-    match mode {
-        crate::ClassificationMode::Manifest => (
-            waygate_catalog::schema_hash(
-                tool.name.as_ref(),
-                tool.description.as_deref(),
-                &tool.input_schema,
-            ),
-            serde_json::json!({"name":tool.name,"description":tool.description,"inputSchema":tool.input_schema}),
-        ),
-        crate::ClassificationMode::McpAnnotations => (
-            crate::security_metadata::behavior_hash(tool),
-            serde_json::to_value(tool).expect("MCP tool descriptor serializes"),
-        ),
-    }
+pub(super) fn review_contract(tool: &Tool) -> (String, serde_json::Value) {
+    (
+        crate::security_metadata::behavior_hash(tool),
+        serde_json::to_value(tool).expect("MCP tool descriptor serializes"),
+    )
 }
 
 /// What one pass of [`UpstreamPool::observe_tool_reviews`] left in place,
@@ -147,7 +134,7 @@ impl UpstreamPool {
             if class.is_none() && !annotation_mode {
                 continue;
             }
-            let (hash, contract) = review_contract(tool, manifest.classification_mode);
+            let (hash, contract) = review_contract(tool);
             let side_effects = class.is_some_and(|class| class.side_effects) || annotation_mode;
             // Every classified tool is observed, so each change keeps its
             // drift history. Only a covered tool's change is held for review.
@@ -240,7 +227,7 @@ impl UpstreamPool {
             let mut found = false;
             for descriptor in conn.live_tools.iter().filter(|item| item.name == tool) {
                 found = true;
-                if review_contract(descriptor, mode).0 != hash {
+                if review_contract(descriptor).0 != hash {
                     return false;
                 }
             }
@@ -334,7 +321,7 @@ impl UpstreamPool {
                     )
                 })
         });
-        self.review_admission_from_state(server, tool, contract, mode, protected, review, effects)
+        self.review_admission_from_state(server, tool, contract, protected, review, effects)
             .await
     }
 
@@ -347,7 +334,6 @@ impl UpstreamPool {
         server: &str,
         tool: &str,
         contract: Option<&Tool>,
-        mode: crate::ClassificationMode,
         protected: bool,
         review: Option<ReviewDecision>,
         effects: Effects,
@@ -365,7 +351,7 @@ impl UpstreamPool {
             // other lanes to tell a disconnected server apart.
             return Admission::Refused(ToolRefusal::NotInCatalog);
         };
-        let (hash, value) = review_contract(contract, mode);
+        let (hash, value) = review_contract(contract);
         if let Some(review) = review {
             return review_decision_admission(&review, &hash, protected);
         }
