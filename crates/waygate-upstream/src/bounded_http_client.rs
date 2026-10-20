@@ -26,9 +26,9 @@ use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use http::{HeaderName, HeaderValue};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use rmcp::model::{
-    ClientJsonRpcMessage, ClientRequest, CustomResult, ErrorData, GetExtensions, JsonRpcMessage,
-    JsonRpcResponse, RequestId, ServerJsonRpcMessage, ServerNotification, ServerRequest,
-    ServerResult,
+    ClientJsonRpcMessage, ClientRequest, ClientResult, CustomResult, ErrorData, GetExtensions,
+    JsonRpcMessage, JsonRpcResponse, RequestId, ServerJsonRpcMessage, ServerNotification,
+    ServerRequest, ServerResult,
 };
 use rmcp::service::ServiceError;
 use rmcp::transport::streamable_http_client::{
@@ -402,6 +402,11 @@ impl BoundedResponseClient {
         if let Some(session_id) = session_id {
             request = request.header(SESSION_HEADER, session_id.as_ref());
         }
+        let control_request = Self::is_file_authorization(&message).then(|| {
+            request
+                .try_clone()
+                .expect("an HTTP request without a body can be cloned")
+        });
         let response = request
             .json(&message)
             .send()
@@ -431,7 +436,7 @@ impl BoundedResponseClient {
             .map(str::to_owned);
         let status = response.status();
         if !status.is_success() {
-            if materialize {
+            if materialize && !Self::is_file_authorization(&message) {
                 return Err(StreamableHttpError::UnexpectedServerResponse(
                     format!("HTTP {status} during bounded resource read").into(),
                 ));
@@ -493,6 +498,45 @@ impl BoundedResponseClient {
                     let decoded = Self::decode_response(&message, data.as_bytes())?;
                     if Self::is_response_for(&message, &decoded) {
                         return Ok(StreamableHttpPostResponse::Json(decoded, returned_session));
+                    }
+                    if let (Some(control), JsonRpcMessage::Request(request)) =
+                        (&control_request, decoded)
+                    {
+                        // These dials advertise no server-request capabilities.
+                        // Ping still needs an answer while the authorization
+                        // stream is waiting for its final result.
+                        let reply = if matches!(request.request, ServerRequest::PingRequest(_)) {
+                            ClientJsonRpcMessage::response(ClientResult::empty(()), request.id)
+                        } else {
+                            ClientJsonRpcMessage::error(
+                                ErrorData::new(
+                                    rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                                    "server request is not supported during file authorization",
+                                    None,
+                                ),
+                                Some(request.id),
+                            )
+                        };
+                        let mut control = control
+                            .try_clone()
+                            .expect("an HTTP request without a body can be cloned");
+                        if let Some(session) = &returned_session {
+                            control = control.header(SESSION_HEADER, session);
+                        }
+                        let response = control
+                            .json(&reply)
+                            .send()
+                            .await
+                            .map_err(StreamableHttpError::Client)?;
+                        if !response.status().is_success() {
+                            return Err(StreamableHttpError::UnexpectedServerResponse(
+                                format!(
+                                    "HTTP {} answering an authorization control request",
+                                    response.status()
+                                )
+                                .into(),
+                            ));
+                        }
                     }
                 }
                 Err(_error) if exceeded.load(Ordering::Relaxed) => {
@@ -660,11 +704,34 @@ mod tests {
                 } else {
                     reply.to_string()
                 };
+                let ping_answered = Arc::new(tokio::sync::Notify::new());
                 let app = Router::new().route(
                     "/mcp",
-                    post(move || {
+                    post(move |axum::Json(message): axum::Json<serde_json::Value>| {
                         let body = body.clone();
+                        let ping_answered = Arc::clone(&ping_answered);
                         async move {
+                            if message["id"] == 9 {
+                                assert_eq!(message["result"], json!({}));
+                                ping_answered.notify_one();
+                                return Response::builder()
+                                    .status(202)
+                                    .body(Body::empty())
+                                    .unwrap();
+                            }
+                            let body = if event_stream {
+                                let ping = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n\n";
+                                let events = stream::once(async move {
+                                    Ok::<_, Infallible>(Bytes::from(ping))
+                                })
+                                .chain(stream::once(async move {
+                                    ping_answered.notified().await;
+                                    Ok(Bytes::from(body))
+                                }));
+                                Body::from_stream(events)
+                            } else {
+                                Body::from(body)
+                            };
                             Response::builder()
                                 .header(
                                     CONTENT_TYPE,
@@ -674,7 +741,7 @@ mod tests {
                                         JSON_MIME_TYPE
                                     },
                                 )
-                                .body(Body::from(body))
+                                .body(body)
                                 .unwrap()
                         }
                     }),
@@ -1160,6 +1227,44 @@ mod tests {
             panic!("the upstream's JSON-RPC error is delivered")
         };
         assert_eq!(error.error.message, "unknown tool");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn file_authorization_error_status_keeps_its_json_rpc_refusal() {
+        let body = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "error": {"code": -32601, "message": "not supported"}
+        }))
+        .unwrap();
+        let (uri, server) = serve_chunked(400, JSON_MIME_TYPE, body, 16).await;
+        let client = BoundedResponseClient::new(
+            waygate_core::http_client::client(waygate_core::http_client::Profile::NoTotalTimeout)
+                .unwrap(),
+            ExchangeRecorder::default(),
+        );
+        let response = client
+            .post_message_with_max_sse_event_size(
+                uri.into(),
+                ClientJsonRpcMessage::request(
+                    ClientRequest::CustomRequest(rmcp::model::CustomRequest::new(
+                        waygate_mcp::files::AUTHORIZE_DOWNLOAD_METHOD,
+                        None,
+                    )),
+                    RequestId::Number(7),
+                ),
+                None,
+                None,
+                HashMap::new(),
+                1024,
+            )
+            .await
+            .expect("a method refusal must remain a JSON-RPC error");
+        let StreamableHttpPostResponse::Json(JsonRpcMessage::Error(error), _) = response else {
+            panic!("the upstream refusal must reach the file authorization classifier")
+        };
+        assert_eq!(error.error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
         server.abort();
     }
 }
