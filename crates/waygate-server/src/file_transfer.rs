@@ -446,6 +446,78 @@ impl OutboundFileProcessor {
         }
     }
 
+    async fn prepare_retained_file_references(
+        &self,
+        context: &FileOutputContext,
+        principal: &Principal,
+        batch_id: uuid::Uuid,
+        body: &mut waygate_mcp::files::RetainedFileBody,
+    ) -> Result<(usize, Option<u64>), McpError> {
+        let media_type = body
+            .media_type
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if media_type != "application/json"
+            && !(media_type.starts_with("application/") && media_type.ends_with("+json"))
+        {
+            return Ok((0, self.max_bytes));
+        }
+        let mut value: Value = serde_json::from_slice(&body.bytes).map_err(|_| {
+            file_transfer_failure(
+                FileTransferReason::TransferFailed,
+                "retained JSON is invalid",
+            )
+        })?;
+        let files = collect_file_values(&value)?;
+        if files.is_empty() {
+            return Ok((0, self.max_bytes));
+        }
+        if self
+            .max_bytes
+            .is_some_and(|limit| body.bytes.len() as u64 > limit)
+        {
+            return Err(invalid_file_request(
+                FileTransferReason::QuotaExhausted,
+                "retained response exceeded the configured size limit",
+            ));
+        }
+        let file_count = files.len();
+        let mut file_bytes = 0u64;
+        let mut active_file_id = None;
+        let mut budget = self
+            .max_bytes
+            .map(|limit| limit.saturating_sub(body.bytes.len() as u64));
+        for (path, file) in files {
+            let (replacement, stored_file_id, bytes) = self
+                .stage_file_with_batch_heartbeat(
+                    context,
+                    principal,
+                    batch_id,
+                    active_file_id,
+                    budget,
+                    file,
+                )
+                .await?;
+            active_file_id = Some(stored_file_id);
+            file_bytes = file_bytes.saturating_add(bytes);
+            budget = budget.map(|limit| limit.saturating_sub(bytes));
+            replace_file_at_path(&mut value, &path, replacement)?;
+        }
+        body.bytes = serde_json::to_vec(&value).map_err(|_| {
+            file_transfer_failure(
+                FileTransferReason::TransferFailed,
+                "retained response could not be encoded",
+            )
+        })?;
+        Ok((
+            file_count,
+            self.max_bytes.map(|limit| limit.saturating_sub(file_bytes)),
+        ))
+    }
+
     /// `budget` is what remains of the CALL's byte allowance, not the
     /// per-file cap. One tool result can carry many files, so capping each one
     /// individually leaves the call itself unbounded — a compromised upstream
@@ -1341,7 +1413,7 @@ impl FileOutputProcessor for OutboundFileProcessor {
     async fn prepare_retained(
         &self,
         context: FileOutputContext,
-        body: waygate_mcp::files::RetainedFileBody,
+        mut body: waygate_mcp::files::RetainedFileBody,
     ) -> Result<waygate_mcp::files::PreparedRetainedFile, McpError> {
         let principal = context.principal.as_ref().ok_or_else(|| {
             invalid_file_request(
@@ -1349,15 +1421,6 @@ impl FileOutputProcessor for OutboundFileProcessor {
                 "retained response files require an authenticated caller",
             )
         })?;
-        let _permit = self
-            .admission
-            .try_enter_for(&owner_from_principal(principal))
-            .map_err(|_| {
-                file_transfer_failure(
-                    FileTransferReason::TemporarilyUnavailable,
-                    "file transfer capacity is currently full",
-                )
-            })?;
         let batch_id = uuid::Uuid::new_v4();
         let retention = if body.sensitive {
             self.retention.secret
@@ -1370,6 +1433,31 @@ impl FileOutputProcessor for OutboundFileProcessor {
                 "file retention is too large",
             )
         })?;
+        let (nested_files, remaining_budget) = match self
+            .prepare_retained_file_references(&context, principal, batch_id, &mut body)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.discard_resource_batch_bounded(batch_id).await;
+                return Err(error);
+            }
+        };
+        // Each nested download takes its own permit. Acquire the document's
+        // permit afterwards so a single-transfer deployment can import both.
+        let _permit = match self
+            .admission
+            .try_enter_for(&owner_from_principal(principal))
+        {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.discard_resource_batch_bounded(batch_id).await;
+                return Err(file_transfer_failure(
+                    FileTransferReason::TemporarilyUnavailable,
+                    "file transfer capacity is currently full",
+                ));
+            }
+        };
         let staged = self
             .storage
             .stage_bytes(
@@ -1384,7 +1472,7 @@ impl FileOutputProcessor for OutboundFileProcessor {
                     media_type: Some(body.media_type),
                     expected_size: Some(body.bytes.len() as u64),
                     expected_sha256: None,
-                    max_bytes: self.max_bytes,
+                    max_bytes: remaining_budget,
                     inspection_status: FileInspectionStatus::Uninspectable,
                     retention,
                 },
@@ -1433,6 +1521,7 @@ impl FileOutputProcessor for OutboundFileProcessor {
                 }),
             },
             batch_id: batch_id.to_string(),
+            file_count: nested_files + 1,
         })
     }
 
@@ -3361,7 +3450,7 @@ mod tests {
         actor.tenant = waygate_core::TenantId::parse(&tenant).unwrap();
         let owner = owner_from_principal(&actor);
         for sensitive in [false, true] {
-            let bytes = b"complete synthetic result content".to_vec();
+            let bytes = br#"{"message":"complete synthetic result content"}"#.to_vec();
             let prepared = processor
                 .prepare_retained(
                     FileOutputContext {
@@ -5998,6 +6087,122 @@ mod tests {
         assert!(evidence.iter().any(|event| {
             event.action == delivery_action && event.id.to_string() == ready_invocation_id
         }));
+
+        let nested_processor = OutboundFileProcessor {
+            admission: FileTransferAdmission::new(1),
+            max_bytes: Some(64 * 1024),
+            ..processor.as_ref().clone()
+        };
+        let retained_context = || FileOutputContext {
+            principal: Some(actor.clone()),
+            server: "printable".to_owned(),
+            tool: "render".to_owned(),
+            invocation_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let document = json!({
+            "logs": [{"full_log": {"file": upstream_file_a}},
+                     {"file": {"uri": "mcp-file://printable/output-b"}}],
+            "literal": "mcp-file://printable/a-string-is-not-a-file"
+        });
+        let prepared = nested_processor
+            .prepare_retained(
+                retained_context(),
+                waygate_mcp::files::RetainedFileBody {
+                    upstream_uri: "connector-response:/report".to_owned(),
+                    media_type: "application/json".to_owned(),
+                    bytes: serde_json::to_vec(&document).unwrap(),
+                    sensitive: false,
+                },
+            )
+            .await
+            .expect("import the retained document and its nested files");
+        assert_eq!(prepared.file_count, 3);
+        let document_id = parse_gateway_file_uri(&prepared.file.uri).unwrap();
+        assert!(storage
+            .find_ready(&owner, document_id)
+            .await
+            .unwrap()
+            .is_none());
+        nested_processor
+            .publish(&prepared.batch_id, prepared.file_count)
+            .await
+            .unwrap();
+        let document_file = storage
+            .find_ready(&owner, document_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let rewritten: Value = serde_json::from_slice(
+            &tokio::fs::read(storage.path_for(&document_file))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rewritten["literal"], document["literal"]);
+        let mut other_owner = owner.clone();
+        other_owner.principal_sub = "another-user".to_owned();
+        for (reference, expected) in [
+            (
+                &rewritten["logs"][0]["full_log"]["file"],
+                b"hello".as_slice(),
+            ),
+            (&rewritten["logs"][1]["file"], b"world".as_slice()),
+        ] {
+            let uri = reference["uri"].as_str().unwrap();
+            let id = parse_gateway_file_uri(uri).expect("nested reference belongs to the gateway");
+            assert!(storage
+                .find_ready(&other_owner, id)
+                .await
+                .unwrap()
+                .is_none());
+            let nested = storage.find_ready(&owner, id).await.unwrap().unwrap();
+            assert_eq!(
+                tokio::fs::read(storage.path_for(&nested)).await.unwrap(),
+                expected
+            );
+            let helper = client
+                .call_tool(
+                    CallToolRequestParams::new("gateway-files.prepare_download").with_arguments(
+                        json!({"uri": uri, "helper_jkt": URL_SAFE_NO_PAD.encode([7u8; 32])})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
+                )
+                .await
+                .expect("the helper accepts the nested gateway reference");
+            assert!(!helper.is_error.unwrap_or(false));
+            ready_files.push(nested);
+        }
+        ready_files.push(document_file);
+
+        let failed_context = retained_context();
+        let failed_invocation = failed_context.invocation_id.clone();
+        let refused = nested_processor
+            .prepare_retained(
+                failed_context,
+                waygate_mcp::files::RetainedFileBody {
+                    upstream_uri: "connector-response:/unavailable-file".to_owned(),
+                    media_type: "application/json".to_owned(),
+                    bytes: serde_json::to_vec(&json!({"files": [
+                        {"uri": "mcp-file://printable/output-a"},
+                        {"uri": "mcp-file://printable/unknown"}
+                    ]}))
+                    .unwrap(),
+                    sensitive: false,
+                },
+            )
+            .await
+            .err()
+            .expect("an unavailable nested file refuses the incomplete bundle");
+        assert_eq!(refused.data.as_ref().unwrap()["error"], "transfer_failed");
+        let abandoned: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM gateway_files WHERE invocation_id = $1")
+                .bind(failed_invocation)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(abandoned, 0);
 
         client.cancel().await.expect("stop gateway MCP client");
         waygate_server.abort();
