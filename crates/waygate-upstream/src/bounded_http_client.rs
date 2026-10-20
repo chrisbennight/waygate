@@ -8,6 +8,9 @@
 //! response. Any other bounded request, such as a tool call, keeps its event
 //! stream: rmcp still receives the upstream's notifications, requests and
 //! resumable event IDs, and only the byte count is enforced here.
+//! File-authorization replies are also consumed here, under the transport's
+//! event-size ceiling, to preserve custom fields alongside ordinary `_meta`
+//! until the pool's method-specific file parser validates them.
 //!
 //! Every request also reports its outcome to the dial's exchange recorder,
 //! which records only while the dial that built this client is in progress.
@@ -23,8 +26,9 @@ use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use http::{HeaderName, HeaderValue};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use rmcp::model::{
-    ClientJsonRpcMessage, ClientRequest, ErrorData, GetExtensions, JsonRpcMessage, RequestId,
-    ServerJsonRpcMessage,
+    ClientJsonRpcMessage, ClientRequest, CustomResult, ErrorData, GetExtensions, JsonRpcMessage,
+    JsonRpcResponse, RequestId, ServerJsonRpcMessage, ServerNotification, ServerRequest,
+    ServerResult,
 };
 use rmcp::service::ServiceError;
 use rmcp::transport::streamable_http_client::{
@@ -233,15 +237,46 @@ impl BoundedResponseClient {
         }))
     }
 
-    /// Whether the bounded request is consumed here up to its one response.
-    /// Resource reads are; every other request keeps its event stream so rmcp
-    /// still sees what the upstream sends while it works.
+    fn is_file_authorization(message: &ClientJsonRpcMessage) -> bool {
+        matches!(message, JsonRpcMessage::Request(request)
+            if matches!(&request.request, ClientRequest::CustomRequest(custom)
+                if matches!(custom.method.as_str(),
+                    waygate_mcp::files::AUTHORIZE_UPLOAD_METHOD
+                    | waygate_mcp::files::AUTHORIZE_DOWNLOAD_METHOD)))
+    }
+
+    /// Resource reads and file authorization consume one response here;
+    /// tool calls keep their event stream for the SDK's interactive handling.
     fn materializes_reply(message: &ClientJsonRpcMessage) -> bool {
         matches!(
             message,
             JsonRpcMessage::Request(request)
                 if matches!(request.request, ClientRequest::ReadResourceRequest(_))
-        )
+        ) || Self::is_file_authorization(message)
+    }
+
+    fn decode_response(
+        request: &ClientJsonRpcMessage,
+        body: &[u8],
+    ) -> Result<ServerJsonRpcMessage, serde_json::Error> {
+        if Self::is_file_authorization(request) {
+            // The SDK's untagged result union accepts `_meta` as a tool
+            // result and drops the custom fields. Select the custom result
+            // by the originating method, preserving the complete payload.
+            let decoded: JsonRpcMessage<ServerRequest, serde_json::Value, ServerNotification> =
+                serde_json::from_slice(body)?;
+            if let JsonRpcMessage::Response(response) = decoded {
+                if matches!(request, JsonRpcMessage::Request(request) if request.id == response.id)
+                {
+                    return Ok(JsonRpcMessage::Response(JsonRpcResponse {
+                        jsonrpc: response.jsonrpc,
+                        id: response.id,
+                        result: ServerResult::CustomResult(CustomResult::new(response.result)),
+                    }));
+                }
+            }
+        }
+        serde_json::from_slice(body)
     }
 
     async fn read_capped(
@@ -424,7 +459,7 @@ impl BoundedResponseClient {
 
         if is_json {
             let body = Self::read_capped(response, limit).await?;
-            let decoded = serde_json::from_slice::<ServerJsonRpcMessage>(&body)?;
+            let decoded = Self::decode_response(&message, &body)?;
             return Ok(StreamableHttpPostResponse::Json(decoded, returned_session));
         }
         let is_event_stream = content_type.as_deref().is_some_and(|value| {
@@ -455,7 +490,7 @@ impl BoundedResponseClient {
                     let Some(data) = event.data.filter(|data| !data.trim().is_empty()) else {
                         continue;
                     };
-                    let decoded = serde_json::from_str::<ServerJsonRpcMessage>(&data)?;
+                    let decoded = Self::decode_response(&message, data.as_bytes())?;
                     if Self::is_response_for(&message, &decoded) {
                         return Ok(StreamableHttpPostResponse::Json(decoded, returned_session));
                     }
@@ -506,7 +541,9 @@ impl StreamableHttpClient for BoundedResponseClient {
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         let exchange = self.exchanges.post(&message);
         let uri = self.request_uri(uri);
-        let result = if let Some(limit) = Self::response_limit(&message) {
+        let limit = Self::response_limit(&message)
+            .or_else(|| Self::is_file_authorization(&message).then_some(max_sse_event_size));
+        let result = if let Some(limit) = limit {
             self.until_closed(self.post_bounded(
                 uri,
                 message,
@@ -599,6 +636,88 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[tokio::test]
+    async fn file_authorization_preserves_metadata_and_transfer_fields_on_the_wire() {
+        for method in [
+            waygate_mcp::files::AUTHORIZE_UPLOAD_METHOD,
+            waygate_mcp::files::AUTHORIZE_DOWNLOAD_METHOD,
+        ] {
+            for event_stream in [false, true] {
+                let transfer = if method == waygate_mcp::files::AUTHORIZE_UPLOAD_METHOD {
+                    "upload"
+                } else {
+                    "download"
+                };
+                let expected = json!({
+                    "_meta": {"serverInfo": {"name": "fixture"}},
+                    "file": {"uri": "mcp-file://fixture/file"},
+                    (transfer): {"url": "https://fixture.invalid/bytes", "method": "GET"}
+                });
+                let reply = json!({"jsonrpc": "2.0", "id": 7, "result": expected});
+                let body = if event_stream {
+                    format!("event: message\ndata: {reply}\n\n")
+                } else {
+                    reply.to_string()
+                };
+                let app = Router::new().route(
+                    "/mcp",
+                    post(move || {
+                        let body = body.clone();
+                        async move {
+                            Response::builder()
+                                .header(
+                                    CONTENT_TYPE,
+                                    if event_stream {
+                                        EVENT_STREAM_MIME_TYPE
+                                    } else {
+                                        JSON_MIME_TYPE
+                                    },
+                                )
+                                .body(Body::from(body))
+                                .unwrap()
+                        }
+                    }),
+                );
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                let client = BoundedResponseClient::new(
+                    waygate_core::http_client::client(
+                        waygate_core::http_client::Profile::NoTotalTimeout,
+                    )
+                    .unwrap(),
+                    ExchangeRecorder::default(),
+                );
+                let response = client
+                    .post_message_with_max_sse_event_size(
+                        format!("http://{address}/mcp").into(),
+                        ClientJsonRpcMessage::request(
+                            ClientRequest::CustomRequest(rmcp::model::CustomRequest::new(
+                                method, None,
+                            )),
+                            RequestId::Number(7),
+                        ),
+                        None,
+                        None,
+                        HashMap::new(),
+                        4096,
+                    )
+                    .await
+                    .unwrap();
+                let StreamableHttpPostResponse::Json(JsonRpcMessage::Response(response), _) =
+                    response
+                else {
+                    panic!("file authorization must return its correlated response");
+                };
+                let ServerResult::CustomResult(result) = response.result else {
+                    panic!("custom authorization fields must survive the SDK result union");
+                };
+                assert_eq!(result.0, expected);
+                server.abort();
+            }
+        }
+    }
 
     fn read_request(limit: Option<usize>) -> ClientJsonRpcMessage {
         let mut message: ClientJsonRpcMessage = serde_json::from_value(json!({

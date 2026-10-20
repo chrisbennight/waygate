@@ -215,6 +215,11 @@ download support on tool and task requests whose authenticated invocation has
 configured file output storage. Both use the shared file-capability builder,
 so transfer authorization and result production agree on the wire shape.
 
+HTTP upstream upload and download authorization results may include ordinary
+MCP `_meta`. The gateway preserves the complete custom result before validating
+the method-specific transfer instructions, for JSON and SSE-framed replies.
+These authorization replies use the transport's event-size ceiling.
+
 That emission travels as an explicit per-request metadata override, not only in
 the request params. On a leg the upstream negotiated at `2026-07-28` the MCP
 library stamps its own client capability object onto every outgoing request,

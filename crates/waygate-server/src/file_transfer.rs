@@ -3846,7 +3846,13 @@ mod tests {
             };
             self.authorized.fetch_add(1, Ordering::SeqCst);
             result
-                .map(CustomResult::new)
+                .map(|mut result| {
+                    result.as_object_mut().unwrap().insert(
+                        "_meta".to_owned(),
+                        json!({"serverInfo": {"name": "printable-fixture"}}),
+                    );
+                    CustomResult::new(result)
+                })
                 .map_err(|error| McpError::internal_error(error.to_string(), None))
         }
     }
