@@ -475,6 +475,15 @@ impl OutboundFileProcessor {
         if files.is_empty() {
             return Ok((0, self.max_bytes));
         }
+        if files.len() >= limits().file_count {
+            return Err(invalid_file_request(
+                FileTransferReason::PolicyViolation,
+                format!(
+                    "retained response and attachments exceed the {}-file limit",
+                    limits().file_count
+                ),
+            ));
+        }
         if self
             .max_bytes
             .is_some_and(|limit| body.bytes.len() as u64 > limit)
@@ -6104,6 +6113,33 @@ mod tests {
                      {"file": {"uri": "mcp-file://printable/output-b"}}],
             "literal": "mcp-file://printable/a-string-is-not-a-file"
         });
+        let oversized_context = retained_context();
+        let oversized_invocation = oversized_context.invocation_id.clone();
+        let too_many = nested_processor
+            .prepare_retained(
+                oversized_context,
+                waygate_mcp::files::RetainedFileBody {
+                    upstream_uri: "connector-response:/too-many-files".to_owned(),
+                    media_type: "application/json".to_owned(),
+                    bytes: serde_json::to_vec(&json!(vec![
+                        json!({"uri": "mcp-file://printable/output-a"});
+                        limits().file_count
+                    ]))
+                    .unwrap(),
+                    sensitive: false,
+                },
+            )
+            .await
+            .err()
+            .expect("attachment count is bounded before staging");
+        assert_eq!(too_many.data.as_ref().unwrap()["error"], "policy_violation");
+        let staged: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM gateway_files WHERE invocation_id = $1")
+                .bind(oversized_invocation)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(staged, 0);
         let prepared = nested_processor
             .prepare_retained(
                 retained_context(),

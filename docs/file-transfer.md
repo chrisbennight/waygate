@@ -128,7 +128,9 @@ type), Waygate imports file descriptors nested inside objects and arrays before
 publishing the response. Each descriptor's upstream `mcp-file:` URI becomes an
 owner-scoped gateway URI usable with the same download helper. Ordinary strings
 that happen to contain a URI remain unchanged. The response and its attachments
-share the existing per-call byte budget and publish together; a missing or
+share the existing per-call byte budget and publish together. The existing
+file-count limit includes the document itself and is checked before downloads.
+A missing or
 refused attachment fails delivery without exposing a partial result. Files
 referenced by an attachment's own bytes are not followed recursively.
 
