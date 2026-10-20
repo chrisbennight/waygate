@@ -135,6 +135,7 @@ mod retained_response_pipeline_tests {
                     digest: None,
                 },
                 batch_id: "test-batch".into(),
+                file_count: 1,
             })
         }
 

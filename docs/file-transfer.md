@@ -123,6 +123,17 @@ larger or binary bodies use the same file route, exposed as
 `_gateway_delivery.file` in the connector value. Neither path places the whole
 body in model context automatically.
 
+For a retained JSON response (`application/json` or an `application/*+json`
+type), Waygate imports file descriptors nested inside objects and arrays before
+publishing the response. Each descriptor's upstream `mcp-file:` URI becomes an
+owner-scoped gateway URI usable with the same download helper. Ordinary strings
+that happen to contain a URI remain unchanged. The response and its attachments
+share the existing per-call byte budget and publish together. The existing
+file-count limit includes the document itself and is checked before downloads.
+A missing or
+refused attachment fails delivery without exposing a partial result. Files
+referenced by an attachment's own bytes are not followed recursively.
+
 This applies to reads and mutations alike. Operation success and attachment
 delivery are separate outcomes. An unavailable attachment after a confirmed
 mutation reports `operation_status: "succeeded"`,
@@ -313,7 +324,7 @@ Task completion and file delivery are separate outcomes. If delivery of a
 completed task fails, retry `tasks/get` while its ID and upstream file are
 still valid; do not submit the work again. File retention is independent of
 task retention. Initialization-only legacy negotiation, draft file content
-blocks, nested references inside downloaded bytes, and uploads in `tasks/update`
+blocks, references inside arbitrary downloaded files, and uploads in `tasks/update`
 remain subject to their existing limitations; see the matrix below,
 [result surfaces](#result-surfaces), and [Tasks](agents/tasks.md#upstream-owned-tasks).
 

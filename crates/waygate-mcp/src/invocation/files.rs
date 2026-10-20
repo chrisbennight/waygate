@@ -341,7 +341,10 @@ impl DefaultInvocationService {
                     result = match staged {
                         Ok(prepared) => {
                             if let Some(root) = compact.structured_content.as_mut() {
-                                root["payload"]["bytes"] = serde_json::json!(byte_count);
+                                root["payload"]["bytes"] = serde_json::json!(prepared
+                                    .file
+                                    .size
+                                    .unwrap_or(byte_count as u64));
                                 compact.content =
                                     vec![rmcp::model::ContentBlock::text(root.to_string())];
                             }
@@ -362,7 +365,7 @@ impl DefaultInvocationService {
                                     )
                                     .with_mime_type(recovered.target.media_type.clone()),
                                 ));
-                            prepared_batch = Some((prepared.batch_id, 1));
+                            prepared_batch = Some((prepared.batch_id, prepared.file_count));
                             Ok(compact)
                         }
                         Err(_) if ctx.facts().side_effects => {
@@ -590,7 +593,10 @@ impl DefaultInvocationService {
                 rmcp::ErrorData::internal_error("retained delivery descriptor is invalid", None),
             );
         }
-        if let Err(error) = processor.publish(&prepared.batch_id, 1).await {
+        if let Err(error) = processor
+            .publish(&prepared.batch_id, prepared.file_count)
+            .await
+        {
             processor.discard(&prepared.batch_id).await;
             return Self::inline_delivery_failure(ctx, CallToolResult::success(Vec::new()), error);
         }

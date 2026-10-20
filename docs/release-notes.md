@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 2.0.1
+
+- Upload and download authorization over upstream HTTP preserve transfer fields
+  when the response includes standard MCP `_meta` metadata. Streamed replies
+  answer upstream pings, and method-level refusals retain their error category.
+- Retained JSON responses import file descriptors nested in objects and arrays.
+  The download helper can read their rewritten gateway file addresses. The
+  response and its attachments publish together under the caller's ownership
+  and the existing transfer budget.
 - An upstream that verifies the gateway's identity token no longer refuses the
   gateway's first connections after a restart. The gateway now serves its
   identity key set before it connects to upstreams; until startup completes,

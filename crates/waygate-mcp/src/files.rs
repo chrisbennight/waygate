@@ -152,6 +152,8 @@ pub struct RetainedFileBody {
 pub struct PreparedRetainedFile {
     pub file: FileValue,
     pub batch_id: String,
+    /// The retained document and every imported file it references publish together.
+    pub file_count: usize,
 }
 
 /// Trusted delivery metadata is mirrored in the structured gateway delivery envelope.

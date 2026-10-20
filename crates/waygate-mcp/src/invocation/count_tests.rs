@@ -370,6 +370,7 @@ impl crate::files::FileOutputProcessor for CountFiles {
                 digest: None,
             },
             batch_id: "count-test".into(),
+            file_count: 1,
         })
     }
 
