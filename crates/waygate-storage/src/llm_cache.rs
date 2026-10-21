@@ -210,11 +210,14 @@ pub async fn run_llm_cache_sweep_scheduler(
 /// tenant's entries. `max_rows` is clamped to `>= 1` (a cap of 0 would evict the
 /// entire tenant — the `NOT IN (empty set)` would match every row). Returns the
 /// number of rows evicted.
-pub async fn enforce_tenant_cap(
-    pool: &sqlx::PgPool,
+pub async fn enforce_tenant_cap<'e, E>(
+    executor: E,
     tenant_id: &str,
     max_rows: i64,
-) -> Result<u64, sqlx::Error> {
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let max_rows = max_rows.max(1);
     let affected = sqlx::query(
         "DELETE FROM llm_cache WHERE tenant_id = $1 AND cache_key NOT IN \
@@ -223,7 +226,7 @@ pub async fn enforce_tenant_cap(
     )
     .bind(tenant_id)
     .bind(max_rows)
-    .execute(pool)
+    .execute(executor)
     .await?
     .rows_affected();
     Ok(affected)
@@ -307,24 +310,21 @@ impl waygate_evidence::cache::LlmCache for PgLlmCache {
             response_body: entry.body,
             ttl: entry.ttl,
         };
-        match put_cached(&self.pool, &row).await {
-            Ok(()) => {
-                // Bound the tenant's footprint (evict-oldest) so a within-TTL
-                // diversity burst can't balloon the table. Best-effort: a cap
-                // failure leaves the just-stored entry in place — the TTL sweep
-                // still reclaims eventually.
-                if let Some(max_rows) = self.max_rows_per_tenant {
-                    if let Err(e) = enforce_tenant_cap(&self.pool, &row.tenant_id, max_rows).await {
-                        tracing::warn!(
-                            error = %e,
-                            "llm cache tenant-cap eviction failed (best-effort)",
-                        );
-                    }
-                }
+        let stored = async {
+            if let Some(max_rows) = self.max_rows_per_tenant {
+                // A cancelled optional write must not commit an insertion
+                // while skipping the configured eviction.
+                let mut transaction = self.pool.begin().await?;
+                put_cached(&mut *transaction, &row).await?;
+                enforce_tenant_cap(&mut *transaction, &row.tenant_id, max_rows).await?;
+                transaction.commit().await
+            } else {
+                put_cached(&self.pool, &row).await
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "llm cache store failed; dropping (best-effort)");
-            }
+        }
+        .await;
+        if let Err(error) = stored {
+            tracing::warn!(%error, "llm cache store failed; dropping (best-effort)");
         }
     }
 }

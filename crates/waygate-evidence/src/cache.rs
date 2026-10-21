@@ -67,6 +67,8 @@ pub trait LlmCache: Send + Sync + 'static {
 
     /// Store a completion after a miss. Best-effort: returns `()` and logs/drops
     /// on error — a cache write must not fail a response the user already got.
+    /// Callers may cancel a slow write. Implementations must keep insertion
+    /// and any required eviction atomic when cancellation interrupts storage.
     async fn put(&self, entry: CacheStoreRequest);
 }
 

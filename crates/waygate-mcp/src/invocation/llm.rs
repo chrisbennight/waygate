@@ -11,6 +11,22 @@ use super::*;
 mod images;
 mod native;
 
+const COMPLETION_CACHE_WRITE_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Cache population is optional; usage accounting has already finished.
+/// Awaiting here keeps cancellation and shutdown local to the request.
+async fn store_completion_within_budget(
+    cache: &dyn crate::cache::LlmCache,
+    entry: crate::cache::CacheStoreRequest,
+) {
+    if tokio::time::timeout(COMPLETION_CACHE_WRITE_BUDGET, cache.put(entry))
+        .await
+        .is_err()
+    {
+        tracing::warn!("optional completion cache write exceeded its latency budget");
+    }
+}
+
 impl DefaultInvocationService {
     async fn admit_llm_response(
         &self,
@@ -377,8 +393,9 @@ impl DefaultInvocationService {
                 if let (Some(cache), Some(ttl)) = (&self.llm_cache, model.cache_ttl) {
                     if !llm_req.stream {
                         let (tenant_id, principal_issuer, principal_sub) = cache_identity(&ctx);
-                        cache
-                            .put(crate::cache::CacheStoreRequest {
+                        store_completion_within_budget(
+                            cache.as_ref(),
+                            crate::cache::CacheStoreRequest {
                                 canonical_request: cache_canonical(&llm_req),
                                 tenant_id,
                                 principal_issuer,
@@ -392,8 +409,9 @@ impl DefaultInvocationService {
                                 provider: record.provider.as_str().to_owned(),
                                 body: body.clone(),
                                 ttl,
-                            })
-                            .await;
+                            },
+                        )
+                        .await;
                     }
                 }
                 Ok(InvocationResponse::UnaryValue(body))
@@ -595,8 +613,9 @@ impl DefaultInvocationService {
                 // the §7 failover winner, so a later hit attributes to it.
                 if let (Some(cache), Some(ttl)) = (&self.llm_cache, model.cache_ttl) {
                     let (tenant_id, principal_issuer, principal_sub) = cache_identity(&ctx);
-                    cache
-                        .put(crate::cache::CacheStoreRequest {
+                    store_completion_within_budget(
+                        cache.as_ref(),
+                        crate::cache::CacheStoreRequest {
                             canonical_request: cache_canonical_embeddings(&emb_req),
                             tenant_id,
                             principal_issuer,
@@ -606,8 +625,9 @@ impl DefaultInvocationService {
                             provider: record.provider.as_str().to_owned(),
                             body: body.clone(),
                             ttl,
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                 }
                 Ok(InvocationResponse::UnaryValue(body))
             }

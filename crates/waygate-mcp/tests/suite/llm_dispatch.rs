@@ -1599,6 +1599,7 @@ struct MockCache {
     >,
     gets: std::sync::atomic::AtomicUsize,
     puts: std::sync::atomic::AtomicUsize,
+    stall_put: bool,
 }
 
 impl MockCache {
@@ -1640,6 +1641,9 @@ impl waygate_mcp::cache::LlmCache for MockCache {
 
     async fn put(&self, entry: waygate_mcp::cache::CacheStoreRequest) {
         self.puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.stall_put {
+            std::future::pending::<()>().await;
+        }
         self.store.lock().unwrap().insert(
             (
                 entry.canonical_request,
@@ -1774,6 +1778,44 @@ async fn cached_model_stores_on_miss_then_replays_on_hit_without_dispatch() {
         rows[1].model_served.as_deref(),
         Some("served-x"),
         "a hit replays the originally-served model"
+    );
+}
+
+#[tokio::test]
+async fn slow_optional_cache_does_not_hold_a_completed_response() {
+    let cap = Arc::new(Mutex::new(Captured::default()));
+    let addr = spawn_provider(cap.clone()).await;
+    let usage = Arc::new(RecordingUsage::default());
+    let cache = Arc::new(MockCache {
+        stall_put: true,
+        ..Default::default()
+    });
+    let dispatcher = LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), store());
+    let svc = DefaultInvocationService::new(
+        Arc::new(FakeCatalog),
+        Arc::new(AllowAllGate),
+        Arc::new(RecordingSink::default()),
+    )
+    .with_llm(dispatcher, caching_resolver(addr))
+    .with_llm_usage_store(usage.clone())
+    .with_llm_cache(cache.clone());
+    let principal = principal();
+    let request = InvocationRequest::new("llm", "gpt-x").with_arguments(Some(chat_args()));
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        svc.invoke(Some(&principal), request),
+    )
+    .await
+    .expect("optional cache storage must not hold the response")
+    .expect("completed model response");
+    assert!(matches!(response, InvocationResponse::UnaryValue(_)));
+    assert!(cap.lock().unwrap().called);
+    assert_eq!(cache.puts(), 1);
+    assert!(cache.store.lock().unwrap().is_empty());
+    assert_eq!(
+        usage.rows.lock().unwrap().len(),
+        1,
+        "accounting completes before optional caching"
     );
 }
 

@@ -17,6 +17,42 @@ use waygate_storage::{
 };
 
 #[tokio::test]
+async fn cache_provider_applies_the_tenant_cap_with_each_write() {
+    use waygate_evidence::cache::{CacheStoreRequest, LlmCache};
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("cache-cap-provider-{}", Uuid::new_v4());
+    let cache = waygate_storage::PgLlmCache::new(pool.clone()).with_max_rows_per_tenant(Some(1));
+    for index in 0..3 {
+        cache
+            .put(CacheStoreRequest {
+                canonical_request: format!("request-{index}"),
+                tenant_id: tenant.clone(),
+                principal_issuer: Some("test-issuer".into()),
+                principal_sub: Some("alice".into()),
+                model_alias: "alias".into(),
+                model_served: None,
+                provider: "openrouter".into(),
+                body: json!({"index":index}),
+                ttl: Duration::from_secs(60),
+            })
+            .await;
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM llm_cache WHERE tenant_id=$1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+    sqlx::query("DELETE FROM llm_cache WHERE tenant_id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn provider_cache_isolates_issuers_and_never_reuses_legacy_entries() {
     use waygate_evidence::cache::{CacheStoreRequest, LlmCache};
     let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
