@@ -315,6 +315,10 @@ impl waygate_evidence::cache::LlmCache for PgLlmCache {
                 // A cancelled optional write must not commit an insertion
                 // while skipping the configured eviction.
                 let mut transaction = self.pool.begin().await?;
+                // Serialize the tenant's insert-and-evict pair so concurrent
+                // uncommitted insertions cannot each evade the other's cap.
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('waygate-llm-cache-cap:' || $1, 0))")
+                    .bind(&row.tenant_id).execute(&mut *transaction).await?;
                 put_cached(&mut *transaction, &row).await?;
                 enforce_tenant_cap(&mut *transaction, &row.tenant_id, max_rows).await?;
                 transaction.commit().await

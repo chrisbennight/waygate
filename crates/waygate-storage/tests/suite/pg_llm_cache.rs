@@ -24,27 +24,35 @@ async fn cache_provider_applies_the_tenant_cap_with_each_write() {
     };
     let tenant = format!("cache-cap-provider-{}", Uuid::new_v4());
     let cache = waygate_storage::PgLlmCache::new(pool.clone()).with_max_rows_per_tenant(Some(1));
-    for index in 0..3 {
-        cache
-            .put(CacheStoreRequest {
-                canonical_request: format!("request-{index}"),
-                tenant_id: tenant.clone(),
-                principal_issuer: Some("test-issuer".into()),
-                principal_sub: Some("alice".into()),
-                model_alias: "alias".into(),
-                model_served: None,
-                provider: "openrouter".into(),
-                body: json!({"index":index}),
-                ttl: Duration::from_secs(60),
-            })
-            .await;
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM llm_cache WHERE tenant_id=$1")
-            .bind(&tenant)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(count, 1);
-    }
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+    let writes = (0..16).map(|index| {
+        let cache = cache.clone();
+        let tenant = tenant.clone();
+        let barrier = barrier.clone();
+        async move {
+            barrier.wait().await;
+            cache
+                .put(CacheStoreRequest {
+                    canonical_request: format!("request-{index}"),
+                    tenant_id: tenant.clone(),
+                    principal_issuer: Some("test-issuer".into()),
+                    principal_sub: Some("alice".into()),
+                    model_alias: "alias".into(),
+                    model_served: None,
+                    provider: "openrouter".into(),
+                    body: json!({"index":index}),
+                    ttl: Duration::from_secs(60),
+                })
+                .await;
+        }
+    });
+    futures::future::join_all(writes).await;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM llm_cache WHERE tenant_id=$1")
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
     sqlx::query("DELETE FROM llm_cache WHERE tenant_id=$1")
         .bind(&tenant)
         .execute(&pool)
