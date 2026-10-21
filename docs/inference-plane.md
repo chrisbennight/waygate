@@ -774,6 +774,9 @@ rolling/daily/weekly/monthly. Cost weighting comes from the `llm_models` costing
   estimation, no pre-debit.
 - **Ledger update (stage 13):** attempt to record actual usage (including cached tokens)
   after completion or stream close; the next request reads that ledger.
+- The PostgreSQL budget gate reads applicable limits and their scoped usage in
+  the same statement snapshot. It does not reuse an earlier allow decision;
+  each budget keeps its own rolling window, principal, and model scope.
 - **Overrun:** no hard bound. Concurrent admitted calls and dropped best-effort usage writes
   can exceed the configured budget because there is no reservation or fail-closed debit.
 - Cost-based budgets sum known total costs. Unknown costs are excluded rather
