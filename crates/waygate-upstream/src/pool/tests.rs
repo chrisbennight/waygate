@@ -458,6 +458,27 @@ async fn admission_reuses_catalog_reads_only_within_one_generation() {
     expect_snapshot(admit().await);
     assert_eq!(resolves(), 1, "an unchanged generation reuses the read");
 
+    let dispatch = || {
+        let manifest = pool.entry("example-messages").unwrap().manifest_snapshot();
+        pool.resolve_snapshot_from(
+            "default",
+            "example-messages",
+            "send",
+            contract_binding::snapshot_inputs_for(
+                Some(&manifest),
+                "example-messages",
+                "send",
+                Default::default(),
+            ),
+        )
+    };
+    expect_snapshot(dispatch().await);
+    assert_eq!(
+        resolves(),
+        1,
+        "dispatch reuses rows after checking the durable generation"
+    );
+
     catalog
         .generation
         .as_ref()
@@ -482,6 +503,26 @@ async fn admission_reuses_catalog_reads_only_within_one_generation() {
     assert_eq!(resolves(), 4, "the overlapped read was not kept");
     expect_snapshot(admit().await);
     assert_eq!(resolves(), 4);
+
+    *catalog.outcome.lock().unwrap() = Some(waygate_catalog::ResolvedTool::Quarantined {
+        server_name: "example-messages".into(),
+        tool_name: "send".into(),
+        retired: false,
+    });
+    catalog
+        .generation
+        .as_ref()
+        .unwrap()
+        .fetch_add(1, Ordering::SeqCst);
+    assert!(matches!(
+        dispatch().await,
+        ResolvedInvocationTool::Refused { .. }
+    ));
+    assert_eq!(
+        resolves(),
+        5,
+        "a durable block is authoritative at dispatch"
+    );
 }
 
 #[tokio::test]
