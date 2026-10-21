@@ -158,12 +158,13 @@ pub fn portable_schema_object(schema: &JsonObject) -> Option<JsonObject> {
         return None;
     }
     normalize_schema(&mut value, None);
-    inspector_portable_schema(&value).then(|| {
-        value
-            .as_object()
-            .cloned()
-            .expect("an object-rooted schema remains an object")
-    })
+    if !inspector_portable_schema(&value) {
+        return None;
+    }
+    let Value::Object(object) = value else {
+        unreachable!("an object-rooted schema remains an object");
+    };
+    Some(object)
 }
 
 /// Project an object-rooted schema into the same optional wire contract.
