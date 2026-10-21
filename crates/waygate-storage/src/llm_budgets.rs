@@ -5,8 +5,8 @@
 //! irreversible provider call. It reads RECORDED usage (the `llm_usage` ledger)
 //! against the configured `llm_budgets` and reports the first exhausted limit,
 //! if any — invariant I3: reject the next call iff the principal is ALREADY
-//! at/over a limit, with no estimation of the in-flight call (bounded ~1-request
-//! overrun).
+//! at/over a limit, with no estimation or reservation for in-flight calls.
+//! Concurrent calls or missed ledger writes can exceed the configured limit.
 //!
 //! A budget applies to a call when its scope matches: `tenant_id` equal,
 //! `principal_sub` NULL (tenant-wide) or equal, `model_alias` NULL (all models)
@@ -115,9 +115,8 @@ where
 /// already at/over an applicable limit (refuse the next call), `None` when
 /// within budget (or no budget configured).
 ///
-/// `pool` (not a bare executor) because the check runs two queries: the
-/// applicable-budget lookup, then a per-budget usage SUM scoped to that
-/// budget's own window + principal/model scope.
+/// Applicable limits and their recorded usage are read in one statement
+/// snapshot. Each budget retains its own rolling window and scope.
 pub async fn check_llm_budget(
     pool: &sqlx::PgPool,
     tenant_id: &str,
@@ -126,15 +125,66 @@ pub async fn check_llm_budget(
 ) -> Result<Option<BudgetExceedance>, sqlx::Error> {
     // Budgets that apply to this call: tenant match, and scope columns either
     // wildcard (NULL) or equal to the call's principal / model.
-    let budgets = sqlx::query_as::<_, LlmBudgetRow>(
+    // The disjoint scope branches preserve equality lookups on the usage
+    // indexes. Each applicable budget aggregates exactly once.
+    let budgets = sqlx::query_as::<_, BudgetUsage>(
         r#"
-        SELECT id, tenant_id, principal_sub, model_alias, window_seconds,
-               max_total_tokens, max_total_cost, enabled, created_at, updated_at
-          FROM llm_budgets
-         WHERE tenant_id = $1
-           AND enabled
-           AND (principal_sub IS NULL OR principal_sub = $2)
-           AND (model_alias IS NULL OR model_alias = $3)
+        WITH applicable AS MATERIALIZED (
+            SELECT window_seconds, max_total_tokens, max_total_cost,
+                   principal_sub, model_alias,
+                   now() - make_interval(secs => window_seconds::DOUBLE PRECISION) AS starts_at
+              FROM llm_budgets
+             WHERE tenant_id = $1 AND enabled
+               AND (principal_sub IS NULL OR principal_sub = $2)
+               AND (model_alias IS NULL OR model_alias = $3)
+        )
+        SELECT b.window_seconds, b.max_total_tokens, b.max_total_cost,
+               used.tokens, used.cost
+          FROM applicable AS b
+         CROSS JOIN LATERAL (
+            SELECT COALESCE(SUM(COALESCE(u.input_tokens, 0) + COALESCE(u.output_tokens, 0)), 0)::BIGINT AS tokens,
+                   COALESCE(SUM(COALESCE(u.total_cost, 0)), 0) AS cost
+              FROM llm_usage AS u
+             WHERE u.tenant_id = $1 AND u.ts >= b.starts_at
+         ) AS used
+         WHERE b.principal_sub IS NULL AND b.model_alias IS NULL
+        UNION ALL
+        SELECT b.window_seconds, b.max_total_tokens, b.max_total_cost,
+               used.tokens, used.cost
+          FROM applicable AS b
+         CROSS JOIN LATERAL (
+            SELECT COALESCE(SUM(COALESCE(u.input_tokens, 0) + COALESCE(u.output_tokens, 0)), 0)::BIGINT AS tokens,
+                   COALESCE(SUM(COALESCE(u.total_cost, 0)), 0) AS cost
+              FROM llm_usage AS u
+             WHERE u.tenant_id = $1 AND u.ts >= b.starts_at
+               AND u.principal_sub = $2
+         ) AS used
+         WHERE b.principal_sub IS NOT NULL AND b.model_alias IS NULL
+        UNION ALL
+        SELECT b.window_seconds, b.max_total_tokens, b.max_total_cost,
+               used.tokens, used.cost
+          FROM applicable AS b
+         CROSS JOIN LATERAL (
+            SELECT COALESCE(SUM(COALESCE(u.input_tokens, 0) + COALESCE(u.output_tokens, 0)), 0)::BIGINT AS tokens,
+                   COALESCE(SUM(COALESCE(u.total_cost, 0)), 0) AS cost
+              FROM llm_usage AS u
+             WHERE u.tenant_id = $1 AND u.ts >= b.starts_at
+               AND u.model_alias = $3
+         ) AS used
+         WHERE b.principal_sub IS NULL AND b.model_alias IS NOT NULL
+        UNION ALL
+        SELECT b.window_seconds, b.max_total_tokens, b.max_total_cost,
+               used.tokens, used.cost
+          FROM applicable AS b
+         CROSS JOIN LATERAL (
+            SELECT COALESCE(SUM(COALESCE(u.input_tokens, 0) + COALESCE(u.output_tokens, 0)), 0)::BIGINT AS tokens,
+                   COALESCE(SUM(COALESCE(u.total_cost, 0)), 0) AS cost
+              FROM llm_usage AS u
+             WHERE u.tenant_id = $1 AND u.ts >= b.starts_at
+               AND u.principal_sub = $2
+               AND u.model_alias = $3
+         ) AS used
+         WHERE b.principal_sub IS NOT NULL AND b.model_alias IS NOT NULL
         "#,
     )
     .bind(tenant_id)
@@ -144,33 +194,11 @@ pub async fn check_llm_budget(
     .await?;
 
     for b in &budgets {
-        // Sum recorded usage over THIS budget's rolling window and scope. A
-        // wildcard (NULL) scope column sums across all principals / models.
         // Current writers store inclusive input/output totals, so adding cache
         // or reasoning subsets here would count those tokens twice. Legacy
         // accounting_version=1 rows retain their original historical counts.
-        let row = sqlx::query(
-            r#"
-            SELECT
-                COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)::BIGINT
-                    AS tokens,
-                COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS cost
-              FROM llm_usage
-             WHERE tenant_id = $1
-               AND ts >= now() - make_interval(secs => $2)
-               AND ($3::text IS NULL OR principal_sub = $3)
-               AND ($4::text IS NULL OR model_alias = $4)
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(b.window_seconds as f64)
-        .bind(&b.principal_sub)
-        .bind(&b.model_alias)
-        .fetch_one(pool)
-        .await?;
-        use sqlx::Row;
-        let used_tokens: i64 = row.try_get("tokens")?;
-        let used_cost: Decimal = row.try_get("cost")?;
+        let used_tokens = b.tokens;
+        let used_cost = b.cost;
 
         if let Some(max) = b.max_total_tokens {
             if used_tokens >= max {
@@ -197,6 +225,15 @@ pub async fn check_llm_budget(
     }
 
     Ok(None)
+}
+
+#[derive(sqlx::FromRow)]
+struct BudgetUsage {
+    window_seconds: i64,
+    max_total_tokens: Option<i64>,
+    max_total_cost: Option<Decimal>,
+    tokens: i64,
+    cost: Decimal,
 }
 
 /// Postgres-backed [`LlmBudgetGate`]. Cheap to clone (wraps a pooled `PgPool`).
