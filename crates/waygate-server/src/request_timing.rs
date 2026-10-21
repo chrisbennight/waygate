@@ -52,10 +52,18 @@ pub async fn observe(request: Request, next: Next) -> Response {
         axum::http::Version::HTTP_10 | axum::http::Version::HTTP_11
     );
     let mut observation = Observation {
-        route: request
-            .extensions()
-            .get::<MatchedPath>()
-            .map_or_else(|| "unmatched".to_owned(), |route| route.as_str().to_owned()),
+        route: request.extensions().get::<MatchedPath>().map_or_else(
+            || {
+                // The nested MCP service uses a fallback, which has no
+                // MatchedPath. Its fixed mount still bounds the label.
+                if request.uri().path() == "/mcp" || request.uri().path().starts_with("/mcp/") {
+                    "/mcp".to_owned()
+                } else {
+                    "unmatched".to_owned()
+                }
+            },
+            |route| route.as_str().to_owned(),
+        ),
         method: request.method().as_str().to_owned(),
         status: None,
         started: Instant::now(),
@@ -214,6 +222,37 @@ mod tests {
         let metrics = waygate_telemetry::gather_text();
         assert!(metrics.contains("route=\"/timing/{id}\""));
         assert!(!metrics.contains("private-value"));
+        assert!(!metrics.contains("never-label"));
+    }
+
+    #[tokio::test]
+    async fn nested_mcp_fallback_uses_its_fixed_mount_label() {
+        let app = axum::Router::new()
+            .nest("/mcp", axum::Router::new().fallback(|| async { "mcp" }))
+            .layer(axum::middleware::from_fn(observe));
+        for path in ["/mcp", "/mcp/private?token=never-label", "/unknown-private"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    HttpRequest::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let _ = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+        }
+        let metrics = waygate_telemetry::gather_text();
+        assert!(metrics.lines().any(|line| line
+            .starts_with("mcp_http_request_duration_seconds_count")
+            && line.contains("route=\"/mcp\"")
+            && line.contains("phase=\"headers\"")
+            && line.ends_with(" 2")));
+        assert!(metrics.contains("route=\"unmatched\""));
+        assert!(!metrics.contains("private"));
         assert!(!metrics.contains("never-label"));
     }
 
