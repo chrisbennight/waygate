@@ -47,6 +47,10 @@ impl Drop for Observation {
 }
 
 pub async fn observe(request: Request, next: Next) -> Response {
+    let http1 = matches!(
+        request.version(),
+        axum::http::Version::HTTP_10 | axum::http::Version::HTTP_11
+    );
     let mut observation = Observation {
         route: request
             .extensions()
@@ -74,6 +78,15 @@ pub async fn observe(request: Request, next: Next) -> Response {
             response.headers_mut().append("server-timing", value);
         }
     }
+    let content_length = (!response.headers().contains_key(header::TRANSFER_ENCODING))
+        .then(|| {
+            response
+                .headers()
+                .get(header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        .flatten();
     // HTTP methods, statuses, and zero-length framing can suppress a body
     // without polling it, even when a streaming wrapper hides its empty size.
     let no_body = observation.method == "HEAD"
@@ -83,13 +96,7 @@ pub async fn observe(request: Request, next: Next) -> Response {
             axum::http::StatusCode::NO_CONTENT | axum::http::StatusCode::NOT_MODIFIED
         )
         || (observation.method == "CONNECT" && response.status().is_success())
-        || (!response.headers().contains_key(header::TRANSFER_ENCODING)
-            && response
-                .headers()
-                .get(header::CONTENT_LENGTH)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok())
-                == Some(0));
+        || content_length == Some(0);
     let (parts, body) = response.into_parts();
     if no_body || body.is_end_stream() {
         observation.finish(HttpRequestPhase::Complete);
@@ -99,6 +106,7 @@ pub async fn observe(request: Request, next: Next) -> Response {
         Body::new(ObservedBody {
             inner: Box::pin(body),
             observation,
+            remaining: if http1 { content_length } else { None },
         }),
     )
 }
@@ -106,6 +114,7 @@ pub async fn observe(request: Request, next: Next) -> Response {
 struct ObservedBody {
     inner: Pin<Box<Body>>,
     observation: Observation,
+    remaining: Option<u64>,
 }
 
 impl HttpBody for ObservedBody {
@@ -125,7 +134,14 @@ impl HttpBody for ObservedBody {
                     this.observation.first_data = true;
                     this.observation.record(HttpRequestPhase::FirstData);
                 }
-                if this.inner.is_end_stream() {
+                if let Some(data) = frame.data_ref() {
+                    this.remaining = this
+                        .remaining
+                        .and_then(|remaining| remaining.checked_sub(data.len() as u64));
+                }
+                // A fixed-length response can stop being polled after its
+                // final data byte, before the stream reports EOF.
+                if this.remaining == Some(0) || this.inner.is_end_stream() {
                     this.observation.finish(HttpRequestPhase::Complete);
                 }
                 Poll::Ready(Some(Ok(frame)))
@@ -296,6 +312,56 @@ mod tests {
             .any(|line| line.contains("phase=\"cancelled\"")));
     }
 
+    #[tokio::test]
+    async fn fixed_length_stream_completes_without_an_eof_poll() {
+        let app = axum::Router::new()
+            .route(
+                "/timing-download",
+                get(|| async {
+                    (
+                        [(header::CONTENT_LENGTH, "5")],
+                        Body::from_stream(futures::stream::iter([
+                            Ok::<_, std::io::Error>(Bytes::from_static(b"he")),
+                            Ok(Bytes::from_static(b"llo")),
+                        ])),
+                    )
+                }),
+            )
+            .layer(axum::middleware::from_fn(observe));
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/timing-download")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = response.into_body();
+        for expected in ["he", "llo"] {
+            let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(frame.data_ref().unwrap(), expected);
+        }
+        drop(body);
+        let metrics = waygate_telemetry::gather_text();
+        let lines: Vec<_> = metrics
+            .lines()
+            .filter(|line| {
+                line.starts_with("mcp_http_request_duration_seconds_count")
+                    && line.contains("route=\"/timing-download\"")
+            })
+            .collect();
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("phase=\"complete\"") && line.ends_with(" 1")));
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("phase=\"cancelled\"")));
+    }
+
     struct Frames(std::collections::VecDeque<Frame<Bytes>>);
     impl HttpBody for Frames {
         type Data = Bytes;
@@ -327,6 +393,7 @@ mod tests {
         let mut body = ObservedBody {
             inner: Box::pin(inner),
             observation: observation("timing_trailers"),
+            remaining: None,
         };
         let data = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
             .await
@@ -348,6 +415,7 @@ mod tests {
         drop(ObservedBody {
             inner: Box::pin(inner),
             observation: observation("timing_cancelled"),
+            remaining: None,
         });
         assert!(waygate_telemetry::gather_text().lines().any(|line| line
             .starts_with("mcp_http_request_duration_seconds_count")
