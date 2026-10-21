@@ -2349,6 +2349,7 @@ pub use contract_binding::{list_all_tools, ListedCatalog};
 pub use freshness::{CatalogFreshnessTrigger, ScheduledCatalogRefresh};
 pub use health::{
     ObservedContracts, ObservedToolContract, UpstreamErrorClass, UpstreamHealth, UpstreamStatus,
+    UpstreamStatusObservation,
 };
 pub use refusals::{BlockedTool, ServerRefusals, ToolBlock, REFUSAL_REPORT_TOOL_LIMIT};
 use reload::redial_committed_fields_eq;

@@ -34,6 +34,13 @@ pub enum UpstreamObservation {
     Busy { name: String },
 }
 
+/// A coherent status snapshot, or an explicit unavailable observation.
+#[derive(Debug, Clone)]
+pub enum UpstreamStatusObservation {
+    Observed(Box<UpstreamStatus>),
+    Busy { name: String },
+}
+
 impl UpstreamRuntimeState {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -390,6 +397,22 @@ impl UpstreamPool {
     /// `wait` and never hides the others. Stable ordering matches
     /// [`Self::status_snapshot`].
     pub async fn health_snapshot_within(&self, wait: Duration) -> Vec<UpstreamObservation> {
+        self.status_snapshot_within(wait)
+            .await
+            .into_iter()
+            .map(|observation| match observation {
+                UpstreamStatusObservation::Observed(status) => {
+                    UpstreamObservation::Observed(status.health)
+                }
+                UpstreamStatusObservation::Busy { name } => UpstreamObservation::Busy { name },
+            })
+            .collect()
+    }
+
+    /// Read upstreams concurrently without letting a busy lane block the view.
+    /// Metadata and health are returned together only when all lane locks were
+    /// acquired; a timeout never invents health or catalog counts.
+    pub async fn status_snapshot_within(&self, wait: Duration) -> Vec<UpstreamStatusObservation> {
         let map = self.entries.load_full();
         let mut names: Vec<&String> = map.keys().collect();
         names.sort();
@@ -397,8 +420,8 @@ impl UpstreamPool {
             let entry = &map[name];
             async move {
                 match tokio::time::timeout(wait, entry_status(name, entry)).await {
-                    Ok(status) => UpstreamObservation::Observed(status.health),
-                    Err(_) => UpstreamObservation::Busy { name: name.clone() },
+                    Ok(status) => UpstreamStatusObservation::Observed(Box::new(status)),
+                    Err(_) => UpstreamStatusObservation::Busy { name: name.clone() },
                 }
             }
         }))
@@ -1306,6 +1329,17 @@ mod bounded_snapshot_tests {
                 assert_eq!(idle.name, "idle");
             }
             other => panic!("unexpected observations: {other:?}"),
+        }
+
+        let statuses = pool.status_snapshot_within(Duration::from_secs(2)).await;
+        match statuses.as_slice() {
+            [UpstreamStatusObservation::Busy { name }, UpstreamStatusObservation::Observed(idle)] =>
+            {
+                assert_eq!(name, "busy");
+                assert_eq!(idle.manifest.name, "idle");
+                assert_eq!(idle.health.name, "idle");
+            }
+            other => panic!("unexpected status observations: {other:?}"),
         }
 
         drop(call);

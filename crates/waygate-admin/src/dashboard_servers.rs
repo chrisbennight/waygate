@@ -41,6 +41,7 @@ struct ServersPage {
     config_degraded: bool,
     config_detail: String,
     servers: Vec<ServerRow>,
+    busy_upstreams: Vec<String>,
 }
 
 struct ServerRow {
@@ -237,7 +238,8 @@ pub(crate) async fn servers_page(
     let read_tenant = principal_tenant(user.as_ref());
     let catalog_rows = read_catalog_rows(&state, is_admin, read_tenant).await;
     let mut servers = Vec::new();
-    for status in state.upstreams.status_snapshot().await {
+    let (statuses, busy_upstreams) = dashboard_upstream_status(&state.upstreams).await;
+    for status in statuses {
         let m = status.manifest;
         let health = status.health;
         let enc = urlencode(&m.name);
@@ -334,6 +336,7 @@ pub(crate) async fn servers_page(
         config_degraded,
         config_detail,
         servers,
+        busy_upstreams,
     })
 }
 
@@ -828,10 +831,15 @@ pub(crate) async fn server_config_fragment(
         .await;
     }
 
-    let Some(status) = state
-        .upstreams
-        .status_snapshot()
-        .await
+    let (statuses, busy) = dashboard_upstream_status(&state.upstreams).await;
+    if busy.contains(&manifest.name) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Server status is temporarily unavailable while a call or refresh is busy. Try again shortly.",
+        )
+            .into_response();
+    }
+    let Some(status) = statuses
         .into_iter()
         .find(|status| status.health.name == manifest.name)
     else {

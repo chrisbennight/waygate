@@ -34,8 +34,8 @@ pub use pool::{
     list_all_tools, BlockedTool, CatalogFreshnessTrigger, CatalogRefreshOutcome,
     CatalogRefreshReport, ExchangeBundle, ListedCatalog, ObservedContracts, ObservedToolContract,
     RejectedOutputSchema, ReloadReport, ScheduledCatalogRefresh, ServerRefusals, ToolBlock,
-    UpstreamHealth, UpstreamPool, UpstreamStatus, DEFAULT_CALL_RESPONSE_MAX_BYTES,
-    REFUSAL_REPORT_TOOL_LIMIT,
+    UpstreamHealth, UpstreamPool, UpstreamStatus, UpstreamStatusObservation,
+    DEFAULT_CALL_RESPONSE_MAX_BYTES, REFUSAL_REPORT_TOOL_LIMIT,
 };
 pub use transport::{
     client_config, default_auto_lifecycle, legacy_bridge_lifecycle, stdio_command,
