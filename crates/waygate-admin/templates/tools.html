@@ -120,7 +120,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/admin/static/js/htmx.min.js"></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/htmx.min.js") }}"></script>
 <script>
 // Row click / Enter / Space opens the tool drawer; Esc / close button closes.
 // Read-only GET into the drawer (no CSRF) — mirrors the Activity drawer.

@@ -18,7 +18,7 @@
 {% if !store_configured %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#alert-triangle") }}"/></svg>
         <p class="empty-state__title">Tenants store not configured</p>
         <p class="empty-state__body">
             Set <code>GATEWAY_DATABASE_URL</code> and restart to enable. Until
@@ -58,14 +58,14 @@
     {% match error %}
     {% when Some with (msg) %}
         <div class="empty-state empty-state--danger">
-            <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+            <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#x-circle") }}"/></svg>
             <p class="empty-state__title">Couldn't load tenants</p>
             <p class="empty-state__body">{{ msg }}</p>
         </div>
     {% when None %}
         {% if tenants.is_empty() %}
             <div class="empty-state">
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#server"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#server") }}"/></svg>
                 <p class="empty-state__title">No tenants registered</p>
                 <p class="empty-state__body">
                     {% if is_admin %}Use the <strong>Register a tenant</strong> form above to onboard your first. It seeds the default policy bundle, a <code>tenant_admin</code> role, and the standard API-key profiles.{% else %}Ask an operator with <code>mcp:admin</code> to register one.{% endif %}

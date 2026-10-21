@@ -341,7 +341,7 @@
 {# Vendored CodeMirror 6 (Cedar syntax + line numbers). Progressive
    enhancement — the bundle mounts over the textarea below; if it fails to load
    or JS is off, the plain textarea (and its textarea-jump fallback) still work. #}
-<script src="/admin/static/js/codemirror.bundle.js" defer></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/codemirror.bundle.js") }}" defer></script>
 <script>
 // Mount CM6 over the editor textarea and honor the Policies pane's
 // ?focus=<@id> deep-link. The id is read from the textarea's

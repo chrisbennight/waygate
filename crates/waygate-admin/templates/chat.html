@@ -18,7 +18,7 @@
 {% if !invocation_ready %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#message-square"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#message-square") }}"/></svg>
         <p class="empty-state__title">Inference is not configured</p>
         <p class="empty-state__body">
             This gateway has no LLM invocation service wired (no model catalog /
@@ -50,7 +50,7 @@
 
         <div class="chat-log" data-chat-log aria-live="polite">
             <div class="empty-state" data-chat-empty>
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#message-square"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#message-square") }}"/></svg>
                 <p class="empty-state__title">No messages yet</p>
                 <p class="empty-state__body">Pick a model and send a message to test it. Replies stream in token by token.</p>
             </div>
@@ -67,5 +67,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/admin/static/js/chat.js" defer></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/chat.js") }}" defer></script>
 {% endblock %}

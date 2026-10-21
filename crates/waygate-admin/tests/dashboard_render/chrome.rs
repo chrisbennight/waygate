@@ -1033,7 +1033,7 @@ pub(crate) async fn palette_overlay_and_script_present_on_every_page() {
         "palette results list missing",
     );
     assert!(
-        body.contains(r#"src="/admin/static/js/palette.js""#),
+        body.contains(r#"/js/palette.js""#),
         "palette.js script tag missing",
     );
     // Cmd-K opener button in the topbar — discoverability hook.
@@ -1250,7 +1250,7 @@ pub(crate) async fn every_sidebar_icon_resolves_in_spritesheet() {
         .and_then(|s| s.split("</ul>").next())
         .expect("sidebar nav <ul> should render");
 
-    let marker = "/admin/static/lucide.svg#";
+    let marker = "lucide.svg#";
     let mut icons: Vec<&str> = nav
         .match_indices(marker)
         .map(|(i, _)| {
@@ -1283,14 +1283,21 @@ pub(crate) async fn every_sidebar_icon_resolves_in_spritesheet() {
 pub(crate) async fn every_rendered_icon_resolves_in_spritesheet() {
     use std::path::PathBuf;
     let app = dashboard_router(empty_state().await, DashboardAuth::Disabled);
-    let (status, body) = body_of(app, "/").await;
+    let (status, mut body) = body_of(app.clone(), "/").await;
     assert_eq!(status, StatusCode::OK);
+    let (status, profiles) = body_of(app, "/profiles").await;
+    assert_eq!(status, StatusCode::OK);
+    body.push_str(&profiles);
+    assert!(
+        !body.contains("/admin/static/lucide.svg#"),
+        "shared page icons must use the versioned sprite"
+    );
     let sprite = std::fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static/lucide.svg"),
     )
     .expect("static/lucide.svg should be readable from CARGO_MANIFEST_DIR");
 
-    let marker = "/admin/static/lucide.svg#";
+    let marker = "lucide.svg#";
     let mut icons: Vec<&str> = body
         .match_indices(marker)
         .map(|(i, _)| {
@@ -1372,7 +1379,7 @@ pub(crate) async fn decisions_badge_hook_present() {
     let app = dashboard_router(empty_state().await, DashboardAuth::Disabled);
     let (_status, body) = body_of(app, "/").await;
     assert!(
-        body.contains(r#"src="/admin/static/js/badge.js""#),
+        body.contains(r#"/js/badge.js""#),
         "badge.js script tag missing",
     );
     assert!(

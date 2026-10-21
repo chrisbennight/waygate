@@ -132,3 +132,173 @@ async fn serve_dir_returns_404_for_missing_asset() {
         resp.status()
     );
 }
+
+async fn page_asset(app: &axum::Router, relative: &str) -> String {
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let html = std::str::from_utf8(&bytes).unwrap();
+    let suffix = format!("/{relative}");
+    let url = html
+        .split('"')
+        .find(|value| value.starts_with("/admin/static/v/") && value.ends_with(&suffix))
+        .expect("page should reference a versioned asset");
+    url.strip_prefix("/admin").unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn versioned_assets_are_immutable_conditional_and_compressed() {
+    let app = dashboard_router(empty_state().await, DashboardAuth::Disabled);
+    let uri = page_asset(&app, "css/base.css").await;
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["cache-control"],
+        "public, max-age=31536000, immutable"
+    );
+    assert!(response.headers()["content-type"]
+        .to_str()
+        .unwrap()
+        .starts_with("text/css"));
+    let etag = response.headers()["etag"].clone();
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        body.as_ref(),
+        std::fs::read(resolved_static_dir().join("css/base.css")).unwrap()
+    );
+
+    let js_uri = page_asset(&app, "js/palette.js").await;
+    let js_response = app
+        .clone()
+        .oneshot(Request::builder().uri(&js_uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(js_response.status(), StatusCode::OK);
+    let js = axum::body::to_bytes(js_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let js = std::str::from_utf8(&js).unwrap();
+    let prefix = uri.strip_suffix("css/base.css").unwrap();
+    assert!(js.contains(&format!("/admin{prefix}lucide.svg#")));
+    assert!(!js.contains("/admin/static/lucide.svg#"));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&uri)
+                .header("if-none-match", etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    assert!(axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(&uri)
+                .header("accept-encoding", "gzip")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-encoding"], "gzip");
+    assert!(response.headers()["vary"]
+        .to_str()
+        .unwrap()
+        .contains("accept-encoding"));
+    let compressed = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(&compressed[..2], &[0x1f, 0x8b]);
+    assert!(compressed.len() < body.len());
+}
+
+#[tokio::test]
+async fn versioned_stylesheet_fonts_resolve_and_old_versions_redirect_without_caching() {
+    let app = dashboard_router(empty_state().await, DashboardAuth::Disabled);
+    let uri = page_asset(&app, "css/fonts.css").await;
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let css = std::str::from_utf8(&body).unwrap();
+    let font = css
+        .split(['\'', '"'])
+        .find(|value| value.starts_with("/admin/static/v/") && value.contains("/fonts/"))
+        .expect("font URL should use bundle version");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(font.strip_prefix("/admin").unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["cache-control"],
+        "public, max-age=31536000, immutable"
+    );
+    let relative = font.split("/fonts/").nth(1).unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        body.as_ref(),
+        std::fs::read(resolved_static_dir().join("fonts").join(relative)).unwrap()
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/static/v/old/css/base.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(response.headers()["location"], "/admin/static/css/base.css");
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/static/v/old/missing.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(response.headers()["location"], "/admin/static/missing.css");
+    assert_eq!(response.headers()["cache-control"], "no-store");
+}

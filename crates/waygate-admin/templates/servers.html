@@ -126,6 +126,6 @@
    globally in layout.html: the "Reload manifests" button hx-posts, and each
    row's expander hx-gets its config panel. servers_accordion.js handles the
    row show/hide toggle; htmx owns the panel content load. #}
-<script src="/admin/static/js/htmx.min.js"></script>
-<script src="/admin/static/js/servers_accordion.js" defer></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/htmx.min.js") }}"></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/servers_accordion.js") }}" defer></script>
 {% endblock %}

@@ -23,7 +23,7 @@
 {% if surfaces.is_empty() %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#cpu"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#cpu") }}"/></svg>
         <p class="empty-state__title">No built-in surfaces</p>
         <p class="empty-state__body">None are registered on this gateway build.</p>
     </div>

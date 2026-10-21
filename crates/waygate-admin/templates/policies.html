@@ -225,11 +225,11 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/admin/static/js/htmx.min.js"></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/htmx.min.js") }}"></script>
 {# The vendored CodeMirror 6 bundle (also used by the bundle editor) powers
    the inline per-policy editors below. Progressive enhancement — the inline
    <details> editors work as plain textareas without it. #}
-<script src="/admin/static/js/codemirror.bundle.js" defer></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/codemirror.bundle.js") }}" defer></script>
 <script>
 // Client-side policy filter: matches the search box against each item's
 // pre-lowercased `data-search` blob (id + effect + tags + description +

@@ -182,7 +182,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/admin/static/js/htmx.min.js"></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/htmx.min.js") }}"></script>
 {% if cedar_configured && scenarios_configured %}
 <script>
 // Mirror the simulator form's current values into the

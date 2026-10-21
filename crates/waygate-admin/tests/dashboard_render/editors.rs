@@ -467,7 +467,7 @@ pub(crate) async fn policy_bundles_editor_mounts_codemirror() {
     let (status, body) = body_of(app, "/t/default/policy_bundles").await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        body.contains(r#"src="/admin/static/js/codemirror.bundle.js""#),
+        body.contains(r#"/js/codemirror.bundle.js""#),
         "CodeMirror bundle script not loaded",
     );
     assert!(

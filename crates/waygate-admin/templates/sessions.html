@@ -26,7 +26,7 @@
 {% if !enabled %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#alert-triangle") }}"/></svg>
         <p class="empty-state__title">OAuth sessions unavailable</p>
         <p class="empty-state__body">
             The built-in Authorization Server is disabled
@@ -40,5 +40,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/admin/static/js/htmx.min.js"></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/htmx.min.js") }}"></script>
 {% endblock %}

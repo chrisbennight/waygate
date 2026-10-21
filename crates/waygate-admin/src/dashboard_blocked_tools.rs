@@ -524,6 +524,7 @@ mod tests {
 
     fn chrome() -> PageChrome {
         PageChrome {
+            assets: None,
             title: "Blocked tools",
             env: "test",
             user: None,
