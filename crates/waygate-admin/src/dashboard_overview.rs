@@ -24,6 +24,7 @@ struct OverviewPage {
     /// Shared topbar / nav / tenant chrome — see [`crate::chrome::PageChrome`].
     chrome: PageChrome,
     upstreams: Vec<UpstreamTile>,
+    busy_upstreams: Vec<String>,
     upstreams_total: usize,
     upstreams_degraded: usize,
     upstreams_down: usize,
@@ -299,8 +300,8 @@ pub(crate) async fn overview(
     tenant_ctx: Option<Extension<TenantContext>>,
     headers: HeaderMap,
 ) -> Response {
-    let upstreams = upstream_tiles(&state.upstreams).await;
-    let upstreams_total = upstreams.len();
+    let (upstreams, busy_upstreams) = upstream_tiles(&state.upstreams).await;
+    let upstreams_total = upstreams.len() + busy_upstreams.len();
     let upstreams_degraded = upstreams
         .iter()
         .filter(|u| u.runtime_status == "degraded")
@@ -424,11 +425,9 @@ pub(crate) async fn overview(
     }
 
     // Same gate and tenant scope as the Blocked tools page it links to.
-    if let Some(blocked) =
-        crate::dashboard_blocked_tools::blocked_tool_count(&state, user_principal)
-            .await
-            .filter(|blocked| *blocked > 0)
-    {
+    let blocked_count =
+        crate::dashboard_blocked_tools::blocked_tool_count(&state, user_principal).await;
+    if let Some(blocked) = blocked_count.filter(|blocked| *blocked > 0) {
         attention_items.push(AttentionItem {
             severity: "warn",
             label: format!(
@@ -436,6 +435,13 @@ pub(crate) async fn overview(
                 if blocked == 1 { "" } else { "s" }
             ),
             hint: "The gateway refuses these tools or holds them as temporarily unavailable.",
+            href: nav_for_attention(crate::dashboard_blocked_tools::BLOCKED_TOOLS_PATH),
+        });
+    } else if blocked_count.is_none() && overview_break_glass_admin(user_principal) {
+        attention_items.push(AttentionItem {
+            severity: "warn",
+            label: "Blocked-tool status is unavailable".into(),
+            hint: "A call or catalog refresh is busy; no current count is available.",
             href: nav_for_attention(crate::dashboard_blocked_tools::BLOCKED_TOOLS_PATH),
         });
     }
@@ -643,6 +649,7 @@ pub(crate) async fn overview(
             String::new(),
         ),
         upstreams,
+        busy_upstreams,
         upstreams_total,
         upstreams_degraded,
         upstreams_down,
@@ -717,9 +724,9 @@ pub(crate) fn attention_items_for_overview(
     items
 }
 
-async fn upstream_tiles(pool: &UpstreamPool) -> Vec<UpstreamTile> {
-    pool.status_snapshot()
-        .await
+async fn upstream_tiles(pool: &UpstreamPool) -> (Vec<UpstreamTile>, Vec<String>) {
+    let (statuses, busy) = dashboard_upstream_status(pool).await;
+    let tiles = statuses
         .into_iter()
         .map(|status| UpstreamTile {
             name: status.manifest.name,
@@ -727,7 +734,8 @@ async fn upstream_tiles(pool: &UpstreamPool) -> Vec<UpstreamTile> {
             runtime_status: status.health.runtime_state.as_str(),
             tool_count: status.health.published_tool_count,
         })
-        .collect()
+        .collect();
+    (tiles, busy)
 }
 
 /// Recent non-success events, selected by event timestamp within the tenant.

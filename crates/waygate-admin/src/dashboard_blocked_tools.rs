@@ -73,6 +73,7 @@ struct BlockedToolsPage {
     /// The catalog could not be read, so catalog links are withheld and only
     /// a default-tenant viewer sees servers.
     catalog_unavailable: bool,
+    report_unavailable: bool,
     /// The server the page is limited to, if any.
     server_filter: Option<String>,
     rows: Vec<BlockedRow>,
@@ -376,19 +377,27 @@ impl CatalogRows {
 struct Report {
     catalog: CatalogRows,
     servers: Vec<ServerRefusals>,
+    unavailable: bool,
 }
 
 async fn read_report(state: &AdminState, tenant: &str, only: Option<&str>) -> Report {
     let catalog = CatalogRows::read(state, tenant).await;
     let default_tenant = tenant == waygate_core::TenantId::DEFAULT;
-    let servers = state
-        .upstreams
-        .refusals(tenant, |server| {
-            only.is_none_or(|only| only == server)
-                && (default_tenant || catalog.get(server).is_some())
-        })
-        .await;
-    Report { catalog, servers }
+    let scan = state.upstreams.refusals(tenant, |server| {
+        only.is_none_or(|only| only == server) && (default_tenant || catalog.get(server).is_some())
+    });
+    match tokio::time::timeout(crate::dashboard::DASHBOARD_UPSTREAM_WAIT, scan).await {
+        Ok(servers) => Report {
+            catalog,
+            servers,
+            unavailable: false,
+        },
+        Err(_) => Report {
+            catalog,
+            servers: Vec::new(),
+            unavailable: true,
+        },
+    }
 }
 
 /// The number of tools the gateway does not run for `principal`'s tenant,
@@ -399,7 +408,7 @@ pub(crate) async fn blocked_tool_count(
 ) -> Option<usize> {
     let principal = principal.filter(|principal| principal_has_dashboard_admin(Some(principal)))?;
     let report = read_report(state, principal.tenant.as_str(), None).await;
-    Some(report.servers.iter().map(|server| server.tools.len()).sum())
+    (!report.unavailable).then(|| report.servers.iter().map(|server| server.tools.len()).sum())
 }
 
 /// Group each server's blocked tools by explanation, keeping the report's
@@ -456,8 +465,8 @@ async fn blocked_tools_page(
     let tenant = crate::dashboard::principal_tenant(user.as_ref()).to_owned();
     let server_filter = query.server.filter(|server| !server.is_empty());
 
-    let (rows, catalog_unavailable, truncated) = if insufficient_scope {
-        (Vec::new(), false, Vec::new())
+    let (rows, catalog_unavailable, report_unavailable, truncated) = if insufficient_scope {
+        (Vec::new(), false, false, Vec::new())
     } else {
         let report = read_report(&state, &tenant, server_filter.as_deref()).await;
         // Tool-change review also requires the URL tenant to be the default
@@ -482,6 +491,7 @@ async fn blocked_tools_page(
         (
             rows,
             matches!(report.catalog, CatalogRows::Unavailable),
+            report.unavailable,
             truncated,
         )
     };
@@ -498,6 +508,7 @@ async fn blocked_tools_page(
         ),
         insufficient_scope,
         catalog_unavailable,
+        report_unavailable,
         server_filter,
         blocked_count: rows.iter().map(|row| row.tools.len()).sum(),
         rows,
@@ -541,6 +552,7 @@ mod tests {
         blocked: &[(&str, ToolBlock, bool)],
     ) -> Report {
         Report {
+            unavailable: false,
             catalog: CatalogRows::Read(
                 row.map(|row| (row.name.clone(), row)).into_iter().collect(),
             ),
@@ -566,6 +578,7 @@ mod tests {
             chrome: chrome(),
             insufficient_scope: false,
             catalog_unavailable: false,
+            report_unavailable: false,
             server_filter: None,
             blocked_count: rows.iter().map(|row| row.tools.len()).sum(),
             rows,
@@ -574,6 +587,27 @@ mod tests {
         }
         .render()
         .expect("blocked tools page renders")
+    }
+
+    #[test]
+    fn an_unavailable_report_does_not_claim_every_tool_is_admitted() {
+        let html = BlockedToolsPage {
+            chrome: chrome(),
+            insufficient_scope: false,
+            catalog_unavailable: false,
+            report_unavailable: true,
+            server_filter: None,
+            blocked_count: 0,
+            rows: Vec::new(),
+            truncated: Vec::new(),
+            tool_limit: REFUSAL_REPORT_TOOL_LIMIT,
+        }
+        .render()
+        .expect("unavailable report renders");
+        assert!(html.contains("Blocked-tool report temporarily unavailable"));
+        assert!(html.contains("No current blocked-tool count is available"));
+        assert!(!html.contains("No blocked tools"));
+        assert!(!html.contains("The gateway admits every tool"));
     }
 
     fn refused(reason: ToolRefusal) -> ToolBlock {
