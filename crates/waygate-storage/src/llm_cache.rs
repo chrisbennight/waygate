@@ -13,6 +13,20 @@
 use std::time::Duration;
 
 use serde_json::Value;
+use sqlx::pool::PoolConnection;
+use sqlx::{Acquire, Postgres};
+
+// Interrupted SQL must not return to the shared accounting/control pool.
+// Completed transactions disarm the guard and retain normal connection reuse.
+struct WriteConnection(Option<PoolConnection<Postgres>>);
+
+impl Drop for WriteConnection {
+    fn drop(&mut self) {
+        if let Some(connection) = self.0.as_mut() {
+            connection.close_on_drop();
+        }
+    }
+}
 
 /// A cache hit: the cached client-facing response, the served model, and the
 /// provider that served it — all replayed into the hit's `InferenceRecord`.
@@ -311,20 +325,33 @@ impl waygate_evidence::cache::LlmCache for PgLlmCache {
             ttl: entry.ttl,
         };
         let stored = async {
+            let mut connection = WriteConnection(Some(self.pool.acquire().await?));
+            let mut transaction = connection.0.as_mut().expect("acquired cache connection").begin().await?;
+            // These limits are transaction-local and cannot affect later
+            // accounting work that reuses a successfully returned connection.
+            sqlx::query("SELECT set_config('statement_timeout', '40ms', true), set_config('lock_timeout', '20ms', true)")
+                .execute(&mut *transaction).await?;
             if let Some(max_rows) = self.max_rows_per_tenant {
                 // A cancelled optional write must not commit an insertion
                 // while skipping the configured eviction.
-                let mut transaction = self.pool.begin().await?;
                 // Serialize the tenant's insert-and-evict pair so concurrent
                 // uncommitted insertions cannot each evade the other's cap.
-                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('waygate-llm-cache-cap:' || $1, 0))")
-                    .bind(&row.tenant_id).execute(&mut *transaction).await?;
+                let admitted: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended('waygate-llm-cache-cap:' || $1, 0))")
+                    .bind(&row.tenant_id).fetch_one(&mut *transaction).await?;
+                if !admitted {
+                    transaction.rollback().await?;
+                    drop(connection.0.take());
+                    tracing::debug!("skipping optional cache population while the tenant cap is busy");
+                    return Ok::<(), sqlx::Error>(());
+                }
                 put_cached(&mut *transaction, &row).await?;
                 enforce_tenant_cap(&mut *transaction, &row.tenant_id, max_rows).await?;
-                transaction.commit().await
             } else {
-                put_cached(&self.pool, &row).await
+                put_cached(&mut *transaction, &row).await?;
             }
+            transaction.commit().await?;
+            drop(connection.0.take());
+            Ok(())
         }
         .await;
         if let Err(error) = stored {

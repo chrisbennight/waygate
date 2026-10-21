@@ -816,7 +816,10 @@ rolling/daily/weekly/monthly. Cost weighting comes from the `llm_models` costing
   write is cancelled and logged; the completed response is still returned.
   No background task retains the response. PostgreSQL insertion and configured
   tenant-cap eviction commit together, including when cancellation interrupts
-  the write. Cache availability can fall under database pressure; accounting
+  the write. Capped writes use non-blocking tenant admission; contention skips
+  optional population. PostgreSQL statement and lock deadlines bound the work,
+  and interrupted connections are retired instead of returned to the shared
+  pool. Cache availability can fall under database pressure; accounting
   and budget enforcement retain their existing ordering.
 - **Growth bounds:** two layers. A background **TTL sweep**
   (`GATEWAY_LLM_CACHE_SWEEP_SECONDS`, default 300) reclaims expired rows' disk;
