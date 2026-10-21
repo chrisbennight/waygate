@@ -6,7 +6,7 @@ use std::sync::Arc;
 use askama::Template;
 use axum::extract::{Form, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::Extension;
 use serde::Deserialize;
 use waygate_mcp::catalog::UpstreamCatalog;
@@ -501,7 +501,7 @@ pub(crate) async fn tools_drawer(
     let Ok(((risk, side_effects, pii), live)) =
         tokio::time::timeout(DASHBOARD_UPSTREAM_WAIT, load).await
     else {
-        return busy_upstream_fragment();
+        return busy_tool_drawer_fragment();
     };
     let found_tool = live
         .into_iter()
@@ -545,6 +545,35 @@ pub(crate) async fn tools_drawer(
         csrf_token: csrf.map(|Extension(c)| c.0).unwrap_or_default(),
         tenant_ctx: tenant_ctx.map(|Extension(c)| c),
     })
+}
+
+fn busy_tool_drawer_fragment() -> Response {
+    Html(concat!(
+        "<header><h2 id=\"drawer-title\">Tool details unavailable</h2>",
+        "<button type=\"button\" class=\"close\" data-drawer-close aria-label=\"Close\">Close</button></header>",
+        "<p class=\"callout callout--warn\" role=\"status\">",
+        "Tool details are temporarily unavailable while a call or catalog refresh is busy. ",
+        "Reload this page to try again.</p>"
+    ))
+    .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn busy_tool_drawer_keeps_visible_close_control() {
+        let response = busy_tool_drawer_fragment();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(html.contains("id=\"drawer-title\""));
+        assert!(html.contains("<button type=\"button\" class=\"close\" data-drawer-close"));
+        assert!(html.contains("temporarily unavailable"));
+    }
 }
 
 // ---- governed "try this tool" ----------------------------------------------
