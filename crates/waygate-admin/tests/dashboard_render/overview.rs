@@ -249,6 +249,10 @@ pub(crate) async fn overview_leads_with_status_sentence_and_defers_blocked_inven
         "the blocked-tool summary loads separately",
     );
     assert!(
+        body.contains(r#"/js/htmx.min.js"></script>"#),
+        "the deferred summary requires the vendored htmx script"
+    );
+    assert!(
         !body.contains("Active approvals") && !body.contains("Expired-unused"),
         "the permanently-dash KPI tiles should be gone",
     );
