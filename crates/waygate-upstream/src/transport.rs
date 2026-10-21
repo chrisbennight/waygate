@@ -286,6 +286,61 @@ pub(crate) struct PinnedNetworkDestination {
     addresses: Vec<IpAddr>,
 }
 
+/// A credential-free transport. MCP sessions, identity cells, request limits,
+/// tracing and cancellation remain owned by each independently created dial.
+struct PinnedClient {
+    client: reqwest::Client,
+    destination: PinnedNetworkDestination,
+}
+
+impl PinnedClient {
+    fn for_destination(&self, destination: &PinnedNetworkDestination) -> Option<reqwest::Client> {
+        if self.destination.host != destination.host || self.destination.port != destination.port {
+            return None;
+        }
+        let mut cached = self.destination.addresses.clone();
+        let mut current = destination.addresses.clone();
+        cached.sort_unstable();
+        current.sort_unstable();
+        (cached == current).then(|| self.client.clone())
+    }
+}
+
+pub(crate) type PinnedHttpClient = std::sync::Arc<HttpClientCache>;
+
+/// One lane's most recently resolved transport. In-flight sessions retain
+/// their own client clone when a changed DNS answer replaces this entry.
+#[derive(Default)]
+pub(crate) struct HttpClientCache {
+    current: std::sync::Mutex<Option<PinnedClient>>,
+}
+
+impl HttpClientCache {
+    fn client_for(
+        &self,
+        destination: &PinnedNetworkDestination,
+    ) -> Result<reqwest::Client, DialError> {
+        if let Some(client) = self
+            .current
+            .lock()
+            .expect("HTTP client cache lock poisoned")
+            .as_ref()
+            .and_then(|cached| cached.for_destination(destination))
+        {
+            return Ok(client);
+        }
+        let client = build_streaming_client(Some(destination))?;
+        *self
+            .current
+            .lock()
+            .expect("HTTP client cache lock poisoned") = Some(PinnedClient {
+            client: client.clone(),
+            destination: destination.clone(),
+        });
+        Ok(client)
+    }
+}
+
 impl PinnedNetworkDestination {
     pub(crate) fn new(host: String, port: u16, addresses: Vec<IpAddr>) -> Self {
         Self {
@@ -315,6 +370,7 @@ impl PinnedNetworkDestination {
 pub(crate) struct ConnectedService {
     pub(crate) service: RunningService<RoleClient, ClientConfig>,
     pub(crate) network_destination: Option<PinnedNetworkDestination>,
+    pub(crate) http_client: Option<PinnedHttpClient>,
     pub(crate) cleartext_control_plane: bool,
     /// Cancel to end every request this connection still has open with the
     /// upstream before the service closes. Only streamable HTTP holds a
@@ -391,6 +447,7 @@ pub(crate) async fn connect_with_destination(
     issuer: Option<&SharedIdentityIssuer>,
     cell: Option<&IdentityCell>,
     exchange: Option<&ExchangeBundle>,
+    http_client: Option<&PinnedHttpClient>,
 ) -> Result<DialedService, DialError> {
     connect_with_handshake_timeout_and_destination(
         manifest,
@@ -399,6 +456,7 @@ pub(crate) async fn connect_with_destination(
         exchange,
         ClientCapabilities::default(),
         http_policy::HANDSHAKE_TIMEOUT,
+        http_client,
     )
     .await
 }
@@ -423,6 +481,7 @@ pub(crate) async fn connect_with_capabilities(
     cell: Option<&IdentityCell>,
     exchange: Option<&ExchangeBundle>,
     capabilities: ClientCapabilities,
+    http_client: Option<&PinnedHttpClient>,
 ) -> Result<DialedService, DialError> {
     connect_with_handshake_timeout_and_destination(
         manifest,
@@ -431,6 +490,7 @@ pub(crate) async fn connect_with_capabilities(
         exchange,
         capabilities,
         http_policy::HANDSHAKE_TIMEOUT,
+        http_client,
     )
     .await
 }
@@ -561,6 +621,7 @@ async fn connect_with_handshake_timeout(
         exchange,
         capabilities,
         handshake_timeout,
+        None,
     )
     .await?
     .finish_dial()
@@ -574,6 +635,7 @@ async fn connect_with_handshake_timeout_and_destination(
     exchange: Option<&ExchangeBundle>,
     capabilities: ClientCapabilities,
     handshake_timeout: Duration,
+    http_client: Option<&PinnedHttpClient>,
 ) -> Result<DialedService, DialError> {
     let exchanges = DialTrace::new();
     let lifecycle = lifecycle_for(manifest);
@@ -586,6 +648,7 @@ async fn connect_with_handshake_timeout_and_destination(
         handshake_timeout,
         lifecycle.clone(),
         exchanges.recorder(),
+        http_client,
     )
     .await;
 
@@ -604,6 +667,7 @@ async fn connect_with_handshake_timeout_and_destination(
                 handshake_timeout,
                 ClientLifecycleMode::Initialize,
                 exchanges.recorder(),
+                http_client,
             )
             .await
         }
@@ -631,6 +695,7 @@ async fn dial_once(
     handshake_timeout: Duration,
     lifecycle: ClientLifecycleMode,
     exchanges: ExchangeRecorder,
+    reusable_http_client: Option<&PinnedHttpClient>,
 ) -> Result<ConnectedService, DialError> {
     let info = client_config(
         capabilities,
@@ -660,10 +725,9 @@ async fn dial_once(
             if !credentials.headers.is_empty() {
                 config = config.custom_headers(credentials.headers.into_iter().collect());
             }
-            // Build exactly one shared-policy streaming client per dial. The
-            // non-mTLS and mTLS paths share the same no-total-timeout, bounded
-            // connect, and disabled-idle-pool policy; mTLS only layers identity
-            // and trust material onto that builder.
+            // Transport reuse is independent of MCP session lifetime. A fresh
+            // DNS answer must agree with the client's pinned destination;
+            // request credentials and identity wrappers are always rebuilt.
             // Security: an
             // `mtls:` block with an `http://` URL silently
             // disables TLS — no handshake, cert never
@@ -673,6 +737,10 @@ async fn dial_once(
             // so the operator gets a structured error,
             // not a "works but isn't actually mTLS"
             // silent failure.
+            let http_client = manifest
+                .mtls
+                .is_none()
+                .then(|| reusable_http_client.cloned().unwrap_or_default());
             let http = match manifest.mtls.as_ref() {
                 Some(mtls) => {
                     if !url_is_https(&url) {
@@ -683,8 +751,13 @@ async fn dial_once(
                     }
                     build_mtls_client_with_destination(mtls, Some(&destination))?
                 }
-                None => build_streaming_client(Some(&destination))?,
+                None => http_client
+                    .as_ref()
+                    .expect("a non-mTLS dial has a client cache")
+                    .client_for(&destination)?,
             };
+            // mTLS material is read on every dial so file rotation cannot
+            // silently keep using the previous client certificate or trust.
             let http =
                 BoundedResponseClient::new(http, exchanges).with_query_secret(credentials.query);
             let connection_probe = http.clone();
@@ -724,6 +797,7 @@ async fn dial_once(
             Ok(ConnectedService {
                 service,
                 network_destination: Some(destination),
+                http_client,
                 cleartext_control_plane: url::Url::parse(&url)
                     .is_ok_and(|url| url.scheme() == "http"),
                 open_requests,
@@ -794,6 +868,7 @@ async fn dial_once(
             Ok(ConnectedService {
                 service,
                 network_destination: Some(destination),
+                http_client: None,
                 cleartext_control_plane,
                 open_requests: Default::default(),
                 refused_redirect,
@@ -843,6 +918,7 @@ async fn dial_once(
             Ok(ConnectedService {
                 service,
                 network_destination: None,
+                http_client: None,
                 cleartext_control_plane: false,
                 open_requests: Default::default(),
                 refused_redirect: Default::default(),
@@ -1484,6 +1560,52 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn http_client_reuse_requires_the_same_resolved_destination() {
+        let destination = PinnedNetworkDestination::new(
+            "upstream.example".into(),
+            443,
+            vec!["192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()],
+        );
+        let cached = PinnedClient {
+            client: build_streaming_client(Some(&destination)).unwrap(),
+            destination: destination.clone(),
+        };
+        let mut current = destination;
+        current.addresses.reverse();
+        assert!(cached.for_destination(&current).is_some());
+        current.addresses.pop();
+        assert!(cached.for_destination(&current).is_none());
+        current = cached.destination.clone();
+        current.host = "another.example".into();
+        assert!(cached.for_destination(&current).is_none());
+        current = cached.destination.clone();
+        current.port = 8443;
+        assert!(cached.for_destination(&current).is_none());
+    }
+
+    #[test]
+    fn changed_destinations_replace_the_shared_lane_client() {
+        let cache = PinnedHttpClient::default();
+        let mut destination = PinnedNetworkDestination::new(
+            "upstream.example".into(),
+            443,
+            vec!["192.0.2.1".parse().unwrap()],
+        );
+        cache.client_for(&destination).unwrap();
+        let next_call = cache.clone();
+        destination.addresses = vec!["192.0.2.2".parse().unwrap()];
+        next_call.client_for(&destination).unwrap();
+        assert!(cache
+            .current
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .for_destination(&destination)
+            .is_some());
+    }
 
     type TestEventSender = mpsc::Sender<Result<Event, Infallible>>;
 

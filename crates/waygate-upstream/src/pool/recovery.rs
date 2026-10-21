@@ -24,6 +24,7 @@ struct PerCallDial<'a> {
     prebuilt_context: Option<&'a IdentityContext>,
     caller_capabilities: Option<&'a ClientCapabilities>,
     negotiated_protocol: Option<&'a str>,
+    http_client: Option<&'a crate::transport::PinnedHttpClient>,
     has_continuation: bool,
     deadline: Option<tokio::time::Instant>,
     timeout: Option<std::time::Duration>,
@@ -57,6 +58,7 @@ pub(super) struct PerCallExecution<'a> {
     pub(super) prebuilt_context: Option<&'a IdentityContext>,
     pub(super) caller_capabilities: Option<&'a ClientCapabilities>,
     pub(super) negotiated_protocol: Option<&'a str>,
+    pub(super) http_client: Option<&'a crate::transport::PinnedHttpClient>,
     pub(super) admitted: Option<&'a InvocationContractIdentity>,
     pub(super) has_continuation: bool,
     pub(super) approval_gated: bool,
@@ -174,6 +176,7 @@ pub(super) async fn execute_per_call(setup: PerCallExecution<'_>) -> PerCallExec
             prebuilt_context: setup.prebuilt_context,
             caller_capabilities: setup.caller_capabilities,
             negotiated_protocol: setup.negotiated_protocol,
+            http_client: setup.http_client,
             has_continuation: setup.has_continuation,
             deadline: setup.deadline,
             timeout: setup.timeout,
@@ -440,6 +443,7 @@ async fn dial_per_call(setup: PerCallDial<'_>) -> Result<PerCallDialSuccess, Per
             setup.caller_capabilities,
             setup.negotiated_protocol,
             setup.has_continuation,
+            setup.http_client,
         );
         // Times the connect and MCP lifecycle exchange this call runs on, so
         // the price of per-call session isolation is readable on its own rather
@@ -551,6 +555,7 @@ mod tests {
             prebuilt_context: None,
             caller_capabilities: None,
             negotiated_protocol: None,
+            http_client: None,
             has_continuation: false,
             deadline: None,
             timeout: None,

@@ -53,7 +53,8 @@ impl RedirectRefused {
 pub(crate) fn streaming_builder() -> reqwest::ClientBuilder {
     http_client::builder(Profile::NoTotalTimeout)
         .connect_timeout(CONNECT_TIMEOUT)
-        .pool_max_idle_per_host(0)
+        .pool_max_idle_per_host(4)
+        .pool_idle_timeout(Duration::from_secs(30))
         .redirect(refuse_redirects())
 }
 

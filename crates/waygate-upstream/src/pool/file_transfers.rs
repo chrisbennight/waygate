@@ -272,6 +272,7 @@ impl UpstreamPool {
                     self.issuer.as_ref(),
                     cell.as_ref(),
                     self.exchange.as_ref(),
+                    conn.http_client.as_ref(),
                 )
                 .await
                 {

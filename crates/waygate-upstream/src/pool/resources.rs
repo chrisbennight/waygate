@@ -551,15 +551,16 @@ impl UpstreamPool {
                 if let (Some(cell), Some(context)) = (cell.as_ref(), identity_context) {
                     cell.set(context);
                 }
-                let service = match transport::connect(
+                let service = match transport::connect_with_destination(
                     &snapshot,
                     self.issuer.as_ref(),
                     cell.as_ref(),
                     self.exchange.as_ref(),
+                    conn.http_client.as_ref(),
                 )
                 .await
                 {
-                    Ok(service) => service,
+                    Ok(dialed) => dialed.finish_dial().service,
                     Err(error) => {
                         permit.failure();
                         entry.record_runtime_failure(UpstreamErrorClass::from_dial_error(&error));
