@@ -75,7 +75,9 @@ pub async fn observe(request: Request, next: Next) -> Response {
         }
     }
     let (parts, body) = response.into_parts();
-    if body.is_end_stream() {
+    // Axum suppresses a GET handler's body for HEAD after route middleware
+    // returns. Its successful body drop is not caller cancellation.
+    if observation.method == "HEAD" || body.is_end_stream() {
         observation.finish(HttpRequestPhase::Complete);
     }
     Response::from_parts(
@@ -183,6 +185,45 @@ mod tests {
         assert!(metrics.contains("route=\"/timing/{id}\""));
         assert!(!metrics.contains("private-value"));
         assert!(!metrics.contains("never-label"));
+    }
+
+    #[tokio::test]
+    async fn automatic_head_responses_complete_without_polling_the_get_body() {
+        let app = axum::Router::new()
+            .route(
+                "/timing-head/{id}",
+                get(|| async { axum::response::Html("hello") }),
+            )
+            .layer(axum::middleware::from_fn(observe));
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("HEAD")
+                    .uri("/timing-head/value")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap()
+            .is_empty());
+        let metrics = waygate_telemetry::gather_text();
+        let lines: Vec<_> = metrics
+            .lines()
+            .filter(|line| {
+                line.starts_with("mcp_http_request_duration_seconds_count")
+                    && line.contains("route=\"/timing-head/{id}\"")
+            })
+            .collect();
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("phase=\"complete\"") && line.ends_with(" 1")));
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("phase=\"cancelled\"")));
     }
 
     struct Frames(std::collections::VecDeque<Frame<Bytes>>);
