@@ -56,6 +56,8 @@ pub(crate) async fn tenants_create_returns_503_without_store() {
 pub(crate) struct FakeTenantStore {
     tenants: std::sync::Mutex<Vec<waygate_tenants::Tenant>>,
     fail_delete: bool,
+    lists: std::sync::atomic::AtomicUsize,
+    bounded_lists: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeTenantStore {
@@ -63,6 +65,8 @@ impl FakeTenantStore {
         Self {
             tenants: std::sync::Mutex::new(tenants),
             fail_delete: false,
+            lists: Default::default(),
+            bounded_lists: Default::default(),
         }
     }
 
@@ -70,6 +74,8 @@ impl FakeTenantStore {
         Self {
             tenants: std::sync::Mutex::new(tenants),
             fail_delete: true,
+            lists: Default::default(),
+            bounded_lists: Default::default(),
         }
     }
 }
@@ -110,9 +116,21 @@ impl waygate_tenants::TenantStore for FakeTenantStore {
             .cloned())
     }
     async fn list(&self) -> Result<Vec<waygate_tenants::Tenant>, waygate_tenants::TenantError> {
+        self.lists.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut v = self.tenants.lock().unwrap().clone();
         v.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(v)
+    }
+    async fn list_bounded(
+        &self,
+        limit: u16,
+    ) -> Result<Vec<waygate_tenants::Tenant>, waygate_tenants::TenantError> {
+        self.bounded_lists
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut rows = self.tenants.lock().unwrap().clone();
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        rows.truncate(usize::from(limit));
+        Ok(rows)
     }
     async fn update(
         &self,
@@ -174,6 +192,143 @@ pub(crate) fn tenant_fixture(id: &str, status: &str) -> waygate_tenants::Tenant 
         created_at: now,
         updated_at: now,
     }
+}
+
+#[tokio::test]
+async fn bounded_selector_keeps_the_active_tenant_beyond_the_first_page() {
+    let store = Arc::new(FakeTenantStore::with(
+        (0..60)
+            .map(|i| tenant_fixture(&format!("t{i:03}"), "active"))
+            .collect(),
+    ));
+    let app = dashboard_router(
+        state_with_tenant_store(store.clone()).await,
+        DashboardAuth::Disabled,
+    );
+    let (status, body) = body_of(app, "/t/t055/servers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("t055 display"));
+    assert!(
+        body.contains("value=\"t055\" selected"),
+        "active tenant must remain selected: {body}"
+    );
+    assert!(
+        !body.contains("value=\"t049\""),
+        "active tenant displaces the final visible option"
+    );
+    assert_eq!(
+        store
+            .bounded_lists
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(store.lists.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn badge_and_palette_requests_skip_unused_selector_reads() {
+    let store = Arc::new(FakeTenantStore::with(vec![tenant_fixture(
+        "default", "active",
+    )]));
+    let app = dashboard_router(
+        state_with_tenant_store(store.clone()).await,
+        DashboardAuth::Disabled,
+    );
+    let (status, _) = body_of(app.clone(), "/t/default/badge/decisions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(store.lists.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        store
+            .bounded_lists
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    let (status, _) = body_of(app.clone(), "/t/default/search?q=default").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        store.lists.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "only the palette's own tenant search reads the registry"
+    );
+    assert_eq!(
+        store
+            .bounded_lists
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    let (status, _) = body_of(app, "/t/missing/badge/decisions").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn activity_comparison_keeps_full_page_tenant_navigation() {
+    let store = Arc::new(FakeTenantStore::with(vec![tenant_fixture(
+        "default", "active",
+    )]));
+    let app = dashboard_router(
+        state_with_tenant_store(store.clone()).await,
+        DashboardAuth::Disabled,
+    );
+    let (status, body) = body_of(app, "/t/default/activity/compare?a=00000000-0000-0000-0000-000000000001&b=00000000-0000-0000-0000-000000000002").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("sidebar__tenant-select"));
+    assert_eq!(
+        store
+            .bounded_lists
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[tokio::test]
+async fn fragment_json_and_stream_requests_skip_selector_reads() {
+    let store = Arc::new(FakeTenantStore::with(vec![tenant_fixture(
+        "default", "active",
+    )]));
+    let app = dashboard_router(
+        state_with_tenant_store(store.clone()).await,
+        DashboardAuth::Disabled,
+    );
+    for path in [
+        "/t/default/assist/context?page=/servers",
+        "/t/default/agent_chat/bootstrap",
+        "/t/default/agent_chat/conversations",
+        "/t/default/decisions-log/rows",
+        "/t/default/policy_bundles/policy",
+    ] {
+        let (status, _) = body_of(app.clone(), path).await;
+        assert_ne!(status, StatusCode::NOT_FOUND);
+    }
+    for path in [
+        "/t/default/agent_chat/stream",
+        "/t/default/agent_chat/approve",
+        "/t/default/chat/stream",
+        "/t/default/agent_review/policy",
+        "/t/default/classification_audit/run",
+        "/t/default/policy_bundles/diagnostics",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    }
+    assert_eq!(
+        store
+            .bounded_lists
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(store.lists.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let (status, _) = body_of(app, "/t/missing/agent_chat/bootstrap").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 /// Build an `AdminState` with the tenants store wired + a real

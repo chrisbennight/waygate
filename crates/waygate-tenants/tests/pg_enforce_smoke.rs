@@ -37,6 +37,35 @@ fn principal(tenant: &str) -> Principal {
 }
 
 #[tokio::test]
+async fn bounded_tenant_navigation_reads_keep_stable_order_and_limit() {
+    use waygate_tenants::{PgTenantStore, TenantStatus, TenantStore};
+    let Ok(url) = env::var("AUDIT_DATABASE_URL") else {
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+    sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
+    let store = PgTenantStore::new(pool);
+    let ids = [
+        format!("bounded-a-{}", Uuid::new_v4()),
+        format!("bounded-z-{}", Uuid::new_v4()),
+    ];
+    for id in &ids {
+        store.create(id, id, TenantStatus::Active).await.unwrap();
+    }
+    assert!(store.list_bounded(0).await.unwrap().is_empty());
+    let rows = store.list_bounded(2).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].id < rows[1].id);
+    for id in &ids {
+        assert!(store.delete(id).await.unwrap());
+    }
+}
+
+#[tokio::test]
 async fn enricher_transitions_principal_across_active_suspended_missing() {
     let Ok(url) = env::var("AUDIT_DATABASE_URL") else {
         eprintln!("skipping pg smoke: AUDIT_DATABASE_URL not set");

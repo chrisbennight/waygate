@@ -97,6 +97,13 @@ pub trait TenantStore: Send + Sync {
     /// dashboard rendering.
     async fn list(&self) -> Result<Vec<Tenant>, TenantError>;
 
+    /// First `limit` tenants in stable id order, for bounded navigation.
+    async fn list_bounded(&self, limit: u16) -> Result<Vec<Tenant>, TenantError> {
+        let mut rows = self.list().await?;
+        rows.truncate(usize::from(limit));
+        Ok(rows)
+    }
+
     /// Update mutable fields. Either `display_name` or `status`
     /// can be `None` to leave the existing value alone. `Ok(None)`
     /// when the id doesn't exist.
@@ -185,6 +192,16 @@ impl TenantStore for PgTenantStore {
              ORDER BY id ASC
             "#,
         )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(TenantError::Sqlx)
+    }
+
+    async fn list_bounded(&self, limit: u16) -> Result<Vec<Tenant>, TenantError> {
+        sqlx::query_as::<_, Tenant>(
+            "SELECT id, display_name, status, created_at, updated_at FROM tenants ORDER BY id ASC LIMIT $1",
+        )
+        .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
         .map_err(TenantError::Sqlx)
