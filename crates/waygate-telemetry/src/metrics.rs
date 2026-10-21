@@ -30,6 +30,125 @@ use prometheus::{
 
 use crate::registry;
 
+/// Transport milestones. First data can be an SSE keepalive; it does not
+/// replace the model's first-meaningful-output metric.
+#[derive(Clone, Copy)]
+pub enum HttpRequestPhase {
+    Headers,
+    FirstData,
+    Complete,
+    Error,
+    Cancelled,
+}
+
+impl HttpRequestPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Headers => "headers",
+            Self::FirstData => "first_data",
+            Self::Complete => "complete",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// `route` must come from the router's matched template, or `unmatched`.
+/// Never pass a raw request path, query string, or upstream URL.
+pub fn record_http_request_phase(
+    route: &str,
+    method: &str,
+    status: Option<u16>,
+    phase: HttpRequestPhase,
+    seconds: f64,
+) {
+    static METRIC: OnceLock<HistogramVec> = OnceLock::new();
+    let metric = METRIC.get_or_init(|| {
+        register_histogram_vec_with_registry!(
+            "mcp_http_request_duration_seconds",
+            "Elapsed HTTP request time at transport milestones.",
+            &["route", "method", "status", "phase"],
+            vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+                300.0, 1800.0, 3600.0
+            ],
+            registry()
+        )
+        .expect("register mcp_http_request_duration_seconds")
+    });
+    let method = match method {
+        "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS" | "CONNECT" | "TRACE" => {
+            method
+        }
+        _ => "OTHER",
+    };
+    let status = status.map_or_else(|| "none".to_owned(), |status| status.to_string());
+    metric
+        .with_label_values(&[route, method, &status, phase.as_str()])
+        .observe(seconds);
+}
+
+/// Closed gateway stages outside the existing MCP/upstream timers.
+#[derive(Clone, Copy)]
+pub enum RequestStage {
+    Authentication,
+    Preparse,
+    TenantMetadata,
+}
+
+impl RequestStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Authentication => "authentication",
+            Self::Preparse => "preparse",
+            Self::TenantMetadata => "tenant_metadata",
+        }
+    }
+}
+
+/// Drop before invoking the next handler, so the stage excludes downstream work.
+pub struct RequestStageTimer {
+    stage: RequestStage,
+    started: std::time::Instant,
+}
+
+impl RequestStageTimer {
+    pub fn start(stage: RequestStage) -> Self {
+        Self {
+            stage,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for RequestStageTimer {
+    fn drop(&mut self) {
+        static METRIC: OnceLock<HistogramVec> = OnceLock::new();
+        let seconds = self.started.elapsed().as_secs_f64();
+        METRIC
+            .get_or_init(|| {
+                register_histogram_vec_with_registry!(
+                    "mcp_request_stage_duration_seconds",
+                    "Gateway stage duration, excluding downstream handlers.",
+                    &["stage"],
+                    vec![
+                        0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+                        5.0, 10.0, 30.0
+                    ],
+                    registry()
+                )
+                .expect("register mcp_request_stage_duration_seconds")
+            })
+            .with_label_values(&[self.stage.as_str()])
+            .observe(seconds);
+        tracing::debug!(
+            stage = self.stage.as_str(),
+            seconds,
+            "gateway request stage completed"
+        );
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Handles (lazy, registered on first use)
 // -----------------------------------------------------------------------------

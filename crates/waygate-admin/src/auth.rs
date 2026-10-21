@@ -144,6 +144,9 @@ pub async fn session_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
+    let timer = waygate_telemetry::metrics::RequestStageTimer::start(
+        waygate_telemetry::metrics::RequestStage::Authentication,
+    );
     if let DashboardAuth::Disabled = &auth {
         // Dev short-circuit. Loud at startup (see waygate-server main), quiet
         // per-request so we don't drown the log stream.
@@ -157,11 +160,13 @@ pub async fn session_middleware(
             assurance: SessionAssurance::default(),
             exp: now_unix() + 86_400,
         });
+        drop(timer);
         return next.run(req).await;
     }
 
     let path = req.uri().path().to_owned();
     if is_public_path(&path) {
+        drop(timer);
         return next.run(req).await;
     }
 
@@ -202,6 +207,7 @@ pub async fn session_middleware(
             req.extensions_mut()
                 .insert(CsrfToken(session.csrf_token.clone()));
             req.extensions_mut().insert(session);
+            drop(timer);
             next.run(req).await
         }
         Err(e) => {

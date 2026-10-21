@@ -155,6 +155,22 @@ Pull-based, scraped at `/metrics`; all registered in
 fleet-state gauges use `gateway_`, and model usage metrics use `gen_ai_`.
 Metric semantics and operational uses:
 
+- `mcp_http_request_duration_seconds{route,method,status,phase}` measures from
+  entry to the routed HTTP service. `headers` includes authentication and
+  pre-parse work; `first_data` is the first nonempty body frame, which can be
+  an SSE keepalive and is separate from meaningful model output. `complete`,
+  `error`, and `cancelled` end the observation when the application body is
+  produced, fails, or is dropped. These do not measure client receipt or paint.
+  `status=none` means cancellation before response headers. Routes are matched
+  templates or `unmatched`; methods outside the standard set share `OTHER`.
+  HTML responses also carry `Server-Timing: gateway;dur=...` through headers.
+- `mcp_request_stage_duration_seconds{stage}` covers authentication,
+  pre-parse governance, and tenant metadata, excluding downstream handlers.
+  Matching debug events retain request-trace correlation. Existing upstream,
+  queue, policy, evidence, and model metrics describe their own stages. Read
+  each boundary directly; subtracting independent percentile series does not
+  give a request's gateway overhead. Response bodies stay unbuffered and
+  preserve trailers. The gateway dashboard exposes these timing series.
 - `mcp_server_operation_duration_seconds{method,outcome}` — gateway-as-server
   handling time (semconv `mcp.server.operation.duration`); `outcome` is
   `ok`/`error`, where a tool-level `isError` counts as `error`.

@@ -32,6 +32,7 @@ mod mcp_preparse_gate;
 mod process_mode;
 mod reconnect_scheduler;
 mod reload;
+mod request_timing;
 mod retention_config;
 mod skills_git;
 mod startup_listener;
@@ -1919,7 +1920,9 @@ async fn gateway_main() -> anyhow::Result<()> {
     } else {
         None
     };
-    let app = app.layer(TraceLayer::new_for_http());
+    let app = app
+        .layer(axum::middleware::from_fn(request_timing::observe))
+        .layer(TraceLayer::new_for_http());
 
     // Trim trailing slashes before routing so `/admin/` reaches the same
     // handler as `/admin`. axum 0.8's nest matches the bare prefix but not the
