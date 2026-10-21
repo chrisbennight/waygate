@@ -382,7 +382,10 @@ struct Report {
 
 impl Report {
     fn blocked_count(&self) -> Option<usize> {
-        if self.unavailable || matches!(self.catalog, CatalogRows::Unavailable) {
+        if self.unavailable
+            || matches!(self.catalog, CatalogRows::Unavailable)
+            || self.servers.iter().any(|server| server.truncated)
+        {
             return None;
         }
         Some(self.servers.iter().map(|server| server.tools.len()).sum())
@@ -612,6 +615,13 @@ mod tests {
             "a failed catalog cannot establish an empty inventory"
         );
         report.catalog = CatalogRows::NotConfigured;
+        report.servers[0].truncated = true;
+        assert_eq!(
+            report.blocked_count(),
+            None,
+            "a capped scan cannot establish an empty inventory"
+        );
+        report.servers[0].truncated = false;
         report.unavailable = true;
         assert_eq!(report.blocked_count(), None);
         let html = BlockedToolsPage {
