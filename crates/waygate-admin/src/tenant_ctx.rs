@@ -240,6 +240,7 @@ fn needs_selector(request: &Request) -> bool {
         "/tools/drawer",
         "/activity/rows",
         "/activity/{id}",
+        "/decisions-log/rows",
         "/overview/blocked-tools",
         "/assist/context",
         "/agent_chat/bootstrap",
@@ -251,6 +252,7 @@ fn needs_selector(request: &Request) -> bool {
         "/agent_review/policy",
         "/classification_audit/run",
         "/policy_bundles/diagnostics",
+        "/policy_bundles/policy",
     ]
     .iter()
     .any(|suffix| path.ends_with(suffix))

@@ -281,7 +281,7 @@ async fn activity_comparison_keeps_full_page_tenant_navigation() {
 }
 
 #[tokio::test]
-async fn assistant_json_and_stream_requests_skip_selector_reads() {
+async fn fragment_json_and_stream_requests_skip_selector_reads() {
     let store = Arc::new(FakeTenantStore::with(vec![tenant_fixture(
         "default", "active",
     )]));
@@ -293,6 +293,8 @@ async fn assistant_json_and_stream_requests_skip_selector_reads() {
         "/t/default/assist/context?page=/servers",
         "/t/default/agent_chat/bootstrap",
         "/t/default/agent_chat/conversations",
+        "/t/default/decisions-log/rows",
+        "/t/default/policy_bundles/policy",
     ] {
         let (status, _) = body_of(app.clone(), path).await;
         assert_ne!(status, StatusCode::NOT_FOUND);
