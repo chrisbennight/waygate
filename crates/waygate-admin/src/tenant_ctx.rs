@@ -249,6 +249,8 @@ fn needs_selector(request: &Request) -> bool {
         "/agent_chat/conversations/{id}",
         "/chat/stream",
         "/agent_review/policy",
+        "/classification_audit/run",
+        "/policy_bundles/diagnostics",
     ]
     .iter()
     .any(|suffix| path.ends_with(suffix))

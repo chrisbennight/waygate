@@ -302,6 +302,8 @@ async fn assistant_json_and_stream_requests_skip_selector_reads() {
         "/t/default/agent_chat/approve",
         "/t/default/chat/stream",
         "/t/default/agent_review/policy",
+        "/t/default/classification_audit/run",
+        "/t/default/policy_bundles/diagnostics",
     ] {
         let response = app
             .clone()
