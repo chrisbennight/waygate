@@ -136,15 +136,26 @@ async fn serve(
     RequestPath((version, path)): RequestPath<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(asset) = assets.files.get(&path) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    if version != assets.version {
-        // Rolling deployments may route an old page to a newer process. Use
-        // the revalidated legacy URL instead of caching new bytes under the
-        // old immutable identity.
+    let asset = assets.files.get(&path);
+    if version != assets.version || asset.is_none() {
+        // Old pages and relative custom CSS dependencies can reference files
+        // absent from this snapshot. Keep their public static URL available
+        // without caching different bytes under an immutable identity.
+        if path.split('/').any(|part| {
+            part.is_empty()
+                || matches!(part, "." | "..")
+                || part.contains('\\')
+                || part.chars().any(char::is_control)
+        }) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
         let mut location = url::Url::parse("http://localhost/").expect("fixed base URL");
-        location.set_path(&format!("/admin/static/{path}"));
+        location
+            .path_segments_mut()
+            .expect("fixed hierarchical URL")
+            .clear()
+            .extend(["admin", "static"])
+            .extend(path.split('/'));
         return (
             StatusCode::TEMPORARY_REDIRECT,
             [
@@ -154,6 +165,7 @@ async fn serve(
         )
             .into_response();
     }
+    let asset = asset.expect("the current snapshot contains this asset");
     let current_tag = asset
         .etag
         .to_str()
@@ -232,6 +244,55 @@ fn encode_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unavailable_snapshots_and_relative_custom_dependencies_use_legacy_urls() {
+        let assets = Arc::new(Assets::default());
+        let stylesheet =
+            url::Url::parse("https://example.test/admin/static/v/old/css/fonts.css").unwrap();
+        let font = stylesheet.join("../fonts/custom.woff2").unwrap();
+        for (path, expected) in [
+            ("css/base.css", "/admin/static/css/base.css"),
+            (
+                font.path().strip_prefix("/admin/static/v/old/").unwrap(),
+                "/admin/static/fonts/custom.woff2",
+            ),
+        ] {
+            let response = serve(
+                State(assets.clone()),
+                RequestPath(("old".into(), path.into())),
+                HeaderMap::new(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+            assert_eq!(response.headers()[header::LOCATION], expected);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+        for path in [
+            "../private",
+            "fonts/../../private",
+            "fonts\\private",
+            "//other.example/asset",
+        ] {
+            let response = serve(
+                State(assets.clone()),
+                RequestPath(("old".into(), path.into())),
+                HeaderMap::new(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        let response = serve(
+            State(assets),
+            RequestPath(("old".into(), "fonts/%2e%2e/private".into())),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "/admin/static/fonts/%252e%252e/private"
+        );
+    }
 
     #[test]
     fn bundle_identity_tracks_override_bytes_and_retains_snapshot() {

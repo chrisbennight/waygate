@@ -283,5 +283,7 @@ async fn versioned_stylesheet_fonts_resolve_and_old_versions_redirect_without_ca
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(response.headers()["location"], "/admin/static/missing.css");
+    assert_eq!(response.headers()["cache-control"], "no-store");
 }

@@ -106,9 +106,10 @@ Compression applies only to the static service.
 
 The legacy `/admin/static/...` service remains available with revalidation.
 An unavailable bundle snapshot falls back to these URLs. Restart the gateway
-after changing overridden assets. During a rolling deployment, an unknown
-version of a known asset redirects without caching to its legacy URL, so a
-process never serves different bytes under an immutable version.
+after changing overridden assets. An unavailable versioned file redirects
+without caching to its legacy URL. This also preserves relative references to
+custom files and recovery when another process cannot load its snapshot;
+a process never serves different bytes under an immutable version.
 
 ## Tenant selector + cross-tenant banner
 

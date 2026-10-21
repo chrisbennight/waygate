@@ -1285,6 +1285,10 @@ pub(crate) async fn every_rendered_icon_resolves_in_spritesheet() {
     let app = dashboard_router(empty_state().await, DashboardAuth::Disabled);
     let (status, body) = body_of(app, "/").await;
     assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.contains("/admin/static/lucide.svg#"),
+        "shared page icons must use the versioned sprite"
+    );
     let sprite = std::fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static/lucide.svg"),
     )
