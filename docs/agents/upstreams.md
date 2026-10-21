@@ -850,7 +850,8 @@ sessions. Each dial still resolves and checks the destination; it reuses the
 client only when the host, port, and complete resolved address set match.
 The client retains at most four idle connections per host for 30 seconds.
 MCP sessions, caller identity, credentials, response limits, and cancellation
-remain separate for each call. A changed destination builds a new client.
+remain separate for each call. A changed destination replaces the lane's cached
+client; in-flight sessions retain their own original pinned client.
 Connections using mTLS build a fresh client on every dial so rotated certificate
 and trust files take effect as before.
 
