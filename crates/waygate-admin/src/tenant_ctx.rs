@@ -239,7 +239,6 @@ fn needs_selector(request: &Request) -> bool {
         "/servers/config",
         "/tools/drawer",
         "/activity/rows",
-        "/activity/compare",
         "/activity/{id}",
         "/overview/blocked-tools",
     ]

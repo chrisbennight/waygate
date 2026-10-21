@@ -260,6 +260,26 @@ async fn badge_and_palette_requests_skip_unused_selector_reads() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn activity_comparison_keeps_full_page_tenant_navigation() {
+    let store = Arc::new(FakeTenantStore::with(vec![tenant_fixture(
+        "default", "active",
+    )]));
+    let app = dashboard_router(
+        state_with_tenant_store(store.clone()).await,
+        DashboardAuth::Disabled,
+    );
+    let (status, body) = body_of(app, "/t/default/activity/compare?a=00000000-0000-0000-0000-000000000001&b=00000000-0000-0000-0000-000000000002").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("sidebar__tenant-select"));
+    assert_eq!(
+        store
+            .bounded_lists
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
 /// Build an `AdminState` with the tenants store wired + a real
 /// `InMemorySink` evidence sink — tenant edit/delete audit via
 /// `record_required` (fail-closed), so a NullSink would turn the
