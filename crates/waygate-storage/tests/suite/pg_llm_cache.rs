@@ -17,6 +17,119 @@ use waygate_storage::{
 };
 
 #[tokio::test]
+async fn cache_provider_applies_the_tenant_cap_with_each_write() {
+    use waygate_evidence::cache::{CacheStoreRequest, LlmCache};
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("cache-cap-provider-{}", Uuid::new_v4());
+    let cache = waygate_storage::PgLlmCache::new(pool.clone()).with_max_rows_per_tenant(Some(1));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+    let writes = (0..16).map(|index| {
+        let cache = cache.clone();
+        let tenant = tenant.clone();
+        let barrier = barrier.clone();
+        async move {
+            barrier.wait().await;
+            cache
+                .put(CacheStoreRequest {
+                    canonical_request: format!("request-{index}"),
+                    tenant_id: tenant.clone(),
+                    principal_issuer: Some("test-issuer".into()),
+                    principal_sub: Some("alice".into()),
+                    model_alias: "alias".into(),
+                    model_served: None,
+                    provider: "openrouter".into(),
+                    body: json!({"index":index}),
+                    ttl: Duration::from_secs(60),
+                })
+                .await;
+        }
+    });
+    futures::future::join_all(writes).await;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM llm_cache WHERE tenant_id=$1")
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    sqlx::query("DELETE FROM llm_cache WHERE tenant_id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_locked_optional_write_ends_without_leaking_pool_settings() {
+    use waygate_evidence::cache::{CacheStoreRequest, LlmCache};
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let writer = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&env::var("AUDIT_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let original_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&writer)
+        .await
+        .unwrap();
+    let cache = waygate_storage::PgLlmCache::new(writer.clone());
+    let tenant = format!("cache-lock-budget-{}", Uuid::new_v4());
+    let mut entry = CacheStoreRequest {
+        canonical_request: "request".into(),
+        tenant_id: tenant.clone(),
+        principal_issuer: Some("issuer".into()),
+        principal_sub: Some("alice".into()),
+        model_alias: "alias".into(),
+        model_served: None,
+        provider: "openrouter".into(),
+        body: json!({"version":1}),
+        ttl: Duration::from_secs(60),
+    };
+    cache.put(entry.clone()).await;
+    let key = cache_key(
+        &entry.canonical_request,
+        &tenant,
+        Some("issuer"),
+        Some("alice"),
+    );
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT cache_key FROM llm_cache WHERE cache_key=$1 FOR UPDATE")
+        .bind(&key)
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    entry.body = json!({"version":2});
+    tokio::time::timeout(Duration::from_secs(5), cache.put(entry))
+        .await
+        .expect("a lock must not retain an optional write");
+    let current_timeout: String = tokio::time::timeout(
+        Duration::from_secs(5),
+        sqlx::query_scalar("SHOW statement_timeout").fetch_one(&writer),
+    )
+    .await
+    .expect("the writer pool remains usable")
+    .unwrap();
+    assert_eq!(current_timeout, original_timeout);
+    blocker.rollback().await.unwrap();
+    assert_eq!(
+        cache
+            .get("request", &tenant, Some("issuer"), Some("alice"))
+            .await
+            .unwrap()
+            .body,
+        json!({"version":1})
+    );
+    sqlx::query("DELETE FROM llm_cache WHERE tenant_id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn provider_cache_isolates_issuers_and_never_reuses_legacy_entries() {
     use waygate_evidence::cache::{CacheStoreRequest, LlmCache};
     let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {

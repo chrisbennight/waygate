@@ -13,6 +13,20 @@
 use std::time::Duration;
 
 use serde_json::Value;
+use sqlx::pool::PoolConnection;
+use sqlx::{Acquire, Postgres};
+
+// Interrupted SQL must not return to the shared accounting/control pool.
+// Completed transactions disarm the guard and retain normal connection reuse.
+struct WriteConnection(Option<PoolConnection<Postgres>>);
+
+impl Drop for WriteConnection {
+    fn drop(&mut self) {
+        if let Some(connection) = self.0.as_mut() {
+            connection.close_on_drop();
+        }
+    }
+}
 
 /// A cache hit: the cached client-facing response, the served model, and the
 /// provider that served it — all replayed into the hit's `InferenceRecord`.
@@ -210,11 +224,14 @@ pub async fn run_llm_cache_sweep_scheduler(
 /// tenant's entries. `max_rows` is clamped to `>= 1` (a cap of 0 would evict the
 /// entire tenant — the `NOT IN (empty set)` would match every row). Returns the
 /// number of rows evicted.
-pub async fn enforce_tenant_cap(
-    pool: &sqlx::PgPool,
+pub async fn enforce_tenant_cap<'e, E>(
+    executor: E,
     tenant_id: &str,
     max_rows: i64,
-) -> Result<u64, sqlx::Error> {
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let max_rows = max_rows.max(1);
     let affected = sqlx::query(
         "DELETE FROM llm_cache WHERE tenant_id = $1 AND cache_key NOT IN \
@@ -223,7 +240,7 @@ pub async fn enforce_tenant_cap(
     )
     .bind(tenant_id)
     .bind(max_rows)
-    .execute(pool)
+    .execute(executor)
     .await?
     .rows_affected();
     Ok(affected)
@@ -307,24 +324,38 @@ impl waygate_evidence::cache::LlmCache for PgLlmCache {
             response_body: entry.body,
             ttl: entry.ttl,
         };
-        match put_cached(&self.pool, &row).await {
-            Ok(()) => {
-                // Bound the tenant's footprint (evict-oldest) so a within-TTL
-                // diversity burst can't balloon the table. Best-effort: a cap
-                // failure leaves the just-stored entry in place — the TTL sweep
-                // still reclaims eventually.
-                if let Some(max_rows) = self.max_rows_per_tenant {
-                    if let Err(e) = enforce_tenant_cap(&self.pool, &row.tenant_id, max_rows).await {
-                        tracing::warn!(
-                            error = %e,
-                            "llm cache tenant-cap eviction failed (best-effort)",
-                        );
-                    }
+        let stored = async {
+            let mut connection = WriteConnection(Some(self.pool.acquire().await?));
+            let mut transaction = connection.0.as_mut().expect("acquired cache connection").begin().await?;
+            // These limits are transaction-local and cannot affect later
+            // accounting work that reuses a successfully returned connection.
+            sqlx::query("SELECT set_config('statement_timeout', '40ms', true), set_config('lock_timeout', '20ms', true)")
+                .execute(&mut *transaction).await?;
+            if let Some(max_rows) = self.max_rows_per_tenant {
+                // A cancelled optional write must not commit an insertion
+                // while skipping the configured eviction.
+                // Serialize the tenant's insert-and-evict pair so concurrent
+                // uncommitted insertions cannot each evade the other's cap.
+                let admitted: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended('waygate-llm-cache-cap:' || $1, 0))")
+                    .bind(&row.tenant_id).fetch_one(&mut *transaction).await?;
+                if !admitted {
+                    transaction.rollback().await?;
+                    drop(connection.0.take());
+                    tracing::debug!("skipping optional cache population while the tenant cap is busy");
+                    return Ok::<(), sqlx::Error>(());
                 }
+                put_cached(&mut *transaction, &row).await?;
+                enforce_tenant_cap(&mut *transaction, &row.tenant_id, max_rows).await?;
+            } else {
+                put_cached(&mut *transaction, &row).await?;
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "llm cache store failed; dropping (best-effort)");
-            }
+            transaction.commit().await?;
+            drop(connection.0.take());
+            Ok(())
+        }
+        .await;
+        if let Err(error) = stored {
+            tracing::warn!(%error, "llm cache store failed; dropping (best-effort)");
         }
     }
 }
