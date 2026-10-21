@@ -532,6 +532,7 @@ async fn decisions_badge(
 fn page_routes(state: Arc<AdminState>) -> Router<()> {
     Router::new()
         .route("/", get(overview))
+        .route("/overview/blocked-tools", get(overview_blocked_tools))
         .route("/badge/decisions", get(decisions_badge))
         .route("/connect", get(connect_page))
         .route("/servers", get(servers_page))

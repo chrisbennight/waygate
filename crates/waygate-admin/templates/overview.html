@@ -27,7 +27,9 @@
     {% else %}
         {% if upstreams_down > 0 %}<span class="state-err">{{ upstreams_down }} down</span>{% endif %}{% if upstreams_down > 0 && upstreams_degraded > 0 %} and {% endif %}{% if upstreams_degraded > 0 %}<span class="chip chip--warn">{{ upstreams_degraded }} degraded</span>{% endif %} of <a href="{{ self.chrome.nav_url("/servers") }}">{{ upstreams_total }} upstreams</a>.
     {% endif %}
-    {% if attention_items.is_empty() %}
+    {% if blocked_tools_pending %}
+        <a href="#attention">Review attention items below.</a>
+    {% else if attention_items.is_empty() %}
         Nothing needs your attention.
     {% else %}
         <a href="#attention">{{ attention_items.len() }} item{% if attention_items.len() != 1 %}s{% endif %} need{% if attention_items.len() == 1 %}s{% endif %} attention.</a>
@@ -57,7 +59,7 @@
 {% when None %}
 {% endmatch %}
 
-{% if !attention_items.is_empty() %}
+{% if !attention_items.is_empty() || blocked_tools_pending %}
 <section class="page-section" aria-label="Attention queue" id="attention">
     <h2 class="section-heading">Needs attention</h2>
     <div class="card card--table">
@@ -72,6 +74,15 @@
                 <a class="attn-link" href="{{ item.href }}">Review →</a>
             </li>
             {% endfor %}
+            {% if blocked_tools_pending %}
+            <li id="overview-blocked-tools"
+                hx-get="{{ self.chrome.nav_url("/overview/blocked-tools") }}"
+                hx-trigger="load" hx-swap="outerHTML" role="status">
+                <span class="attn-chip attn-chip--info">info</span>
+                <div class="attn-label">Checking blocked tools…</div>
+                <a class="attn-link" href="{{ self.chrome.nav_url("/tools/blocked") }}">Review →</a>
+            </li>
+            {% endif %}
         </ul>
     </div>
 </section>
@@ -245,4 +256,8 @@
         </div>
     </div>
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ chrome.asset_url("/admin/static/js/htmx.min.js") }}"></script>
 {% endblock %}

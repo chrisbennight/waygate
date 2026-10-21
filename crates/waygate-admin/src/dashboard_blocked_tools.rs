@@ -380,6 +380,18 @@ struct Report {
     unavailable: bool,
 }
 
+impl Report {
+    fn blocked_count(&self) -> Option<usize> {
+        if self.unavailable
+            || matches!(self.catalog, CatalogRows::Unavailable)
+            || self.servers.iter().any(|server| server.truncated)
+        {
+            return None;
+        }
+        Some(self.servers.iter().map(|server| server.tools.len()).sum())
+    }
+}
+
 async fn read_report(state: &AdminState, tenant: &str, only: Option<&str>) -> Report {
     let catalog = CatalogRows::read(state, tenant).await;
     let default_tenant = tenant == waygate_core::TenantId::DEFAULT;
@@ -401,14 +413,16 @@ async fn read_report(state: &AdminState, tenant: &str, only: Option<&str>) -> Re
 }
 
 /// The number of tools the gateway does not run for `principal`'s tenant,
-/// or `None` when the principal lacks the page's admin gate.
+/// or `None` when the principal lacks the page's admin gate or the report is
+/// incomplete.
 pub(crate) async fn blocked_tool_count(
     state: &AdminState,
     principal: Option<&Principal>,
 ) -> Option<usize> {
     let principal = principal.filter(|principal| principal_has_dashboard_admin(Some(principal)))?;
-    let report = read_report(state, principal.tenant.as_str(), None).await;
-    (!report.unavailable).then(|| report.servers.iter().map(|server| server.tools.len()).sum())
+    read_report(state, principal.tenant.as_str(), None)
+        .await
+        .blocked_count()
 }
 
 /// Group each server's blocked tools by explanation, keeping the report's
@@ -592,6 +606,24 @@ mod tests {
 
     #[test]
     fn an_unavailable_report_does_not_claim_every_tool_is_admitted() {
+        let mut report = report(None, true, &[]);
+        assert_eq!(report.blocked_count(), Some(0));
+        report.catalog = CatalogRows::Unavailable;
+        assert_eq!(
+            report.blocked_count(),
+            None,
+            "a failed catalog cannot establish an empty inventory"
+        );
+        report.catalog = CatalogRows::NotConfigured;
+        report.servers[0].truncated = true;
+        assert_eq!(
+            report.blocked_count(),
+            None,
+            "a capped scan cannot establish an empty inventory"
+        );
+        report.servers[0].truncated = false;
+        report.unavailable = true;
+        assert_eq!(report.blocked_count(), None);
         let html = BlockedToolsPage {
             chrome: chrome(),
             insufficient_scope: false,

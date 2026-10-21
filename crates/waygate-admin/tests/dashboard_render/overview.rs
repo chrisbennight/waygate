@@ -229,10 +229,10 @@ pub(crate) async fn overview_changed_feed_filters_admin_mutation_to_allowlist() 
     );
 }
 
-/// The overview leads with status and omits an empty attention section.
+/// The overview leads with status and keeps a pending inventory explicit.
 /// Missing audit data renders a caption instead of unavailable figures.
 #[tokio::test]
-pub(crate) async fn overview_leads_with_status_sentence_and_skips_empty_attention() {
+pub(crate) async fn overview_leads_with_status_sentence_and_defers_blocked_inventory() {
     let app = dashboard_router(empty_state().await, DashboardAuth::Disabled);
     let (status, body) = body_of(app, "/").await;
     assert_eq!(status, StatusCode::OK);
@@ -241,12 +241,16 @@ pub(crate) async fn overview_leads_with_status_sentence_and_skips_empty_attentio
         "status sentence missing",
     );
     assert!(
-        body.contains("Nothing needs your attention."),
-        "all-clear clause missing from the status sentence",
+        body.contains("Review attention items below."),
+        "pending inventory must not be reported as all clear",
     );
     assert!(
-        !body.contains("Needs attention"),
-        "empty attention queue must not render a section",
+        body.contains("Checking blocked tools"),
+        "the blocked-tool summary loads separately",
+    );
+    assert!(
+        body.contains(r#"/js/htmx.min.js"></script>"#),
+        "the deferred summary requires the vendored htmx script"
     );
     assert!(
         !body.contains("Active approvals") && !body.contains("Expired-unused"),
