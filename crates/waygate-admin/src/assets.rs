@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
@@ -29,12 +29,6 @@ struct Asset {
     body: Bytes,
     content_type: &'static str,
     etag: HeaderValue,
-}
-
-pub(crate) fn static_dir() -> PathBuf {
-    std::env::var_os("GATEWAY_STATIC_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static"))
 }
 
 impl Assets {

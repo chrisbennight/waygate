@@ -17,6 +17,7 @@
 //! then the gateway logs a loud warning at startup and the route is
 //! effectively dev-only.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use askama::Template;
@@ -663,7 +664,9 @@ fn page_routes(state: Arc<AdminState>) -> Router<()> {
 ///   reachable both ways
 /// - `/admin/static/...` — assets, public, no auth
 pub fn router(state: Arc<AdminState>) -> Router<()> {
-    let static_dir = crate::assets::static_dir();
+    let static_dir = std::env::var_os("GATEWAY_STATIC_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static"));
     let assets = state
         .dashboard
         .assets
