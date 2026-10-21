@@ -1859,13 +1859,32 @@ impl UpstreamPool {
         let _depth_guard = SerializerDepthGuard {
             server: server.to_owned(),
         };
+        let call_timeout = self.call_timeout_for(&snapshot);
+        let call_deadline =
+            call_timeout.and_then(|duration| tokio::time::Instant::now().checked_add(duration));
         let wait_start = std::time::Instant::now();
-        let lane = entry.admit(resolve_isolation(&snapshot)).await;
-        let isolation = lane.isolation;
+        let admitted_lane = entry
+            .admit_with_budget(
+                server,
+                resolve_isolation(&snapshot),
+                call_deadline,
+                &mrtr.cancellation,
+            )
+            .await;
         waygate_telemetry::metrics::record_identity_cell_wait(
             server,
             wait_start.elapsed().as_secs_f64(),
         );
+        let lane = match admitted_lane {
+            Ok(lane) => lane,
+            Err(error) => {
+                // No upstream request was sent, so queue pressure and caller
+                // cancellation are not upstream health failures.
+                permit.neutral();
+                return Err(error);
+            }
+        };
+        let isolation = lane.isolation;
 
         // The `snapshot` above — and the Tier-A/Tier-C gates
         // + per-call IdentityContext built from it — predate admission. A
@@ -1896,10 +1915,7 @@ impl UpstreamPool {
             .map(|p| p.tenant.as_str())
             .unwrap_or(waygate_core::TenantId::DEFAULT);
 
-        let call_timeout = self.call_timeout_for(&snapshot);
         let response_limit = self.call_response_limit_for(&snapshot);
-        let call_deadline =
-            call_timeout.and_then(|duration| tokio::time::Instant::now().checked_add(duration));
         let trace_id = dispatch::call_trace_id();
         let mut attempts = 1_usize;
         let (inner_result, conn_guard) = match isolation {

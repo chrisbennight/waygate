@@ -290,6 +290,39 @@ pub(super) async fn dial_slots(
 }
 
 impl super::UpstreamEntry {
+    /// Waiting for capacity spends the same deadline as dispatch. Dropping
+    /// admission releases any partially acquired permit or slot guard.
+    pub(super) async fn admit_with_budget(
+        &self,
+        server: &str,
+        isolation: SessionIsolation,
+        deadline: Option<tokio::time::Instant>,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> Result<CallLane<'_>, McpError> {
+        let expires = async {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(McpError::internal_error(
+                format!("upstream `{server}` call was cancelled while waiting for capacity"),
+                Some(serde_json::json!({
+                    "error": "upstream_call_cancelled", "phase": "pre_dispatch", "retryable": false,
+                })),
+            )),
+            () = expires => Err(McpError::internal_error(
+                format!("upstream `{server}` call timed out while waiting for capacity"),
+                Some(serde_json::json!({
+                    "error": "upstream_admission_timeout", "phase": "pre_dispatch", "retryable": true,
+                })),
+            )),
+            lane = self.admit(isolation) => Ok(lane),
+        }
+    }
+
     pub(super) fn record_runtime_failure(&self, error_class: super::health::UpstreamErrorClass) {
         self.recovery
             .write()

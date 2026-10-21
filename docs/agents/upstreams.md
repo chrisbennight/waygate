@@ -867,6 +867,11 @@ tools:
   (default 300) for this server, with the same meaning and bounds: `0`
   disables the timeout, and any other value must be at least 5. It bounds tool
   calls, resource requests and file authorization requests. A tool call that
+  waits for upstream capacity spends the same timeout on queueing and dispatch.
+  Expiring in that queue returns `data.error = "upstream_admission_timeout"`,
+  `phase: "pre_dispatch"` and `retryable: true`, without sending an upstream
+  request or recording an upstream health failure. Caller cancellation also
+  ends the capacity wait, even when the timeout is disabled. A tool call that
   reaches it is cancelled as [upstream call cancellation](#upstream-call-cancellation)
   describes.
 - `call_response_max_bytes` replaces `GATEWAY_UPSTREAM_CALL_RESPONSE_MAX_BYTES`

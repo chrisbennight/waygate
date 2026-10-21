@@ -2805,6 +2805,52 @@ fn admitted_now<'a>(
         .expect("admission must not wait")
 }
 
+#[tokio::test(start_paused = true)]
+async fn admission_deadline_expires_without_taking_capacity() {
+    for isolation in [SessionIsolation::PerCall, SessionIsolation::Reuse] {
+        let entry = entry_with_lanes(1, true);
+        let held = admitted_now(&entry, isolation);
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let result = entry
+            .admit_with_budget("mock", isolation, Some(deadline), &cancellation)
+            .await;
+        let Err(error) = result else {
+            panic!("a full upstream must time out")
+        };
+        assert_eq!(tokio::time::Instant::now(), deadline);
+        let data = error.data.unwrap();
+        assert_eq!(data["error"], "upstream_admission_timeout");
+        assert_eq!(data["phase"], "pre_dispatch");
+        assert_eq!(data["retryable"], true);
+        drop(held);
+        let _next = admitted_now(&entry, isolation);
+    }
+}
+
+#[tokio::test]
+async fn admission_cancellation_releases_its_wait_without_a_timeout() {
+    use futures::FutureExt;
+
+    for isolation in [SessionIsolation::PerCall, SessionIsolation::Reuse] {
+        let entry = entry_with_lanes(1, true);
+        let held = admitted_now(&entry, isolation);
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let waiting = entry.admit_with_budget("mock", isolation, None, &cancellation);
+        tokio::pin!(waiting);
+        assert!(waiting.as_mut().now_or_never().is_none());
+        cancellation.cancel();
+        let Err(error) = waiting.await else {
+            panic!("a cancelled waiter must not be admitted")
+        };
+        let data = error.data.unwrap();
+        assert_eq!(data["error"], "upstream_call_cancelled");
+        assert_eq!(data["phase"], "pre_dispatch");
+        drop(held);
+        let _next = admitted_now(&entry, isolation);
+    }
+}
+
 /// An unbounded upstream admits more per-call calls than it has slots, all at
 /// once, and they leave every slot free for a reuse call.
 #[tokio::test]
