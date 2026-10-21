@@ -606,6 +606,7 @@ pub struct FederationPlane {
 /// plane: playground scenarios, activity saved views, MCP task rows, the
 /// try-it invocation handle, and the Overview change-feed filter.
 pub struct DashboardPlane {
+    pub(crate) assets: std::sync::OnceLock<Arc<crate::assets::Assets>>,
     /// Per-tenant Cedar playground saved-scenarios
     /// store. `Some` ⇒ the playground page renders the Saved
     /// scenarios sidebar + Save/Delete affordances; `None` ⇒
@@ -950,6 +951,7 @@ impl AdminState {
                 federated_peers_cache: None,
             },
             dashboard: DashboardPlane {
+                assets: std::sync::OnceLock::new(),
                 playground_scenarios: Capability::absent("playground scenario store not configured"),
                 activity_saved_views: Capability::absent("activity saved-views store not configured"),
                 try_invocation: None,

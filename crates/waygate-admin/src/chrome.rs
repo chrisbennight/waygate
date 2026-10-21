@@ -25,6 +25,7 @@ use crate::tenant_ctx::{self, TenantContext};
 /// the CSRF token page bodies embed in mutating forms. One per rendered page;
 /// built by [`PageChrome::build`] at the top of the handler.
 pub struct PageChrome {
+    pub(crate) assets: Option<std::sync::Arc<crate::assets::Assets>>,
     /// Page `<title>` and topbar heading.
     pub title: &'static str,
     /// Topbar environment chip — `SystemInfo::deployment_profile`
@@ -62,6 +63,7 @@ impl PageChrome {
         csrf_token: String,
     ) -> Self {
         Self {
+            assets: state.dashboard.assets.get().cloned(),
             title,
             env: state.system.deployment_profile,
             user,
@@ -77,5 +79,13 @@ impl PageChrome {
     /// `chrome.nav_url("/x")`.
     pub fn nav_url(&self, path: &str) -> String {
         tenant_ctx::nav_url(self.tenant_ctx.as_ref(), path)
+    }
+
+    /// Content-versioned public asset URL, retaining the ordinary static URL
+    /// when immutable caching is unavailable for this asset.
+    pub fn asset_url(&self, path: &str) -> String {
+        self.assets
+            .as_ref()
+            .map_or_else(|| path.to_owned(), |assets| assets.url(path))
     }
 }

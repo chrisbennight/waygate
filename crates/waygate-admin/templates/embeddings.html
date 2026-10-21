@@ -19,7 +19,7 @@
 {% if !invocation_ready %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#box") }}"/></svg>
         <p class="empty-state__title">Inference is not configured</p>
         <p class="empty-state__body">
             This gateway has no LLM invocation service wired (no model catalog /
@@ -94,5 +94,5 @@
 {# Embeddings posts the form and swaps the result fragment via htmx, which the
    dashboard loads per-page (not globally in layout.html). Without this the form
    would fall back to a native submit and never embed. #}
-<script src="/admin/static/js/htmx.min.js"></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/htmx.min.js") }}"></script>
 {% endblock %}

@@ -19,7 +19,7 @@
     <div class="card card--table">
         {% if !enabled %}
             <div class="empty-state">
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ sprite_url }}#alert-triangle"/></svg>
                 <p class="empty-state__title">API-key profiles store not configured</p>
                 <p class="empty-state__body">
                     Set <code>GATEWAY_DATABASE_URL</code> and restart to enable.
@@ -29,7 +29,7 @@
             </div>
         {% else if !is_admin %}
             <div class="empty-state">
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ sprite_url }}#shield-check"/></svg>
                 <p class="empty-state__title">Admin scope required</p>
                 <p class="empty-state__body">
                     You need <code>mcp:admin</code> to view API-key profiles —
@@ -40,14 +40,14 @@
             {% match error %}
             {% when Some with (msg) %}
                 <div class="empty-state empty-state--danger">
-                    <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                    <svg class="empty-state__icon" aria-hidden="true"><use href="{{ sprite_url }}#x-circle"/></svg>
                     <p class="empty-state__title">Couldn't load profiles</p>
                     <p class="empty-state__body">{{ msg }}</p>
                 </div>
             {% when None %}
                 {% if profiles.is_empty() %}
                     <div class="empty-state">
-                        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+                        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ sprite_url }}#box"/></svg>
                         <p class="empty-state__title">No profiles yet</p>
                         <p class="empty-state__body">
                             Profiles cap what an API key can do (TTL, scopes, servers,

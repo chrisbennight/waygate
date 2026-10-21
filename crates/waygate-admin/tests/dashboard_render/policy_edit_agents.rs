@@ -98,7 +98,7 @@ pub(crate) async fn policies_page_offers_inline_editor_for_admin() {
     );
     // The CM6 bundle + lint endpoint are wired onto the inline editor.
     assert!(
-        body.contains("/admin/static/js/codemirror.bundle.js"),
+        body.contains("/js/codemirror.bundle.js"),
         "CodeMirror bundle not loaded for the inline editor"
     );
     assert!(

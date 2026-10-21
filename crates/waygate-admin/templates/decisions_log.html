@@ -70,5 +70,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/admin/static/js/htmx.min.js"></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/htmx.min.js") }}"></script>
 {% endblock %}

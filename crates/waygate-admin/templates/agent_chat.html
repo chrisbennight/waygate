@@ -18,7 +18,7 @@
 {% if !configured %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#box") }}"/></svg>
         <p class="empty-state__title">Agent configuration is not available</p>
         <p class="empty-state__body">
             This gateway has no agent-config store wired (no database in this
@@ -29,7 +29,7 @@
 {% else if !inference_ready %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#message-square"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#message-square") }}"/></svg>
         <p class="empty-state__title">Inference is not configured</p>
         <p class="empty-state__body">
             This gateway has no LLM invocation service wired, so an agent has no
@@ -40,7 +40,7 @@
 {% else if agents.is_empty() %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#box") }}"/></svg>
         <p class="empty-state__title">No enabled chat agents</p>
         <p class="empty-state__body">
             Create and enable a <strong>chat</strong> agent on the
@@ -82,7 +82,7 @@
 
         <div class="chat-log" data-chat-log aria-live="polite">
             <div class="empty-state" data-chat-empty>
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#message-square"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#message-square") }}"/></svg>
                 <p class="empty-state__title">No messages yet</p>
                 <p class="empty-state__body">
                     Pick an agent and send a message. The agent can call its

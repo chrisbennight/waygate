@@ -215,6 +215,104 @@ async fn tenant_wide_budget_counts_all_principals() {
     cleanup(&pool, &tenant).await;
 }
 
+#[tokio::test]
+async fn overlapping_budgets_keep_independent_scopes_windows_and_current_limits() {
+    use rust_decimal::Decimal;
+
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("budget-overlap-{}", Uuid::now_v7());
+    let foreign = format!("budget-foreign-{}", Uuid::now_v7());
+    let cost = |value| CostBreakdown {
+        total_cost: Some(value),
+        ..Default::default()
+    };
+    insert_llm_usage(
+        &pool,
+        &usage(&tenant, "alice", "gpt-x", 100, 0),
+        &cost(Decimal::ONE),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE llm_usage SET ts = now() - interval '2 hours' WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    insert_llm_usage(
+        &pool,
+        &usage(&tenant, "alice", "gpt-x", 1, 1),
+        &cost(Decimal::new(25, 2)),
+    )
+    .await
+    .unwrap();
+    insert_llm_usage(
+        &pool,
+        &usage(&tenant, "bob", "gpt-y", 4, 4),
+        &cost(Decimal::new(10, 2)),
+    )
+    .await
+    .unwrap();
+    insert_llm_usage(
+        &pool,
+        &usage(&foreign, "alice", "gpt-x", 10000, 0),
+        &cost(Decimal::from(100)),
+    )
+    .await
+    .unwrap();
+
+    let global = budget(&tenant, None, None, 86400, Some(1000));
+    let principal = budget(&tenant, Some("alice"), None, 3600, Some(10));
+    let mut model = budget(&tenant, None, Some("gpt-x"), 86400, Some(110));
+    let mut exact = budget(&tenant, Some("alice"), Some("gpt-x"), 60, Some(3));
+    for limit in [&global, &principal, &model, &exact] {
+        upsert_llm_budget(&pool, limit).await.unwrap();
+    }
+    assert!(check_llm_budget(&pool, &tenant, Some("alice"), "gpt-x")
+        .await
+        .unwrap()
+        .is_none());
+
+    exact.max_total_tokens = Some(2);
+    upsert_llm_budget(&pool, &exact).await.unwrap();
+    assert_eq!(
+        check_llm_budget(&pool, &tenant, Some("alice"), "gpt-x")
+            .await
+            .unwrap()
+            .map(|e| e.dimension),
+        Some(BudgetDimension::Tokens)
+    );
+    exact.max_total_tokens = Some(3);
+    upsert_llm_budget(&pool, &exact).await.unwrap();
+    assert!(check_llm_budget(&pool, &tenant, Some("alice"), "gpt-x")
+        .await
+        .unwrap()
+        .is_none());
+
+    model.max_total_cost = Some(Decimal::new(125, 2));
+    upsert_llm_budget(&pool, &model).await.unwrap();
+    assert_eq!(
+        check_llm_budget(&pool, &tenant, None, "gpt-x")
+            .await
+            .unwrap()
+            .map(|e| e.dimension),
+        Some(BudgetDimension::Cost)
+    );
+    assert!(check_llm_budget(&pool, &tenant, Some("bob"), "gpt-y")
+        .await
+        .unwrap()
+        .is_none());
+    model.enabled = false;
+    upsert_llm_budget(&pool, &model).await.unwrap();
+    assert!(check_llm_budget(&pool, &tenant, Some("alice"), "gpt-x")
+        .await
+        .unwrap()
+        .is_none());
+    cleanup(&pool, &tenant).await;
+    cleanup(&pool, &foreign).await;
+}
+
 async fn cleanup(pool: &sqlx::PgPool, tenant: &str) {
     sqlx::query("DELETE FROM llm_usage WHERE tenant_id = $1")
         .bind(tenant)

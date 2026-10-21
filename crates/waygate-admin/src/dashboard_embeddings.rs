@@ -424,6 +424,7 @@ mod tests {
         // renders no form — so assert the CONFIGURED page directly here.
         let page = EmbeddingsPage {
             chrome: crate::chrome::PageChrome {
+                assets: None,
                 title: "Embeddings",
                 env: "dev",
                 user: None,

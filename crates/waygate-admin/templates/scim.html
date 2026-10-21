@@ -16,7 +16,7 @@
 {% if insufficient_scope %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#shield-check") }}"/></svg>
         <p class="empty-state__title">Admin scope required</p>
         <p class="empty-state__body">
             This page requires the <code>mcp:admin</code> scope. Your current
@@ -30,7 +30,7 @@
 {% else if !store_configured %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#alert-triangle") }}"/></svg>
         <p class="empty-state__title">SCIM store not configured</p>
         <p class="empty-state__body">
             Set <code>GATEWAY_DATABASE_URL</code> and restart to enable the
@@ -46,13 +46,13 @@
     <div class="card card--table">
         {% if users_load_error %}
             <div class="empty-state empty-state--danger">
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#x-circle") }}"/></svg>
                 <p class="empty-state__title">Couldn't load users</p>
                 <p class="empty-state__body">See gateway logs for details. The provisioning-log section below may still be accurate.</p>
             </div>
         {% else if users.is_empty() %}
             <div class="empty-state">
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#users"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#users") }}"/></svg>
                 <p class="empty-state__title">No SCIM users yet</p>
                 <p class="empty-state__body">
                     Users are provisioned by your IdP via <code>POST /scim/v2/Users</code> —
@@ -127,7 +127,7 @@
     <div class="card card--table">
         {% if provisioning_log_load_error %}
             <div class="empty-state empty-state--danger">
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#x-circle") }}"/></svg>
                 <p class="empty-state__title">Couldn't load the provisioning log</p>
                 <p class="empty-state__body">
                     See gateway logs. The audit_log still records every SCIM
@@ -136,7 +136,7 @@
             </div>
         {% else if provisioning_log.is_empty() %}
             <div class="empty-state">
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#box") }}"/></svg>
                 <p class="empty-state__title">No provisioning events yet</p>
                 <p class="empty-state__body">
                     The writer hook fires on every successful SCIM

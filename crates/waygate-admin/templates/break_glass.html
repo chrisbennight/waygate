@@ -22,7 +22,7 @@
 {% if insufficient_scope %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#shield-check") }}"/></svg>
         <p class="empty-state__title">Admin scope required</p>
         <p class="empty-state__body">
             This page requires the <code>mcp:admin</code> scope. Your current
@@ -37,7 +37,7 @@
 {% else if !store_configured %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#alert-triangle") }}"/></svg>
         <p class="empty-state__title">Break-glass store not configured</p>
         <p class="empty-state__body">
             Set <code>GATEWAY_DATABASE_URL</code> and restart to enable.
@@ -52,7 +52,7 @@
 {% when Some with (msg) %}
     <div class="card">
         <div class="empty-state empty-state--danger">
-            <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+            <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#x-circle") }}"/></svg>
             <p class="empty-state__title">Couldn't load break-glass tokens</p>
             <p class="empty-state__body">{{ msg }}</p>
         </div>
@@ -70,7 +70,7 @@
     <div class="card card--table">
         {% if active.is_empty() %}
             <div class="empty-state">
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#shield-check") }}"/></svg>
                 <p class="empty-state__title">No active break-glass tokens</p>
                 <p class="empty-state__body">
                     Nothing is currently bypassing the policy gate. Use the mint
@@ -124,13 +124,13 @@
     <div class="card card--table">
         {% if expired_load_error %}
             <div class="empty-state empty-state--danger">
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#x-circle") }}"/></svg>
                 <p class="empty-state__title">Couldn't load expired tokens</p>
                 <p class="empty-state__body">See gateway logs for details. The Active and Recently-used sections may still be accurate.</p>
             </div>
         {% else if expired.is_empty() %}
             <div class="empty-state">
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#check-circle"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#check-circle") }}"/></svg>
                 <p class="empty-state__title">Nothing expired unused</p>
                 <p class="empty-state__body">No token timed out without being claimed.</p>
             </div>
@@ -181,13 +181,13 @@
     <div class="card card--table">
         {% if recent_used_load_error %}
             <div class="empty-state empty-state--danger">
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#x-circle") }}"/></svg>
                 <p class="empty-state__title">Couldn't load used tokens</p>
                 <p class="empty-state__body">See gateway logs for details. The Active and Expired sections may still be accurate.</p>
             </div>
         {% else if recent_used.is_empty() %}
             <div class="empty-state">
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#box") }}"/></svg>
                 <p class="empty-state__title">No used tokens on record</p>
                 <p class="empty-state__body">No break-glass override has been claimed yet.</p>
             </div>

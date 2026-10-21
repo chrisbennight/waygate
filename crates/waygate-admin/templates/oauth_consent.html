@@ -20,7 +20,7 @@
 {% if insufficient_scope %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#shield-check") }}"/></svg>
         <p class="empty-state__title">Admin scope required</p>
         <p class="empty-state__body">
             This page requires the <code>mcp:admin</code> scope. Your current
@@ -34,7 +34,7 @@
 {% else if !store_configured %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#alert-triangle"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#alert-triangle") }}"/></svg>
         <p class="empty-state__title">OAuth consent store not configured</p>
         <p class="empty-state__body">
             Set <code>GATEWAY_DATABASE_URL</code> and restart to enable.
@@ -49,7 +49,7 @@
 {% when Some with (msg) %}
     <div class="card">
         <div class="empty-state empty-state--danger">
-            <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#x-circle"/></svg>
+            <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#x-circle") }}"/></svg>
             <p class="empty-state__title">Couldn't load consent grants</p>
             <p class="empty-state__body">{{ msg }}</p>
         </div>
@@ -66,7 +66,7 @@
     <div class="card card--table">
         {% if grants.is_empty() %}
             <div class="empty-state">
-                <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+                <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#shield-check") }}"/></svg>
                 <p class="empty-state__title">No consent grants yet</p>
                 <p class="empty-state__body">
                     A grant lands here when a user completes the

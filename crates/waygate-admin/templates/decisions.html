@@ -36,7 +36,7 @@
 {% if insufficient_scope %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#shield-check"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#shield-check") }}"/></svg>
         <p class="empty-state__title">Admin scope required</p>
         <p class="empty-state__body">
             The decisions queue requires the <code>mcp:admin</code> scope (the
@@ -51,7 +51,7 @@
 {% else if items.is_empty() && !load_error %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#inbox"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#inbox") }}"/></svg>
         <p class="empty-state__title">Nothing awaiting a decision</p>
         <p class="empty-state__body">
             {% if stores_unconfigured %}
