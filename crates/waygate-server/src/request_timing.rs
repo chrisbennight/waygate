@@ -74,10 +74,24 @@ pub async fn observe(request: Request, next: Next) -> Response {
             response.headers_mut().append("server-timing", value);
         }
     }
+    // HTTP methods, statuses, and zero-length framing can suppress a body
+    // without polling it, even when a streaming wrapper hides its empty size.
+    let no_body = observation.method == "HEAD"
+        || response.status().is_informational()
+        || matches!(
+            response.status(),
+            axum::http::StatusCode::NO_CONTENT | axum::http::StatusCode::NOT_MODIFIED
+        )
+        || (observation.method == "CONNECT" && response.status().is_success())
+        || (!response.headers().contains_key(header::TRANSFER_ENCODING)
+            && response
+                .headers()
+                .get(header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                == Some(0));
     let (parts, body) = response.into_parts();
-    // Axum suppresses a GET handler's body for HEAD after route middleware
-    // returns. Its successful body drop is not caller cancellation.
-    if observation.method == "HEAD" || body.is_end_stream() {
+    if no_body || body.is_end_stream() {
         observation.finish(HttpRequestPhase::Complete);
     }
     Response::from_parts(
@@ -221,6 +235,62 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line.contains("phase=\"complete\"") && line.ends_with(" 1")));
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("phase=\"cancelled\"")));
+    }
+
+    #[tokio::test]
+    async fn bodyless_responses_complete_when_the_empty_stream_is_not_polled() {
+        let app = axum::Router::new()
+            .route(
+                "/timing-bodyless/{status}",
+                axum::routing::post(
+                    |axum::extract::Path(status): axum::extract::Path<u16>| async move {
+                        let mut response =
+                            Response::new(Body::from_stream(futures::stream::empty::<
+                                Result<Bytes, std::io::Error>,
+                            >()));
+                        *response.status_mut() = axum::http::StatusCode::from_u16(status).unwrap();
+                        if status == 200 {
+                            response
+                                .headers_mut()
+                                .insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+                        }
+                        response
+                    },
+                ),
+            )
+            .layer(axum::middleware::from_fn(observe));
+        for status in [200, 204, 304] {
+            let response = app
+                .clone()
+                .oneshot(
+                    HttpRequest::builder()
+                        .method("POST")
+                        .uri(format!("/timing-bodyless/{status}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            drop(response);
+        }
+        let metrics = waygate_telemetry::gather_text();
+        let lines: Vec<_> = metrics
+            .lines()
+            .filter(|line| {
+                line.starts_with("mcp_http_request_duration_seconds_count")
+                    && line.contains("route=\"/timing-bodyless/{status}\"")
+            })
+            .collect();
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("phase=\"complete\"") && line.ends_with(" 1"))
+                .count(),
+            3
+        );
         assert!(!lines
             .iter()
             .any(|line| line.contains("phase=\"cancelled\"")));
