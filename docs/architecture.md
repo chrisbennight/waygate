@@ -149,6 +149,10 @@ The hot path for one tool call:
    callers. A first page, a discovery page, or a `tools/list` continuation
    without a held view still builds the eligible catalog before pagination, so
    batching reduces database round trips without claiming constant-time pages.
+   Upstream definitions pass schema portability projection when their canonical
+   record is built; `tools/list` reuses that projection instead of walking and
+   copying each upstream schema a second time. Built-in definitions retain
+   their own projection before joining the result.
    A held `tools/list` view is bound to one principal and presentation and
    serves only that traversal's continuations.
    Legacy sessions receive the same catalog unpaginated; tools are invoked as

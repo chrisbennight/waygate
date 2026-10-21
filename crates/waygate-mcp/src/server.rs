@@ -2832,6 +2832,10 @@ impl GatewayServer {
             return out;
         }
 
+        // Built-in definitions still need their wire projection here.
+        // Upstream records below are already projected by CatalogTool, so
+        // projecting the combined list would walk and copy every schema twice.
+        retain_publishable_tools(&mut out);
         for server in self.catalog.list_servers().await {
             if let Some(p) = principal {
                 if profile_blocks_server(p, &server) {
@@ -2875,7 +2879,6 @@ impl GatewayServer {
                 out.push(record.definition);
             }
         }
-        retain_publishable_tools(&mut out);
         if canonical_order {
             // Catalog publication compares descriptor sets by name and does
             // not emit a change for an upstream-only reorder. Canonicalize the

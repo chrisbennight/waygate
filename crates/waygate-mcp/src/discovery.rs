@@ -306,9 +306,9 @@ impl AuthorizedCatalog {
             out.extend(self.visible_builtins(principal).await);
         }
         out.sort_unstable_by(|left, right| {
-            left.identity
-                .qualified_name()
-                .cmp(&right.identity.qualified_name())
+            left.definition
+                .name
+                .cmp(&right.definition.name)
                 .then_with(|| {
                     source_order(&left.identity.source).cmp(&source_order(&right.identity.source))
                 })
