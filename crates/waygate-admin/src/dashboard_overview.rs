@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use askama::Template;
 use axum::extract::State;
-use axum::http::HeaderMap;
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use time::OffsetDateTime;
 use waygate_oidc::Principal;
@@ -58,6 +58,8 @@ struct OverviewPage {
     /// needed to compute the underlying counts — template
     /// renders an "all clear" placeholder in that case.
     attention_items: Vec<AttentionItem>,
+    /// The protected inventory summary loads separately from the page.
+    blocked_tools_pending: bool,
     /// First-run "Getting started" checklist. `Some` only when setup is
     /// incomplete (at least one milestone unmet); `None` ⇒ the card is
     /// hidden once everything is wired. Built from cheap config signals,
@@ -299,19 +301,11 @@ pub(crate) async fn overview(
     tenant_ctx: Option<Extension<TenantContext>>,
     headers: HeaderMap,
 ) -> Response {
-    let upstreams = upstream_tiles(&state.upstreams).await;
-    let upstreams_total = upstreams.len();
-    let upstreams_degraded = upstreams
-        .iter()
-        .filter(|u| u.runtime_status == "degraded")
-        .count();
-    let upstreams_down = upstreams
-        .iter()
-        .filter(|u| u.runtime_status == "disconnected")
-        .count();
-
     let tenant_ctx = tenant_ctx.map(|Extension(c)| c);
     let user_principal = user.as_ref().map(|Extension(p)| p);
+    let ctx_ref = tenant_ctx.as_ref();
+    let nav_for_attention = |path: &str| crate::tenant_ctx::nav_url(ctx_ref, path);
+    let blocked_tools_pending = overview_break_glass_admin(user_principal);
 
     // Red banner. Gated on mcp:admin + non-peer-assertion so
     // a non-admin SSO session can't infer that active overrides
@@ -322,90 +316,121 @@ pub(crate) async fn overview(
     let active_break_glass_tenant = user_principal
         .map(|p| p.tenant.as_str().to_owned())
         .unwrap_or_else(|| waygate_core::TenantId::DEFAULT.to_owned());
-    let (active_break_glass, active_break_glass_saturated) =
-        if overview_break_glass_admin(user_principal) {
-            let count = crate::dashboard_break_glass::count_active_for_banner(
-                state.policy.break_glass.get(),
-                &active_break_glass_tenant,
-            )
-            .await;
-            match count {
-                Some(0) => (None, false),
-                Some(n) => {
-                    let (n, sat) = crate::dashboard_break_glass::active_banner_label(n);
-                    (Some(n), sat)
+    let attention_fut = async {
+        let break_glass_fut = async {
+            if overview_break_glass_admin(user_principal) {
+                let count = crate::dashboard_break_glass::count_active_for_banner(
+                    state.policy.break_glass.get(),
+                    &active_break_glass_tenant,
+                )
+                .await;
+                match count {
+                    Some(0) => (None, false),
+                    Some(n) => {
+                        let (n, sat) = crate::dashboard_break_glass::active_banner_label(n);
+                        (Some(n), sat)
+                    }
+                    None => (None, false),
                 }
-                None => (None, false),
+            } else {
+                (None, false)
             }
-        } else {
-            (None, false)
         };
 
-    // KPI tiles + attention queue. Same admin posture as the
-    // break-glass banner: a non-admin SSO session sees `None` on
-    // both tiles and an empty attention queue (the catalog reads
-    // are skipped). Tenant is the principal's, never tenant_ctx.
-    let approvals_tenant = active_break_glass_tenant.clone();
-    let (active_approvals, expired_unused_approvals) = if overview_break_glass_admin(user_principal)
-    {
-        let store = state.servers.catalog.get();
-        let active =
-            crate::dashboard_approvals::count_active_for_attention(store, &approvals_tenant).await;
-        let expired = crate::dashboard_approvals::count_expired_unused_for_attention(
-            store,
-            &approvals_tenant,
-        )
-        .await;
-        (active, expired)
-    } else {
-        (None, None)
-    };
-
-    // Tenant-aware deep-link builder. Uses the same `nav_url`
-    // helper the template's `self.nav_url` calls into, so a
-    // tenant-prefixed URL ends up with the slug carried through.
-    let ctx_ref = tenant_ctx.as_ref();
-    let nav_for_attention = |path: &str| crate::tenant_ctx::nav_url(ctx_ref, path);
-    let mut attention_items = attention_items_for_overview(
-        active_break_glass,
-        active_break_glass_saturated,
-        active_approvals,
-        expired_unused_approvals,
-        &nav_for_attention,
-    );
-
-    if overview_break_glass_admin(user_principal) && state.hitl.reviewed_skills.get().is_some() {
-        match crate::dashboard_skills::current_reviews(&state, &approvals_tenant).await {
-            Ok(reviews) => {
-                let pending = reviews
-                    .iter()
-                    .filter(|review| {
-                        review.candidate_status == waygate_skills::review::CandidateStatus::Pending
-                    })
-                    .count();
-                if pending > 0 {
-                    attention_items.push(AttentionItem {
-                        severity: "warn",
-                        label: format!("{pending} skill candidates need review"),
-                        hint: "Unapproved contents remain unavailable to clients.",
-                        href: nav_for_attention("/skills"),
-                    });
+        // KPI tiles + attention queue. Same admin posture as the
+        // break-glass banner: a non-admin SSO session sees `None` on
+        // both tiles and an empty attention queue (the catalog reads
+        // are skipped). Tenant is the principal's, never tenant_ctx.
+        let approvals_tenant = active_break_glass_tenant.clone();
+        let approvals_fut = async {
+            if overview_break_glass_admin(user_principal) {
+                let store = state.servers.catalog.get();
+                tokio::join!(
+                    crate::dashboard_approvals::count_active_for_attention(
+                        store,
+                        &approvals_tenant
+                    ),
+                    crate::dashboard_approvals::count_expired_unused_for_attention(
+                        store,
+                        &approvals_tenant
+                    ),
+                )
+            } else {
+                (None, None)
+            }
+        };
+        let skill_reviews_fut = async {
+            if overview_break_glass_admin(user_principal)
+                && state.hitl.reviewed_skills.get().is_some()
+            {
+                Some(crate::dashboard_skills::current_reviews(&state, &approvals_tenant).await)
+            } else {
+                None
+            }
+        };
+        let tool_reviews_fut = async {
+            if overview_break_glass_admin(user_principal)
+                && approvals_tenant == waygate_core::TenantId::DEFAULT
+            {
+                if let Some(store) = state.servers.tool_reviews.get() {
+                    return Some(store.pending_count(&approvals_tenant, None).await);
                 }
             }
-            Err(_) => attention_items.push(AttentionItem {
-                severity: "warn",
-                label: "Skill reviews are unavailable".into(),
-                hint: "Review state could not be read; skill distribution fails closed.",
-                href: nav_for_attention("/skills"),
-            }),
-        }
-    }
+            None
+        };
+        let (
+            (active_break_glass, active_break_glass_saturated),
+            (active_approvals, expired_unused_approvals),
+            skill_reviews,
+            tool_reviews,
+        ) = tokio::join!(
+            break_glass_fut,
+            approvals_fut,
+            skill_reviews_fut,
+            tool_reviews_fut
+        );
 
-    if overview_break_glass_admin(user_principal)
-        && approvals_tenant == waygate_core::TenantId::DEFAULT
-    {
-        if let Some(store) = state.servers.tool_reviews.get() {
-            match store.pending_count(&approvals_tenant, None).await {
+        // Tenant-aware deep-link builder. Uses the same `nav_url`
+        // helper the template's `self.nav_url` calls into, so a
+        // tenant-prefixed URL ends up with the slug carried through.
+        let mut attention_items = attention_items_for_overview(
+            active_break_glass,
+            active_break_glass_saturated,
+            active_approvals,
+            expired_unused_approvals,
+            &nav_for_attention,
+        );
+
+        if let Some(reviews) = skill_reviews {
+            match reviews {
+                Ok(reviews) => {
+                    let pending = reviews
+                        .iter()
+                        .filter(|review| {
+                            review.candidate_status
+                                == waygate_skills::review::CandidateStatus::Pending
+                        })
+                        .count();
+                    if pending > 0 {
+                        attention_items.push(AttentionItem {
+                            severity: "warn",
+                            label: format!("{pending} skill candidates need review"),
+                            hint: "Unapproved contents remain unavailable to clients.",
+                            href: nav_for_attention("/skills"),
+                        });
+                    }
+                }
+                Err(_) => attention_items.push(AttentionItem {
+                    severity: "warn",
+                    label: "Skill reviews are unavailable".into(),
+                    hint: "Review state could not be read; skill distribution fails closed.",
+                    href: nav_for_attention("/skills"),
+                }),
+            }
+        }
+
+        if let Some(reviews) = tool_reviews {
+            match reviews {
                 Ok(pending) if pending > 0 => attention_items.push(AttentionItem {
                     severity: "warn",
                     label: format!("{pending} tool definitions need review"),
@@ -421,28 +446,16 @@ pub(crate) async fn overview(
                 Ok(_) => {}
             }
         }
-    }
-
-    // Same gate and tenant scope as the Blocked tools page it links to.
-    if let Some(blocked) =
-        crate::dashboard_blocked_tools::blocked_tool_count(&state, user_principal)
-            .await
-            .filter(|blocked| *blocked > 0)
-    {
-        attention_items.push(AttentionItem {
-            severity: "warn",
-            label: format!(
-                "{blocked} blocked tool{}",
-                if blocked == 1 { "" } else { "s" }
-            ),
-            hint: "The gateway refuses these tools or holds them as temporarily unavailable.",
-            href: nav_for_attention(crate::dashboard_blocked_tools::BLOCKED_TOOLS_PATH),
-        });
-    }
+        (
+            active_break_glass,
+            active_break_glass_saturated,
+            attention_items,
+        )
+    };
 
     // Figures + "what changed" feed. One 48h hourly
     // histogram feeds all three deltas so they agree on the window;
-    // the feed is three cheap category-filtered queries merged by
+    // the feed uses a fixed set of category-filtered queries merged by
     // time. Tenant scope follows the same rule as the banner above
     // (the principal's tenant). Every failure path collapses to
     // None/empty — the template renders a caption line, never a
@@ -466,121 +479,146 @@ pub(crate) async fn overview(
                     since: Some(now - time::Duration::hours(48)),
                     ..Default::default()
                 };
-                let figures = match reader.histogram(&q, 3600).await {
-                    Err(e) => {
-                        tracing::warn!(error = %e, "overview histogram failed");
-                        None
-                    }
-                    Ok(buckets) => {
-                        let t = split_histogram(&buckets, now.unix_timestamp());
-                        let deny_rate_pct =
-                            (t.denied.0 * 100).checked_div(t.calls.0).unwrap_or(0) as u32;
-                        // The deny-rate delta tracks the RATE, not the raw
-                        // denial count — a call-volume swing must not masquerade
-                        // as a policy trend.
-                        let deny_rate_yesterday =
-                            (t.denied.1 * 100).checked_div(t.calls.1).unwrap_or(0) as u32;
-                        let peak = |s: &[i64]| s.iter().copied().max().unwrap_or(0);
-                        Some(OverviewFigures {
-                            calls_today: t.calls.0,
-                            calls_delta: fmt_delta(t.calls.0, t.calls.1),
-                            deny_rate_pct,
-                            deny_delta: fmt_rate_delta(
+                let figures_fut = async {
+                    match reader.histogram(&q, 3600).await {
+                        Err(e) => {
+                            tracing::warn!(error = %e, "overview histogram failed");
+                            None
+                        }
+                        Ok(buckets) => {
+                            let t = split_histogram(&buckets, now.unix_timestamp());
+                            let deny_rate_pct =
+                                (t.denied.0 * 100).checked_div(t.calls.0).unwrap_or(0) as u32;
+                            // The deny-rate delta tracks the RATE, not the raw
+                            // denial count — a call-volume swing must not masquerade
+                            // as a policy trend.
+                            let deny_rate_yesterday =
+                                (t.denied.1 * 100).checked_div(t.calls.1).unwrap_or(0) as u32;
+                            let peak = |s: &[i64]| s.iter().copied().max().unwrap_or(0);
+                            Some(OverviewFigures {
+                                calls_today: t.calls.0,
+                                calls_delta: fmt_delta(t.calls.0, t.calls.1),
                                 deny_rate_pct,
-                                deny_rate_yesterday,
-                                t.calls.1 > 0,
-                            ),
-                            errors_today: t.errors.0,
-                            errors_delta: fmt_delta(t.errors.0, t.errors.1),
-                            calls_spark_points: spark_points(&t.hourly_calls),
-                            calls_spark_peak: peak(&t.hourly_calls),
-                            deny_spark_points: spark_points(&t.hourly_denied),
-                            deny_spark_peak: peak(&t.hourly_denied),
-                            errors_spark_points: spark_points(&t.hourly_errors),
-                            errors_spark_peak: peak(&t.hourly_errors),
-                        })
+                                deny_delta: fmt_rate_delta(
+                                    deny_rate_pct,
+                                    deny_rate_yesterday,
+                                    t.calls.1 > 0,
+                                ),
+                                errors_today: t.errors.0,
+                                errors_delta: fmt_delta(t.errors.0, t.errors.1),
+                                calls_spark_points: spark_points(&t.hourly_calls),
+                                calls_spark_peak: peak(&t.hourly_calls),
+                                deny_spark_points: spark_points(&t.hourly_denied),
+                                deny_spark_peak: peak(&t.hourly_denied),
+                                errors_spark_points: spark_points(&t.hourly_errors),
+                                errors_spark_peak: peak(&t.hourly_errors),
+                            })
+                        }
                     }
                 };
 
-                let mut changed: Vec<(OffsetDateTime, ChangedEvent)> = Vec::new();
-                for (category, kind, dest, limit) in [
-                    ("policy_reload", "policy", "/policies", 5i64),
-                    ("manifest_reload", "servers", "/servers", 5i64),
-                    ("api_key_lifecycle", "identity", "/identities", 5i64),
-                    // Surface the change-request ceremony. The broad
-                    // `admin_mutation` category is filtered to the configurable
-                    // allowlist below, so fetch a wider window (ceremony rows may
-                    // sit behind unrelated mutations) before the global cap of 8.
-                    ("admin_mutation", "control plane", "/changes", 20i64),
-                ] {
-                    // The tenant/category/ID index serves this bounded feed
-                    // without scanning unrelated categories or sorting history.
-                    if let Ok(rows) = reader
-                        .recent_by_category(&overview_tenant, category, limit)
-                        .await
-                    {
-                        for r in rows {
-                            // `admin_mutation` is heterogeneous (secret-retrievals,
-                            // oauth/session revokes, …); surface only the curated
-                            // change-request ceremony actions (configurable via
-                            // GATEWAY_OVERVIEW_CHANGE_FEED_ACTIONS) so the feed shows
-                            // propose/approve/execute without the noise. Other
-                            // categories pass through unfiltered.
-                            if category == "admin_mutation"
-                                && !state
-                                    .dashboard
-                                    .overview_change_feed_actions
-                                    .iter()
-                                    .any(|a| a == &r.action)
-                            {
-                                continue;
-                            }
-                            changed.push((
-                                r.ts,
-                                ChangedEvent {
-                                    ts_abs: format_ts_abs(r.ts),
-                                    ts_rel: format_ts_rel(r.ts),
-                                    kind,
-                                    // `<action> · <target> · <principal>` when
-                                    // the row names a subject (migration 0046's
-                                    // `target` column — e.g. the API key's sub),
-                                    // else the legacy `<action> · <principal>`.
-                                    // Without the target, two ApiKeyMinted rows
-                                    // for different keys collapse to an identical
-                                    // line; the subject is what disambiguates them.
-                                    summary: match r.target.as_deref() {
-                                        Some(t) if !t.is_empty() => format!(
-                                            "{} · {} · {}",
-                                            action_label(&r),
-                                            t,
-                                            principal_label(&r),
-                                        ),
-                                        _ => format!(
-                                            "{} · {}",
-                                            action_label(&r),
-                                            principal_label(&r),
-                                        ),
+                let changed_fut = async {
+                    let mut changed: Vec<(OffsetDateTime, ChangedEvent)> = Vec::new();
+                    let feeds = [
+                        ("policy_reload", "policy", "/policies", 5i64),
+                        ("manifest_reload", "servers", "/servers", 5i64),
+                        ("api_key_lifecycle", "identity", "/identities", 5i64),
+                        // Surface the change-request ceremony. The broad
+                        // `admin_mutation` category is filtered to the configurable
+                        // allowlist below, so fetch a wider window (ceremony rows may
+                        // sit behind unrelated mutations) before the global cap of 8.
+                        ("admin_mutation", "control plane", "/changes", 20i64),
+                    ];
+                    let results = futures_util::future::join_all(feeds.iter().map(
+                        |(category, _, _, limit)| {
+                            reader.recent_by_category(&overview_tenant, category, *limit)
+                        },
+                    ))
+                    .await;
+                    for ((category, kind, dest, _), result) in feeds.into_iter().zip(results) {
+                        // The tenant/category/ID index serves this bounded feed
+                        // without scanning unrelated categories or sorting history.
+                        if let Ok(rows) = result {
+                            for r in rows {
+                                // `admin_mutation` is heterogeneous (secret-retrievals,
+                                // oauth/session revokes, …); surface only the curated
+                                // change-request ceremony actions (configurable via
+                                // GATEWAY_OVERVIEW_CHANGE_FEED_ACTIONS) so the feed shows
+                                // propose/approve/execute without the noise. Other
+                                // categories pass through unfiltered.
+                                if category == "admin_mutation"
+                                    && !state
+                                        .dashboard
+                                        .overview_change_feed_actions
+                                        .iter()
+                                        .any(|a| a == &r.action)
+                                {
+                                    continue;
+                                }
+                                changed.push((
+                                    r.ts,
+                                    ChangedEvent {
+                                        ts_abs: format_ts_abs(r.ts),
+                                        ts_rel: format_ts_rel(r.ts),
+                                        kind,
+                                        // `<action> · <target> · <principal>` when
+                                        // the row names a subject (migration 0046's
+                                        // `target` column — e.g. the API key's sub),
+                                        // else the legacy `<action> · <principal>`.
+                                        // Without the target, two ApiKeyMinted rows
+                                        // for different keys collapse to an identical
+                                        // line; the subject is what disambiguates them.
+                                        summary: match r.target.as_deref() {
+                                            Some(t) if !t.is_empty() => format!(
+                                                "{} · {} · {}",
+                                                action_label(&r),
+                                                t,
+                                                principal_label(&r),
+                                            ),
+                                            _ => format!(
+                                                "{} · {}",
+                                                action_label(&r),
+                                                principal_label(&r),
+                                            ),
+                                        },
+                                        href: nav_for_attention(dest),
                                     },
-                                    href: nav_for_attention(dest),
-                                },
-                            ));
+                                ));
+                            }
                         }
                     }
-                }
-                changed.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
-                let changed: Vec<ChangedEvent> =
-                    changed.into_iter().take(8).map(|(_, e)| e).collect();
-                (figures, changed)
+                    changed.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
+                    let changed: Vec<ChangedEvent> =
+                        changed.into_iter().take(8).map(|(_, e)| e).collect();
+                    changed
+                };
+                tokio::join!(figures_fut, changed_fut)
             }
         }
     };
 
     // Recent non-success events, tenant-scoped. Computed
     // concurrently with the figures/changed feed above (separate connections).
-    let ((figures, changed), notable) = tokio::join!(
+    let (
+        (figures, changed),
+        notable,
+        (active_break_glass, active_break_glass_saturated, attention_items),
+        upstreams,
+    ) = tokio::join!(
         figures_changed_fut,
         overview_notable(&state, &overview_tenant),
+        attention_fut,
+        upstream_tiles(&state.upstreams),
     );
+    let upstreams_total = upstreams.len();
+    let upstreams_degraded = upstreams
+        .iter()
+        .filter(|u| u.runtime_status == "degraded")
+        .count();
+    let upstreams_down = upstreams
+        .iter()
+        .filter(|u| u.runtime_status == "disconnected")
+        .count();
 
     // First-run "Getting started" checklist. Cheap config signals → setup
     // milestones; the card hides itself (None) once everything is wired.
@@ -653,9 +691,37 @@ pub(crate) async fn overview(
         active_break_glass,
         active_break_glass_saturated,
         attention_items,
+        blocked_tools_pending,
         getting_started,
     };
     render(&page)
+}
+
+#[derive(Template)]
+#[template(path = "overview_blocked_tools.html")]
+struct BlockedToolsAttention {
+    count: Option<usize>,
+    href: String,
+}
+
+pub(crate) async fn overview_blocked_tools(
+    State(state): State<Arc<AdminState>>,
+    user: Option<Extension<Principal>>,
+    tenant_ctx: Option<Extension<TenantContext>>,
+) -> Response {
+    let principal = user.as_ref().map(|Extension(principal)| principal);
+    if !overview_break_glass_admin(principal) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let count = crate::dashboard_blocked_tools::blocked_tool_count(&state, principal).await;
+    let response = render(&BlockedToolsAttention {
+        count,
+        href: crate::tenant_ctx::nav_url(
+            tenant_ctx.as_ref().map(|Extension(ctx)| ctx),
+            crate::dashboard_blocked_tools::BLOCKED_TOOLS_PATH,
+        ),
+    });
+    ([(axum::http::header::CACHE_CONTROL, "no-store")], response).into_response()
 }
 
 /// Compose the attention-queue rows from the

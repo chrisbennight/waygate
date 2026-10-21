@@ -1,0 +1,16 @@
+<li id="overview-blocked-tools" role="status">
+    {% match count %}
+    {% when Some with (n) %}
+        {% if *n == 0usize %}
+        <span class="attn-chip attn-chip--info">info</span>
+        <div class="attn-label">No blocked tools</div>
+        {% else %}
+        <span class="attn-chip attn-chip--warn">warn</span>
+        <div class="attn-label">{{ n }} blocked tool{% if *n != 1usize %}s{% endif %}</div>
+        {% endif %}
+    {% when None %}
+        <span class="attn-chip attn-chip--warn">warn</span>
+        <div class="attn-label">Blocked-tool status is unavailable</div>
+    {% endmatch %}
+    <a class="attn-link" href="{{ href }}">Review →</a>
+</li>

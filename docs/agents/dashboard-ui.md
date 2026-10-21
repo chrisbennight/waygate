@@ -23,6 +23,16 @@ htmx fragment swap of a small region, (c) a tiny client-side state machine
 (palette toggle, collapse). None of these justify the bundle/runtime cost of a
 framework. The cutoff lines for reaching for more JS live below.
 
+## Overview reads
+
+Overview joins its independent status, attention, and audit reads. The audit
+feed uses a fixed set of categories, so per-page concurrency stays bounded.
+The blocked-tool inventory loads through a separate protected fragment after
+the page renders. Its placeholder remains explicit until the count arrives,
+with a link to the full page that also works without JavaScript. The fragment
+uses the same administrator gate and principal tenant as the full report;
+an unavailable report never renders an empty count.
+
 ## Design system
 
 Follow the canonical [Waygate design language](../design.md) for identity,

@@ -154,18 +154,20 @@ pub(crate) async fn blocked_tools_page_is_scoped_to_the_viewer_tenant() {
 }
 
 #[tokio::test]
-pub(crate) async fn overview_counts_blocked_tools_and_links_to_the_page() {
+pub(crate) async fn overview_loads_blocked_counts_separately_and_keeps_the_admin_gate() {
     let app = dashboard_router(state_with_blocked_tools().await, DashboardAuth::Disabled);
-    let (_, body) = body_of(app, "/t/default").await;
+    let (_, body) = body_of(app.clone(), "/t/default").await;
+    assert!(body.contains("Checking blocked tools"));
+    assert!(!body.contains("2 blocked tools"));
+    assert!(body.contains(r#"hx-get="/admin/t/default/overview/blocked-tools""#));
+    let (status, body) = body_of(app, "/t/default/overview/blocked-tools").await;
+    assert_eq!(status, StatusCode::OK);
     assert!(body.contains("2 blocked tools"), "{body}");
     assert!(body.contains(r#"href="/admin/t/default/tools/blocked""#));
 
     let app = dashboard_router(state_with_manifests().await, DashboardAuth::Disabled);
-    let (_, body) = body_of(app, "/").await;
-    assert!(
-        !body.contains("blocked tool"),
-        "no count when nothing is blocked"
-    );
+    let (_, body) = body_of(app, "/overview/blocked-tools").await;
+    assert!(body.contains("No blocked tools"));
 
     let (_, body) = body_as(
         state_with_blocked_tools().await,
@@ -177,6 +179,22 @@ pub(crate) async fn overview_counts_blocked_tools_and_links_to_the_page() {
         !body.contains("blocked tool"),
         "a non-administrator sees no count"
     );
+    let (status, body) = body_as(
+        state_with_blocked_tools().await,
+        principal("default", &["mcp:read"], waygate_oidc::AuthMethod::Oauth),
+        "/overview/blocked-tools",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(!body.contains("2 blocked tools"));
+    let (status, body) = body_as(
+        state_with_blocked_tools().await,
+        principal("other", &["mcp:admin"], waygate_oidc::AuthMethod::Oauth),
+        "/overview/blocked-tools",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("No blocked tools"));
 }
 
 #[tokio::test]
