@@ -54,6 +54,13 @@ in a `card--table`, and the create/edit form goes in its **own** sibling
 
 ## URL structure
 
+Runtime status reads use `dashboard_upstream_status`, which bounds each
+upstream's lock wait and reads upstreams concurrently. Busy observations appear
+as unavailable, with no invented health or tool counts; unrelated upstreams
+remain visible. The blocked-tool report and tool drawer also bound their
+display reads. These display deadlines do not alter invocation authorization,
+contract checks, or the lifetime of an executing tool call.
+
 Every dashboard page mounts at TWO paths:
 
 - `/admin/<page>` — unprefixed paths.

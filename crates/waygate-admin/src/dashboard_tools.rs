@@ -6,7 +6,7 @@ use std::sync::Arc;
 use askama::Template;
 use axum::extract::{Form, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::Extension;
 use serde::Deserialize;
 use waygate_mcp::catalog::UpstreamCatalog;
@@ -43,6 +43,7 @@ struct ToolsPage {
     /// The viewer passes the Blocked tools page's admin gate, so a withheld
     /// server's blocked count links there.
     blocked_links: bool,
+    busy_upstreams: Vec<String>,
 }
 
 struct ToolRow {
@@ -81,6 +82,7 @@ impl WithheldServer {
 struct ToolCatalogue {
     rows: Vec<ToolRow>,
     withheld: Vec<WithheldServer>,
+    busy_upstreams: Vec<String>,
 }
 
 /// Plain-GET filters for the Tools console. Empty strings normalise to
@@ -185,7 +187,8 @@ const TOOLS_PAGE_CAP: usize = 200;
 async fn collect_tool_catalogue(state: &Arc<AdminState>) -> ToolCatalogue {
     let mut rows = Vec::new();
     let mut withheld = Vec::new();
-    for status in state.upstreams.status_snapshot().await {
+    let (statuses, mut busy_upstreams) = dashboard_upstream_status(&state.upstreams).await;
+    for status in statuses {
         let m = status.manifest;
         if status.health.connected_lanes == 0 {
             rows.extend(m.tools.iter().map(|c| ToolRow {
@@ -199,9 +202,18 @@ async fn collect_tool_catalogue(state: &Arc<AdminState>) -> ToolCatalogue {
             }));
             continue;
         }
-        let live = match state.upstreams.list_tools(&m.name).await {
-            Ok(live) => live,
-            Err(e) => {
+        let live = match tokio::time::timeout(
+            DASHBOARD_UPSTREAM_WAIT,
+            state.upstreams.list_tools(&m.name),
+        )
+        .await
+        {
+            Ok(Ok(live)) => live,
+            Err(_) => {
+                busy_upstreams.push(m.name);
+                continue;
+            }
+            Ok(Err(e)) => {
                 tracing::warn!(
                     error = %e,
                     server = %m.name,
@@ -236,7 +248,11 @@ async fn collect_tool_catalogue(state: &Arc<AdminState>) -> ToolCatalogue {
             });
         }
     }
-    ToolCatalogue { rows, withheld }
+    ToolCatalogue {
+        rows,
+        withheld,
+        busy_upstreams,
+    }
 }
 
 /// Distinct servers + tool counts, sorted by name — drives the server
@@ -272,8 +288,14 @@ pub(crate) async fn tools_page(
     Query(q): Query<ToolFilters>,
 ) -> Response {
     let mut filters = q.cleaned();
-    let ToolCatalogue { rows, withheld } = collect_tool_catalogue(&state).await;
-    let servers = build_server_facets(&rows, &withheld);
+    let ToolCatalogue {
+        rows,
+        withheld,
+        busy_upstreams,
+    } = collect_tool_catalogue(&state).await;
+    let mut servers = build_server_facets(&rows, &withheld);
+    servers.extend(busy_upstreams.iter().cloned().map(|name| (name, 0)));
+    servers.sort_by(|a, b| a.0.cmp(&b.0));
     // Drop an unknown server so the `<select>` (which would render "All
     // servers" for an unrepresentable value) can't disagree with a 0-row
     // result.
@@ -308,6 +330,7 @@ pub(crate) async fn tools_page(
         truncated,
         withheld,
         blocked_links,
+        busy_upstreams,
     })
 }
 
@@ -464,13 +487,22 @@ pub(crate) async fn tools_drawer(
     // pipeline uses, so the displayed risk chips AND the try-it confirm
     // hint match what `tools_try` will actually enforce (no manifest-vs-
     // catalog drift in either direction).
-    let (risk, side_effects, pii) =
-        resolve_pipeline_facts(&state, principal_tenant(user.as_ref()), &q.server, &q.tool).await;
-    let live = state
-        .upstreams
-        .list_tools(&q.server)
-        .await
-        .unwrap_or_default();
+    let load = async {
+        let facts =
+            resolve_pipeline_facts(&state, principal_tenant(user.as_ref()), &q.server, &q.tool)
+                .await;
+        let live = state
+            .upstreams
+            .list_tools(&q.server)
+            .await
+            .unwrap_or_default();
+        (facts, live)
+    };
+    let Ok(((risk, side_effects, pii), live)) =
+        tokio::time::timeout(DASHBOARD_UPSTREAM_WAIT, load).await
+    else {
+        return busy_tool_drawer_fragment();
+    };
     let found_tool = live
         .into_iter()
         .find(|t| t.name.as_ref() == q.tool.as_str());
@@ -513,6 +545,35 @@ pub(crate) async fn tools_drawer(
         csrf_token: csrf.map(|Extension(c)| c.0).unwrap_or_default(),
         tenant_ctx: tenant_ctx.map(|Extension(c)| c),
     })
+}
+
+fn busy_tool_drawer_fragment() -> Response {
+    Html(concat!(
+        "<header><h2 id=\"drawer-title\">Tool details unavailable</h2>",
+        "<button type=\"button\" class=\"close\" data-drawer-close aria-label=\"Close\">Close</button></header>",
+        "<p class=\"callout callout--warn\" role=\"status\">",
+        "Tool details are temporarily unavailable while a call or catalog refresh is busy. ",
+        "Reload this page to try again.</p>"
+    ))
+    .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn busy_tool_drawer_keeps_visible_close_control() {
+        let response = busy_tool_drawer_fragment();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(html.contains("id=\"drawer-title\""));
+        assert!(html.contains("<button type=\"button\" class=\"close\" data-drawer-close"));
+        assert!(html.contains("temporarily unavailable"));
+    }
 }
 
 // ---- governed "try this tool" ----------------------------------------------

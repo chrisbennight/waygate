@@ -106,7 +106,10 @@
                 <td colspan="11"><div id="cfg-body-{{ loop.index }}" class="cfg-body"></div></td>
             </tr>
         {% endfor %}
-        {% if servers.is_empty() %}
+        {% for name in busy_upstreams %}
+            <tr><td>—</td><td>{{ name }}</td><td colspan="9"><span class="chip chip--warn">Status unavailable while a call or refresh is busy. Reload this page to try again.</span></td></tr>
+        {% endfor %}
+        {% if servers.is_empty() && busy_upstreams.is_empty() %}
             <tr><td colspan="11" class="empty">
                 No upstreams configured yet. Add one on the Server Manifests page or
                 under <code>servers/</code>, then reload manifests; see

@@ -20,6 +20,8 @@
 <p class="status-sentence">
     {% if upstreams_total == 0 %}
         No upstreams configured yet.
+    {% else if !busy_upstreams.is_empty() %}
+        Status is temporarily unavailable for {{ busy_upstreams.len() }} of <a href="{{ self.chrome.nav_url("/servers") }}">{{ upstreams_total }} upstreams</a> while calls or refreshes are busy.
     {% else if upstreams_down == 0 && upstreams_degraded == 0 %}
         All <a href="{{ self.chrome.nav_url("/servers") }}">{{ upstreams_total }} upstreams</a> healthy.
     {% else %}
@@ -188,7 +190,10 @@
                     <td class="mono">{{ u.tool_count }}</td>
                 </tr>
             {% endfor %}
-            {% if upstreams.is_empty() %}
+            {% for name in busy_upstreams %}
+                <tr><td>{{ name }}</td><td>—</td><td><span class="chip chip--warn">status unavailable: busy</span></td><td>—</td></tr>
+            {% endfor %}
+            {% if upstreams_total == 0 %}
                 <tr><td colspan="4" class="empty">No upstreams configured. Drop a manifest into <code>servers/</code> and restart.</td></tr>
             {% endif %}
             </tbody>

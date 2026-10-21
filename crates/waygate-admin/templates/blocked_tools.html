@@ -49,7 +49,9 @@
 {% when None %}{% endmatch %}
 
 <div class="card card--table">
-    {% if rows.is_empty() %}
+    {% if report_unavailable %}
+        <div class="empty-state" role="status"><p class="empty-state__title">Blocked-tool report temporarily unavailable</p><p class="empty-state__body">A call or catalog refresh is busy. No current blocked-tool count is available. Reload this page to try again.</p></div>
+    {% else if rows.is_empty() %}
         <div class="empty-state">
             <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#check-circle") }}"/></svg>
             <p class="empty-state__title">No blocked tools</p>
