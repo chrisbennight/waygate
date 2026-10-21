@@ -472,17 +472,27 @@ async fn spawn_session_retained_upstream(
 struct CapturedIdentities {
     tokens: Arc<Mutex<Vec<String>>>,
     missing: Arc<AtomicUsize>,
+    initialize_peers: Arc<Mutex<Vec<std::net::SocketAddr>>>,
 }
 
 async fn spawn_mock_upstream_with_identity_requirement(
     require_identity: bool,
+) -> (std::net::SocketAddr, Arc<AtomicUsize>, CapturedIdentities) {
+    spawn_mock_upstream_with_options(require_identity, false).await
+}
+
+async fn spawn_mock_upstream_with_options(
+    require_identity: bool,
+    json_response: bool,
 ) -> (std::net::SocketAddr, Arc<AtomicUsize>, CapturedIdentities) {
     let inits = Arc::new(AtomicUsize::new(0));
     let identities = CapturedIdentities::default();
     let svc = StreamableHttpService::new(
         || Ok(MockUpstream),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default().with_legacy_session_mode(true),
+        StreamableHttpServerConfig::default()
+            .with_legacy_session_mode(!json_response)
+            .with_json_response(json_response),
     );
 
     let counter = inits.clone();
@@ -495,6 +505,18 @@ async fn spawn_mock_upstream_with_identity_requirement(
             async move {
                 if req.method() == Method::POST && req.headers().get("mcp-session-id").is_none() {
                     counter.fetch_add(1, Ordering::SeqCst);
+                    if req
+                        .headers()
+                        .get("mcp-method")
+                        .is_none_or(|method| method == "server/discover")
+                    {
+                        if let Some(axum::extract::ConnectInfo(peer)) =
+                            req.extensions()
+                                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                        {
+                            captured.initialize_peers.lock().unwrap().push(*peer);
+                        }
+                    }
                 }
                 match req
                     .headers()
@@ -515,7 +537,11 @@ async fn spawn_mock_upstream_with_identity_requirement(
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
     });
     (addr, inits, identities)
 }
@@ -897,6 +923,31 @@ async fn http_default_isolation_opens_fresh_session_per_call() {
         inits.load(Ordering::SeqCst),
         boot + 3,
         "per_call (default) must mint a fresh session per call",
+    );
+}
+
+#[tokio::test]
+async fn fresh_current_protocol_dials_reuse_http_connections() {
+    let (addr, _, captured) = spawn_mock_upstream_with_options(false, true).await;
+    let pool = UpstreamPool::connect(BTreeMap::from([("mock".into(), manifest(addr, None))])).await;
+    assert!(pool.is_connected("mock").await);
+    for _ in 0..3 {
+        pool.call_tool("mock", "noop", None, None, None)
+            .await
+            .expect("call_tool noop");
+    }
+    let peers = captured.initialize_peers.lock().unwrap();
+    assert_eq!(
+        peers.len(),
+        4,
+        "boot and each call run a fresh discovery lifecycle"
+    );
+    assert!(
+        peers
+            .iter()
+            .enumerate()
+            .any(|(i, peer)| peers[..i].contains(peer)),
+        "fresh MCP sessions should reuse an upstream HTTP connection: {peers:?}",
     );
 }
 

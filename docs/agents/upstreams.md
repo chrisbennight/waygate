@@ -845,6 +845,15 @@ the MCP session headers, so they stay on the configured scheme, host, and port:
 The runtime dialer and `classify` CLI share this client policy through
 `waygate_upstream::http_policy`.
 
+Streamable HTTP lanes retain a credential-free HTTP client across per-call
+sessions. Each dial still resolves and checks the destination; it reuses the
+client only when the host, port, and complete resolved address set match.
+The client retains at most four idle connections per host for 30 seconds.
+MCP sessions, caller identity, credentials, response limits, and cancellation
+remain separate for each call. A changed destination builds a new client.
+Connections using mTLS build a fresh client on every dial so rotated certificate
+and trust files take effect as before.
+
 ## Per-server call limits
 
 The optional `limits` block bounds each call to one upstream. Both fields are

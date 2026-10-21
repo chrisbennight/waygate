@@ -286,6 +286,7 @@ impl UpstreamEntry {
 
 struct Connection {
     client: RunningService<RoleClient, ClientConfig>,
+    http_client: Option<transport::PinnedHttpClient>,
     /// Address set resolved and pinned when this network connection was
     /// created. File downloads on the same upstream host reuse this set so a
     /// second DNS answer cannot redirect the gateway to another service.
@@ -1206,9 +1207,14 @@ async fn dial(
         install_catalog_probe_identity(manifest, issuer, identity_cell.as_ref())?;
     // Per-transport construction lives in the transport factory; the
     // common post-connect tail (tools/list + Connection) stays here.
-    let dialed =
-        transport::connect_with_destination(manifest, issuer, identity_cell.as_ref(), exchange)
-            .await?;
+    let dialed = transport::connect_with_destination(
+        manifest,
+        issuer,
+        identity_cell.as_ref(),
+        exchange,
+        None,
+    )
+    .await?;
     let listed = list_all_tools(dialed.service()).await.map_err(|error| {
         match dialed.refused_redirect() {
             Some(refused) => DialError::redirect_refused(&manifest.name, refused),
@@ -1224,6 +1230,7 @@ async fn dial(
         peer_info.is_some_and(|i| i.capabilities.resources.is_some());
     Ok(Connection {
         client: connected.service,
+        http_client: connected.http_client,
         network_destination: connected.network_destination,
         cleartext_control_plane: connected.cleartext_control_plane,
         negotiated_protocol,
@@ -2021,6 +2028,7 @@ impl UpstreamPool {
                     prebuilt_context: prebuilt_context.as_ref(),
                     caller_capabilities: mrtr.caller_capabilities.as_ref(),
                     negotiated_protocol: conn.negotiated_protocol.as_deref(),
+                    http_client: conn.http_client.as_ref(),
                     admitted,
                     has_continuation,
                     approval_gated: mrtr.approval_gated,

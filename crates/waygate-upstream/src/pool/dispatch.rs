@@ -984,6 +984,7 @@ pub(super) fn pinned_2026_manifest(snapshot: &crate::UpstreamManifest) -> crate:
 ///
 /// The session belongs to its call once returned, so the dial's HTTP
 /// exchange recording ends here.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn per_call_dial(
     snapshot: &crate::UpstreamManifest,
     issuer: Option<&waygate_oidc::SharedIdentityIssuer>,
@@ -992,6 +993,7 @@ pub(super) async fn per_call_dial(
     caller: Option<&ClientCapabilities>,
     negotiated_protocol: Option<&str>,
     has_continuation: bool,
+    http_client: Option<&crate::transport::PinnedHttpClient>,
 ) -> Result<crate::transport::ConnectedService, crate::transport::DialError> {
     let mirrored = mirrored_dial_capabilities(caller, negotiated_protocol);
     if mirrored.is_none() && !has_continuation {
@@ -1003,26 +1005,38 @@ pub(super) async fn per_call_dial(
         if lane_negotiated_legacy_under_auto(snapshot, negotiated_protocol) {
             let mut pinned = snapshot.clone();
             pinned.protocol = crate::UpstreamProtocol::Legacy;
-            let dialed =
-                match crate::transport::connect_with_destination(&pinned, issuer, cell, exchange)
+            let dialed = match crate::transport::connect_with_destination(
+                &pinned,
+                issuer,
+                cell,
+                exchange,
+                http_client,
+            )
+            .await
+            {
+                Err(crate::transport::DialError::Init(_)) => {
+                    crate::transport::connect_with_destination(
+                        &pinned_2026_manifest(snapshot),
+                        issuer,
+                        cell,
+                        exchange,
+                        http_client,
+                    )
                     .await
-                {
-                    Err(crate::transport::DialError::Init(_)) => {
-                        crate::transport::connect_with_destination(
-                            &pinned_2026_manifest(snapshot),
-                            issuer,
-                            cell,
-                            exchange,
-                        )
-                        .await
-                    }
-                    dialed => dialed,
-                };
+                }
+                dialed => dialed,
+            };
             return dialed.map(crate::transport::DialedService::finish_dial);
         }
-        return crate::transport::connect_with_destination(snapshot, issuer, cell, exchange)
-            .await
-            .map(crate::transport::DialedService::finish_dial);
+        return crate::transport::connect_with_destination(
+            snapshot,
+            issuer,
+            cell,
+            exchange,
+            http_client,
+        )
+        .await
+        .map(crate::transport::DialedService::finish_dial);
     }
     crate::transport::connect_with_capabilities(
         &pinned_2026_manifest(snapshot),
@@ -1030,6 +1044,7 @@ pub(super) async fn per_call_dial(
         cell,
         exchange,
         mirrored.unwrap_or_default(),
+        http_client,
     )
     .await
     .map(crate::transport::DialedService::finish_dial)

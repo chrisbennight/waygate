@@ -406,6 +406,7 @@ async fn finishing_the_dial_stops_recording_while_the_connection_keeps_working()
         None,
         None,
         None,
+        None,
     )
     .await
     .expect("the upstream connects");
