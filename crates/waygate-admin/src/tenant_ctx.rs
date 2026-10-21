@@ -241,6 +241,14 @@ fn needs_selector(request: &Request) -> bool {
         "/activity/rows",
         "/activity/{id}",
         "/overview/blocked-tools",
+        "/assist/context",
+        "/agent_chat/bootstrap",
+        "/agent_chat/stream",
+        "/agent_chat/approve",
+        "/agent_chat/conversations",
+        "/agent_chat/conversations/{id}",
+        "/chat/stream",
+        "/agent_review/policy",
     ]
     .iter()
     .any(|suffix| path.ends_with(suffix))

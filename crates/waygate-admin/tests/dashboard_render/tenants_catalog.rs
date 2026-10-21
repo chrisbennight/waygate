@@ -280,6 +280,53 @@ async fn activity_comparison_keeps_full_page_tenant_navigation() {
     );
 }
 
+#[tokio::test]
+async fn assistant_json_and_stream_requests_skip_selector_reads() {
+    let store = Arc::new(FakeTenantStore::with(vec![tenant_fixture(
+        "default", "active",
+    )]));
+    let app = dashboard_router(
+        state_with_tenant_store(store.clone()).await,
+        DashboardAuth::Disabled,
+    );
+    for path in [
+        "/t/default/assist/context?page=/servers",
+        "/t/default/agent_chat/bootstrap",
+        "/t/default/agent_chat/conversations",
+    ] {
+        let (status, _) = body_of(app.clone(), path).await;
+        assert_ne!(status, StatusCode::NOT_FOUND);
+    }
+    for path in [
+        "/t/default/agent_chat/stream",
+        "/t/default/agent_chat/approve",
+        "/t/default/chat/stream",
+        "/t/default/agent_review/policy",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    }
+    assert_eq!(
+        store
+            .bounded_lists
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(store.lists.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let (status, _) = body_of(app, "/t/missing/agent_chat/bootstrap").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 /// Build an `AdminState` with the tenants store wired + a real
 /// `InMemorySink` evidence sink — tenant edit/delete audit via
 /// `record_required` (fail-closed), so a NullSink would turn the

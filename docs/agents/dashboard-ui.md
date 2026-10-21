@@ -127,7 +127,7 @@ without JS via the `<noscript>` Switch button; JS users get a no-click
 `onchange` submit. The selector reads at most 51 registry rows and renders at
 most 50 options. The extra row signals that more tenants exist. If the active
 slug sorts past the cap, its already-loaded request metadata replaces the last
-visible option. Known fragment, badge, and palette routes skip selector reads;
+visible option. Known fragment, badge, palette, and assistant JSON/stream routes skip selector reads;
 non-boosted htmx requests do likewise. Tenant existence checks still run on
 every tenant-prefixed request. Palette search keeps its complete tenant search.
 
