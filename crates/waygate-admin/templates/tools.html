@@ -5,6 +5,10 @@
     <h1 class="page-title">Tools</h1>
 </header>
 
+{% if !busy_upstreams.is_empty() %}
+<p class="callout callout--warn" role="status">Tool counts are incomplete while calls or refreshes are busy. Status unavailable for: {% for name in busy_upstreams %}{% if !loop.first %}, {% endif %}{{ name }}{% endfor %}. Reload this page to try again.</p>
+{% endif %}
+
 <p class="muted" style="margin: 0 0 16px; max-width: 70ch">
     Every tool each connected upstream publishes, with its manifest-declared
     risk tier. MCP clients see the subset of this catalog they are authorized to
@@ -19,7 +23,7 @@
     <select name="server" aria-label="Server">
         <option value="">All servers</option>
         {% for s in servers %}
-        <option value="{{ s.0 }}"{% if filters.is_server(s.0.as_str()) %} selected{% endif %}>{{ s.0 }} ({{ s.1 }})</option>
+        <option value="{{ s.0 }}"{% if filters.is_server(s.0.as_str()) %} selected{% endif %}>{{ s.0 }} ({% if busy_upstreams.contains(s.0) %}unavailable{% else %}{{ s.1 }}{% endif %})</option>
         {% endfor %}
     </select>
     <select name="risk" aria-label="Risk tier">

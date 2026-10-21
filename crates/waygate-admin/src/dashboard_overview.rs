@@ -24,6 +24,7 @@ struct OverviewPage {
     /// Shared topbar / nav / tenant chrome — see [`crate::chrome::PageChrome`].
     chrome: PageChrome,
     upstreams: Vec<UpstreamTile>,
+    busy_upstreams: Vec<String>,
     upstreams_total: usize,
     upstreams_degraded: usize,
     upstreams_down: usize,
@@ -603,14 +604,14 @@ pub(crate) async fn overview(
         (figures, changed),
         notable,
         (active_break_glass, active_break_glass_saturated, attention_items),
-        upstreams,
+        (upstreams, busy_upstreams),
     ) = tokio::join!(
         figures_changed_fut,
         overview_notable(&state, &overview_tenant),
         attention_fut,
         upstream_tiles(&state.upstreams),
     );
-    let upstreams_total = upstreams.len();
+    let upstreams_total = upstreams.len() + busy_upstreams.len();
     let upstreams_degraded = upstreams
         .iter()
         .filter(|u| u.runtime_status == "degraded")
@@ -681,6 +682,7 @@ pub(crate) async fn overview(
             String::new(),
         ),
         upstreams,
+        busy_upstreams,
         upstreams_total,
         upstreams_degraded,
         upstreams_down,
@@ -783,9 +785,9 @@ pub(crate) fn attention_items_for_overview(
     items
 }
 
-async fn upstream_tiles(pool: &UpstreamPool) -> Vec<UpstreamTile> {
-    pool.status_snapshot()
-        .await
+async fn upstream_tiles(pool: &UpstreamPool) -> (Vec<UpstreamTile>, Vec<String>) {
+    let (statuses, busy) = dashboard_upstream_status(pool).await;
+    let tiles = statuses
         .into_iter()
         .map(|status| UpstreamTile {
             name: status.manifest.name,
@@ -793,7 +795,8 @@ async fn upstream_tiles(pool: &UpstreamPool) -> Vec<UpstreamTile> {
             runtime_status: status.health.runtime_state.as_str(),
             tool_count: status.health.published_tool_count,
         })
-        .collect()
+        .collect();
+    (tiles, busy)
 }
 
 /// Recent non-success events, selected by event timestamp within the tenant.
