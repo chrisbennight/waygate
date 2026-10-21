@@ -204,8 +204,12 @@ its admitted catalog `tool_id`, and output validation uses its admitted schema.
 A catalog update affects calls that enter Stage 1 afterward; it cannot replace
 the schema or approval identity of a call already in flight. Stage 11 hands
 the snapshot's contract identity to `UpstreamCatalog::call_tool`, and the pool
-re-resolves the tool under the selected connection's read lock, refusing
-retryably when the identity no longer matches — a mid-call reload therefore
+re-resolves the tool under the selected connection's read lock. The dispatch read checks the
+durable catalog generation before reusing catalog and review rows from that
+generation; an unavailable generation falls back to authoritative row reads.
+A changed generation reloads the rows. The connection's current published
+contract is resolved again and compared with the admitted identity. A mismatch
+refuses dispatch retryably — a mid-call reload therefore
 surfaces as a refused dispatch, never as an RPC executed under a contract the
 earlier stages did not validate. Existing upstream
 session-generation and tombstone checks may still refuse dispatch, but they do

@@ -579,7 +579,24 @@ impl UpstreamPool {
         tool_name: &str,
         inputs: SnapshotInputs,
     ) -> ResolvedInvocationTool {
-        self.resolve_snapshot_with_reads(tenant, server, tool_name, inputs, None, Effects::Record)
+        // The durable generation is read at this boundary. Only catalog and
+        // review rows from that exact generation may be reused; the held
+        // connection's published contract is still resolved and compared.
+        let mode = if inputs.annotation_mode {
+            crate::ClassificationMode::McpAnnotations
+        } else {
+            crate::ClassificationMode::Manifest
+        };
+        let reads = self
+            .admission_reads(
+                tenant,
+                server,
+                tool_name,
+                mode,
+                inputs.published.advertised_definition.as_ref(),
+            )
+            .await;
+        self.resolve_snapshot_with_reads(tenant, server, tool_name, inputs, reads, Effects::Record)
             .await
     }
 
@@ -1068,7 +1085,7 @@ impl UpstreamPool {
 impl UpstreamPool {
     /// Re-resolve the tool's contract identity from the exact state the RPC
     /// will execute under — the held connection's published contract, the
-    /// supplied manifest snapshot, and a fresh governed-catalog read — and
+    /// supplied manifest snapshot, and current governed-catalog generation — and
     /// compare it against the Stage-1 admitted identity. The caller holds the
     /// selected connection's read lock, so a re-dial cannot swap the
     /// connection between this comparison and the RPC. A `false` result means
