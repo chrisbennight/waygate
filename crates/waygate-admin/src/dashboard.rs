@@ -17,7 +17,6 @@
 //! then the gateway logs a loud warning at startup and the route is
 //! effectively dev-only.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use askama::Template;
@@ -26,6 +25,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
+use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 use waygate_mcp::catalog::UpstreamCatalog;
@@ -663,9 +663,12 @@ fn page_routes(state: Arc<AdminState>) -> Router<()> {
 ///   reachable both ways
 /// - `/admin/static/...` — assets, public, no auth
 pub fn router(state: Arc<AdminState>) -> Router<()> {
-    let static_dir = std::env::var("GATEWAY_STATIC_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static"));
+    let static_dir = crate::assets::static_dir();
+    let assets = state
+        .dashboard
+        .assets
+        .get_or_init(|| Arc::new(crate::assets::Assets::load(&static_dir)))
+        .clone();
 
     let tenant_pages = page_routes(state.clone()).layer(axum::middleware::from_fn_with_state(
         state.clone(),
@@ -680,28 +683,18 @@ pub fn router(state: Arc<AdminState>) -> Router<()> {
         // outer level (not under `/t/{tenant}`) so it doesn't require
         // the tenant_scope middleware to run first.
         .route("/tenant-switch", get(tenant_switch_get))
-        // Static assets revalidate on every load (`no-cache` = "store but
-        // always check freshness"). The asset paths are stable across
-        // deploys (no content-hashed filenames), so the previous
-        // `max-age=86400` let a browser serve a *stale* stylesheet, JS, or
-        // Lucide sprite for up to a day after a deploy — a changed icon
-        // referenced by `<use href=…#name>` rendered blank, and restyled
-        // pages kept the old CSS, until the cache expired. `no-cache` makes
-        // that impossible while staying cheap: ServeDir emits Last-Modified,
-        // so each revalidation is a conditional GET that 304s with no body
-        // (the 91KB of self-hosted woff2 is not re-downloaded unless it
-        // actually changed). Correctness over a few 304 round-trips is the
-        // right trade for an internal ops console; immutable content-hashed
-        // URLs would let us cache hard, but that needs a build step we don't
-        // have.
+        // Versioned assets serve snapshot bytes. Legacy URLs revalidate, and
+        // remain the recovery path for old pages during a rolling deployment.
         .nest_service(
             "/static",
             Router::new()
+                .merge(assets.router())
                 .fallback_service(ServeDir::new(static_dir))
                 .layer(SetResponseHeaderLayer::if_not_present(
                     header::CACHE_CONTROL,
                     axum::http::HeaderValue::from_static("no-cache"),
-                )),
+                ))
+                .layer(CompressionLayer::new()),
         )
 }
 

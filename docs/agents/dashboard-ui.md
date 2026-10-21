@@ -95,6 +95,21 @@ What stays un-prefixed by design:
   validates and 303s into the tenant home. Used by the sidebar selector
   form and the palette tenant-switch entries.
 
+## Static assets
+
+Full pages use `PageChrome::asset_url` for shared CSS, JavaScript, fonts, and
+icons. The router snapshots the shipped paths from `GATEWAY_STATIC_DIR` (or
+the built-in static directory) once per dashboard state. The bundle's content
+digest identifies `/admin/static/v/<digest>/...`; those responses have an ETag
+and a year of immutable caching. Stylesheet font URLs use the same version.
+Compression applies only to the static service.
+
+The legacy `/admin/static/...` service remains available with revalidation.
+An unavailable bundle snapshot falls back to these URLs. Restart the gateway
+after changing overridden assets. During a rolling deployment, an unknown
+version of a known asset redirects without caching to its legacy URL, so a
+process never serves different bytes under an immutable version.
+
 ## Tenant selector + cross-tenant banner
 
 The sidebar renders a tenant `<select>` on tenant-prefixed pages only (hidden

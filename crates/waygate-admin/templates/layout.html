@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{ chrome.title }} · Waygate</title>
-<link rel="icon" type="image/svg+xml" href="/admin/static/branding/favicon.svg">
-<link rel="stylesheet" href="/admin/static/css/fonts.css">
-<link rel="stylesheet" href="/admin/static/css/tokens.css">
-<link rel="stylesheet" href="/admin/static/css/base.css">
-<link rel="stylesheet" href="/admin/static/css/components.css">
+<link rel="icon" type="image/svg+xml" href="{{ self.chrome.asset_url("/admin/static/branding/favicon.svg") }}">
+<link rel="stylesheet" href="{{ self.chrome.asset_url("/admin/static/css/fonts.css") }}">
+<link rel="stylesheet" href="{{ self.chrome.asset_url("/admin/static/css/tokens.css") }}">
+<link rel="stylesheet" href="{{ self.chrome.asset_url("/admin/static/css/base.css") }}">
+<link rel="stylesheet" href="{{ self.chrome.asset_url("/admin/static/css/components.css") }}">
 {% block head %}{% endblock %}
 </head>
 <body{% match chrome.tenant_ctx %}{% when Some with (ctx) %} data-tenant-slug="{{ ctx.slug }}"{% when None %}{% endmatch %}>
@@ -35,7 +35,7 @@
 <div class="shell">
     <header class="topbar" role="banner">
         <a class="topbar__brand" href="{{ self.chrome.nav_url("/") }}" aria-label="Waygate overview">
-            <svg class="topbar__mark" viewBox="0 0 128 128" aria-hidden="true"><use href="/admin/static/branding/brand.svg#waygate"/></svg>
+            <svg class="topbar__mark" viewBox="0 0 128 128" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/branding/brand.svg#waygate") }}"/></svg>
             <span>WAYGATE</span>
         </a>
         <span class="topbar__env mono" aria-label="environment">{{ chrome.env }}</span>
@@ -48,7 +48,7 @@
         <button class="topbar__palette" type="button"
                 onclick="document.dispatchEvent(new KeyboardEvent('keydown', {key: 'k', ctrlKey: true, bubbles: true}));"
                 aria-label="Open command palette (Ctrl-K)">
-            <svg width="16" height="16" aria-hidden="true"><use href="/admin/static/lucide.svg#search"/></svg>
+            <svg width="16" height="16" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#search") }}"/></svg>
             <span class="topbar__palette-hint mono">Ctrl K</span>
         </button>
         {% match chrome.user %}{% when Some with (_u) %}
@@ -56,13 +56,13 @@
            Ctrl/Cmd-J handler in assist_panel.js shares this open/close path. #}
         <button class="topbar__palette" type="button" data-assist-toggle
                 aria-label="Toggle assistant (Ctrl-J)" aria-expanded="false">
-            <svg width="16" height="16" aria-hidden="true"><use href="/admin/static/lucide.svg#message-square"/></svg>
+            <svg width="16" height="16" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#message-square") }}"/></svg>
             <span class="topbar__palette-hint mono">Ctrl J</span>
         </button>
         {% when None %}{% endmatch %}
         <button class="theme-toggle" data-theme-toggle type="button" aria-label="Toggle theme">
-            <svg class="theme-toggle__sun"  aria-hidden="true"><use href="/admin/static/lucide.svg#sun"/></svg>
-            <svg class="theme-toggle__moon" aria-hidden="true"><use href="/admin/static/lucide.svg#moon"/></svg>
+            <svg class="theme-toggle__sun"  aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#sun") }}"/></svg>
+            <svg class="theme-toggle__moon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#moon") }}"/></svg>
         </button>
         <div class="topbar__user">{% match chrome.user %}{% when Some with (u) %}{{ u }}{% when None %}anonymous{% endmatch %}</div>
         {% match chrome.user %}{% when Some with (_u) %}
@@ -131,7 +131,7 @@
             {% when None %}{% endmatch %}
             <li{% if group.label == "Settings" %} class="sidebar__bottom"{% endif %}>
                 <a class="sidebar__link" href="{{ group.href }}"{% if group.active %} aria-current="page"{% endif %}>
-                    <svg class="sidebar__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#{{ group.icon }}"/></svg>
+                    <svg class="sidebar__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg") }}#{{ group.icon }}"/></svg>
                     <span class="sidebar-label">{{ group.label }}</span>
                     {% match group.badge_href %}
                     {% when Some with (b) %}<span class="nav-badge" data-badge-src="{{ b }}" hidden></span>
@@ -168,7 +168,7 @@
      aria-label="Command palette" aria-modal="true" hidden data-open="false">
     <div class="palette__card">
         <div class="palette__input-row">
-            <svg class="palette__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#search"/></svg>
+            <svg class="palette__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#search") }}"/></svg>
             <input data-palette-input type="text" autocomplete="off" spellcheck="false"
                    placeholder="Search pages, tenants, and actions…"
                    aria-label="Search query" />
@@ -188,18 +188,18 @@
 {% include "_assist_panel.html" %}
 {% when None %}{% endmatch %}
 
-<script src="/admin/static/js/theme.js"></script>
-<script src="/admin/static/js/badge.js" defer></script>
-<script src="/admin/static/js/palette.js" defer></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/theme.js") }}"></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/badge.js") }}" defer></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/palette.js") }}" defer></script>
 {# Enhances the drawer's governed "Try this tool" form. Loaded once;
    re-initialises on htmx:afterSwap so it wires the form each time the tool
    drawer is swapped in. #}
-<script src="/admin/static/js/try_tool.js" defer></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/try_tool.js") }}" defer></script>
 {# Contextual Assistant: the shared chat client auto-inits any
    server-hydrated [data-agent-chat] block (the immersive page); the panel shell
    hydrates + toggles the docked drawer present on every page. #}
-<script src="/admin/static/js/assist_chat.js" defer></script>
-<script src="/admin/static/js/assist_panel.js" defer></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/assist_chat.js") }}" defer></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/assist_panel.js") }}" defer></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

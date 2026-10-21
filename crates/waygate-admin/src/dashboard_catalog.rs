@@ -526,6 +526,7 @@ mod tests {
     fn empty_drift_state_links_to_tool_change_review() {
         let page = CatalogPage {
             chrome: PageChrome {
+                assets: None,
                 title: "Catalog",
                 env: "test",
                 user: None,
@@ -571,6 +572,7 @@ mod tests {
         let url = crate::dashboard_tool_reviews::event_url(current.id);
         let page = CatalogPage {
             chrome: PageChrome {
+                assets: None,
                 title: "Catalog",
                 env: "test",
                 user: None,

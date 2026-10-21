@@ -14,7 +14,7 @@
 {% if !is_admin %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#box") }}"/></svg>
         <p class="empty-state__title">Policy review requires mcp:admin</p>
         <p class="empty-state__body">
             Reviewing the policy set reads the full Cedar source and spends model
@@ -25,7 +25,7 @@
 {% else if !ready %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#box") }}"/></svg>
         <p class="empty-state__title">Policy review is not available</p>
         <p class="empty-state__body">
             This gateway is missing a piece the review needs — an agent-config
@@ -36,7 +36,7 @@
 {% else if agents.is_empty() %}
 <div class="card">
     <div class="empty-state">
-        <svg class="empty-state__icon" aria-hidden="true"><use href="/admin/static/lucide.svg#box"/></svg>
+        <svg class="empty-state__icon" aria-hidden="true"><use href="{{ self.chrome.asset_url("/admin/static/lucide.svg#box") }}"/></svg>
         <p class="empty-state__title">No enabled policy-review agents</p>
         <p class="empty-state__body">
             Create and enable a <strong>policy review</strong> agent on the
@@ -69,5 +69,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/admin/static/js/agent_review.js" defer></script>
+<script src="{{ self.chrome.asset_url("/admin/static/js/agent_review.js") }}" defer></script>
 {% endblock %}

@@ -30,6 +30,7 @@ pub mod api_key_profiles_section;
 pub mod api_keys;
 pub mod approval_grants;
 pub(crate) mod approval_requirement;
+mod assets;
 pub mod assist;
 pub mod audit;
 pub mod audit_bundle;
