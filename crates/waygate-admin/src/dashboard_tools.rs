@@ -501,11 +501,7 @@ pub(crate) async fn tools_drawer(
     let Ok(((risk, side_effects, pii), live)) =
         tokio::time::timeout(DASHBOARD_UPSTREAM_WAIT, load).await
     else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Tool details are temporarily unavailable while a call or refresh is busy. Try again shortly.",
-        )
-            .into_response();
+        return busy_upstream_fragment();
     };
     let found_tool = live
         .into_iter()

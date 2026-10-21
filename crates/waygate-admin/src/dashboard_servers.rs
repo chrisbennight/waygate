@@ -833,11 +833,7 @@ pub(crate) async fn server_config_fragment(
 
     let (statuses, busy) = dashboard_upstream_status(&state.upstreams).await;
     if busy.contains(&manifest.name) {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Server status is temporarily unavailable while a call or refresh is busy. Try again shortly.",
-        )
-            .into_response();
+        return busy_upstream_fragment();
     }
     let Some(status) = statuses
         .into_iter()

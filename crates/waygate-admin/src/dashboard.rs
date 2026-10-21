@@ -43,6 +43,13 @@ pub(crate) use waygate_core::fmt::{format_ts_abs, format_ts_rel};
 /// Display reads must not inherit the lifetime of an executing upstream call.
 pub(crate) const DASHBOARD_UPSTREAM_WAIT: Duration = Duration::from_millis(250);
 
+/// Expected display unavailability must be a successful fragment: htmx does
+/// not swap error responses with its default response handling.
+pub(crate) fn busy_upstream_fragment() -> Response {
+    Html("<p class=\"callout callout--warn\" role=\"status\">Status is temporarily unavailable while a call or catalog refresh is busy. Reload this page to try again.</p>")
+        .into_response()
+}
+
 pub(crate) async fn dashboard_upstream_status(
     pool: &waygate_upstream::UpstreamPool,
 ) -> (Vec<waygate_upstream::UpstreamStatus>, Vec<String>) {
@@ -906,6 +913,23 @@ pub(crate) fn urlencode(s: &str) -> String {
 mod tests {
     use super::*;
     use time::OffsetDateTime;
+
+    #[tokio::test]
+    async fn busy_fragment_is_visible_to_default_htmx_response_handling() {
+        let response = busy_upstream_fragment();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/html; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("role=\"status\""));
+        assert!(body.contains("temporarily unavailable"));
+        assert!(body.contains("Reload this page to try again"));
+    }
 
     fn nav_legacy(path: &str) -> String {
         format!("/admin{path}")
