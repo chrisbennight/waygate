@@ -153,6 +153,9 @@ pub async fn tenant_scope_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
+    let timer = waygate_telemetry::metrics::RequestStageTimer::start(
+        waygate_telemetry::metrics::RequestStage::TenantMetadata,
+    );
     // Stage 1: shape check. `TenantId::parse` enforces the
     // lowercase-alphanumeric + dash/underscore + length rules
     // shared with the storage layer; refusing malformed slugs
@@ -213,6 +216,7 @@ pub async fn tenant_scope_middleware(
         more_tenants_available,
     };
     req.extensions_mut().insert(ctx);
+    drop(timer);
     next.run(req).await
 }
 

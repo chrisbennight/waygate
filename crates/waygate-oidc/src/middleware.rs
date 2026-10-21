@@ -195,6 +195,9 @@ pub async fn bearer_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
+    let timer = waygate_telemetry::metrics::RequestStageTimer::start(
+        waygate_telemetry::metrics::RequestStage::Authentication,
+    );
     let inner = &layer.inner;
     match &inner.mode {
         AuthMode::Disabled => {
@@ -204,6 +207,7 @@ pub async fn bearer_middleware(
             );
             req.extensions_mut().insert(dev_principal());
             record_bearer_validation(BearerOutcome::Disabled);
+            drop(timer);
             return next.run(req).await;
         }
         AuthMode::Enforce => {}
@@ -299,6 +303,7 @@ pub async fn bearer_middleware(
                 }
                 req.extensions_mut().insert(principal);
                 record_bearer_validation(BearerOutcome::Ok);
+                drop(timer);
                 return next.run(req).await;
             }
             Err(e) if e.is_client_error() => {

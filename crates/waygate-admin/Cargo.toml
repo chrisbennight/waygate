@@ -25,6 +25,7 @@ waygate-skills.workspace = true
 waygate-policy.workspace = true
 waygate-manifest-store.workspace = true
 waygate-core.workspace = true
+waygate-telemetry.workspace = true
 waygate-invocation.workspace = true
 waygate-oidc.workspace = true
 waygate-scim.workspace = true

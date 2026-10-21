@@ -333,7 +333,12 @@ pub async fn preparse_gate(
     };
 
     let started = std::time::Instant::now();
-    match evaluate(&state, &principal, &server, &tool).await {
+    let timer = waygate_telemetry::metrics::RequestStageTimer::start(
+        waygate_telemetry::metrics::RequestStage::Preparse,
+    );
+    let decision = evaluate(&state, &principal, &server, &tool).await;
+    drop(timer);
+    match decision {
         GateDecision::Pass => next.run(req).await,
         GateDecision::Forbidden {
             reason,
