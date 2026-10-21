@@ -13,6 +13,7 @@
    so the partial resolves them against this page's struct (askama include
    scoping). `self.nav_url` resolves here too. #}
 {% let enabled = profiles_section.enabled %}
+{% let sprite_url = profiles_section.sprite_url.as_str() %}
 {% let is_admin = profiles_section.is_admin %}
 {% let error = profiles_section.error.clone() %}
 {% let profiles = profiles_section.profiles.iter().collect::<Vec<_>>() %}

@@ -1283,8 +1283,11 @@ pub(crate) async fn every_sidebar_icon_resolves_in_spritesheet() {
 pub(crate) async fn every_rendered_icon_resolves_in_spritesheet() {
     use std::path::PathBuf;
     let app = dashboard_router(empty_state().await, DashboardAuth::Disabled);
-    let (status, body) = body_of(app, "/").await;
+    let (status, mut body) = body_of(app.clone(), "/").await;
     assert_eq!(status, StatusCode::OK);
+    let (status, profiles) = body_of(app, "/profiles").await;
+    assert_eq!(status, StatusCode::OK);
+    body.push_str(&profiles);
     assert!(
         !body.contains("/admin/static/lucide.svg#"),
         "shared page icons must use the versioned sprite"

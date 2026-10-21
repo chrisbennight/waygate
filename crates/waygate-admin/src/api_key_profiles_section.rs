@@ -89,6 +89,7 @@ pub struct ProfileRow {
 #[derive(Template)]
 #[template(path = "api_key_profiles_section.html")]
 pub struct ProfilesSection {
+    pub sprite_url: String,
     /// `true` when the api_key_profiles store is wired
     /// (gateway has a database). False → "feature disabled"
     /// card.
@@ -146,6 +147,10 @@ pub async fn load_section(
     csrf_token: String,
     create_error: Option<String>,
 ) -> ProfilesSection {
+    let sprite_url = state.dashboard.assets.get().map_or_else(
+        || "/admin/static/lucide.svg".to_owned(),
+        |assets| assets.url("/admin/static/lucide.svg"),
+    );
     let is_admin = user
         .map(|p| p.has_scope(waygate_oidc::Scope::McpAdmin.as_str()))
         .unwrap_or(false);
@@ -161,6 +166,7 @@ pub async fn load_section(
         .collect();
     let Some(store) = state.identity.api_key_profiles.get() else {
         return ProfilesSection {
+            sprite_url,
             enabled: false,
             is_admin,
             error: None,
@@ -177,6 +183,7 @@ pub async fn load_section(
         // (which can include allowed_servers / allowed_tools
         // operator-confidential lists) enters the HTML.
         return ProfilesSection {
+            sprite_url,
             enabled: true,
             is_admin,
             error: None,
@@ -191,6 +198,7 @@ pub async fn load_section(
 
     match store.list(tenant).await {
         Ok(rows) => ProfilesSection {
+            sprite_url,
             enabled: true,
             is_admin,
             error: None,
@@ -208,6 +216,7 @@ pub async fn load_section(
                 "api_key_profiles_section: list failed",
             );
             ProfilesSection {
+                sprite_url,
                 enabled: true,
                 is_admin,
                 error: Some(

@@ -179,6 +179,21 @@ async fn versioned_assets_are_immutable_conditional_and_compressed() {
         std::fs::read(resolved_static_dir().join("css/base.css")).unwrap()
     );
 
+    let js_uri = page_asset(&app, "js/palette.js").await;
+    let js_response = app
+        .clone()
+        .oneshot(Request::builder().uri(&js_uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(js_response.status(), StatusCode::OK);
+    let js = axum::body::to_bytes(js_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let js = std::str::from_utf8(&js).unwrap();
+    let prefix = uri.strip_suffix("css/base.css").unwrap();
+    assert!(js.contains(&format!("/admin{prefix}lucide.svg#")));
+    assert!(!js.contains("/admin/static/lucide.svg#"));
+
     let response = app
         .clone()
         .oneshot(

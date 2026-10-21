@@ -108,7 +108,8 @@ Full pages use `PageChrome::asset_url` for shared CSS, JavaScript, fonts, and
 icons. The router snapshots the shipped paths from `GATEWAY_STATIC_DIR` (or
 the built-in static directory) once per dashboard state. The bundle's content
 digest identifies `/admin/static/v/<digest>/...`; those responses have an ETag
-and a year of immutable caching. Stylesheet font URLs use the same version.
+and a year of immutable caching. CSS and JavaScript references to shipped
+assets use the same version, including fonts and generated icons.
 Compression applies only to the static service.
 
 The legacy `/admin/static/...` service remains available with revalidation.

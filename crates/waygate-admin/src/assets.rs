@@ -70,8 +70,8 @@ impl Assets {
             originals.insert((*relative).to_owned(), bytes);
         }
         let mut digest = Sha256::new();
-        // This identity covers both the source bundle and its CSS URL format.
-        digest.update(b"waygate-dashboard-assets-v1\0");
+        // This identity covers the source bundle and its public text URL format.
+        digest.update(b"waygate-dashboard-assets-v2\0");
         for (path, bytes) in &originals {
             digest.update((path.len() as u64).to_be_bytes());
             digest.update(path.as_bytes());
@@ -83,11 +83,11 @@ impl Assets {
         let known_paths: BTreeSet<_> = originals.keys().cloned().collect();
         let mut files = BTreeMap::new();
         for (path, bytes) in originals {
-            let body = if path.ends_with(".css") {
-                let css = String::from_utf8(bytes).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 stylesheet")
+            let body = if path.ends_with(".css") || path.ends_with(".js") {
+                let text = String::from_utf8(bytes).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 public text asset")
                 })?;
-                rewrite_css(&css, &prefix, &known_paths).into_bytes()
+                rewrite_asset_references(&text, &prefix, &known_paths).into_bytes()
             } else {
                 bytes
             };
@@ -192,8 +192,8 @@ async fn serve(
     response
 }
 
-fn rewrite_css(css: &str, prefix: &str, known_paths: &BTreeSet<String>) -> String {
-    let mut parts = css.split("/admin/static/");
+fn rewrite_asset_references(text: &str, prefix: &str, known_paths: &BTreeSet<String>) -> String {
+    let mut parts = text.split("/admin/static/");
     let mut rewritten = parts.next().unwrap_or_default().to_owned();
     for suffix in parts {
         let path = suffix
