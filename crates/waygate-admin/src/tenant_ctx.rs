@@ -58,7 +58,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{MatchedPath, Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
@@ -197,12 +197,13 @@ pub async fn tenant_scope_middleware(
         .unwrap_or_else(|| TenantId::DEFAULT.to_owned());
     let is_cross_tenant = principal_tenant != params.tenant;
 
-    // Stage 4: build the selector option list. Empty when no
-    // registry; otherwise pull every tenant the principal is
-    // entitled to see (today: every tenant — gateway-admin role
-    // separation is not yet implemented).
-    let (available_tenants, more_tenants_available) =
-        load_selector_options(&state, &params.tenant).await;
+    // Display-only selector data is unnecessary for fragments. The active
+    // tenant lookup above remains authoritative on every request.
+    let (available_tenants, more_tenants_available) = if needs_selector(&req) {
+        load_selector_options(&state, &params.tenant, display_name.as_deref()).await
+    } else {
+        (Vec::new(), false)
+    };
 
     let ctx = TenantContext {
         slug: params.tenant.clone(),
@@ -214,6 +215,36 @@ pub async fn tenant_scope_middleware(
     };
     req.extensions_mut().insert(ctx);
     next.run(req).await
+}
+
+fn needs_selector(request: &Request) -> bool {
+    if request
+        .headers()
+        .get("hx-request")
+        .is_some_and(|value| value == "true")
+        && !request
+            .headers()
+            .get("hx-boosted")
+            .is_some_and(|value| value == "true")
+    {
+        return false;
+    }
+    let path = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or("", MatchedPath::as_str);
+    ![
+        "/badge/decisions",
+        "/search",
+        "/servers/config",
+        "/tools/drawer",
+        "/activity/rows",
+        "/activity/compare",
+        "/activity/{id}",
+        "/overview/blocked-tools",
+    ]
+    .iter()
+    .any(|suffix| path.ends_with(suffix))
 }
 
 /// Pull the tenant list for the sidebar selector, capped at
@@ -235,11 +266,12 @@ pub async fn tenant_scope_middleware(
 async fn load_selector_options(
     state: &Arc<AdminState>,
     active_slug: &str,
+    active_display_name: Option<&str>,
 ) -> (Vec<TenantOption>, bool) {
     let Some(store) = state.identity.tenants.get() else {
         return (Vec::new(), false);
     };
-    match store.list().await {
+    match store.list_bounded((SELECTOR_TENANT_CAP + 1) as u16).await {
         Ok(rows) => {
             let total = rows.len();
             let more = total > SELECTOR_TENANT_CAP;
@@ -248,7 +280,11 @@ async fn load_selector_options(
             // the "active row from the tail" — if the active tenant
             // sorts past the cap, displace the last of the visible
             // slice so the active option is always present.
-            let active_row = rows.iter().find(|t| t.id == active_slug).cloned();
+            let active_row = active_display_name.map(|display_name| TenantOption {
+                active: true,
+                slug: active_slug.to_owned(),
+                display_name: display_name.to_owned(),
+            });
             let visible_contains_active = rows
                 .iter()
                 .take(SELECTOR_TENANT_CAP)
@@ -272,11 +308,7 @@ async fn load_selector_options(
                     if options.len() >= SELECTOR_TENANT_CAP {
                         options.pop();
                     }
-                    options.push(TenantOption {
-                        active: true,
-                        slug: row.id,
-                        display_name: row.display_name,
-                    });
+                    options.push(row);
                 }
                 // If the active slug ISN'T in the registry at all,
                 // the middleware will already have 404ed (since

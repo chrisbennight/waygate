@@ -124,9 +124,12 @@ a process never serves different bytes under an immutable version.
 The sidebar renders a tenant `<select>` on tenant-prefixed pages only (hidden
 entirely on legacy `/admin/...`). Form action is `/admin/tenant-switch` — works
 without JS via the `<noscript>` Switch button; JS users get a no-click
-`onchange` submit. The selector list comes from `state.identity.tenants.list()` capped
-at 50; if the active slug sorts past the cap, the loader displaces the last
-visible row so the active option is always present.
+`onchange` submit. The selector reads at most 51 registry rows and renders at
+most 50 options. The extra row signals that more tenants exist. If the active
+slug sorts past the cap, its already-loaded request metadata replaces the last
+visible option. Known fragment, badge, and palette routes skip selector reads;
+non-boosted htmx requests do likewise. Tenant existence checks still run on
+every tenant-prefixed request. Palette search keeps its complete tenant search.
 
 The red cross-tenant banner appears when `url_tenant != principal.tenant`.
 Gateway-admin operators acting on another tenant's data always see it; tenant
