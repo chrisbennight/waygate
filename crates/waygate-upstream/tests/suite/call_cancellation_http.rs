@@ -213,6 +213,43 @@ async fn caller_cancellation_closes_a_2026_upstream_request() {
     caller_cancellation_reaches(UpstreamProtocol::default(), SessionIsolation::PerCall).await;
 }
 
+#[tokio::test]
+async fn cancelled_capacity_waits_do_not_dispatch_or_trip_the_breaker() {
+    let (addr, upstream) = spawn_upstream().await;
+    let pool = Arc::new(
+        connect(manifest(
+            addr,
+            UpstreamProtocol::default(),
+            SessionIsolation::PerCall,
+        ))
+        .await
+        .with_call_timeout(None),
+    );
+    let first_cancel = CancellationToken::new();
+    let first = call(&pool, first_cancel.clone());
+    tokio::time::timeout(WAIT, upstream.started.notified())
+        .await
+        .unwrap();
+    for _ in 0..6 {
+        let cancellation = CancellationToken::new();
+        let waiting = call(&pool, cancellation.clone());
+        cancellation.cancel();
+        let error = tokio::time::timeout(WAIT, waiting).await.unwrap().unwrap();
+        assert_eq!(error.data.unwrap()["phase"], "pre_dispatch");
+    }
+    assert_eq!(
+        pool.breaker_state("mock"),
+        Some(waygate_upstream::breaker::BreakerState::Closed)
+    );
+    first_cancel.cancel();
+    tokio::time::timeout(WAIT, first).await.unwrap().unwrap();
+    assert!(
+        tokio::time::timeout(Duration::ZERO, upstream.started.notified())
+            .await
+            .is_err()
+    );
+}
+
 /// A reused legacy session stays open after the call, so only the
 /// cancellation notification can stop the upstream's work.
 #[tokio::test]
