@@ -230,8 +230,10 @@ fn schema<'a>(
             None,
         );
     }
-    let open = |schema: Option<&Value>| {
-        schema.and_then(|s| s.get("additionalProperties")) != Some(&Value::Bool(false))
+    // A schema opens when it stops refusing properties it does not name.
+    let opens = |key: &str| {
+        let refuses = |s: Option<&Value>| s.and_then(|s| s.get(key)) == Some(&Value::Bool(false));
+        refuses(before) && !refuses(after)
     };
     // A nested parameter's own type, description, allowed values, and
     // default are reported by `property`.
@@ -269,25 +271,37 @@ fn schema<'a>(
         if old == new {
             continue;
         }
-        let is_object = |v: Option<&Value>| v.is_some_and(Value::is_object);
-        let is_array = |v: Option<&Value>| v.is_some_and(Value::is_array);
-        if key == "additionalProperties" && input && !open(before) && open(after) {
+        if input
+            && matches!(
+                key.as_str(),
+                "additionalProperties" | "unevaluatedProperties"
+            )
+            && opens(key)
+        {
             out.push(
                 || format!("{} now accepts parameters it does not name", scope()),
                 Some("The model may send inputs the schema does not describe."),
             );
-            if is_object(new) {
+            if new.is_some_and(Value::is_object) {
                 schema(label, None, new, &child(key), input, out);
             }
             continue;
         }
-        // Keywords whose values are schemas are walked with the same rules,
-        // so a parameter added inside `items` or a branch is still named.
-        if SCHEMA_KEYWORDS.contains(&key.as_str()) && (is_object(old) || is_object(new)) {
+        // Any keyword holding a schema, or a list of them, is walked with the
+        // same rules, so a parameter added inside `items`, a definition, or a
+        // branch is still named. Keywords that carry example or literal
+        // values are listed without being read as schemas.
+        let literal = matches!(key.as_str(), "examples" | "default" | "const" | "enum");
+        let is_object = |v: Option<&Value>| v.is_some_and(Value::is_object);
+        let holds_objects = |v: Option<&Value>| {
+            v.and_then(Value::as_array)
+                .is_some_and(|a| a.iter().any(Value::is_object))
+        };
+        if !literal && (is_object(old) || is_object(new)) {
             nested(label, &child(key), old, new, input, out);
             continue;
         }
-        if SCHEMA_LIST_KEYWORDS.contains(&key.as_str()) && (is_array(old) || is_array(new)) {
+        if !literal && (holds_objects(old) || holds_objects(new)) {
             let (old, new) = (old.and_then(Value::as_array), new.and_then(Value::as_array));
             let len = old.map_or(0, Vec::len).max(new.map_or(0, Vec::len));
             for i in 0..len {
@@ -303,54 +317,12 @@ fn schema<'a>(
             }
             continue;
         }
-        if SCHEMA_MAP_KEYWORDS.contains(&key.as_str()) && (is_object(old) || is_object(new)) {
-            let (old, new) = (
-                old.and_then(Value::as_object),
-                new.and_then(Value::as_object),
-            );
-            let names: BTreeSet<&String> = old.into_iter().chain(new).flat_map(Map::keys).collect();
-            for name in names {
-                let at = child_path(&child(key), Cow::Borrowed(name.as_str()));
-                nested(
-                    label,
-                    &at,
-                    old.and_then(|o| o.get(name)),
-                    new.and_then(|n| n.get(name)),
-                    input,
-                    out,
-                );
-            }
-            continue;
-        }
         out.push(
             || format!("{} {} {}", scope(), quoted(key), presence(old, new)),
             None,
         );
     }
 }
-
-/// Keywords whose value is one schema.
-const SCHEMA_KEYWORDS: [&str; 10] = [
-    "items",
-    "additionalProperties",
-    "additionalItems",
-    "not",
-    "contains",
-    "if",
-    "then",
-    "else",
-    "propertyNames",
-    "unevaluatedProperties",
-];
-/// Keywords whose value is a list of schemas.
-const SCHEMA_LIST_KEYWORDS: [&str; 5] = ["anyOf", "oneOf", "allOf", "prefixItems", "items"];
-/// Keywords whose value maps names to schemas.
-const SCHEMA_MAP_KEYWORDS: [&str; 4] = [
-    "$defs",
-    "definitions",
-    "patternProperties",
-    "dependentSchemas",
-];
 
 /// Compare a schema found under a keyword: added and removed ones are named,
 /// and an added one is walked so its parameters are flagged as new.
@@ -868,6 +840,41 @@ mod tests {
             assert!(texts.contains(&expected), "{expected:?} in {texts:?}");
         }
         assert!(!texts.iter().any(|(t, _)| t.contains("“items” changed")));
+    }
+
+    #[test]
+    fn legacy_dependencies_and_unevaluated_properties_are_covered() {
+        let before = json!({"inputSchema": {"type": "object", "unevaluatedProperties": false,
+            "properties": {"query": {"type": "string"}},
+            "dependencies": {"query": {"properties": {}}}}});
+        let after = json!({"inputSchema": {"type": "object",
+            "properties": {"query": {"type": "string"}},
+            "dependencies": {"query": {"required": ["context"],
+                "properties": {"context": {"type": "string"}}}}}});
+        let summary = summarize(&before, &after);
+        let listed = texts(&summary);
+        for expected in [
+            ("Input parameter “dependencies.query.context” added", true),
+            (
+                "Input parameter “dependencies.query.context” is now required",
+                true,
+            ),
+            (
+                "Input parameter schema now accepts parameters it does not name",
+                true,
+            ),
+        ] {
+            assert!(listed.contains(&expected), "{expected:?} in {listed:?}");
+        }
+        // Literal values are listed, not read as schemas.
+        let examples = summarize(
+            &json!({"inputSchema": {"examples": [{"properties": {}}]}}),
+            &json!({"inputSchema": {"examples": [{"properties": {"x": {}}}]}}),
+        );
+        assert_eq!(
+            texts(&examples),
+            vec![("Input parameter schema “examples” changed", false)]
+        );
     }
 
     #[test]
