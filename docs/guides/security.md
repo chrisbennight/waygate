@@ -116,7 +116,15 @@ automatic quarantine. This detects a changed contract, not whether its text is
 malicious. Response-content inspection is a separate control.
 
 Open **Servers → Review tool changes**. Select the affected tool to compare
-its previously accepted contract with the observed replacement. **Keep blocked**
+its previously accepted contract with the observed replacement. Each changed
+field is shown as a diff: removed and added lines carry a sign, the words that
+changed within a line are highlighted, and long unchanged runs are collapsed
+until expanded. Invisible, control, and text-direction characters appear as
+labelled code points such as `U+200B`, and a change that alters only such
+characters or whitespace says so. **Side by side** and **Full definitions**
+change the layout, and the choice is remembered. A tool awaiting its first
+approval, or whose accepted definition was not retained, shows the complete
+observed definition instead. **Keep blocked**
 records a decision and leaves the block in place. **Approve this replacement**
 refreshes
 the upstream and accepts only the exact reviewed generation; if it changed
@@ -148,7 +156,8 @@ still establishes its baseline under the approved manifest.
 **Catalog → Recent drift events** lists each change to a classified tool,
 including changes accepted automatically, with its server, tool, changed fields,
 and outcome.
-**View change** compares that change's previous and new definitions, and the
+**View change** compares that change's previous and new definitions in the
+same views, and the
 change's Activity entry links to the same page. A change back to a definition
 recorded earlier is labeled as one. Definitions over the storage limit, and
 changes recorded before this history was kept, show only their contract hashes.

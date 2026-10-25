@@ -17,13 +17,9 @@
 {% if r.observed_contract.is_null() %}
 <div class="card"><p>The tool contract exceeds the review storage limit. Its identity is retained, but the comparison is unavailable. {% if r.quarantined %}Reduce the contract upstream and refresh before approval.{% else %}Its existing approval remains in effect.{% endif %}</p></div>
 {% endif %}
-{% for change in changes %}
-<section class="page-section"><h2 class="section-heading">{{ change.name }}</h2>
-<div class="skills-comparison">
-<section><h3 class="card-title">Previously accepted</h3><pre class="skills-content" tabindex="0">{{ change.before }}</pre></section>
-<section><h3 class="card-title">Observed replacement</h3><pre class="skills-content" tabindex="0">{{ change.after }}</pre></section>
-</div></section>
-{% endfor %}
+{% match baseline_note %}{% when Some with (note) %}<p class="diff-note">{{ note }}</p>{% when None %}{% endmatch %}
+{% include "_diff_views.html" %}
+{% for section in sections %}{% include "_review_diff.html" %}{% endfor %}
 {% if r.quarantined %}
 <form class="card" method="post" action="{{ self.chrome.nav_url("/servers/tool-changes/approve") }}">
 <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">

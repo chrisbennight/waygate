@@ -1,0 +1,1 @@
+{% for s in segs %}{% if s.class.is_empty() %}{{ s.text }}{% else %}<span class="{{ s.class }}"{% match s.label %}{% when Some with (label) %} title="{{ label }}"{% when None %}{% endmatch %}>{{ s.text }}</span>{% endif %}{% endfor %}

@@ -36,7 +36,7 @@ Full size: [light](docs/images/email-policy-light.png) · [dark](docs/images/ema
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/tool-change-review-dark.png">
-  <img src="docs/images/tool-change-review-light.png" width="864" alt="An upstream tool changed its description to request credentials. Waygate quarantined it and shows the accepted and replacement descriptions side by side.">
+  <img src="docs/images/tool-change-review-light.png" width="864" alt="An upstream tool changed its description to request credentials. Waygate blocked it and shows the change as a diff, with the added words highlighted.">
 </picture>
 
 An upstream tool changes what it asks your agent to do. With

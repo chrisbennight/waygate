@@ -1,0 +1,4 @@
+{% for block in c.blocks %}{% if block.collapsed && block.rows.is_empty() %}<p class="diff-gap diff-gap--static">{{ block.hidden_label() }}, not shown here</p>{% else %}{% if block.collapsed %}<details class="diff-gap"><summary>{{ block.hidden_label() }}</summary>{% endif %}<table class="diff-table"><colgroup><col class="diff-col-num"><col class="diff-col-num"><col class="diff-col-sign"><col></colgroup><tbody>
+{% for row in block.rows %}<tr class="{{ row.class() }}"><td class="diff-num">{{ row.old_number() }}</td><td class="diff-num">{{ row.new_number() }}</td><td class="diff-sign"><span aria-hidden="true">{{ row.marker() }}</span><span class="sr-only">{{ row.label() }}</span></td><td class="diff-code">{% let segs = row.segments.as_slice() %}{% include "_diff_segments.html" %}</td></tr>
+{% endfor %}</tbody></table>{% if block.collapsed %}</details>{% endif %}{% endif %}
+{% endfor %}

@@ -291,6 +291,30 @@ a row. Preserve these properties when changing the page:
   event whose reason starts with `refused:` or `unavailable:`, which links to
   that server's rows (`?server=<name>`).
 
+## Review comparisons
+
+The tool change review page and each tool change event page show every changed
+contract field as a diff built by `review_diff`. Preserve these properties when
+changing them:
+
+- **Server-rendered.** `review_diff::compare` aligns lines within a time bound,
+  highlights the changed words within paired lines, and collapses long
+  unchanged runs into `<details>` rows. The `_review_diff.html` partials escape
+  every segment, so the pages need no script.
+- **Three views.** One column is the default. Side by side aligns old and new
+  lines and falls back to one column on narrow screens. Full definitions shows
+  the complete stored text. An explicit `?view=` choice is remembered in the
+  `mcp-gw-review-view` preference cookie.
+- **Nothing hidden.** Control, invisible, text-direction, and non-standard
+  space characters render as labelled code points in every view. Whitespace
+  changes are marked, not ignored, and a change whose visible text is unchanged
+  says so.
+- **Not color alone.** Changed lines carry a sign and a hidden Added or Removed
+  label. Forced-colors mode keeps a border and underline.
+- **No reconstruction.** A first approval, or an accepted definition that was
+  not retained, shows the observed definition whole with a note rather than a
+  diff against nothing.
+
 ## Skills review
 
 The Skills destination (`/skills`) is a searchable tenant-scoped review catalog.

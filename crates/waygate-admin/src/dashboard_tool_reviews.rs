@@ -5,6 +5,7 @@ use crate::{
     chrome::PageChrome,
     dashboard::{csrf_matches, render, urlencode, user_display},
     error::ApiError,
+    review_diff::{self, DiffSection, DiffView, SectionBody, ViewLink},
     state::AdminState,
     tenant_ctx::{self, TenantContext},
     tool_reviews::{self, ToolReviewParams},
@@ -55,6 +56,27 @@ pub(crate) fn field_label(key: &str) -> &str {
     }
 }
 
+/// Changed top-level fields in reading order: the text the model reads, then
+/// the shapes it fills and receives, then hints and metadata.
+fn changed_fields(before: &serde_json::Value, after: &serde_json::Value) -> Vec<String> {
+    const ORDER: [&str; 5] = [
+        "description",
+        "inputSchema",
+        "outputSchema",
+        "annotations",
+        "_meta",
+    ];
+    let mut fields = waygate_catalog::tool_reviews::changed_fields(before, after);
+    // A stable sort keeps any other fields in their existing name order.
+    fields.sort_by_key(|field| {
+        ORDER
+            .iter()
+            .position(|known| known == field)
+            .unwrap_or(ORDER.len())
+    });
+    fields
+}
+
 pub(crate) fn review_url(server: &str, tool: &str) -> String {
     format!(
         "/servers/tool-changes?server={}&tool={}",
@@ -71,6 +93,11 @@ struct ReviewQuery {
     after_tool: Option<String>,
     #[serde(default)]
     include_decided: bool,
+    view: Option<DiffView>,
+}
+#[derive(Deserialize)]
+struct ViewQuery {
+    view: Option<DiffView>,
 }
 struct PendingRow {
     server: String,
@@ -79,18 +106,19 @@ struct PendingRow {
     trigger: String,
     status: &'static str,
 }
-struct FieldChange {
-    name: String,
-    before: String,
-    after: String,
-}
 #[derive(Template)]
 #[template(path = "tool_review.html")]
 struct ReviewPage {
     chrome: PageChrome,
     rows: Vec<PendingRow>,
     review: Option<waygate_catalog::tool_reviews::ToolReview>,
-    changes: Vec<FieldChange>,
+    sections: Vec<DiffSection>,
+    /// Why whole definitions are shown instead of a comparison.
+    baseline_note: Option<&'static str>,
+    view: DiffView,
+    view_links: Vec<ViewLink>,
+    before_label: &'static str,
+    after_label: &'static str,
     manifest_hash: String,
     observed_at: String,
     trigger: String,
@@ -112,9 +140,9 @@ pub(crate) fn trigger(review: &waygate_catalog::tool_reviews::ToolReview) -> Str
     if review.observed_contract.is_null() {
         return "Definition changed; comparison unavailable".into();
     }
-    let fields = changes(review)
+    let fields = changed_fields(&review.approved_contract, &review.observed_contract)
         .into_iter()
-        .map(|change| format!("{} changed", change.name))
+        .map(|key| format!("{} changed", field_label(&key)))
         .collect::<Vec<_>>();
     if fields.is_empty() {
         "Definition differs from approval".into()
@@ -123,33 +151,68 @@ pub(crate) fn trigger(review: &waygate_catalog::tool_reviews::ToolReview) -> Str
     }
 }
 
-fn changes(review: &waygate_catalog::tool_reviews::ToolReview) -> Vec<FieldChange> {
+/// The review's changed fields, and why whole definitions are shown when
+/// there is no accepted definition to compare with.
+fn review_sections(
+    review: &waygate_catalog::tool_reviews::ToolReview,
+) -> (Vec<DiffSection>, Option<&'static str>) {
     if review.observed_contract.is_null() {
-        return Vec::new();
+        return (Vec::new(), None);
     }
-    let mut changes = field_changes(&review.approved_contract, &review.observed_contract);
-    if review.approved_contract.is_null() {
-        for change in &mut changes {
-            change.before = "Previous definition unavailable".into();
-        }
+    if !review.approved_contract.is_null() {
+        return (
+            field_sections(&review.approved_contract, &review.observed_contract),
+            None,
+        );
     }
-    changes
-}
-
-fn field_changes(before: &serde_json::Value, after: &serde_json::Value) -> Vec<FieldChange> {
-    let text = |value: Option<&serde_json::Value>| match value {
-        None => "Not present".into(),
-        Some(serde_json::Value::String(text)) => text.clone(),
-        Some(value) => serde_json::to_string_pretty(value).expect("JSON contract serializes"),
+    let note = if review.approved_hash.is_empty() {
+        "No definition has been accepted for this tool yet, so the complete observed definition is shown."
+    } else {
+        "The previously accepted definition was not retained, so only the observed definition is shown."
     };
-    waygate_catalog::tool_reviews::changed_fields(before, after)
+    let sections = changed_fields(&serde_json::Value::Null, &review.observed_contract)
         .into_iter()
-        .map(|key| FieldChange {
-            before: text(before.get(&key)),
-            after: text(after.get(&key)),
+        .map(|key| DiffSection {
+            body: SectionBody::Definition(review_diff::text_segments(&field_text(
+                &review.observed_contract[&key],
+            ))),
             name: field_label(&key).to_owned(),
         })
+        .collect();
+    (sections, Some(note))
+}
+
+/// Descriptions read as prose; structured fields as formatted JSON.
+fn field_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        value => serde_json::to_string_pretty(value).expect("JSON contract serializes"),
+    }
+}
+
+/// Compare each changed top-level field. Both contracts are read from jsonb
+/// columns, whose normalized key order keeps unchanged keys on matching lines.
+fn field_sections(before: &serde_json::Value, after: &serde_json::Value) -> Vec<DiffSection> {
+    changed_fields(before, after)
+        .into_iter()
+        .map(|key| {
+            let old = before.get(&key).map(field_text);
+            let new = after.get(&key).map(field_text);
+            DiffSection {
+                name: field_label(&key).to_owned(),
+                body: SectionBody::Compared(review_diff::compare(old.as_deref(), new.as_deref())),
+            }
+        })
         .collect()
+}
+
+/// The view switcher, shown only when a section has a comparison to switch.
+fn view_links(sections: &[DiffSection], base: &str, view: DiffView) -> Vec<ViewLink> {
+    if sections.iter().any(|s| s.comparison().is_some()) {
+        review_diff::view_links(base, view, "Full definitions")
+    } else {
+        Vec::new()
+    }
 }
 
 #[derive(Template)]
@@ -163,7 +226,11 @@ struct EventPage {
     earlier_recorded_at: Option<String>,
     /// Why no field comparison is shown, when it cannot be.
     unavailable: Option<&'static str>,
-    changes: Vec<FieldChange>,
+    sections: Vec<DiffSection>,
+    view: DiffView,
+    view_links: Vec<ViewLink>,
+    before_label: &'static str,
+    after_label: &'static str,
     quarantined: bool,
     review_url: String,
 }
@@ -175,6 +242,7 @@ async fn event_page(
     tenant: Option<Extension<TenantContext>>,
     headers: HeaderMap,
     Path(params): Path<std::collections::HashMap<String, String>>,
+    Query(query): Query<ViewQuery>,
 ) -> Result<Response, ApiError> {
     // Read `id` by key: the tenant-prefixed mount adds a second capture.
     let id = params
@@ -197,7 +265,7 @@ async fn event_page(
         .await
         .map_err(tool_reviews::unavailable)?
         .ok_or(ApiError::NotFound("Tool change not found"))?;
-    let (unavailable, changes) = match (
+    let (unavailable, sections) = match (
         &change.event.previous_hash,
         &change.previous_contract,
         &change.observed_contract,
@@ -215,14 +283,19 @@ async fn event_page(
             Vec::new(),
         ),
         (Some(_), Some(before), Some(after)) => {
-            let changes = field_changes(before, after);
-            let unavailable = changes
+            let sections = field_sections(before, after);
+            let unavailable = sections
                 .is_empty()
                 .then_some("The stored definitions do not differ.");
-            (unavailable, changes)
+            (unavailable, sections)
         }
     };
+    let view = DiffView::select(query.view, &headers);
     let page = EventPage {
+        view_links: view_links(&sections, &event_url(id), view),
+        view,
+        before_label: "Before",
+        after_label: "After",
         observed_at: waygate_core::fmt::format_ts_abs(change.event.observed_at),
         outcome: drift_outcome(change.event.severity),
         earlier_recorded_at: change
@@ -230,7 +303,7 @@ async fn event_page(
             .earlier_recorded_at
             .map(waygate_core::fmt::format_ts_abs),
         unavailable,
-        changes,
+        sections,
         quarantined: change.quarantined,
         review_url: review_url(&change.event.server, &change.event.tool),
         chrome: PageChrome::build(
@@ -244,7 +317,9 @@ async fn event_page(
         ),
         event: change.event,
     };
-    Ok(render(&page))
+    let mut response = render(&page);
+    DiffView::remember(query.view, response.headers_mut());
+    Ok(response)
 }
 
 async fn page(
@@ -318,7 +393,12 @@ async fn page(
             tool: r.tool,
         })
         .collect();
-    let changes = review.as_ref().map(changes).unwrap_or_default();
+    let (sections, baseline_note) = review.as_ref().map(review_sections).unwrap_or_default();
+    let view = DiffView::select(query.view, &headers);
+    let view_links = review
+        .as_ref()
+        .map(|r| view_links(&sections, &review_url(&r.server, &r.tool), view))
+        .unwrap_or_default();
     let manifest_hash = state
         .read_manifest_set_from_disk()
         .and_then(Result::ok)
@@ -348,10 +428,17 @@ async fn page(
         ),
         rows,
         review,
-        changes,
+        sections,
+        baseline_note,
+        view,
+        view_links,
+        before_label: "Previously accepted",
+        after_label: "Observed replacement",
         manifest_hash,
     };
-    Ok(render(&page))
+    let mut response = render(&page);
+    DiffView::remember(query.view, response.headers_mut());
+    Ok(response)
 }
 
 #[derive(Deserialize)]

@@ -15,12 +15,7 @@
 </details>
 </div>
 {% match unavailable %}{% when Some with (reason) %}<div class="card"><p>{{ reason }}</p></div>{% when None %}{% endmatch %}
-{% for change in changes %}
-<section class="page-section"><h2 class="section-heading">{{ change.name }}</h2>
-<div class="skills-comparison">
-<section><h3 class="card-title">Before</h3><pre class="skills-content" tabindex="0">{{ change.before }}</pre></section>
-<section><h3 class="card-title">After</h3><pre class="skills-content" tabindex="0">{{ change.after }}</pre></section>
-</div></section>
-{% endfor %}
+{% include "_diff_views.html" %}
+{% for section in sections %}{% include "_review_diff.html" %}{% endfor %}
 </section>
 {% endblock %}
