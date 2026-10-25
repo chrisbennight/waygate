@@ -311,17 +311,27 @@ pub(crate) fn compare(before: Option<&str>, after: Option<&str>) -> Comparison {
         (None, Some(_)) => notes.push("Not present before this change."),
         (Some(_), None) => notes.push("Removed by this change."),
         (Some(_), Some(_)) if old_text == new_text => notes.push("The stored text is identical."),
-        (Some(_), Some(_)) if !changed => {
-            // Equal lines with different text differ only in the final line break.
-            notes.push(if new_text.ends_with('\n') {
-                "A final line break was added."
-            } else {
-                "The final line break was removed."
-            });
+        (Some(_), Some(_)) => {
+            // Equal lines with different text differ only in the final line
+            // break, which the note below names on its own.
+            if changed && visible(old_text) == visible(new_text) {
+                notes.push(
+                    "Only invisible characters or whitespace changed. Invisible characters are shown as code points.",
+                );
+            }
+            // Lines are shown without their line feed, so a changed final line
+            // break is invisible in the rows even when other lines change too.
+            if !old_text.is_empty()
+                && !new_text.is_empty()
+                && old_text.ends_with('\n') != new_text.ends_with('\n')
+            {
+                notes.push(if new_text.ends_with('\n') {
+                    "A final line break was added."
+                } else {
+                    "The final line break was removed."
+                });
+            }
         }
-        (Some(_), Some(_)) if visible(old_text) == visible(new_text) => notes.push(
-            "Only invisible characters or whitespace changed. Invisible characters are shown as code points.",
-        ),
         _ => {}
     }
     let changes = ops.iter().filter(|op| !matches!(op, DiffOp::Equal { .. }));
@@ -679,11 +689,12 @@ fn marked(c: char) -> Option<&'static str> {
     }
 }
 
-/// Text as a reader sees it: marked characters removed and whitespace runs
-/// collapsed.
+/// The characters that remain when whitespace and marked characters are
+/// removed. Two texts with equal results differ only in those characters.
 fn visible(text: &str) -> String {
-    let kept: String = text.chars().filter(|c| marked(*c).is_none()).collect();
-    kept.split_whitespace().collect::<Vec<_>>().join(" ")
+    text.chars()
+        .filter(|c| !c.is_whitespace() && marked(*c).is_none())
+        .collect()
 }
 
 #[cfg(test)]
@@ -827,11 +838,21 @@ mod tests {
             .segments
             .iter()
             .any(|s| s.text == "\t" && s.class.contains("diff-ws")));
-        let only_space = compare(Some("a b"), Some("a  b"));
-        assert!(only_space
-            .notes
-            .iter()
-            .any(|n| n.starts_with("Only invisible characters or whitespace")));
+        for (old, new) in [
+            ("a b", "a  b"),
+            ("a b", "a\u{00A0}b"),
+            ("a b", "ab"),
+            ("a\tb", "a b"),
+        ] {
+            let only_space = compare(Some(old), Some(new));
+            assert!(
+                only_space
+                    .notes
+                    .iter()
+                    .any(|n| n.starts_with("Only invisible characters or whitespace")),
+                "{old:?} -> {new:?}"
+            );
+        }
     }
 
     #[test]
@@ -841,6 +862,10 @@ mod tests {
         assert!(c.blocks.is_empty());
         assert_eq!(c.notes, vec!["A final line break was added."]);
         let c = compare(Some("one\n"), Some("one"));
+        assert_eq!(c.notes, vec!["The final line break was removed."]);
+        // The note is not limited to otherwise unchanged text.
+        let c = compare(Some("one\n"), Some("two"));
+        assert_eq!((c.added, c.removed), (1, 1));
         assert_eq!(c.notes, vec!["The final line break was removed."]);
     }
 
