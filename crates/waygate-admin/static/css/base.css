@@ -699,6 +699,7 @@ summary:focus-visible, [tabindex]:focus-visible {
 .diff-view:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .diff-stat { margin-left: 8px; color: var(--ink-muted); font-family: var(--font-mono); font-size: 13px; font-weight: 400; }
 .diff-note { margin: 0 0 8px; color: var(--ink-muted); }
+.diff-section > .section-heading { overflow-wrap: anywhere; }
 .diff { overflow: hidden; border: 1px solid var(--rule); border-radius: var(--radius-container); background: var(--paper-1); }
 .diff--narrow { display: none; }
 .diff-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-family: var(--font-mono); font-size: 13px; line-height: 1.5; }

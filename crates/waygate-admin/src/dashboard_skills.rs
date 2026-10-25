@@ -7,6 +7,7 @@ use crate::{
         csrf_matches, format_ts_abs, overview_break_glass_admin, render, urlencode, user_display,
     },
     error::ApiError,
+    review_diff::{self, DiffSection, DiffView, SectionBody, Segment, ViewLink},
     skill_reviews::{current_review, decide_core, review_error, SkillDecisionParams},
     state::AdminState,
     tenant_ctx::{self, TenantContext},
@@ -315,6 +316,28 @@ struct HistoryRow {
     at: String,
     digest: String,
 }
+/// One version of the selected file, shown whole or described.
+struct Pane {
+    /// Why the content is not shown, when it is not.
+    message: Option<&'static str>,
+    text: Vec<Segment>,
+}
+
+impl From<Preview> for Pane {
+    fn from(preview: Preview) -> Self {
+        match preview {
+            Preview::Text(text) => Self {
+                message: None,
+                text: review_diff::text_segments(&text),
+            },
+            Preview::Unavailable(message) => Self {
+                message: Some(message),
+                text: Vec::new(),
+            },
+        }
+    }
+}
+
 #[derive(Template)]
 #[template(path = "skill_review.html")]
 struct ReviewPage {
@@ -324,17 +347,23 @@ struct ReviewPage {
     files: Vec<FileRow>,
     history: Vec<HistoryRow>,
     file: String,
-    before_text: String,
-    after_text: String,
+    /// The selected file's comparison, when both versions are text.
+    content: Option<DiffSection>,
+    /// Each version described or shown whole when they cannot be compared.
+    before_pane: Pane,
+    after_pane: Pane,
+    /// Changed skill metadata, compared with the approved version when one exists.
+    metadata: Option<DiffSection>,
+    view: DiffView,
+    view_links: Vec<ViewLink>,
+    before_label: &'static str,
+    after_label: &'static str,
     error: Option<String>,
     can_reject: bool,
     can_approve: bool,
     source_url: Option<String>,
     compatibility: String,
     trigger: String,
-    metadata_before: String,
-    metadata_after: String,
-    metadata_changed: bool,
 }
 
 fn source_url(candidate: &ReviewCandidate) -> Option<String> {
@@ -364,11 +393,18 @@ fn source_url(candidate: &ReviewCandidate) -> Option<String> {
 struct ReviewQuery {
     uri: String,
     file: Option<String>,
+    view: Option<DiffView>,
 }
 
-async fn preview(state: &AdminState, candidate: Option<&ReviewCandidate>, uri: &str) -> String {
+/// One version of a file: its text, or why its text cannot be shown.
+enum Preview {
+    Text(String),
+    Unavailable(&'static str),
+}
+
+async fn preview(state: &AdminState, candidate: Option<&ReviewCandidate>, uri: &str) -> Preview {
     let Some(candidate) = candidate else {
-        return "No approved version.".into();
+        return Preview::Unavailable("No approved version.");
     };
     if !candidate
         .skill()
@@ -376,18 +412,66 @@ async fn preview(state: &AdminState, candidate: Option<&ReviewCandidate>, uri: &
         .iter()
         .any(|file| file.uri == uri)
     {
-        return "File absent in this version.".into();
+        return Preview::Unavailable("File absent in this version.");
     }
     let Some(catalog) = state.hitl.reviewed_skills.get() else {
-        return "Review service unavailable.".into();
+        return Preview::Unavailable("Review service unavailable.");
     };
     let Ok(snapshot) = catalog.review_snapshot(candidate).await else {
-        return "Exact source revision unavailable. No replacement content was substituted.".into();
+        return Preview::Unavailable(
+            "Exact source revision unavailable. No replacement content was substituted.",
+        );
     };
     match snapshot.load_resource(uri).await {
-        Ok(Some(resource)) => std::str::from_utf8(&resource.bytes).map(str::to_owned).unwrap_or_else(|_| "Binary content. Review the file's size, media type, and immutable object identity in the inventory.".into()),
-        _ => "Exact file unavailable. No replacement content was substituted.".into(),
+        Ok(Some(resource)) => match std::str::from_utf8(&resource.bytes) {
+            Ok(text) => Preview::Text(text.to_owned()),
+            Err(_) => Preview::Unavailable(
+                "Binary content. Review the file's size, media type, and immutable object identity in the inventory.",
+            ),
+        },
+        _ => Preview::Unavailable("Exact file unavailable. No replacement content was substituted."),
     }
+}
+
+/// Compare two versions of the selected file when both are text. Added,
+/// removed, binary, and unavailable versions are described instead, so a
+/// message is never compared as if it were content.
+fn content_view(file: &str, before: Preview, after: Preview) -> (Option<DiffSection>, Pane, Pane) {
+    match (before, after) {
+        (Preview::Text(old), Preview::Text(new)) => {
+            let section = DiffSection {
+                name: file.to_owned(),
+                body: SectionBody::Compared(review_diff::compare(Some(&old), Some(&new))),
+            };
+            let empty = || Pane {
+                message: None,
+                text: Vec::new(),
+            };
+            (Some(section), empty(), empty())
+        }
+        (before, after) => (None, before.into(), after.into()),
+    }
+}
+
+/// Changed skill metadata as formatted JSON: compared with the approved
+/// version, or shown whole when nothing has been approved.
+fn metadata_section(review: &SkillReview) -> Option<DiffSection> {
+    let text = |value: &serde_json::Map<String, serde_json::Value>| {
+        serde_json::to_string_pretty(value).expect("skill metadata serializes")
+    };
+    let candidate = &review.candidate.skill().frontmatter;
+    let body = match &review.serving {
+        Some(serving) if &serving.skill().frontmatter == candidate => return None,
+        Some(serving) => SectionBody::Compared(review_diff::compare(
+            Some(&text(&serving.skill().frontmatter)),
+            Some(&text(candidate)),
+        )),
+        None => SectionBody::Definition(review_diff::text_segments(&text(candidate))),
+    };
+    Some(DiffSection {
+        name: "Skill metadata".into(),
+        body,
+    })
 }
 
 async fn review_page(
@@ -459,10 +543,30 @@ async fn review_page(
             execution: candidate_entry.code_mode_compatibility_hint(&uri),
         })
         .collect();
-    let (before_text, after_text) = tokio::join!(
+    let (before, after) = tokio::join!(
         preview(&state, review.serving.as_ref(), &file),
         preview(&state, Some(&review.candidate), &file)
     );
+    let (content, before_pane, after_pane) = content_view(&file, before, after);
+    let metadata = metadata_section(&review);
+    let view = DiffView::select(query.view, &headers);
+    let view_links = if [&content, &metadata]
+        .into_iter()
+        .flatten()
+        .any(|section| section.comparison().is_some())
+    {
+        review_diff::view_links(
+            &format!(
+                "{}&file={}",
+                review_url(&review.skill_uri),
+                urlencode(&file)
+            ),
+            view,
+            "Full content",
+        )
+    } else {
+        Vec::new()
+    };
     let history = state
         .hitl
         .reviewed_skills
@@ -508,19 +612,14 @@ async fn review_page(
         ),
         state: status(&review),
         trigger: review_trigger(&review),
-        metadata_before: review
-            .serving
-            .as_ref()
-            .map(|serving| {
-                serde_json::to_string_pretty(&serving.skill().frontmatter)
-                    .expect("skill metadata serializes")
-            })
-            .unwrap_or_else(|| "No previous approval".into()),
-        metadata_after: serde_json::to_string_pretty(&review.candidate.skill().frontmatter)
-            .expect("skill metadata serializes"),
-        metadata_changed: review.serving.as_ref().is_none_or(|serving| {
-            serving.skill().frontmatter != review.candidate.skill().frontmatter
-        }),
+        content,
+        before_pane,
+        after_pane,
+        metadata,
+        view,
+        view_links,
+        before_label: "Approved",
+        after_label: "Candidate",
         can_reject: review.candidate_status == CandidateStatus::Pending,
         can_approve: review.candidate_status != CandidateStatus::Approved || review.quarantined,
         source_url: source_url(&review.candidate),
@@ -536,11 +635,11 @@ async fn review_page(
         files,
         history,
         file,
-        before_text,
-        after_text,
         error,
     };
-    render(&page)
+    let mut response = render(&page);
+    DiffView::remember(query.view, response.headers_mut());
+    response
 }
 
 #[derive(Deserialize)]
@@ -663,6 +762,53 @@ mod review_trigger_tests {
         )
         .unwrap();
         ReviewCandidate::from_snapshot(&snapshot, uri).unwrap()
+    }
+
+    #[test]
+    fn metadata_and_files_are_compared_only_when_both_versions_are_text() {
+        let before = candidate("Instructions", "Original description", &[]);
+        let after = candidate("Instructions", "Changed description", &[]);
+        let mut review = SkillReview {
+            tenant_id: "default".into(),
+            source_key: after.source_key(),
+            skill_uri: after.skill().uri.clone(),
+            generation: 1,
+            candidate: after.clone(),
+            serving: None,
+            candidate_status: CandidateStatus::Pending,
+            quarantined: false,
+            updated_at: time::OffsetDateTime::UNIX_EPOCH,
+        };
+        let first = metadata_section(&review).unwrap();
+        assert!(
+            first.comparison().is_none(),
+            "nothing approved to compare with"
+        );
+        assert!(first.definition().is_some());
+        review.serving = Some(before);
+        let changed = metadata_section(&review).unwrap();
+        let comparison = changed.comparison().unwrap();
+        assert_eq!((comparison.added, comparison.removed), (1, 1));
+        review.serving = Some(after);
+        assert!(metadata_section(&review).is_none());
+
+        let (section, _, _) = content_view(
+            "skill://fixture/review-fixture/SKILL.md",
+            Preview::Text("one\ntwo\n".into()),
+            Preview::Text("one\nthree\n".into()),
+        );
+        let comparison = section.unwrap();
+        let comparison = comparison.comparison().unwrap();
+        assert_eq!((comparison.added, comparison.removed), (1, 1));
+        let (section, before, after) = content_view(
+            "skill://fixture/review-fixture/SKILL.md",
+            Preview::Unavailable("No approved version."),
+            Preview::Text("new\u{200B}".into()),
+        );
+        assert!(section.is_none(), "a message is never compared as content");
+        assert_eq!(before.message, Some("No approved version."));
+        assert!(after.message.is_none());
+        assert!(after.text.iter().any(|segment| segment.text == "U+200B"));
     }
 
     #[test]

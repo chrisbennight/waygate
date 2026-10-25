@@ -293,14 +293,18 @@ a row. Preserve these properties when changing the page:
 
 ## Review comparisons
 
-The tool change review page and each tool change event page show every changed
-contract field as a diff built by `review_diff`. Preserve these properties when
-changing them:
+The tool change review page, each tool change event page, and the skill review
+page show changed text as a diff built by `review_diff`: each changed contract
+field, and a skill's changed metadata and selected file. Preserve these
+properties when changing them:
 
 - **Server-rendered.** `review_diff::compare` aligns lines within a time bound,
   highlights the changed words within paired lines, and collapses long
   unchanged runs into `<details>` rows. The `_review_diff.html` partials escape
-  every segment, so the pages need no script.
+  every segment, so the pages need no script. A text over the 256 KiB comparison
+  limit is shown whole as stored, without marking, with a count of its
+  invisible characters. A comparison over its row budget shows the complete
+  text instead of a partial line view.
 - **Three views.** One column is the default. Side by side aligns old and new
   lines and falls back to one column on narrow screens. Full definitions shows
   the complete stored text. An explicit `?view=` choice is remembered in the
@@ -313,14 +317,16 @@ changing them:
   label. Forced-colors mode keeps a border and underline.
 - **No reconstruction.** A first approval, or an accepted definition that was
   not retained, shows the observed definition whole with a note rather than a
-  diff against nothing.
+  diff against nothing. A skill file that is added, removed, binary, or
+  unavailable on either side is described, never compared as text.
 
 ## Skills review
 
 The Skills destination (`/skills`) is a searchable tenant-scoped review catalog.
-`/skills/review` compares the candidate and approved contents and inventories
-all supporting files. Source text is always escaped plain text. The comparison
-layout stacks on narrow screens and uses the shared theme tokens. Decisions
+`/skills/review` inventories all supporting files and compares the candidate
+and approved metadata and selected file with the
+[review comparison views](#review-comparisons). Source text is always escaped
+plain text. Decisions
 reuse `skill_reviews::decide_core`, the same core registered by the control-plane
 skill action executors. Decision history is committed with the review state;
 the admin mutation recorder additionally emits the required evidence event.
