@@ -22,6 +22,12 @@ const WORD_DIFF_MAX_BYTES: usize = 4_000;
 /// Below this share of unchanged text, highlighting words in a pair of lines
 /// marks nearly everything and stops helping the reader.
 const WORD_DIFF_MIN_SIMILARITY: f32 = 0.4;
+/// Rows rendered for one comparison, counting expandable unchanged lines. A
+/// longer comparison stops and points to the full text, so a contract of many
+/// short lines cannot expand into a page far larger than its stored size.
+const MAX_ROWS: usize = 2_000;
+/// Longer unchanged runs are counted but not rendered for expansion.
+const MAX_EXPANDABLE: usize = 200;
 const VIEW_COOKIE: &str = "mcp-gw-review-view";
 
 /// How a review page presents changed text.
@@ -209,17 +215,19 @@ pub(crate) struct SplitRow {
 }
 
 /// Consecutive lines shown together. A collapsed block holds unchanged lines
-/// that are hidden until the reader expands them.
+/// that are hidden until the reader expands them; a long run is only counted.
 #[derive(Debug, Default)]
 pub(crate) struct Block {
     pub collapsed: bool,
+    /// Unchanged lines a collapsed block stands for.
+    hidden: usize,
     pub rows: Vec<Row>,
     pub split: Vec<SplitRow>,
 }
 
 impl Block {
     pub(crate) fn hidden_label(&self) -> String {
-        format!("{} unchanged lines", self.rows.len())
+        format!("{} unchanged lines", self.hidden)
     }
 }
 
@@ -291,11 +299,14 @@ pub(crate) fn compare(before: Option<&str>, after: Option<&str>) -> Comparison {
     let old = lines(old_text);
     let new = lines(new_text);
     let ops = capture_diff_slices_deadline(Algorithm::Patience, &old, &new, Some(deadline));
-    let mut builder = Builder::default();
+    let mut builder = Builder::new();
     let changed = ops.iter().any(|op| !matches!(op, DiffOp::Equal { .. }));
     if changed {
         let last = ops.len() - 1;
         for (index, op) in ops.iter().enumerate() {
+            if builder.truncated {
+                break;
+            }
             match *op {
                 DiffOp::Equal {
                     old_index,
@@ -334,6 +345,11 @@ pub(crate) fn compare(before: Option<&str>, after: Option<&str>) -> Comparison {
         }
         _ => {}
     }
+    if builder.truncated {
+        notes.push(
+            "This comparison is too long to show line by line. The counts cover every change, and the full view shows the complete text.",
+        );
+    }
     let changes = ops.iter().filter(|op| !matches!(op, DiffOp::Equal { .. }));
     let (removed, added) = changes.fold((0, 0), |(removed, added), op| {
         (removed + op.old_range().len(), added + op.new_range().len())
@@ -353,13 +369,35 @@ pub(crate) fn text_segments(text: &str) -> Vec<Segment> {
     segments(text, &[], false)
 }
 
-#[derive(Default)]
 struct Builder {
     blocks: Vec<Block>,
     current: Block,
+    rows_left: usize,
+    /// The row budget ran out; later lines are not rendered.
+    truncated: bool,
 }
 
 impl Builder {
+    fn new() -> Self {
+        Self {
+            blocks: Vec::new(),
+            current: Block::default(),
+            rows_left: MAX_ROWS,
+            truncated: false,
+        }
+    }
+
+    /// Reserve rows from the budget, or stop the comparison.
+    fn take(&mut self, rows: usize) -> bool {
+        if !self.truncated && rows <= self.rows_left {
+            self.rows_left -= rows;
+            true
+        } else {
+            self.truncated = true;
+            false
+        }
+    }
+
     fn unchanged(
         &mut self,
         lines: &[&str],
@@ -380,16 +418,28 @@ impl Builder {
             (len, 0)
         };
         for offset in 0..head {
+            if !self.take(1) {
+                return;
+            }
             self.context(lines, old_index + offset, new_index + offset);
         }
         if gap > 0 {
             self.close();
-            for offset in head..head + gap {
-                self.context(lines, old_index + offset, new_index + offset);
-            }
             self.current.collapsed = true;
+            self.current.hidden = gap;
+            // A short run is rendered for expansion while the budget allows;
+            // otherwise it is only counted and never stops the comparison.
+            if gap <= MAX_EXPANDABLE && gap <= self.rows_left {
+                self.rows_left -= gap;
+                for offset in head..head + gap {
+                    self.context(lines, old_index + offset, new_index + offset);
+                }
+            }
             self.close();
             for offset in head + gap..len {
+                if !self.take(1) {
+                    return;
+                }
                 self.context(lines, old_index + offset, new_index + offset);
             }
         }
@@ -425,6 +475,11 @@ impl Builder {
         new_range: Range<usize>,
         deadline: Instant,
     ) {
+        // A change is shown whole or not at all, so a reader never sees
+        // removed lines without the lines that replaced them.
+        if !self.take(old_range.len() + new_range.len()) {
+            return;
+        }
         let removed: Vec<_> = old_range.clone().map(|i| (i, old[i])).collect();
         let added: Vec<_> = new_range.clone().map(|i| (i, new[i])).collect();
         // Pair removed and added lines in order; the words that differ within
@@ -483,7 +538,7 @@ impl Builder {
 
     fn close(&mut self) {
         let block = std::mem::take(&mut self.current);
-        if !block.rows.is_empty() {
+        if !block.rows.is_empty() || block.hidden > 0 {
             self.blocks.push(block);
         }
     }
@@ -612,20 +667,38 @@ fn segments(line: &str, changed: &[Range<usize>], changed_line: bool) -> Vec<Seg
         line.len()
     };
     let mut out: Vec<Segment> = Vec::new();
+    // Consecutive repeats of one marked character share a counted badge, so
+    // repetition stays visible without one element per character.
+    let mut repeat: Option<(char, &'static str, usize)> = None;
     for (at, c) in line.char_indices() {
         let word = changed.iter().any(|range| range.contains(&at));
         if let Some(kind) = marked(c) {
-            out.push(Segment {
-                text: format!("U+{:04X}", c as u32),
-                class: if word {
-                    "diff-char diff-word"
-                } else {
-                    "diff-char"
-                },
-                label: Some(format!("U+{:04X}, {kind}", c as u32)),
-            });
+            let class = if word {
+                "diff-char diff-word"
+            } else {
+                "diff-char"
+            };
+            let code = c as u32;
+            match (&mut repeat, out.last_mut()) {
+                (Some((last, last_class, count)), Some(badge))
+                    if *last == c && *last_class == class =>
+                {
+                    *count += 1;
+                    badge.text = format!("U+{code:04X} ×{count}");
+                    badge.label = Some(format!("{count} × U+{code:04X}, {kind}"));
+                }
+                _ => {
+                    out.push(Segment {
+                        text: format!("U+{code:04X}"),
+                        class,
+                        label: Some(format!("U+{code:04X}, {kind}")),
+                    });
+                    repeat = Some((c, class, 1));
+                }
+            }
             continue;
         }
+        repeat = None;
         let space = changed_line && (c == '\t' || (at >= trailing && c == ' '));
         let class = match (word, space) {
             (false, false) => "",
@@ -762,6 +835,58 @@ mod tests {
         assert_eq!(shown.last().unwrap().1, "line 18");
         // Hidden rows keep both line numbers for when they are expanded.
         assert_eq!(c.blocks[2].rows[0].old_number(), "19");
+    }
+
+    #[test]
+    fn long_unchanged_runs_are_counted_without_rendering_them() {
+        let before: String = (0..1000).map(|n| format!("line {n}\n")).collect();
+        let after = before.replace("line 499\n", "line changed\n");
+        let c = compare(Some(&before), Some(&after));
+        let shape: Vec<_> = c
+            .blocks
+            .iter()
+            .map(|b| (b.collapsed, b.hidden, b.rows.len()))
+            .collect();
+        assert_eq!(shape, vec![(true, 496, 0), (false, 0, 8), (true, 497, 0)]);
+        assert_eq!(c.blocks[0].hidden_label(), "496 unchanged lines");
+        assert!(c.notes.is_empty());
+    }
+
+    #[test]
+    fn an_oversized_comparison_stops_with_a_note_but_counts_everything() {
+        let before: String = (0..3000).map(|n| format!("a{n}\n")).collect();
+        let after: String = (0..3000).map(|n| format!("b{n}\n")).collect();
+        let c = compare(Some(&before), Some(&after));
+        assert_eq!((c.added, c.removed), (3000, 3000));
+        assert!(c.blocks.is_empty(), "a change is never shown in part");
+        assert!(c
+            .notes
+            .iter()
+            .any(|n| n.starts_with("This comparison is too long")));
+        let rendered: usize = c.blocks.iter().map(|b| b.rows.len()).sum();
+        assert!(rendered <= MAX_ROWS);
+    }
+
+    #[test]
+    fn repeated_invisible_characters_share_a_counted_badge() {
+        let c = compare(
+            Some("x"),
+            Some(&format!("x{}y\u{200B}", "\u{200B}".repeat(500))),
+        );
+        let rows: Vec<_> = c.blocks.iter().flat_map(|b| &b.rows).collect();
+        let badges: Vec<_> = rows[1]
+            .segments
+            .iter()
+            .filter(|s| s.class.contains("diff-char"))
+            .map(|s| (s.text.as_str(), s.label.as_deref().unwrap()))
+            .collect();
+        assert_eq!(
+            badges,
+            vec![
+                ("U+200B ×500", "500 × U+200B, invisible character"),
+                ("U+200B", "U+200B, invisible character"),
+            ]
+        );
     }
 
     #[test]

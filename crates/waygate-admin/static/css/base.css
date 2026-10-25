@@ -719,6 +719,7 @@ summary:focus-visible, [tabindex]:focus-visible {
 .diff-split-head span { padding: 4px 8px; }
 .diff-gap > summary { padding: 2px 8px; border-block: 1px solid var(--rule); background: var(--paper-2); color: var(--ink-muted); font-size: 13px; cursor: pointer; }
 .diff-gap > summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.diff-gap--static { margin: 0; padding: 2px 8px; border-block: 1px solid var(--rule); background: var(--paper-2); color: var(--ink-muted); font-size: 13px; }
 @media (max-width: 767px) {
     .diff--split { display: none; }
     .diff--narrow { display: block; }
