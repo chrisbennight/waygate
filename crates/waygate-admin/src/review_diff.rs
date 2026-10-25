@@ -22,12 +22,11 @@ const WORD_DIFF_MAX_BYTES: usize = 4_000;
 /// Below this share of unchanged text, highlighting words in a pair of lines
 /// marks nearly everything and stops helping the reader.
 const WORD_DIFF_MIN_SIMILARITY: f32 = 0.4;
-/// Rows rendered for one comparison, counting expandable unchanged lines. A
-/// longer comparison stops and points to the full text, so a contract of many
-/// short lines cannot expand into a page far larger than its stored size.
+/// Rows rendered for one comparison, counting expandable unchanged lines.
+/// Changes and their context are reserved first; a comparison that needs more
+/// shows the complete text instead, so a contract of many short lines cannot
+/// expand into a page far larger than its stored size.
 const MAX_ROWS: usize = 2_000;
-/// Longer unchanged runs are counted but not rendered for expansion.
-const MAX_EXPANDABLE: usize = 200;
 const VIEW_COOKIE: &str = "mcp-gw-review-view";
 
 /// How a review page presents changed text.
@@ -221,6 +220,8 @@ pub(crate) struct Block {
     pub collapsed: bool,
     /// Unchanged lines a collapsed block stands for.
     hidden: usize,
+    /// Old and new line indexes where a collapsed run begins.
+    start: (usize, usize),
     pub rows: Vec<Row>,
     pub split: Vec<SplitRow>,
 }
@@ -236,6 +237,9 @@ impl Block {
 pub(crate) struct Comparison {
     pub added: usize,
     pub removed: usize,
+    /// The line view exceeded its row budget, so the complete text is shown
+    /// in its place.
+    pub truncated: bool,
     pub blocks: Vec<Block>,
     /// Facts about the change that marked lines cannot show.
     pub notes: Vec<&'static str>,
@@ -345,9 +349,10 @@ pub(crate) fn compare(before: Option<&str>, after: Option<&str>) -> Comparison {
         }
         _ => {}
     }
-    if builder.truncated {
+    let truncated = builder.truncated;
+    if truncated {
         notes.push(
-            "This comparison is too long to show line by line. The counts cover every change, and the full view shows the complete text.",
+            "This comparison is too long to show line by line, so the complete text is shown instead. The counts cover every change.",
         );
     }
     let changes = ops.iter().filter(|op| !matches!(op, DiffOp::Equal { .. }));
@@ -357,7 +362,13 @@ pub(crate) fn compare(before: Option<&str>, after: Option<&str>) -> Comparison {
     Comparison {
         added,
         removed,
-        blocks: builder.finish(),
+        truncated,
+        // A partial line view could end before a later change, so none is kept.
+        blocks: if truncated {
+            Vec::new()
+        } else {
+            builder.finish(&old)
+        },
         notes,
         before: before.map(text_segments),
         after: after.map(text_segments),
@@ -424,17 +435,12 @@ impl Builder {
             self.context(lines, old_index + offset, new_index + offset);
         }
         if gap > 0 {
+            // The run's lines are added by `finish` once every change has
+            // reserved its rows, so context never displaces a change.
             self.close();
             self.current.collapsed = true;
             self.current.hidden = gap;
-            // A short run is rendered for expansion while the budget allows;
-            // otherwise it is only counted and never stops the comparison.
-            if gap <= MAX_EXPANDABLE && gap <= self.rows_left {
-                self.rows_left -= gap;
-                for offset in head..head + gap {
-                    self.context(lines, old_index + offset, new_index + offset);
-                }
-            }
+            self.current.start = (old_index + head, new_index + head);
             self.close();
             for offset in head + gap..len {
                 if !self.take(1) {
@@ -446,25 +452,7 @@ impl Builder {
     }
 
     fn context(&mut self, lines: &[&str], old_index: usize, new_index: usize) {
-        let segments = text_segments(lines[old_index]);
-        self.current.split.push(SplitRow {
-            old: Some(Cell {
-                kind: RowKind::Context,
-                number: old_index + 1,
-                segments: segments.clone(),
-            }),
-            new: Some(Cell {
-                kind: RowKind::Context,
-                number: new_index + 1,
-                segments: segments.clone(),
-            }),
-        });
-        self.current.rows.push(Row {
-            kind: RowKind::Context,
-            old: Some(old_index + 1),
-            new: Some(new_index + 1),
-            segments,
-        });
+        push_context(&mut self.current, lines, old_index, new_index);
     }
 
     fn change(
@@ -543,10 +531,43 @@ impl Builder {
         }
     }
 
-    fn finish(mut self) -> Vec<Block> {
+    /// Make collapsed runs expandable from the remaining budget, in reading
+    /// order. A run that does not fit stays counted; the full view shows it.
+    fn finish(mut self, lines: &[&str]) -> Vec<Block> {
         self.close();
+        for block in &mut self.blocks {
+            if block.collapsed && block.hidden <= self.rows_left {
+                self.rows_left -= block.hidden;
+                let (old_index, new_index) = block.start;
+                for offset in 0..block.hidden {
+                    push_context(block, lines, old_index + offset, new_index + offset);
+                }
+            }
+        }
         self.blocks
     }
+}
+
+fn push_context(block: &mut Block, lines: &[&str], old_index: usize, new_index: usize) {
+    let segments = text_segments(lines[old_index]);
+    block.split.push(SplitRow {
+        old: Some(Cell {
+            kind: RowKind::Context,
+            number: old_index + 1,
+            segments: segments.clone(),
+        }),
+        new: Some(Cell {
+            kind: RowKind::Context,
+            number: new_index + 1,
+            segments: segments.clone(),
+        }),
+    });
+    block.rows.push(Row {
+        kind: RowKind::Context,
+        old: Some(old_index + 1),
+        new: Some(new_index + 1),
+        segments,
+    });
 }
 
 /// Lines without their terminating line feed. Empty text has no lines.
@@ -838,18 +859,31 @@ mod tests {
     }
 
     #[test]
-    fn long_unchanged_runs_are_counted_without_rendering_them() {
-        let before: String = (0..1000).map(|n| format!("line {n}\n")).collect();
-        let after = before.replace("line 499\n", "line changed\n");
-        let c = compare(Some(&before), Some(&after));
-        let shape: Vec<_> = c
-            .blocks
-            .iter()
-            .map(|b| (b.collapsed, b.hidden, b.rows.len()))
-            .collect();
-        assert_eq!(shape, vec![(true, 496, 0), (false, 0, 8), (true, 497, 0)]);
-        assert_eq!(c.blocks[0].hidden_label(), "496 unchanged lines");
-        assert!(c.notes.is_empty());
+    fn long_unchanged_runs_expand_from_the_budget_left_after_changes() {
+        let shape = |lines: usize| {
+            let before: String = (0..lines).map(|n| format!("line {n}\n")).collect();
+            let after = before.replace(&format!("line {}\n", lines / 2 - 1), "line changed\n");
+            let c = compare(Some(&before), Some(&after));
+            assert!(!c.truncated && c.notes.is_empty());
+            c.blocks
+                .iter()
+                .map(|b| (b.collapsed, b.hidden, b.rows.len(), b.split.len()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            shape(1000),
+            vec![
+                (true, 496, 496, 496),
+                (false, 0, 8, 7),
+                (true, 497, 497, 497)
+            ]
+        );
+        // Runs larger than the remaining budget are counted, never rendered,
+        // and never prevent the change itself from being shown.
+        assert_eq!(
+            shape(5000),
+            vec![(true, 2496, 0, 0), (false, 0, 8, 7), (true, 2497, 0, 0)]
+        );
     }
 
     #[test]
@@ -858,13 +892,13 @@ mod tests {
         let after: String = (0..3000).map(|n| format!("b{n}\n")).collect();
         let c = compare(Some(&before), Some(&after));
         assert_eq!((c.added, c.removed), (3000, 3000));
-        assert!(c.blocks.is_empty(), "a change is never shown in part");
+        assert!(c.truncated);
+        assert!(c.blocks.is_empty(), "no partial line view is kept");
         assert!(c
             .notes
             .iter()
             .any(|n| n.starts_with("This comparison is too long")));
-        let rendered: usize = c.blocks.iter().map(|b| b.rows.len()).sum();
-        assert!(rendered <= MAX_ROWS);
+        assert!(c.before.is_some() && c.after.is_some());
     }
 
     #[test]

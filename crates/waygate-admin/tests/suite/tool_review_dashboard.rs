@@ -1194,3 +1194,91 @@ async fn drift_event_page_shows_a_marked_diff_in_the_selected_view() {
     let (status, _, _) = get(format!("{uri}?view=bogus"), None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn an_oversized_comparison_shows_the_complete_text_and_says_why() {
+    use waygate_catalog::CatalogStore;
+    let Some(db) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let server = format!("drift-large-{}", uuid::Uuid::new_v4());
+    ManifestImporter::new(db.clone())
+        .import_atomic(
+            "default",
+            &[ImportServer {
+                tenant_id: "default".into(),
+                name: server.clone(),
+                transport: "http".into(),
+                runtime_target: json!({"url":"http://example.test/mcp"}),
+                classification_mode: "manifest".into(),
+                tools: vec![ImportTool {
+                    name: "search".into(),
+                    approved_behavior_hash: None,
+                    risk: "low".into(),
+                    side_effects: false,
+                    pii: false,
+                    discriminator: None,
+                    operations: vec![],
+                }],
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    let store = Arc::new(PgCatalogStore::new(db));
+    let lines =
+        |prefix: &str| -> String { (0..3000).map(|n| format!("{prefix} line {n}\n")).collect() };
+    for (hash, description) in [("a", lines("old")), ("b", lines("new"))] {
+        store
+            .observe(
+                "default",
+                &server,
+                "search",
+                hash,
+                &json!({ "description": description }),
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    let event = store
+        .list_drift_events("default", time::OffsetDateTime::UNIX_EPOCH, 500)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|e| e.server == server)
+        .expect("drift event recorded");
+    let pool = UpstreamPool::connect(BTreeMap::new())
+        .await
+        .with_tool_reviews(store.clone())
+        .await;
+    let state = Arc::new(crate::admin_state::base_admin_state_with_pool(Arc::new(
+        pool,
+    )));
+    let response = dashboard_router(state, DashboardAuth::Disabled)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/t/default/servers/tool-changes/events/{}",
+                    event.id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        to_bytes(response.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    // The default view falls back to the complete text and says why.
+    assert!(html.contains("+3000 −3000"));
+    assert!(html.contains("This comparison is too long to show line by line"));
+    assert!(html.contains("<h3 class=\"card-title\">Before</h3>"));
+    assert!(html.contains("new line 2999"));
+    assert!(!html.contains("diff-table"));
+}
