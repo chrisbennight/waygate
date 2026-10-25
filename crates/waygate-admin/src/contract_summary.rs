@@ -198,10 +198,14 @@ fn schema<'a>(
             new_props.and_then(|p| p.get(name)),
         );
         match (old, new) {
-            (None, Some(_)) => out.push(
-                || format!("{label} {} added", quoted_path(&child(name))),
-                input.then_some("A new input lets the model send more data to the tool."),
-            ),
+            (None, Some(added)) => {
+                out.push(
+                    || format!("{label} {} added", quoted_path(&child(name))),
+                    input.then_some("A new input lets the model send more data to the tool."),
+                );
+                // Its nested parameters are named and flagged too.
+                schema(label, None, Some(added), &child(name), input, out);
+            }
             (Some(_), None) => out.push(
                 || format!("{label} {} removed", quoted_path(&child(name))),
                 None,
@@ -589,9 +593,6 @@ impl Evidence {
                     self.urls.insert(url.to_owned());
                 }
             }
-            if !starts.is_empty() {
-                continue;
-            }
             // Read an address around each `@` by address characters, so a
             // list such as `a@x.test,b@y.test` or a prefix such as `to=`
             // cannot hide one.
@@ -875,6 +876,33 @@ mod tests {
             texts(&examples),
             vec![("Input parameter schema “examples” changed", false)]
         );
+    }
+
+    #[test]
+    fn an_added_object_parameter_names_its_nested_inputs() {
+        let summary = summarize(
+            &json!({"inputSchema": {"type": "object", "properties": {}}}),
+            &json!({"inputSchema": {"type": "object", "properties": {"options": {
+                "type": "object", "required": ["context"],
+                "properties": {"context": {"type": "string"}}}}}}),
+        );
+        assert_eq!(
+            texts(&summary),
+            vec![
+                ("Input parameter “options” added", true),
+                ("Input parameter “options.context” added", true),
+                ("Input parameter “options.context” is now required", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_email_beside_a_web_address_is_found() {
+        let summary = summarize(
+            &json!({"description": "See https://docs.example"}),
+            &json!({"description": "See ops@exfil.example,https://docs.example"}),
+        );
+        assert!(texts(&summary).contains(&("Adds email addresses: ops@exfil.example", true)));
     }
 
     #[test]
