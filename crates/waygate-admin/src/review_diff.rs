@@ -29,11 +29,10 @@ const WORD_DIFF_MIN_SIMILARITY: f32 = 0.4;
 const MAX_ROWS: usize = 2_000;
 /// Largest text, in bytes, that is compared or shown with its characters
 /// labelled; it matches the tool contract storage limit. A larger text is
-/// described instead, which keeps every page proportional to this limit while
-/// every invisible character it shows carries its own label.
+/// shown as stored, without marking, so output stays linear in its size while
+/// every text within the limit labels each invisible character.
 const MAX_TEXT_BYTES: usize = 256 * 1024;
-const TOO_LARGE: &str =
-    "This text is larger than the 256 KiB review display limit, so it is not shown here.";
+const TOO_LARGE: &str = "This text is larger than the 256 KiB comparison limit, so both versions are shown whole, as stored, without line, word, or character marking.";
 const VIEW_COOKIE: &str = "mcp-gw-review-view";
 
 /// How a review page presents changed text.
@@ -247,7 +246,7 @@ pub(crate) struct Comparison {
     /// The line view exceeded its row budget, so the complete text is shown
     /// in its place.
     pub truncated: bool,
-    /// A version exceeds the display limit, so neither view is shown.
+    /// A version exceeds the comparison limit, so both are shown whole.
     pub oversized: bool,
     pub blocks: Vec<Block>,
     /// Facts about the change that marked lines cannot show.
@@ -315,8 +314,8 @@ pub(crate) fn compare(before: Option<&str>, after: Option<&str>) -> Comparison {
             oversized: true,
             blocks: Vec::new(),
             notes: vec![TOO_LARGE],
-            before: None,
-            after: None,
+            before: before.map(text_segments),
+            after: after.map(text_segments),
         };
     }
     let deadline = Instant::now() + BUDGET;
@@ -398,15 +397,26 @@ pub(crate) fn compare(before: Option<&str>, after: Option<&str>) -> Comparison {
     }
 }
 
-/// Present a whole text with its invisible characters shown, or say that it
-/// is too large to show.
+/// Present a whole text with its invisible characters shown. A text over the
+/// limit is shown as stored, after a notice that counts its invisible
+/// characters, since labelling each one could multiply the page size.
 pub(crate) fn text_segments(text: &str) -> Vec<Segment> {
     if text.len() > MAX_TEXT_BYTES {
-        return vec![Segment {
-            text: TOO_LARGE.into(),
-            class: "diff-char",
-            label: None,
-        }];
+        let hidden = text.chars().filter(|c| marked(*c).is_some()).count();
+        return vec![
+            Segment {
+                text: format!(
+                    "Shown as stored, without marking, because it is larger than 256 KiB. Unlabelled invisible or control characters: {hidden}."
+                ),
+                class: "diff-char",
+                label: None,
+            },
+            Segment {
+                text: format!("\n{text}"),
+                class: "",
+                label: None,
+            },
+        ];
     }
     segments(text, &[], false)
 }
@@ -955,20 +965,27 @@ mod tests {
     }
 
     #[test]
-    fn texts_over_the_display_limit_are_described_not_processed() {
-        let large = "\n".repeat(MAX_TEXT_BYTES + 1);
+    fn texts_over_the_limit_are_shown_whole_without_marking() {
+        let large = format!("a\u{200B}{}", "\n".repeat(MAX_TEXT_BYTES));
         for c in [
             compare(Some(&large), Some("small")),
             compare(Some("small"), Some(&large)),
         ] {
             assert!(c.oversized && !c.truncated);
-            assert!(c.blocks.is_empty() && c.before.is_none() && c.after.is_none());
+            assert!(c.blocks.is_empty());
             assert_eq!(c.notes, vec![TOO_LARGE]);
+            assert!(
+                c.before.is_some() && c.after.is_some(),
+                "both versions stay available"
+            );
         }
         assert!(!compare(None, Some(&"a\n".repeat(1000))).oversized);
         let shown = text_segments(&large);
-        assert_eq!(shown.len(), 1);
-        assert_eq!(shown[0].text, TOO_LARGE);
+        assert_eq!(shown.len(), 2);
+        assert!(shown[0]
+            .text
+            .ends_with("Unlabelled invisible or control characters: 1."));
+        assert_eq!(shown[1].text, format!("\n{large}"));
         // At the limit, every invisible character still carries a label.
         let at_limit = "\u{200B}\u{200C}".repeat(MAX_TEXT_BYTES / 6);
         let labelled = text_segments(&at_limit)
