@@ -100,7 +100,8 @@ its approved and candidate contents; source text is escaped and displayed as
 inert text. When both versions are text, the comparison marks the changed lines
 and words, and changed skill metadata is compared the same way, using the
 [review comparison views](agents/dashboard-ui.md#review-comparisons). An added,
-removed, binary, or unavailable version is described rather than compared. The
+removed, binary, unavailable, or over-size version is described rather than
+compared; the review display limit is 256 KiB per version. The
 inventory identifies binary contents by immutable object, size, and media type.
 
 **Approve this candidate** allows its contents to be distributed in the current

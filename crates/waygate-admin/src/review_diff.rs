@@ -27,11 +27,13 @@ const WORD_DIFF_MIN_SIMILARITY: f32 = 0.4;
 /// shows the complete text instead, so a contract of many short lines cannot
 /// expand into a page far larger than its stored size.
 const MAX_ROWS: usize = 2_000;
-/// Labelled code-point badges per whole text, and across one comparison's
-/// rows. Past it, marked characters are written as bracketed code points in the
-/// surrounding text, without elements of their own, so a text of many
-/// invisible characters keeps every identity and renders in linear size.
-const MAX_BADGES: usize = 1_000;
+/// Largest text, in bytes, that is compared or shown with its characters
+/// labelled; it matches the tool contract storage limit. A larger text is
+/// described instead, which keeps every page proportional to this limit while
+/// every invisible character it shows carries its own label.
+const MAX_TEXT_BYTES: usize = 256 * 1024;
+const TOO_LARGE: &str =
+    "This text is larger than the 256 KiB review display limit, so it is not shown here.";
 const VIEW_COOKIE: &str = "mcp-gw-review-view";
 
 /// How a review page presents changed text.
@@ -245,6 +247,8 @@ pub(crate) struct Comparison {
     /// The line view exceeded its row budget, so the complete text is shown
     /// in its place.
     pub truncated: bool,
+    /// A version exceeds the display limit, so neither view is shown.
+    pub oversized: bool,
     pub blocks: Vec<Block>,
     /// Facts about the change that marked lines cannot show.
     pub notes: Vec<&'static str>,
@@ -302,6 +306,19 @@ impl DiffSection {
 
 /// Compare two versions of a text. `None` means the text is absent on that side.
 pub(crate) fn compare(before: Option<&str>, after: Option<&str>) -> Comparison {
+    let fits = |text: Option<&str>| text.is_none_or(|text| text.len() <= MAX_TEXT_BYTES);
+    if !fits(before) || !fits(after) {
+        return Comparison {
+            added: 0,
+            removed: 0,
+            truncated: false,
+            oversized: true,
+            blocks: Vec::new(),
+            notes: vec![TOO_LARGE],
+            before: None,
+            after: None,
+        };
+    }
     let deadline = Instant::now() + BUDGET;
     let old_text = before.unwrap_or_default();
     let new_text = after.unwrap_or_default();
@@ -368,6 +385,7 @@ pub(crate) fn compare(before: Option<&str>, after: Option<&str>) -> Comparison {
         added,
         removed,
         truncated,
+        oversized: false,
         // A partial line view could end before a later change, so none is kept.
         blocks: if truncated {
             Vec::new()
@@ -380,30 +398,22 @@ pub(crate) fn compare(before: Option<&str>, after: Option<&str>) -> Comparison {
     }
 }
 
-/// Present a whole text with its invisible characters shown.
+/// Present a whole text with its invisible characters shown, or say that it
+/// is too large to show.
 pub(crate) fn text_segments(text: &str) -> Vec<Segment> {
-    segments(text, &[], false, &mut Badges::new())
-}
-
-/// Labelled badges left for one text or comparison.
-struct Badges {
-    left: usize,
-    stopped: bool,
-}
-
-impl Badges {
-    fn new() -> Self {
-        Self {
-            left: MAX_BADGES,
-            stopped: false,
-        }
+    if text.len() > MAX_TEXT_BYTES {
+        return vec![Segment {
+            text: TOO_LARGE.into(),
+            class: "diff-char",
+            label: None,
+        }];
     }
+    segments(text, &[], false)
 }
 
 struct Builder {
     blocks: Vec<Block>,
     current: Block,
-    badges: Badges,
     rows_left: usize,
     /// The row budget ran out; later lines are not rendered.
     truncated: bool,
@@ -414,7 +424,6 @@ impl Builder {
         Self {
             blocks: Vec::new(),
             current: Block::default(),
-            badges: Badges::new(),
             rows_left: MAX_ROWS,
             truncated: false,
         }
@@ -474,13 +483,7 @@ impl Builder {
     }
 
     fn context(&mut self, lines: &[&str], old_index: usize, new_index: usize) {
-        push_context(
-            &mut self.current,
-            lines,
-            old_index,
-            new_index,
-            &mut self.badges,
-        );
+        push_context(&mut self.current, lines, old_index, new_index);
     }
 
     fn change(
@@ -511,12 +514,12 @@ impl Builder {
         let old_segments: Vec<_> = removed
             .iter()
             .zip(&old_words)
-            .map(|((_, line), words)| segments(line, words, true, &mut self.badges))
+            .map(|((_, line), words)| segments(line, words, true))
             .collect();
         let new_segments: Vec<_> = added
             .iter()
             .zip(&new_words)
-            .map(|((_, line), words)| segments(line, words, true, &mut self.badges))
+            .map(|((_, line), words)| segments(line, words, true))
             .collect();
         for ((index, _), segments) in removed.iter().zip(&old_segments) {
             self.current.rows.push(Row {
@@ -568,13 +571,7 @@ impl Builder {
                 self.rows_left -= block.hidden;
                 let (old_index, new_index) = block.start;
                 for offset in 0..block.hidden {
-                    push_context(
-                        block,
-                        lines,
-                        old_index + offset,
-                        new_index + offset,
-                        &mut self.badges,
-                    );
+                    push_context(block, lines, old_index + offset, new_index + offset);
                 }
             }
         }
@@ -582,14 +579,8 @@ impl Builder {
     }
 }
 
-fn push_context(
-    block: &mut Block,
-    lines: &[&str],
-    old_index: usize,
-    new_index: usize,
-    badges: &mut Badges,
-) {
-    let segments = segments(lines[old_index], &[], false, badges);
+fn push_context(block: &mut Block, lines: &[&str], old_index: usize, new_index: usize) {
+    let segments = text_segments(lines[old_index]);
     block.split.push(SplitRow {
         old: Some(Cell {
             kind: RowKind::Context,
@@ -721,12 +712,7 @@ fn tokens(line: &str) -> Vec<&str> {
 
 /// Split a line into segments. `changed` lists byte ranges of differing
 /// words; on a changed line, tabs and trailing whitespace are marked too.
-fn segments(
-    line: &str,
-    changed: &[Range<usize>],
-    changed_line: bool,
-    badges: &mut Badges,
-) -> Vec<Segment> {
+fn segments(line: &str, changed: &[Range<usize>], changed_line: bool) -> Vec<Segment> {
     let trailing = if changed_line {
         line.trim_end_matches([' ', '\t']).len()
     } else {
@@ -738,42 +724,12 @@ fn segments(
     let mut repeat: Option<(char, &'static str, usize)> = None;
     for (at, c) in line.char_indices() {
         let word = changed.iter().any(|range| range.contains(&at));
-        let badge_class = if word {
-            "diff-char diff-word"
-        } else {
-            "diff-char"
-        };
-        // Extending the previous badge needs no new label; anything else does.
-        let repeats = repeat.is_some_and(|(last, class, _)| last == c && class == badge_class);
-        if marked(c).is_some() && badges.left == 0 && !repeats {
-            if !badges.stopped {
-                badges.stopped = true;
-                out.push(Segment {
-                    text: "more written as [U+…]".into(),
-                    class: "diff-char",
-                    label: Some(
-                        "Further invisible characters are written as bracketed code points, without individual labels"
-                            .into(),
-                    ),
-                });
-            }
-            let class = if word { "diff-word" } else { "" };
-            let written = format!("[U+{:04X}]", c as u32);
-            match out.last_mut() {
-                Some(last) if last.class == class && last.label.is_none() => {
-                    last.text.push_str(&written)
-                }
-                _ => out.push(Segment {
-                    text: written,
-                    class,
-                    label: None,
-                }),
-            }
-            repeat = None;
-            continue;
-        }
         if let Some(kind) = marked(c) {
-            let class = badge_class;
+            let class = if word {
+                "diff-char diff-word"
+            } else {
+                "diff-char"
+            };
             let code = c as u32;
             match (&mut repeat, out.last_mut()) {
                 (Some((last, last_class, count)), Some(badge))
@@ -784,7 +740,6 @@ fn segments(
                     badge.label = Some(format!("{count} × U+{code:04X}, {kind}"));
                 }
                 _ => {
-                    badges.left -= 1;
                     out.push(Segment {
                         text: format!("U+{code:04X}"),
                         class,
@@ -1000,59 +955,27 @@ mod tests {
     }
 
     #[test]
-    fn badge_labels_are_bounded_without_hiding_characters() {
-        let alternating = "\u{200B}\u{200C}".repeat(MAX_BADGES);
-        let whole = text_segments(&format!("a{alternating}b"));
-        let badges = whole.iter().filter(|s| s.class == "diff-char").count();
-        assert_eq!(
-            badges,
-            MAX_BADGES + 1,
-            "labels plus one marker where they stop"
-        );
-        let shown: String = whole.iter().map(|s| s.text.as_str()).collect();
-        // Past the cap every character keeps its identity as plain text.
-        assert_eq!(shown.matches("[U+200B]").count(), MAX_BADGES / 2);
-        assert_eq!(shown.matches("[U+200C]").count(), MAX_BADGES / 2);
-        assert!(!shown.contains('\u{200B}') && !shown.contains('\u{200C}'));
-        // The bound spans every row of one comparison.
-        let lines: String = (0..MAX_BADGES)
-            .map(|n| format!("{n}\u{200B}x\u{200C}\n"))
-            .collect();
-        let c = compare(Some("start\n"), Some(&lines));
-        let labelled = c
-            .blocks
+    fn texts_over_the_display_limit_are_described_not_processed() {
+        let large = "\n".repeat(MAX_TEXT_BYTES + 1);
+        for c in [
+            compare(Some(&large), Some("small")),
+            compare(Some("small"), Some(&large)),
+        ] {
+            assert!(c.oversized && !c.truncated);
+            assert!(c.blocks.is_empty() && c.before.is_none() && c.after.is_none());
+            assert_eq!(c.notes, vec![TOO_LARGE]);
+        }
+        assert!(!compare(None, Some(&"a\n".repeat(1000))).oversized);
+        let shown = text_segments(&large);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].text, TOO_LARGE);
+        // At the limit, every invisible character still carries a label.
+        let at_limit = "\u{200B}\u{200C}".repeat(MAX_TEXT_BYTES / 6);
+        let labelled = text_segments(&at_limit)
             .iter()
-            .flat_map(|b| &b.rows)
-            .flat_map(|r| &r.segments)
-            .filter(|s| s.class.contains("diff-char"))
+            .filter(|s| s.label.is_some())
             .count();
-        assert_eq!(labelled, MAX_BADGES + 1);
-        // Changed characters past the bound stay distinguishable.
-        let prefix = "\u{200B}\u{200C}".repeat(MAX_BADGES);
-        let c = compare(
-            Some(&format!("{prefix}\u{202E}")),
-            Some(&format!("{prefix}\u{2066}")),
-        );
-        let text = |segments: &Option<Vec<Segment>>| -> String {
-            segments.iter().flatten().map(|s| s.text.as_str()).collect()
-        };
-        assert!(text(&c.before).ends_with("[U+202E]"));
-        assert!(text(&c.after).ends_with("[U+2066]"));
-        // A run that changes highlighting after the bound starts a new
-        // segment without a new label.
-        let mut badges = Badges::new();
-        badges.left = 1;
-        // Byte ranges: each U+200B is three bytes.
-        let run = segments("\u{200B}\u{200B}\u{200B}", &[3..6, 6..9], true, &mut badges);
-        let texts: Vec<_> = run.iter().map(|s| (s.text.as_str(), s.class)).collect();
-        assert_eq!(
-            texts,
-            vec![
-                ("U+200B", "diff-char"),
-                ("more written as [U+…]", "diff-char"),
-                ("[U+200B][U+200B]", "diff-word"),
-            ]
-        );
+        assert_eq!(labelled, 2 * (MAX_TEXT_BYTES / 6));
     }
 
     #[test]

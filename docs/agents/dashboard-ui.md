@@ -301,7 +301,9 @@ properties when changing them:
 - **Server-rendered.** `review_diff::compare` aligns lines within a time bound,
   highlights the changed words within paired lines, and collapses long
   unchanged runs into `<details>` rows. The `_review_diff.html` partials escape
-  every segment, so the pages need no script.
+  every segment, so the pages need no script. A text over the 256 KiB display
+  limit is described instead of compared or shown, and a comparison over its
+  row budget shows the complete text instead of a partial line view.
 - **Three views.** One column is the default. Side by side aligns old and new
   lines and falls back to one column on narrow screens. Full definitions shows
   the complete stored text. An explicit `?view=` choice is remembered in the

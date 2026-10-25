@@ -1,8 +1,8 @@
-<section class="page-section diff-section"><h2 class="section-heading">{{ section.name }}{% match section.comparison() %}{% when Some with (c) %} <span class="diff-stat"><span aria-hidden="true">{{ c.stat() }}</span><span class="sr-only">{{ c.stat_label() }}</span></span>{% when None %}{% endmatch %}</h2>
+<section class="page-section diff-section"><h2 class="section-heading">{{ section.name }}{% match section.comparison() %}{% when Some with (c) %}{% if !c.oversized %} <span class="diff-stat"><span aria-hidden="true">{{ c.stat() }}</span><span class="sr-only">{{ c.stat_label() }}</span></span>{% endif %}{% when None %}{% endmatch %}</h2>
 {% match section.definition() %}{% when Some with (segs) %}<pre class="skills-content" tabindex="0">{% include "_diff_segments.html" %}</pre>{% when None %}{% endmatch %}
 {% match section.comparison() %}{% when Some with (c) %}
 {% for note in c.notes %}<p class="diff-note">{{ note }}</p>{% endfor %}
-{% if view.is_full() || c.truncated %}<div class="skills-comparison">
+{% if c.oversized %}{% else if view.is_full() || c.truncated %}<div class="skills-comparison">
 <section><h3 class="card-title">{{ before_label }}</h3>{% match c.before %}{% when Some with (segs) %}<pre class="skills-content" tabindex="0">{% include "_diff_segments.html" %}</pre>{% when None %}<p class="muted">Not present</p>{% endmatch %}</section>
 <section><h3 class="card-title">{{ after_label }}</h3>{% match c.after %}{% when Some with (segs) %}<pre class="skills-content" tabindex="0">{% include "_diff_segments.html" %}</pre>{% when None %}<p class="muted">Not present</p>{% endmatch %}</section>
 </div>{% else %}{% if !c.blocks.is_empty() %}{% if view.is_split() %}<div class="diff diff--split">{% include "_diff_split.html" %}</div><div class="diff diff--narrow">{% include "_diff_unified.html" %}</div>{% else %}<div class="diff">{% include "_diff_unified.html" %}</div>{% endif %}{% endif %}{% endif %}
