@@ -97,8 +97,11 @@ Open **Skills** from the MCP Gateway navigation or the command palette. Search
 by name or description, then open the skill review. The candidate includes every
 supporting file, including scripts and binary assets. Select a file to compare
 its approved and candidate contents; source text is escaped and displayed as
-inert text. The inventory identifies binary contents by immutable object, size,
-and media type.
+inert text. When both versions are text, the comparison marks the changed lines
+and words, and changed skill metadata is compared the same way, using the
+[review comparison views](agents/dashboard-ui.md#review-comparisons). An added,
+removed, binary, or unavailable version is described rather than compared. The
+inventory identifies binary contents by immutable object, size, and media type.
 
 **Approve this candidate** allows its contents to be distributed in the current
 tenant. **Reject this candidate** leaves the serving version available.
