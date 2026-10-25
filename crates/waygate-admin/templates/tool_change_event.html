@@ -15,6 +15,7 @@
 </details>
 </div>
 {% match unavailable %}{% when Some with (reason) %}<div class="card"><p>{{ reason }}</p></div>{% when None %}{% endmatch %}
+{% include "_contract_summary.html" %}
 {% include "_diff_views.html" %}
 {% for section in sections %}{% include "_review_diff.html" %}{% endfor %}
 </section>

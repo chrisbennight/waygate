@@ -18,6 +18,7 @@
 <div class="card"><p>The tool contract exceeds the review storage limit. Its identity is retained, but the comparison is unavailable. {% if r.quarantined %}Reduce the contract upstream and refresh before approval.{% else %}Its existing approval remains in effect.{% endif %}</p></div>
 {% endif %}
 {% match baseline_note %}{% when Some with (note) %}<p class="diff-note">{{ note }}</p>{% when None %}{% endmatch %}
+{% include "_contract_summary.html" %}
 {% include "_diff_views.html" %}
 {% for section in sections %}{% include "_review_diff.html" %}{% endfor %}
 {% if r.quarantined %}

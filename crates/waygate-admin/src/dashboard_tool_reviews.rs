@@ -3,6 +3,7 @@
 use crate::{
     auth::CsrfToken,
     chrome::PageChrome,
+    contract_summary::{self, ContractSummary},
     dashboard::{csrf_matches, render, urlencode, user_display},
     error::ApiError,
     review_diff::{self, DiffSection, DiffView, SectionBody, ViewLink},
@@ -112,6 +113,8 @@ struct ReviewPage {
     chrome: PageChrome,
     rows: Vec<PendingRow>,
     review: Option<waygate_catalog::tool_reviews::ToolReview>,
+    /// What changed, when there is an accepted contract to compare with.
+    summary: Option<ContractSummary>,
     sections: Vec<DiffSection>,
     /// Why whole definitions are shown instead of a comparison.
     baseline_note: Option<&'static str>,
@@ -144,11 +147,23 @@ pub(crate) fn trigger(review: &waygate_catalog::tool_reviews::ToolReview) -> Str
         .into_iter()
         .map(|key| format!("{} changed", field_label(&key)))
         .collect::<Vec<_>>();
-    if fields.is_empty() {
+    let changed = if fields.is_empty() {
         "Definition differs from approval".into()
     } else {
         fields.join("; ")
+    };
+    match contract_summary::summarize(&review.approved_contract, &review.observed_contract).flagged
+    {
+        0 => changed,
+        1 => format!("{changed} · 1 change flagged"),
+        flagged => format!("{changed} · {flagged} changes flagged"),
     }
+}
+
+/// The summary of a change from one stored contract to another, when both
+/// were retained.
+fn summary(before: &serde_json::Value, after: &serde_json::Value) -> Option<ContractSummary> {
+    (!before.is_null() && !after.is_null()).then(|| contract_summary::summarize(before, after))
 }
 
 /// The review's changed fields, and why whole definitions are shown when
@@ -226,6 +241,7 @@ struct EventPage {
     earlier_recorded_at: Option<String>,
     /// Why no field comparison is shown, when it cannot be.
     unavailable: Option<&'static str>,
+    summary: Option<ContractSummary>,
     sections: Vec<DiffSection>,
     view: DiffView,
     view_links: Vec<ViewLink>,
@@ -291,7 +307,14 @@ async fn event_page(
         }
     };
     let view = DiffView::select(query.view, &headers);
+    let summary = match (&change.previous_contract, &change.observed_contract) {
+        (Some(before), Some(after)) if change.event.previous_hash.is_some() => {
+            summary(before, after)
+        }
+        _ => None,
+    };
     let page = EventPage {
+        summary,
         view_links: view_links(&sections, &event_url(id), view),
         view,
         before_label: "Before",
@@ -427,6 +450,9 @@ async fn page(
             csrf.map(|Extension(c)| c.0).unwrap_or_default(),
         ),
         rows,
+        summary: review
+            .as_ref()
+            .and_then(|r| summary(&r.approved_contract, &r.observed_contract)),
         review,
         sections,
         baseline_note,

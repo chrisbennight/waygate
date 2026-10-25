@@ -780,10 +780,23 @@ fn segments(line: &str, changed: &[Range<usize>], changed_line: bool) -> Vec<Seg
     out
 }
 
+/// Text with each marked character written as a bracketed code point, for
+/// places that show a plain string rather than segments.
+pub(crate) fn reveal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match marked(c) {
+            Some(_) => out.push_str(&format!("[U+{:04X}]", c as u32)),
+            None => out.push(c),
+        }
+    }
+    out
+}
+
 /// Why a character must be shown as a code point, if it must. These render as
 /// nothing, change the order or direction of surrounding text, or look like an
 /// ordinary space while being a different character.
-fn marked(c: char) -> Option<&'static str> {
+pub(crate) fn marked(c: char) -> Option<&'static str> {
     match c as u32 {
         0x09 | 0x0A => None,
         0x00..=0x1F | 0x7F..=0x9F => Some("control character"),

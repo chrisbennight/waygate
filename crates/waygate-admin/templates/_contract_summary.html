@@ -1,0 +1,4 @@
+{% match summary %}{% when Some with (s) %}{% if !s.changes.is_empty() %}<section class="page-section"><h2 class="section-heading">What changed</h2>
+<ul class="change-list">{% for c in s.changes %}<li class="change-item">{% match c.flag %}{% when Some with (reason) %}<span class="chip chip--warn">Flagged</span> {{ c.text }}<span class="change-item__reason">{{ reason }}</span>{% when None %}{{ c.text }}{% endmatch %}</li>{% endfor %}</ul>
+{% match s.unlisted_note() %}{% when Some with (note) %}<p class="diff-note">{{ note }}</p>{% when None %}{% endmatch %}
+<p class="diff-note">Flags come from fixed rules about new inputs, required inputs, behavior hints, addresses, and invisible characters. A change without a flag is not a statement that it is safe.</p></section>{% endif %}{% when None %}{% endmatch %}

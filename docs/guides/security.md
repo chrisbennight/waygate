@@ -121,7 +121,14 @@ field is shown as a diff: removed and added lines carry a sign, the words that
 changed within a line are highlighted, and long unchanged runs are collapsed
 until expanded. Invisible, control, and text-direction characters appear as
 labelled code points such as `U+200B`, and a change that alters only such
-characters or whitespace says so. **Side by side** and **Full definitions**
+characters or whitespace says so. Above the comparison, **What changed** lists
+each changed parameter, hint, and field in plain language. Fixed rules flag a
+new input parameter, a parameter that becomes required, a schema that starts
+accepting unnamed parameters, behavior hints that widen what the tool declares
+it does, and web addresses, email addresses, or invisible characters that the
+accepted contract did not contain. Each flag names its evidence, and the review
+list and Decisions queue show how many changes are flagged. A change without a
+flag is not a statement that it is safe. **Side by side** and **Full definitions**
 change the layout, and the choice is remembered. A tool awaiting its first
 approval, or whose accepted definition was not retained, shows the complete
 observed definition instead. **Keep blocked**
