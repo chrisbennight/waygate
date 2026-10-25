@@ -6440,6 +6440,7 @@ Used by:
 - [serde_with 3.18.0](https://crates.io/crates/serde_with/3.18.0)
 - [serde_with_macros 3.18.0](https://crates.io/crates/serde_with_macros/3.18.0)
 - [signal-hook-registry 1.4.8](https://crates.io/crates/signal-hook-registry/1.4.8)
+- [similar 3.2.1](https://crates.io/crates/similar/3.2.1)
 - [smallvec 1.15.1](https://crates.io/crates/smallvec/1.15.1)
 - [smol_str 0.3.6](https://crates.io/crates/smol_str/0.3.6)
 - [socket2 0.6.3](https://crates.io/crates/socket2/0.6.3)

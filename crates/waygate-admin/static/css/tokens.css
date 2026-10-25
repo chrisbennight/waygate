@@ -65,6 +65,14 @@
     --syntax-operator: var(--ink-muted);
     --syntax-var: var(--ink);
 
+    /* -- Review comparisons. Aliases like the syntax tokens, so added and
+          removed text follows the selected theme. Word highlights use the
+          stronger mix inside a changed line. -- */
+    --diff-add: color-mix(in oklab, var(--ok) 14%, var(--paper-1));
+    --diff-add-strong: color-mix(in oklab, var(--ok) 34%, var(--paper-1));
+    --diff-del: color-mix(in oklab, var(--deny) 14%, var(--paper-1));
+    --diff-del-strong: color-mix(in oklab, var(--deny) 34%, var(--paper-1));
+
 }
 
 [data-theme="dark"] {

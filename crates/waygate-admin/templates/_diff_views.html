@@ -1,0 +1,1 @@
+{% if !view_links.is_empty() %}<nav class="diff-views" aria-label="Comparison view">{% for link in view_links %}<a class="diff-view{% if link.current %} diff-view--current{% endif %}" href="{{ self.chrome.nav_url(link.url) }}"{% if link.current %} aria-current="true"{% endif %}>{{ link.label }}</a>{% endfor %}</nav>{% endif %}

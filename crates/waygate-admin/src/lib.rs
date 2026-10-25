@@ -113,6 +113,7 @@ pub mod policy_tests;
 pub mod rate_limit_policies;
 pub mod rbac;
 pub mod resource_catalog;
+mod review_diff;
 pub mod scim_groups;
 pub mod scim_provisioning;
 pub mod scim_users;

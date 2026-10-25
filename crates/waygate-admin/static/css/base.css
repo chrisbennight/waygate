@@ -690,6 +690,45 @@ summary:focus-visible, [tabindex]:focus-visible {
 .skills-inventory td { overflow-wrap: anywhere; max-width: 24rem; }
 @media (max-width: 767px) { .skills-comparison { grid-template-columns: minmax(0, 1fr); } }
 
+/* Review comparisons mark changed lines with a sign and a hidden label as well
+   as color, and stay legible when forced colors remove backgrounds. */
+.diff-views { display: inline-flex; flex-wrap: wrap; gap: 2px; margin: 16px 0 4px; padding: 2px; border: 1px solid var(--rule); border-radius: var(--radius-interactive); background: var(--paper-1); }
+.diff-view { padding: 4px 10px; border-radius: var(--radius-interactive); color: var(--ink-muted); font-size: 14px; text-decoration: none; }
+.diff-view:hover { color: var(--ink); background: var(--paper-2); }
+.diff-view--current { color: var(--ink); background: var(--paper-2); font-weight: 600; }
+.diff-view:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.diff-stat { margin-left: 8px; color: var(--ink-muted); font-family: var(--font-mono); font-size: 13px; font-weight: 400; }
+.diff-note { margin: 0 0 8px; color: var(--ink-muted); }
+.diff { overflow: hidden; border: 1px solid var(--rule); border-radius: var(--radius-container); background: var(--paper-1); }
+.diff--narrow { display: none; }
+.diff-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-family: var(--font-mono); font-size: 13px; line-height: 1.5; }
+.diff-col-num { width: 6ch; }
+.diff-col-sign { width: 3ch; }
+.diff-num { padding: 0 6px; color: var(--ink-faint); text-align: right; vertical-align: top; user-select: none; }
+.diff-num--split { border-left: 1px solid var(--rule); }
+.diff-sign { color: var(--ink-muted); text-align: center; vertical-align: top; user-select: none; }
+.diff-code { padding: 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; vertical-align: top; }
+.diff-pad { background: var(--paper-2); }
+.diff-line--add { background: var(--diff-add); }
+.diff-line--del { background: var(--diff-del); }
+.diff-line--add .diff-word { background: var(--diff-add-strong); }
+.diff-line--del .diff-word { background: var(--diff-del-strong); }
+.diff-ws { outline: 1px dashed var(--ink-faint); outline-offset: -1px; }
+.diff-char { padding: 0 3px; border: 1px solid var(--flag); border-radius: 3px; color: var(--flag); font-size: 11px; font-weight: 600; }
+.diff-split-head { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-bottom: 1px solid var(--rule); color: var(--ink-muted); font-size: 13px; font-weight: 600; }
+.diff-split-head span { padding: 4px 8px; }
+.diff-gap > summary { padding: 2px 8px; border-block: 1px solid var(--rule); background: var(--paper-2); color: var(--ink-muted); font-size: 13px; cursor: pointer; }
+.diff-gap > summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+@media (max-width: 767px) {
+    .diff--split { display: none; }
+    .diff--narrow { display: block; }
+}
+@media (forced-colors: active) {
+    .diff-line--add .diff-code, .diff-line--del .diff-code { border-left: 3px solid CanvasText; }
+    .diff-word { text-decoration: underline; }
+    .diff-char { border-color: CanvasText; }
+}
+
 /* Mobile navigation keeps tenant selection and named destinations usable. */
 @media (max-width: 767px) {
     .shell {
