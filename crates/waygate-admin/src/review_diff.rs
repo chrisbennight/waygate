@@ -28,8 +28,9 @@ const WORD_DIFF_MIN_SIMILARITY: f32 = 0.4;
 /// expand into a page far larger than its stored size.
 const MAX_ROWS: usize = 2_000;
 /// Labelled code-point badges per whole text, and across one comparison's
-/// rows. Past it, marked characters stay visible as U+FFFD without markup of
-/// their own, so a text of many invisible characters renders in linear size.
+/// rows. Past it, marked characters are written as bracketed code points in the
+/// surrounding text, without elements of their own, so a text of many
+/// invisible characters keeps every identity and renders in linear size.
 const MAX_BADGES: usize = 1_000;
 const VIEW_COOKIE: &str = "mcp-gw-review-view";
 
@@ -735,7 +736,7 @@ fn segments(
     // Consecutive repeats of one marked character share a counted badge, so
     // repetition stays visible without one element per character.
     let mut repeat: Option<(char, &'static str, usize)> = None;
-    for (at, mut c) in line.char_indices() {
+    for (at, c) in line.char_indices() {
         let word = changed.iter().any(|range| range.contains(&at));
         let badge_class = if word {
             "diff-char diff-word"
@@ -748,15 +749,28 @@ fn segments(
             if !badges.stopped {
                 badges.stopped = true;
                 out.push(Segment {
-                    text: "more shown as \u{FFFD}".into(),
+                    text: "more written as [U+…]".into(),
                     class: "diff-char",
                     label: Some(
-                        "Further invisible characters are shown as U+FFFD, without individual labels"
+                        "Further invisible characters are written as bracketed code points, without individual labels"
                             .into(),
                     ),
                 });
             }
-            c = '\u{FFFD}';
+            let class = if word { "diff-word" } else { "" };
+            let written = format!("[U+{:04X}]", c as u32);
+            match out.last_mut() {
+                Some(last) if last.class == class && last.label.is_none() => {
+                    last.text.push_str(&written)
+                }
+                _ => out.push(Segment {
+                    text: written,
+                    class,
+                    label: None,
+                }),
+            }
+            repeat = None;
+            continue;
         }
         if let Some(kind) = marked(c) {
             let class = badge_class;
@@ -996,7 +1010,9 @@ mod tests {
             "labels plus one marker where they stop"
         );
         let shown: String = whole.iter().map(|s| s.text.as_str()).collect();
-        assert_eq!(shown.matches('\u{FFFD}').count(), MAX_BADGES + 1);
+        // Past the cap every character keeps its identity as plain text.
+        assert_eq!(shown.matches("[U+200B]").count(), MAX_BADGES / 2);
+        assert_eq!(shown.matches("[U+200C]").count(), MAX_BADGES / 2);
         assert!(!shown.contains('\u{200B}') && !shown.contains('\u{200C}'));
         // The bound spans every row of one comparison.
         let lines: String = (0..MAX_BADGES)
@@ -1011,6 +1027,17 @@ mod tests {
             .filter(|s| s.class.contains("diff-char"))
             .count();
         assert_eq!(labelled, MAX_BADGES + 1);
+        // Changed characters past the bound stay distinguishable.
+        let prefix = "\u{200B}\u{200C}".repeat(MAX_BADGES);
+        let c = compare(
+            Some(&format!("{prefix}\u{202E}")),
+            Some(&format!("{prefix}\u{2066}")),
+        );
+        let text = |segments: &Option<Vec<Segment>>| -> String {
+            segments.iter().flatten().map(|s| s.text.as_str()).collect()
+        };
+        assert!(text(&c.before).ends_with("[U+202E]"));
+        assert!(text(&c.after).ends_with("[U+2066]"));
         // A run that changes highlighting after the bound starts a new
         // segment without a new label.
         let mut badges = Badges::new();
@@ -1022,8 +1049,8 @@ mod tests {
             texts,
             vec![
                 ("U+200B", "diff-char"),
-                ("more shown as \u{FFFD}", "diff-char"),
-                ("\u{FFFD}\u{FFFD}", "diff-word"),
+                ("more written as [U+…]", "diff-char"),
+                ("[U+200B][U+200B]", "diff-word"),
             ]
         );
     }
