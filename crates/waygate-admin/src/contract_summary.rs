@@ -14,6 +14,8 @@ use std::collections::BTreeSet;
 const MAX_LISTED: usize = 50;
 /// Evidence values named per flag before the rest are counted.
 const MAX_EVIDENCE: usize = 3;
+/// Characters of one evidence value shown before it is shortened.
+const MAX_EVIDENCE_CHARS: usize = 120;
 
 /// One change, in reading order.
 #[derive(Debug, PartialEq, Eq)]
@@ -383,7 +385,13 @@ fn evidence(before: &Value, after: &Value, out: &mut Vec<ContractChange>) {
         let mut named: Vec<String> = values
             .iter()
             .take(MAX_EVIDENCE)
-            .map(|v| reveal(v))
+            .map(|v| {
+                let shown = reveal(v);
+                match shown.char_indices().nth(MAX_EVIDENCE_CHARS) {
+                    Some((end, _)) => format!("{}…", &shown[..end]),
+                    None => shown,
+                }
+            })
             .collect();
         if values.len() > MAX_EVIDENCE {
             named.push(format!("and {} more", values.len() - MAX_EVIDENCE));
@@ -407,7 +415,7 @@ fn evidence(before: &Value, after: &Value, out: &mut Vec<ContractChange>) {
     let hidden = added(&old.hidden, &new.hidden);
     if !hidden.is_empty() {
         out.push(change(
-            format!("Adds invisible characters: {}", hidden.join(", ")),
+            format!("Adds invisible characters: {}", name(&hidden)),
             Some("Invisible characters can hide or reorder instructions the model reads."),
         ));
     }
@@ -593,6 +601,25 @@ mod tests {
         assert!(texts.contains(&("Adds invisible characters: U+200B, U+202E", true)));
         // Addresses already present in the accepted contract are not flagged again.
         assert!(!texts.iter().any(|(t, _)| t.contains("docs.example")));
+    }
+
+    #[test]
+    fn evidence_is_bounded() {
+        let long = format!("https://collect.example/{}", "a".repeat(500));
+        let after = json!({"description": format!(
+            "{long} https://b.example https://c.example https://d.example \u{200B}\u{200C}\u{200D}\u{2060}"
+        )});
+        let summary = summarize(&json!({"description": "x"}), &after);
+        let urls = &summary.changes[1].text;
+        assert!(urls.starts_with(
+            "Adds web addresses: https://b.example, https://c.example, https://collect.example/aaa"
+        ));
+        assert!(urls.contains("…, and 1 more"));
+        assert!(urls.chars().count() < 250);
+        assert_eq!(
+            summary.changes[2].text,
+            "Adds invisible characters: U+200B, U+200C, U+200D, and 1 more"
+        );
     }
 
     #[test]
