@@ -16,6 +16,8 @@ const MAX_LISTED: usize = 50;
 const MAX_EVIDENCE: usize = 3;
 /// Characters of one evidence value shown before it is shortened.
 const MAX_EVIDENCE_CHARS: usize = 120;
+/// Characters of one name or value shown before it is shortened.
+const MAX_NAME_CHARS: usize = 80;
 
 /// One change, in reading order.
 #[derive(Debug, PartialEq, Eq)]
@@ -46,48 +48,79 @@ impl ContractSummary {
 
 /// Summarize the changes from an accepted contract to a replacement.
 pub(crate) fn summarize(before: &Value, after: &Value) -> ContractSummary {
-    let mut out = Vec::new();
+    let mut out = Collector::default();
     top_level(before, after, &mut out);
     evidence(before, after, &mut out);
-    let flagged = out.iter().filter(|c| c.flag.is_some()).count();
-    let unlisted = out.len().saturating_sub(MAX_LISTED);
-    out.truncate(MAX_LISTED);
     ContractSummary {
-        changes: out,
-        unlisted,
-        flagged,
+        unlisted: out.total - out.listed.len(),
+        changes: out.listed,
+        flagged: out.flagged,
     }
 }
 
-fn change(text: String, flag: Option<&str>) -> ContractChange {
-    ContractChange {
-        text,
-        flag: flag.map(str::to_owned),
+/// Changes in reading order. Every change is counted and flag-tested, but
+/// text is built only for listed ones, so an upstream-controlled contract
+/// cannot make the summary allocate per change beyond the list.
+#[derive(Default)]
+struct Collector {
+    listed: Vec<ContractChange>,
+    total: usize,
+    flagged: usize,
+}
+
+impl Collector {
+    fn push(&mut self, text: impl FnOnce() -> String, flag: Option<&'static str>) {
+        self.total += 1;
+        if flag.is_some() {
+            self.flagged += 1;
+        }
+        if self.listed.len() < MAX_LISTED {
+            self.listed.push(ContractChange {
+                text: text(),
+                flag: flag.map(str::to_owned),
+            });
+        }
+    }
+}
+
+/// A name or value with invisible characters revealed, shortened for display.
+fn shown(text: &str) -> String {
+    let revealed = reveal(text);
+    match revealed.char_indices().nth(MAX_NAME_CHARS) {
+        Some((end, _)) => format!("{}…", &revealed[..end]),
+        None => revealed,
     }
 }
 
 fn quoted(name: &str) -> String {
-    format!("“{}”", reveal(name))
+    format!("“{}”", shown(name))
 }
 
-fn top_level(before: &Value, after: &Value, out: &mut Vec<ContractChange>) {
-    let field = |value: &Value, key: &str| value.get(key).cloned();
-    for key in ["title", "description"] {
-        let (old, new) = (field(before, key), field(after, key));
+/// A nested parameter's dotted name, built only when it is displayed.
+fn quoted_path(path: &[&str]) -> String {
+    let names: Vec<String> = path.iter().map(|name| shown(name)).collect();
+    format!("“{}”", names.join("."))
+}
+
+fn value_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => shown(text),
+        other => shown(&other.to_string()),
+    }
+}
+
+fn top_level(before: &Value, after: &Value, out: &mut Collector) {
+    for (key, name) in [("title", "Title"), ("description", "Description")] {
+        let (old, new) = (before.get(key), after.get(key));
         if old != new {
-            let name = if key == "title" {
-                "Title"
-            } else {
-                "Description"
-            };
-            out.push(change(format!("{name} {}", presence(&old, &new)), None));
+            out.push(|| format!("{name} {}", presence(old, new)), None);
         }
     }
     schema(
         "Input parameter",
         before.get("inputSchema"),
         after.get("inputSchema"),
-        "",
+        &[],
         true,
         out,
     );
@@ -95,7 +128,7 @@ fn top_level(before: &Value, after: &Value, out: &mut Vec<ContractChange>) {
         "Output field",
         before.get("outputSchema"),
         after.get("outputSchema"),
-        "",
+        &[],
         false,
         out,
     );
@@ -122,17 +155,14 @@ fn top_level(before: &Value, after: &Value, out: &mut Vec<ContractChange>) {
         .filter(|k| !known.contains(&k.as_str()))
         .collect();
     for key in others {
-        let (old, new) = (field(before, key), field(after, key));
+        let (old, new) = (before.get(key), after.get(key));
         if old != new {
-            out.push(change(
-                format!("{} {}", quoted(key), presence(&old, &new)),
-                None,
-            ));
+            out.push(|| format!("{} {}", quoted(key), presence(old, new)), None);
         }
     }
 }
 
-fn presence(old: &Option<Value>, new: &Option<Value>) -> &'static str {
+fn presence(old: Option<&Value>, new: Option<&Value>) -> &'static str {
     match (old, new) {
         (None, Some(_)) => "added",
         (Some(_), None) => "removed",
@@ -140,91 +170,95 @@ fn presence(old: &Option<Value>, new: &Option<Value>) -> &'static str {
     }
 }
 
-/// Compare one level of a JSON Schema object. `input` selects the rules for
+/// Compare one level of a JSON Schema object. `path` names the parameter the
+/// schema belongs to, empty for the top level; `input` selects the rules for
 /// data the model sends to the tool.
-fn schema(
+fn schema<'a>(
     label: &str,
-    before: Option<&Value>,
-    after: Option<&Value>,
-    path: &str,
+    before: Option<&'a Value>,
+    after: Option<&'a Value>,
+    path: &[&'a str],
     input: bool,
-    out: &mut Vec<ContractChange>,
+    out: &mut Collector,
 ) {
     if before == after {
         return;
     }
-    let props = |schema: Option<&Value>| {
-        schema
-            .and_then(|s| s.get("properties"))
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default()
-    };
-    let (old_props, new_props) = (props(before), props(after));
-    let names: BTreeSet<&String> = old_props.keys().chain(new_props.keys()).collect();
+    let child = |name: &'a str| child_path(path, name);
+    let (old_props, new_props) = (properties(before), properties(after));
+    let names: BTreeSet<&String> = old_props
+        .into_iter()
+        .chain(new_props)
+        .flat_map(Map::keys)
+        .collect();
     for name in names {
-        let full = if path.is_empty() {
-            name.clone()
-        } else {
-            format!("{path}.{name}")
-        };
-        match (old_props.get(name), new_props.get(name)) {
-            (None, Some(_)) => out.push(change(
-                format!("{label} {} added", quoted(&full)),
+        let (old, new) = (
+            old_props.and_then(|p| p.get(name)),
+            new_props.and_then(|p| p.get(name)),
+        );
+        match (old, new) {
+            (None, Some(_)) => out.push(
+                || format!("{label} {} added", quoted_path(&child(name))),
                 input.then_some("A new input lets the model send more data to the tool."),
-            )),
-            (Some(_), None) => out.push(change(format!("{label} {} removed", quoted(&full)), None)),
-            (Some(old), Some(new)) if old != new => property(label, &full, old, new, input, out),
+            ),
+            (Some(_), None) => out.push(
+                || format!("{label} {} removed", quoted_path(&child(name))),
+                None,
+            ),
+            (Some(old), Some(new)) if old != new => {
+                property(label, &child(name), old, new, input, out)
+            }
             _ => {}
         }
     }
-    let required = |schema: Option<&Value>| -> BTreeSet<String> {
-        schema
-            .and_then(|s| s.get("required"))
-            .and_then(Value::as_array)
-            .map(|names| {
-                names
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
     let (old_required, new_required) = (required(before), required(after));
-    let qualify = |name: &String| {
-        if path.is_empty() {
-            name.clone()
-        } else {
-            format!("{path}.{name}")
-        }
-    };
     for name in new_required.difference(&old_required) {
-        out.push(change(
-            format!("{label} {} is now required", quoted(&qualify(name))),
+        out.push(
+            || format!("{label} {} is now required", quoted_path(&child(name))),
             input.then_some("The model must now supply this input on every call."),
-        ));
+        );
     }
     for name in old_required.difference(&new_required) {
-        out.push(change(
-            format!("{label} {} is no longer required", quoted(&qualify(name))),
+        out.push(
+            || {
+                format!(
+                    "{label} {} is no longer required",
+                    quoted_path(&child(name))
+                )
+            },
             None,
-        ));
+        );
     }
     let open = |schema: Option<&Value>| {
         schema.and_then(|s| s.get("additionalProperties")) != Some(&Value::Bool(false))
+    };
+    // A nested parameter's own type, description, allowed values, and
+    // default are reported by `property`.
+    let reported: &[&str] = if path.is_empty() {
+        &["properties", "required"]
+    } else {
+        &[
+            "properties",
+            "required",
+            "type",
+            "description",
+            "enum",
+            "default",
+        ]
     };
     let other_keys: BTreeSet<&String> = [before, after]
         .into_iter()
         .flatten()
         .filter_map(Value::as_object)
         .flat_map(Map::keys)
-        .filter(|k| !matches!(k.as_str(), "properties" | "required"))
+        .filter(|k| !reported.contains(&k.as_str()))
         .collect();
-    let scope = if path.is_empty() {
-        format!("{label} schema")
-    } else {
-        format!("{label} {}", quoted(path))
+    let scope = || {
+        if path.is_empty() {
+            format!("{label} schema")
+        } else {
+            format!("{label} {}", quoted_path(path))
+        }
     };
     for key in other_keys {
         let (old, new) = (
@@ -235,47 +269,62 @@ fn schema(
             continue;
         }
         if key == "additionalProperties" && input && !open(before) && open(after) {
-            out.push(change(
-                format!("{scope} now accepts parameters it does not name"),
+            out.push(
+                || format!("{} now accepts parameters it does not name", scope()),
                 Some("The model may send inputs the schema does not describe."),
-            ));
+            );
         } else {
-            out.push(change(
-                format!(
-                    "{scope} {} {}",
-                    quoted(key),
-                    presence(&old.cloned(), &new.cloned())
-                ),
+            out.push(
+                || format!("{} {} {}", scope(), quoted(key), presence(old, new)),
                 None,
-            ));
+            );
         }
     }
 }
 
-fn property(
+fn child_path<'a>(path: &[&'a str], name: &'a str) -> Vec<&'a str> {
+    let mut child = path.to_vec();
+    child.push(name);
+    child
+}
+
+fn properties(schema: Option<&Value>) -> Option<&Map<String, Value>> {
+    schema
+        .and_then(|s| s.get("properties"))
+        .and_then(Value::as_object)
+}
+
+fn required(schema: Option<&Value>) -> BTreeSet<&str> {
+    schema
+        .and_then(|s| s.get("required"))
+        .and_then(Value::as_array)
+        .map(|names| names.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
+}
+
+fn property<'a>(
     label: &str,
-    name: &str,
-    old: &Value,
-    new: &Value,
+    path: &[&'a str],
+    old: &'a Value,
+    new: &'a Value,
     input: bool,
-    out: &mut Vec<ContractChange>,
+    out: &mut Collector,
 ) {
-    let before = out.len();
-    let text = |value: &Value| match value {
-        Value::String(text) => reveal(text),
-        other => other.to_string(),
-    };
+    let before = out.total;
     if old.get("type") != new.get("type") {
-        let describe = |v: Option<&Value>| v.map(text).unwrap_or_else(|| "unspecified".into());
-        out.push(change(
-            format!(
-                "{label} {} type changed from {} to {}",
-                quoted(name),
-                describe(old.get("type")),
-                describe(new.get("type"))
-            ),
+        let describe =
+            |v: Option<&Value>| v.map(value_text).unwrap_or_else(|| "unspecified".into());
+        out.push(
+            || {
+                format!(
+                    "{label} {} type changed from {} to {}",
+                    quoted_path(path),
+                    describe(old.get("type")),
+                    describe(new.get("type"))
+                )
+            },
             None,
-        ));
+        );
     }
     for (key, what) in [
         ("description", "description"),
@@ -283,69 +332,65 @@ fn property(
         ("default", "default"),
     ] {
         if old.get(key) != new.get(key) {
-            out.push(change(
-                format!("{label} {} {what} changed", quoted(name)),
+            out.push(
+                || format!("{label} {} {what} changed", quoted_path(path)),
                 None,
-            ));
+            );
         }
     }
-    let nested = |v: &Value| v.get("properties").is_some() || v.get("required").is_some();
-    if nested(old) || nested(new) {
-        schema(label, Some(old), Some(new), name, input, out);
+    // Any object-valued parameter is compared as a schema, so the nested
+    // rules, including the open-schema flag, apply at every depth.
+    if old.is_object() || new.is_object() {
+        schema(label, Some(old), Some(new), path, input, out);
     }
-    if out.len() == before {
-        out.push(change(
-            format!("{label} {} definition changed", quoted(name)),
+    if out.total == before {
+        out.push(
+            || format!("{label} {} definition changed", quoted_path(path)),
             None,
-        ));
+        );
     }
 }
 
-fn annotations(before: Option<&Value>, after: Option<&Value>, out: &mut Vec<ContractChange>) {
+fn annotations(before: Option<&Value>, after: Option<&Value>, out: &mut Collector) {
     let (old, new) = (
         before.and_then(Value::as_object),
         after.and_then(Value::as_object),
     );
-    let get = |map: Option<&Map<String, Value>>, key: &str| map.and_then(|m| m.get(key)).cloned();
-    let keys: BTreeSet<&String> = old
-        .iter()
-        .chain(new.iter())
-        .flat_map(|m| m.keys())
-        .collect();
+    let keys: BTreeSet<&String> = old.into_iter().chain(new).flat_map(Map::keys).collect();
     for key in keys {
-        let (was, now) = (get(old, key), get(new, key));
+        let (was, now) = (old.and_then(|m| m.get(key)), new.and_then(|m| m.get(key)));
         if was == now {
             continue;
         }
-        let shown = |v: &Option<Value>| match v {
-            Some(v) => v.to_string(),
-            None => "not declared".into(),
-        };
-        let is = |v: &Option<Value>, b: bool| v.as_ref() == Some(&Value::Bool(b));
+        let describe =
+            |v: Option<&Value>| v.map(value_text).unwrap_or_else(|| "not declared".into());
+        let is = |v: Option<&Value>, b: bool| v == Some(&Value::Bool(b));
         let flag = match key.as_str() {
-            "readOnlyHint" if is(&was, true) && !is(&now, true) => {
+            "readOnlyHint" if is(was, true) && !is(now, true) => {
                 Some("The tool no longer declares itself read-only.")
             }
-            "destructiveHint" if !is(&was, true) && is(&now, true) => {
+            "destructiveHint" if !is(was, true) && is(now, true) => {
                 Some("The tool now declares that it may destroy or overwrite data.")
             }
-            "openWorldHint" if !is(&was, true) && is(&now, true) => {
+            "openWorldHint" if !is(was, true) && is(now, true) => {
                 Some("The tool now declares that it reaches outside systems.")
             }
-            "idempotentHint" if is(&was, true) && !is(&now, true) => {
+            "idempotentHint" if is(was, true) && !is(now, true) => {
                 Some("Repeating a call may now have additional effects.")
             }
             _ => None,
         };
-        out.push(change(
-            format!(
-                "Annotation {} changed from {} to {}",
-                quoted(key),
-                shown(&was),
-                shown(&now)
-            ),
+        out.push(
+            || {
+                format!(
+                    "Annotation {} changed from {} to {}",
+                    quoted(key),
+                    describe(was),
+                    describe(now)
+                )
+            },
             flag,
-        ));
+        );
     }
 }
 
@@ -353,30 +398,30 @@ fn keyed(
     label: &str,
     before: Option<&Map<String, Value>>,
     after: Option<&Map<String, Value>>,
-    out: &mut Vec<ContractChange>,
+    out: &mut Collector,
 ) {
     let keys: BTreeSet<&String> = before
-        .iter()
-        .chain(after.iter())
-        .flat_map(|m| m.keys())
+        .into_iter()
+        .chain(after)
+        .flat_map(Map::keys)
         .collect();
     for key in keys {
         let (old, new) = (
-            before.and_then(|m| m.get(key)).cloned(),
-            after.and_then(|m| m.get(key)).cloned(),
+            before.and_then(|m| m.get(key)),
+            after.and_then(|m| m.get(key)),
         );
         if old != new {
-            out.push(change(
-                format!("{label} {} {}", quoted(key), presence(&old, &new)),
+            out.push(
+                || format!("{label} {} {}", quoted(key), presence(old, new)),
                 None,
-            ));
+            );
         }
     }
 }
 
 /// Web addresses, email addresses, and invisible characters that appear
 /// anywhere in the replacement's text but nowhere in the accepted contract.
-fn evidence(before: &Value, after: &Value, out: &mut Vec<ContractChange>) {
+fn evidence(before: &Value, after: &Value, out: &mut Collector) {
     let (old, new) = (Evidence::of(before), Evidence::of(after));
     let added = |old: &BTreeSet<String>, new: &BTreeSet<String>| -> Vec<String> {
         new.difference(old).cloned().collect()
@@ -400,24 +445,24 @@ fn evidence(before: &Value, after: &Value, out: &mut Vec<ContractChange>) {
     };
     let urls = added(&old.urls, &new.urls);
     if !urls.is_empty() {
-        out.push(change(
-            format!("Adds web addresses: {}", name(&urls)),
+        out.push(
+            || format!("Adds web addresses: {}", name(&urls)),
             Some("A new address can direct the model or its data somewhere else."),
-        ));
+        );
     }
     let emails = added(&old.emails, &new.emails);
     if !emails.is_empty() {
-        out.push(change(
-            format!("Adds email addresses: {}", name(&emails)),
+        out.push(
+            || format!("Adds email addresses: {}", name(&emails)),
             Some("A new address can direct the model or its data somewhere else."),
-        ));
+        );
     }
     let hidden = added(&old.hidden, &new.hidden);
     if !hidden.is_empty() {
-        out.push(change(
-            format!("Adds invisible characters: {}", name(&hidden)),
+        out.push(
+            || format!("Adds invisible characters: {}", name(&hidden)),
             Some("Invisible characters can hide or reorder instructions the model reads."),
-        ));
+        );
     }
 }
 
@@ -464,12 +509,27 @@ impl Evidence {
         };
         for word in text.split(delimiter) {
             let word = word.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+            // An address may follow other text in the same word, as in
+            // `endpoint=https://…`; ASCII lowercasing keeps byte offsets.
             let lower = word.to_ascii_lowercase();
-            if (lower.starts_with("http://") || lower.starts_with("https://"))
-                && word.len() > "https://".len()
-            {
-                self.urls.insert(word.to_owned());
-            } else if let Some((local, domain)) = word.split_once('@') {
+            let starts: Vec<usize> = lower
+                .match_indices("http")
+                .map(|(at, _)| at)
+                .filter(|at| {
+                    lower[*at..].starts_with("http://") || lower[*at..].starts_with("https://")
+                })
+                .collect();
+            for (n, start) in starts.iter().enumerate() {
+                let end = starts.get(n + 1).copied().unwrap_or(word.len());
+                let url = word[*start..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+                if url.len() > "https://".len() {
+                    self.urls.insert(url.to_owned());
+                }
+            }
+            if !starts.is_empty() {
+                continue;
+            }
+            if let Some((local, domain)) = word.split_once('@') {
                 let domain_ok = domain.contains('.')
                     && !domain.starts_with('.')
                     && !domain.ends_with('.')
@@ -620,6 +680,65 @@ mod tests {
             summary.changes[2].text,
             "Adds invisible characters: U+200B, U+200C, U+200D, and 1 more"
         );
+    }
+
+    #[test]
+    fn text_is_built_only_for_listed_changes_and_names_are_shortened() {
+        let parent = "p".repeat(100_000);
+        let children: Map<String, Value> = (0..3500)
+            .map(|i| (format!("c{i:04}"), json!({"type": "string"})))
+            .collect();
+        let before = json!({"inputSchema": {"type": "object", "properties": {
+            &parent: {"type": "object", "properties": {}}}}});
+        let after = json!({"inputSchema": {"type": "object", "properties": {
+            &parent: {"type": "object", "properties": children}}}});
+        let summary = summarize(&before, &after);
+        assert_eq!(summary.changes.len(), MAX_LISTED);
+        assert_eq!(summary.unlisted, 3500 - MAX_LISTED);
+        assert_eq!(summary.flagged, 3500);
+        assert!(summary.changes.iter().all(|c| c.text.chars().count() < 200));
+        assert!(summary.changes[0].text.contains("….c0000"));
+    }
+
+    #[test]
+    fn a_nested_object_parameter_that_opens_is_flagged() {
+        let schema = |open: bool| {
+            json!({"inputSchema": {"type": "object", "properties": {
+                "options": {"type": "object", "additionalProperties": open}}}})
+        };
+        let summary = summarize(&schema(false), &schema(true));
+        assert_eq!(
+            texts(&summary),
+            vec![(
+                "Input parameter “options” now accepts parameters it does not name",
+                true
+            )]
+        );
+    }
+
+    #[test]
+    fn addresses_inside_a_word_are_found() {
+        let after = json!({"description":
+            "Use endpoint=https://collect.example/upload or URL:https://two.example/x."});
+        let summary = summarize(&json!({"description": "Use the API."}), &after);
+        assert!(texts(&summary).contains(&(
+            "Adds web addresses: https://collect.example/upload, https://two.example/x",
+            true
+        )));
+    }
+
+    #[test]
+    fn displayed_values_reveal_invisible_characters() {
+        let summary = summarize(
+            &json!({"annotations": {"title": "Search"}}),
+            &json!({"annotations": {"title": "Search\u{202E}tsil"}}),
+        );
+        let text = &summary.changes[0].text;
+        assert_eq!(
+            text,
+            "Annotation “title” changed from Search to Search[U+202E]tsil"
+        );
+        assert!(!text.contains('\u{202E}'));
     }
 
     #[test]
