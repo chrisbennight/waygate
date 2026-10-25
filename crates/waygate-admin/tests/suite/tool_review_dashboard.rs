@@ -1151,6 +1151,12 @@ async fn drift_event_page_shows_a_marked_diff_in_the_selected_view() {
         "only an explicit choice is remembered"
     );
     assert!(html.contains("+1 −1"));
+    // The summary lists the change and flags the inserted invisible character.
+    assert!(html.contains("<h2 class=\"section-heading\">What changed</h2>"));
+    assert!(html.contains("<li class=\"change-item\">Description changed</li>"));
+    assert!(html.contains(
+        "<span class=\"chip chip--warn\">Flagged</span> Adds invisible characters: U+200B"
+    ));
     assert!(html.contains("<tr class=\"diff-line diff-line--del\">"));
     assert!(html.contains("<tr class=\"diff-line diff-line--add\">"));
     assert!(html.contains("<span class=\"sr-only\">Added</span>"));

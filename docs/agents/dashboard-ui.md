@@ -315,6 +315,10 @@ properties when changing them:
   says so.
 - **Not color alone.** Changed lines carry a sign and a hidden Added or Removed
   label. Forced-colors mode keeps a border and underline.
+- **Summary before detail.** Tool pages list what changed with
+  `contract_summary::summarize` above the comparison. Its rules are fixed and
+  name their evidence; the flagged count also appears in the review list and
+  Decisions queue. The summary never approves, blocks, or replaces the diff.
 - **No reconstruction.** A first approval, or an accepted definition that was
   not retained, shows the observed definition whole with a note rather than a
   diff against nothing. A skill file that is added, removed, binary, or

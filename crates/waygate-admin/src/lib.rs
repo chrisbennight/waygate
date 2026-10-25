@@ -53,6 +53,7 @@ pub mod chrome;
 pub mod codemode_executions;
 pub mod confidential_clients;
 pub mod config_reload;
+mod contract_summary;
 pub mod dashboard;
 pub mod dashboard_activity_page;
 pub mod dashboard_agent_chat;
