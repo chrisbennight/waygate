@@ -7,6 +7,7 @@
 
 use crate::review_diff::{marked, reveal};
 use serde_json::{Map, Value};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 /// Listed changes beyond this are counted, not described; the diff still
@@ -97,7 +98,7 @@ fn quoted(name: &str) -> String {
 }
 
 /// A nested parameter's dotted name, built only when it is displayed.
-fn quoted_path(path: &[&str]) -> String {
+fn quoted_path(path: &[Cow<'_, str>]) -> String {
     let names: Vec<String> = path.iter().map(|name| shown(name)).collect();
     format!("“{}”", names.join("."))
 }
@@ -177,14 +178,14 @@ fn schema<'a>(
     label: &str,
     before: Option<&'a Value>,
     after: Option<&'a Value>,
-    path: &[&'a str],
+    path: &[Cow<'a, str>],
     input: bool,
     out: &mut Collector,
 ) {
     if before == after {
         return;
     }
-    let child = |name: &'a str| child_path(path, name);
+    let child = |name: &'a str| child_path(path, Cow::Borrowed(name));
     let (old_props, new_props) = (properties(before), properties(after));
     let names: BTreeSet<&String> = old_props
         .into_iter()
@@ -268,21 +269,111 @@ fn schema<'a>(
         if old == new {
             continue;
         }
+        let is_object = |v: Option<&Value>| v.is_some_and(Value::is_object);
+        let is_array = |v: Option<&Value>| v.is_some_and(Value::is_array);
         if key == "additionalProperties" && input && !open(before) && open(after) {
             out.push(
                 || format!("{} now accepts parameters it does not name", scope()),
                 Some("The model may send inputs the schema does not describe."),
             );
-        } else {
-            out.push(
-                || format!("{} {} {}", scope(), quoted(key), presence(old, new)),
-                None,
-            );
+            if is_object(new) {
+                schema(label, None, new, &child(key), input, out);
+            }
+            continue;
         }
+        // Keywords whose values are schemas are walked with the same rules,
+        // so a parameter added inside `items` or a branch is still named.
+        if SCHEMA_KEYWORDS.contains(&key.as_str()) && (is_object(old) || is_object(new)) {
+            nested(label, &child(key), old, new, input, out);
+            continue;
+        }
+        if SCHEMA_LIST_KEYWORDS.contains(&key.as_str()) && (is_array(old) || is_array(new)) {
+            let (old, new) = (old.and_then(Value::as_array), new.and_then(Value::as_array));
+            let len = old.map_or(0, Vec::len).max(new.map_or(0, Vec::len));
+            for i in 0..len {
+                let at = child_path(path, Cow::Owned(format!("{key}[{i}]")));
+                nested(
+                    label,
+                    &at,
+                    old.and_then(|o| o.get(i)),
+                    new.and_then(|n| n.get(i)),
+                    input,
+                    out,
+                );
+            }
+            continue;
+        }
+        if SCHEMA_MAP_KEYWORDS.contains(&key.as_str()) && (is_object(old) || is_object(new)) {
+            let (old, new) = (
+                old.and_then(Value::as_object),
+                new.and_then(Value::as_object),
+            );
+            let names: BTreeSet<&String> = old.into_iter().chain(new).flat_map(Map::keys).collect();
+            for name in names {
+                let at = child_path(&child(key), Cow::Borrowed(name.as_str()));
+                nested(
+                    label,
+                    &at,
+                    old.and_then(|o| o.get(name)),
+                    new.and_then(|n| n.get(name)),
+                    input,
+                    out,
+                );
+            }
+            continue;
+        }
+        out.push(
+            || format!("{} {} {}", scope(), quoted(key), presence(old, new)),
+            None,
+        );
     }
 }
 
-fn child_path<'a>(path: &[&'a str], name: &'a str) -> Vec<&'a str> {
+/// Keywords whose value is one schema.
+const SCHEMA_KEYWORDS: [&str; 10] = [
+    "items",
+    "additionalProperties",
+    "additionalItems",
+    "not",
+    "contains",
+    "if",
+    "then",
+    "else",
+    "propertyNames",
+    "unevaluatedProperties",
+];
+/// Keywords whose value is a list of schemas.
+const SCHEMA_LIST_KEYWORDS: [&str; 5] = ["anyOf", "oneOf", "allOf", "prefixItems", "items"];
+/// Keywords whose value maps names to schemas.
+const SCHEMA_MAP_KEYWORDS: [&str; 4] = [
+    "$defs",
+    "definitions",
+    "patternProperties",
+    "dependentSchemas",
+];
+
+/// Compare a schema found under a keyword: added and removed ones are named,
+/// and an added one is walked so its parameters are flagged as new.
+fn nested<'a>(
+    label: &str,
+    path: &[Cow<'a, str>],
+    old: Option<&'a Value>,
+    new: Option<&'a Value>,
+    input: bool,
+    out: &mut Collector,
+) {
+    match (old, new) {
+        (Some(old), Some(new)) if old != new => property(label, path, old, new, input, out),
+        (None, Some(new)) => {
+            out.push(|| format!("{label} {} added", quoted_path(path)), None);
+            schema(label, None, Some(new), path, input, out);
+        }
+        (Some(_), None) => out.push(|| format!("{label} {} removed", quoted_path(path)), None),
+        _ => {}
+    }
+}
+
+fn child_path<'a>(path: &[Cow<'a, str>], name: Cow<'a, str>) -> Vec<Cow<'a, str>> {
     let mut child = path.to_vec();
     child.push(name);
     child
@@ -304,7 +395,7 @@ fn required(schema: Option<&Value>) -> BTreeSet<&str> {
 
 fn property<'a>(
     label: &str,
-    path: &[&'a str],
+    path: &[Cow<'a, str>],
     old: &'a Value,
     new: &'a Value,
     input: bool,
@@ -529,13 +620,25 @@ impl Evidence {
             if !starts.is_empty() {
                 continue;
             }
-            if let Some((local, domain)) = word.split_once('@') {
-                let domain_ok = domain.contains('.')
-                    && !domain.starts_with('.')
-                    && !domain.ends_with('.')
-                    && !domain.contains('@');
-                if !local.is_empty() && domain_ok {
-                    self.emails.insert(word.to_owned());
+            // Read an address around each `@` by address characters, so a
+            // list such as `a@x.test,b@y.test` or a prefix such as `to=`
+            // cannot hide one.
+            let bytes = word.as_bytes();
+            let local_char = |b: u8| b.is_ascii_alphanumeric() || b"._%+-".contains(&b);
+            let domain_char = |b: u8| b.is_ascii_alphanumeric() || b".-".contains(&b);
+            for (at, _) in word.match_indices('@') {
+                let mut start = at;
+                while start > 0 && local_char(bytes[start - 1]) {
+                    start -= 1;
+                }
+                let mut end = at + 1;
+                while end < bytes.len() && domain_char(bytes[end]) {
+                    end += 1;
+                }
+                let local = &word[start..at];
+                let domain = word[at + 1..end].trim_end_matches('.');
+                if !local.is_empty() && domain.contains('.') && !domain.starts_with('.') {
+                    self.emails.insert(format!("{local}@{domain}"));
                 }
             }
         }
@@ -739,6 +842,44 @@ mod tests {
             "Annotation “title” changed from Search to Search[U+202E]tsil"
         );
         assert!(!text.contains('\u{202E}'));
+    }
+
+    #[test]
+    fn parameters_inside_schema_keywords_are_named_and_flagged() {
+        let before = json!({"inputSchema": {"type": "object",
+            "properties": {"rows": {"type": "array", "items": {"type": "object",
+                "properties": {"name": {"type": "string"}}}}},
+            "$defs": {"Options": {"type": "object", "properties": {}}}}});
+        let after = json!({"inputSchema": {"type": "object",
+            "properties": {"rows": {"type": "array", "items": {"type": "object",
+                "required": ["context"],
+                "properties": {"name": {"type": "string"}, "context": {"type": "string"}}}}},
+            "$defs": {"Options": {"type": "object", "properties": {"token": {"type": "string"}}}},
+            "anyOf": [{"properties": {"extra": {"type": "string"}}}]}});
+        let summary = summarize(&before, &after);
+        let texts = texts(&summary);
+        for expected in [
+            ("Input parameter “rows.items.context” added", true),
+            ("Input parameter “rows.items.context” is now required", true),
+            ("Input parameter “$defs.Options.token” added", true),
+            ("Input parameter “anyOf[0]” added", false),
+            ("Input parameter “anyOf[0].extra” added", true),
+        ] {
+            assert!(texts.contains(&expected), "{expected:?} in {texts:?}");
+        }
+        assert!(!texts.iter().any(|(t, _)| t.contains("“items” changed")));
+    }
+
+    #[test]
+    fn every_address_in_a_list_is_found() {
+        let summary = summarize(
+            &json!({"description": "Contact ops@example.test"}),
+            &json!({"description": "Contact ops@example.test,new@example.test; to=third@example.test."}),
+        );
+        assert!(texts(&summary).contains(&(
+            "Adds email addresses: new@example.test, third@example.test",
+            true
+        )));
     }
 
     #[test]
