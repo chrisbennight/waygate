@@ -536,11 +536,13 @@ pub(crate) async fn stage_and_publish_core(
 
 /// Tool decisions hold review rows until their catalog acceptance commits.
 /// Return the published hash so their caller rings the fleet doorbell afterward.
+/// The caller acquires the manifest mutex before any catalog row locks.
 pub(crate) async fn publish_tool_approval_set(
     state: &Arc<AdminState>,
     actor: &Principal,
     content: &str,
     base: &str,
+    _manifest_guard: &tokio::sync::MutexGuard<'_, ()>,
 ) -> ApiResult<String> {
     waygate_upstream::parse_manifest_set(content)
         .map_err(|_| ApiError::BadRequest("The reviewed server set is invalid".into()))?;
@@ -551,7 +553,6 @@ pub(crate) async fn publish_tool_approval_set(
         .map_err(map_manifest_err)?;
     let hash = canonical_disk_hash(content)
         .map_err(|_| ApiError::Internal("Could not identify the reviewed server set".into()))?;
-    let _write_guard = state.servers.manifest_write_lock.lock().await;
     publish_bundle_locked_with_notification(state, Some(actor), draft.id, Some(base), false)
         .await?;
     Ok(hash)

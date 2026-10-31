@@ -42,6 +42,7 @@ async fn publish_selected(
     actor: &Principal,
     candidates: &[(usize, PreparedToolApproval)],
     params: &[ToolReviewParams],
+    manifest_guard: &tokio::sync::MutexGuard<'_, ()>,
 ) -> Result<Option<String>, ApiError> {
     let selected: Vec<_> = candidates.iter().filter(|(_, p)| annotation(p)).collect();
     if selected.is_empty() {
@@ -50,9 +51,9 @@ async fn publish_selected(
     let (mut set, base) = state
         .read_manifest_set_from_disk()
         .ok_or(ApiError::ServiceUnavailable(
-            "Server configuration is unavailable",
+            crate::manifest_bundles::MANIFEST_SERVERS_DIR_UNAVAILABLE,
         ))?
-        .map_err(|_| ApiError::ServiceUnavailable("Server configuration is invalid"))?;
+        .map_err(|_| ApiError::Internal("Could not read the live server configuration".into()))?;
     let mut changed = false;
     for (index, prepared) in selected {
         let target = &params[*index];
@@ -102,9 +103,15 @@ async fn publish_selected(
         let content = waygate_upstream::serialize_manifest_set(&set).map_err(|_| {
             ApiError::Internal("Could not serialize reviewed tool approvals".into())
         })?;
-        return crate::manifest_bundles::publish_tool_approval_set(state, actor, &content, &base)
-            .await
-            .map(Some);
+        return crate::manifest_bundles::publish_tool_approval_set(
+            state,
+            actor,
+            &content,
+            &base,
+            manifest_guard,
+        )
+        .await
+        .map(Some);
     }
     Ok(None)
 }
@@ -165,6 +172,9 @@ pub(crate) async fn approve(
             .collect::<Vec<_>>(),
     )?;
     let reviews: Vec<_> = candidates.iter().map(|(_, p)| p.review.clone()).collect();
+    // Dashboard reload takes the manifest mutex before observing catalog
+    // reviews. Preserve that order and finish all upstream work before locking.
+    let manifest_guard = state.servers.manifest_write_lock.lock().await;
     let mut locked = tool_reviews::store(state)?
         .lock_pending_approvals(&reviews)
         .await
@@ -178,7 +188,7 @@ pub(crate) async fn approve(
         )));
         false
     });
-    let publication = publish_selected(state, actor, &candidates, params).await;
+    let publication = publish_selected(state, actor, &candidates, params, &manifest_guard).await;
     let mut accepted = Vec::new();
     for (index, prepared) in candidates {
         if annotation(&prepared) {
@@ -208,6 +218,7 @@ pub(crate) async fn approve(
         }
     }
     locked.commit().await.map_err(tool_reviews::unavailable)?;
+    drop(manifest_guard);
     if let Ok(Some(hash)) = publication {
         let _ = state
             .servers
