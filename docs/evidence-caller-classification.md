@@ -47,6 +47,7 @@ cannot be written.
 | break-glass gate and break-glass admin mint/revoke | Override use and lifecycle must be durable. |
 | audit bundle signing, retention, routing, and explicit sweep handlers | Evidence-control mutations must audit atomically from the caller's perspective. |
 | admin mutation helpers already wired for fail-closed evidence, OAuth consent revoke, upstream-session revoke, and HITL change-request propose/deny/execute-failure paths | The handler validates and writes required evidence as part of its fail-closed contract. |
+| retained direct invocation request approval and denial | Decision attribution commits atomically with grant issuance. Required `AdminMutation` evidence follows that commit; failure is surfaced as requiring attention and does not imply the committed decision was undone. |
 
 ## Unchained best effort
 

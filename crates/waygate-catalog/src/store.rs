@@ -28,6 +28,13 @@ pub const TOOL_RESOLUTION_BATCH_SIZE: usize = 256;
 /// production wires [`PgCatalogStore`].
 #[async_trait]
 pub trait CatalogStore: Send + Sync + 'static {
+    /// Durable direct-call request storage, when this catalog backend provides it.
+    /// Missing support leaves the existing invocation refusal unchanged.
+    fn pending_invocations(
+        &self,
+    ) -> Option<crate::pending_invocations::SharedPendingInvocationStore> {
+        None
+    }
     /// List `live` servers visible to `principal_tenant`.
     /// Combines `mcp_servers.visibility = 'global'` with
     /// per-tenant rows. Used by the discovery surface (`tools/list` +
@@ -313,6 +320,13 @@ impl PgCatalogStore {
 
 #[async_trait]
 impl CatalogStore for PgCatalogStore {
+    fn pending_invocations(
+        &self,
+    ) -> Option<crate::pending_invocations::SharedPendingInvocationStore> {
+        Some(Arc::new(
+            crate::pending_invocations::PgPendingInvocationStore::new(self.pool.clone()),
+        ))
+    }
     async fn discovery_generation(&self) -> Result<Option<i64>, CatalogError> {
         let generation = sqlx::query_scalar(
             "SELECT generation FROM catalog_discovery_generation WHERE singleton = TRUE",

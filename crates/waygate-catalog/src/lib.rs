@@ -34,6 +34,7 @@ macro_rules! earlier_recorded_at {
 
 pub mod grant_sweeper;
 mod import;
+pub mod pending_invocations;
 mod schema_hash;
 mod store;
 pub mod tool_reviews;

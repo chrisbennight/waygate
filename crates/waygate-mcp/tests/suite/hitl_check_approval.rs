@@ -48,6 +48,7 @@ use waygate_oidc::Principal;
 /// `resolve_tool`, and `claim_grant` either returns the canned grant
 /// (or `None`), or surfaces an error to exercise the fail-closed path.
 struct FakeCatalog {
+    pending: Option<waygate_catalog::pending_invocations::SharedPendingInvocationStore>,
     tool_id: Uuid,
     server_id: Uuid,
     claim_outcome: ClaimOutcome,
@@ -81,6 +82,11 @@ impl RecordingStageObserver {
 
 #[async_trait]
 impl CatalogStore for FakeCatalog {
+    fn pending_invocations(
+        &self,
+    ) -> Option<waygate_catalog::pending_invocations::SharedPendingInvocationStore> {
+        self.pending.clone()
+    }
     async fn approved_servers(
         &self,
         _tenant: &str,
@@ -398,6 +404,7 @@ fn service_with_gate(
         approval_gated_seen: Some(Arc::clone(&approval_gated_seen)),
     });
     let catalog_store: SharedCatalogStore = Arc::new(FakeCatalog {
+        pending: None,
         tool_id: Uuid::from_u128(1),
         server_id: Uuid::from_u128(2),
         claim_outcome,
@@ -428,6 +435,7 @@ fn service_with_observer_and_evidence(
         approval_gated_seen: None,
     });
     let catalog_store: SharedCatalogStore = Arc::new(FakeCatalog {
+        pending: None,
         tool_id: Uuid::from_u128(1),
         server_id: Uuid::from_u128(2),
         claim_outcome,
@@ -891,6 +899,7 @@ async fn approval_gated_dispatch_is_single_round() {
         seen_capabilities: Mutex::new(Vec::new()),
     });
     let catalog_store: SharedCatalogStore = Arc::new(FakeCatalog {
+        pending: None,
         tool_id: Uuid::from_u128(1),
         server_id: Uuid::from_u128(2),
         claim_outcome: ClaimOutcome::Granted,
@@ -1061,6 +1070,7 @@ async fn approval_gated_state_only_pause_names_the_consumed_grant() {
         dispatched: dispatched.clone(),
     });
     let catalog_store: SharedCatalogStore = Arc::new(FakeCatalog {
+        pending: None,
         tool_id: Uuid::from_u128(1),
         server_id: Uuid::from_u128(2),
         claim_outcome: ClaimOutcome::Granted,
@@ -1116,6 +1126,7 @@ async fn grant_claim_carries_the_callers_issuer() {
         approval_gated_seen: None,
     });
     let catalog_store = Arc::new(FakeCatalog {
+        pending: None,
         tool_id: Uuid::from_u128(1),
         server_id: Uuid::from_u128(2),
         claim_outcome: ClaimOutcome::Granted,
@@ -1145,6 +1156,47 @@ async fn grant_claim_carries_the_callers_issuer() {
 #[derive(Default)]
 struct SummaryNotifier(Mutex<Vec<waygate_invocation::HitlApprovalNeeded>>);
 
+#[derive(Default)]
+struct RecordingRequests(Mutex<Vec<waygate_catalog::pending_invocations::NewInvocationRequest>>);
+#[async_trait]
+impl waygate_catalog::pending_invocations::PendingInvocationStore for RecordingRequests {
+    async fn retain(
+        &self,
+        request: &waygate_catalog::pending_invocations::NewInvocationRequest,
+    ) -> Result<Uuid, waygate_catalog::pending_invocations::RequestError> {
+        self.0.lock().unwrap().push(request.clone());
+        Ok(Uuid::from_u128(3))
+    }
+    async fn get(
+        &self,
+        _tenant: &str,
+        _id: Uuid,
+    ) -> Result<
+        Option<waygate_catalog::pending_invocations::InvocationRequest>,
+        waygate_catalog::pending_invocations::RequestError,
+    > {
+        unreachable!("capture does not read administrator decisions")
+    }
+    async fn pending(
+        &self,
+        _tenant: &str,
+    ) -> Result<
+        Vec<waygate_catalog::pending_invocations::InvocationRequest>,
+        waygate_catalog::pending_invocations::RequestError,
+    > {
+        unreachable!("capture does not list the administrator queue")
+    }
+    async fn decide(
+        &self,
+        _decision: waygate_catalog::pending_invocations::InvocationDecision<'_>,
+    ) -> Result<
+        waygate_catalog::pending_invocations::InvocationRequest,
+        waygate_catalog::pending_invocations::RequestError,
+    > {
+        unreachable!("capture never authorizes an invocation")
+    }
+}
+
 impl waygate_invocation::HitlNotifier for SummaryNotifier {
     fn notify_approval_needed(&self, event: waygate_invocation::HitlApprovalNeeded) {
         self.0.lock().unwrap().push(event);
@@ -1153,6 +1205,7 @@ impl waygate_invocation::HitlNotifier for SummaryNotifier {
 
 #[tokio::test]
 async fn direct_approval_summary_uses_admitted_description_and_schema_fields_without_values() {
+    let requests = Arc::new(RecordingRequests::default());
     let dispatched = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let upstream = Arc::new(FakeUpstream {
         requires_approval: true,
@@ -1161,6 +1214,7 @@ async fn direct_approval_summary_uses_admitted_description_and_schema_fields_wit
         approval_gated_seen: None,
     });
     let catalog_store: SharedCatalogStore = Arc::new(FakeCatalog {
+        pending: Some(requests.clone()),
         tool_id: Uuid::from_u128(1),
         server_id: Uuid::from_u128(2),
         claim_outcome: ClaimOutcome::NotFound,
@@ -1180,7 +1234,8 @@ async fn direct_approval_summary_uses_admitted_description_and_schema_fields_wit
     let result = service
         .invoke(
             Some(&principal("fixture-reader")),
-            InvocationRequest::new("example-messages", "send").with_arguments(Some(arguments)),
+            InvocationRequest::new("example-messages", "send")
+                .with_arguments(Some(arguments.clone())),
         )
         .await;
     assert!(matches!(
@@ -1191,21 +1246,61 @@ async fn direct_approval_summary_uses_admitted_description_and_schema_fields_wit
         })
     ));
     assert!(!dispatched.load(std::sync::atomic::Ordering::SeqCst));
-    let events = notifier.0.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].summary.description.as_deref(),
+    {
+        let events = notifier.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].pending_request_id, Some(Uuid::from_u128(3)));
+        let captured = requests.0.lock().unwrap()[0].clone();
+        assert_eq!(
+            captured.argument_hash,
+            waygate_catalog::argument_hash(Some(&arguments))
+        );
+        assert_eq!(captured.behavior_hash, events[0].behavior_hash);
+        assert_eq!(captured.principal_issuer, events[0].principal_issuer);
+        assert_eq!(events[0].summary.description.as_deref(),
         Some("Replace desired configuration. Upstream may retain submitted values. Deploy separately."));
-    let mut fields = events[0].summary.affected_fields.clone();
-    fields.sort_unstable();
-    assert_eq!(fields, ["contents", "selector"]);
-    let rendered = serde_json::to_string(&events[0].summary).unwrap();
-    for forbidden in [
-        "synthetic-secret",
-        "synthetic-target",
-        "opaque",
-        "user-controlled-field-name",
-        events[0].argument_hash.as_str(),
-    ] {
-        assert!(!rendered.contains(forbidden));
+        let mut fields = events[0].summary.affected_fields.clone();
+        fields.sort_unstable();
+        assert_eq!(fields, ["contents", "selector"]);
+        let rendered = serde_json::to_string(&events[0].summary).unwrap();
+        for forbidden in [
+            "synthetic-secret",
+            "synthetic-target",
+            "opaque",
+            "user-controlled-field-name",
+            events[0].argument_hash.as_str(),
+        ] {
+            assert!(!rendered.contains(forbidden));
+        }
     }
+    let execution_id = Uuid::new_v4();
+    let call_id = Uuid::new_v4();
+    let result = service
+        .invoke(
+            Some(&principal("fixture-reader")),
+            InvocationRequest::new("example-messages", "send")
+                .with_arguments(Some(arguments))
+                .with_hierarchy(waygate_core::InvocationHierarchy::new(
+                    execution_id,
+                    std::num::NonZeroU32::MIN,
+                    call_id,
+                    std::num::NonZeroU32::MIN,
+                ))
+                .with_approval_binding(InvocationApprovalBinding {
+                    execution_id,
+                    source_digest: "fixture-source".into(),
+                    call_id,
+                }),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(InvocationError::ApprovalRequired { .. })
+    ));
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        1,
+        "Code Mode uses its own durable request journal"
+    );
+    assert!(notifier.0.lock().unwrap()[1].pending_request_id.is_none());
 }

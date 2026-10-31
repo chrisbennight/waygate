@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Direct invocations awaiting human approval have a durable administrator review
+  queue when the PostgreSQL catalog is configured. Notifications link to retained
+  requests; approval issues a single-use grant for an exact retry and does not
+  run the tool. Migration `0118` adds bounded request storage without argument
+  values. Operator guidance covers expiry, retention, and evidence recovery.
+
 - Skills and Decisions support selected approval or rejection of pending skill
   candidates, with complete supporting-file review, required operator reasons,
   and recoverable item outcomes. Distribution decisions retain exact content

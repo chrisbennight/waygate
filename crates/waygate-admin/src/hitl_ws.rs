@@ -10,6 +10,8 @@
 //! subscribed operator in the same tenant; the admin browser UI
 //! consumes it to show "approval needed" toasts without polling the
 //! REST surface.
+//! Direct requests captured in the catalog also remain available from the
+//! administrator queue; notification delivery does not govern their lifetime.
 //!
 //! ## Tenant scoping
 //!
@@ -109,6 +111,10 @@ pub enum AdminApprovalMessage {
     /// authorized.
     #[serde(rename = "approval_needed")]
     ApprovalNeeded {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pending_request_id: Option<uuid::Uuid>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        approval_url: Option<String>,
         /// Value-free consequences and schema field names for operator review.
         summary: waygate_invocation::ApprovalSummary,
         tenant_id: String,
@@ -133,7 +139,15 @@ pub enum AdminApprovalMessage {
 
 impl AdminApprovalMessage {
     fn from_event(event: HitlApprovalNeeded) -> Self {
+        let approval_url = event.pending_request_id.map(|id| {
+            format!(
+                "/admin/t/{}/invocation-requests?request={id}",
+                crate::dashboard::urlencode(&event.tenant_id)
+            )
+        });
         Self::ApprovalNeeded {
+            pending_request_id: event.pending_request_id,
+            approval_url,
             summary: event.summary,
             tenant_id: event.tenant_id,
             principal_sub: event.principal_sub,
@@ -364,6 +378,8 @@ mod tests {
     #[test]
     fn message_tenant_id_returns_inner() {
         let msg = AdminApprovalMessage::ApprovalNeeded {
+            pending_request_id: None,
+            approval_url: None,
             summary: Default::default(),
             tenant_id: "acme".into(),
             principal_sub: "alice".into(),
@@ -383,6 +399,7 @@ mod tests {
         // No subscribers yet; send returns Err which the
         // notifier coerces to a debug-level log + drop.
         hub.notify_approval_needed(HitlApprovalNeeded {
+            pending_request_id: None,
             summary: Default::default(),
             tenant_id: "acme".into(),
             principal_sub: "alice".into(),
@@ -402,6 +419,7 @@ mod tests {
         assert_eq!(hub.subscriber_count(), 1);
 
         hub.notify_approval_needed(HitlApprovalNeeded {
+            pending_request_id: None,
             summary: Default::default(),
             tenant_id: "acme".into(),
             principal_sub: "alice".into(),
@@ -436,6 +454,7 @@ mod tests {
         let hub = ApprovalHub::default();
         let mut rx = hub.subscribe_raw();
         hub.notify_approval_needed(HitlApprovalNeeded {
+            pending_request_id: Some(uuid::Uuid::from_u128(3)),
             summary: waygate_invocation::ApprovalSummary {
                 description: Some("Replace configuration; upstream retention applies.".to_owned()),
                 affected_fields: vec!["contents".to_owned()],
@@ -453,6 +472,13 @@ mod tests {
         // The `event` tag and the field names are the wire
         // contract — pin them so a future rename breaks tests.
         assert_eq!(json["event"], "approval_needed");
+        assert_eq!(
+            json["approval_url"],
+            format!(
+                "/admin/t/acme/invocation-requests?request={}",
+                uuid::Uuid::from_u128(3)
+            )
+        );
         assert_eq!(
             json["summary"]["affected_fields"],
             serde_json::json!(["contents"])

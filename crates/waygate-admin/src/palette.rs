@@ -296,6 +296,12 @@ const PAGES: &[(&str, &str, &str, &str)] = &[
         "HITL approval grants (active / expired / closed)",
     ),
     (
+        "Invocation requests",
+        "/invocation-requests",
+        "shield-check",
+        "Review exact pending direct tool calls and issue single-use approval",
+    ),
+    (
         "Break-glass",
         "/break_glass",
         "alert-triangle",
