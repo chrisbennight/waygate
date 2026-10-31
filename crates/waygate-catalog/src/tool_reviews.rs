@@ -658,32 +658,105 @@ impl PgCatalogStore {
     /// submission is harmless.
     pub async fn approve(&self, review: &ToolReview, actor: &str) -> Result<bool, CatalogError> {
         let mut tx = self.pool.begin().await?;
-        let result = sqlx::query(
-            "UPDATE tool_contract_reviews r SET approved_hash=observed_hash,
+        let changed = approve_in_transaction(&mut tx, review, actor).await?;
+        tx.commit().await?;
+        Ok(changed)
+    }
+
+    /// Serialize pending decisions with observations and other administrators
+    /// while a shared configuration publication is prepared. Refresh upstreams
+    /// before acquiring these locks and defer reload notification until commit.
+    pub async fn lock_pending_approvals(
+        &self,
+        reviews: &[ToolReview],
+    ) -> Result<LockedToolApprovals, CatalogError> {
+        if reviews.len() > 50 {
+            return Err(CatalogError::InvalidInput(
+                "too many selected tool reviews".into(),
+            ));
+        }
+        let mut ordered: Vec<_> = reviews.iter().collect();
+        ordered.sort_by_key(|review| review.tool_id);
+        let mut tx = self.pool.begin().await?;
+        let mut pending = std::collections::HashSet::new();
+        for review in ordered {
+            let found = sqlx::query(
+                "SELECT r.tool_id FROM tool_contract_reviews r
+                JOIN mcp_tools t ON t.id=r.tool_id JOIN mcp_servers s ON s.id=t.server_id
+                WHERE r.tool_id=$1 AND r.generation=$2 AND r.observed_hash=$3
+                AND s.tenant_id=$4 AND r.quarantined AND r.decided_at IS NULL
+                AND r.observed_contract <> 'null'::jsonb FOR UPDATE OF r",
+            )
+            .bind(review.tool_id)
+            .bind(review.generation)
+            .bind(&review.observed_hash)
+            .bind(&review.tenant_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if found.is_some() {
+                pending.insert(review.tool_id);
+            }
+        }
+        Ok(LockedToolApprovals { tx, pending })
+    }
+}
+
+pub struct LockedToolApprovals {
+    tx: sqlx::Transaction<'static, sqlx::Postgres>,
+    pending: std::collections::HashSet<Uuid>,
+}
+
+impl LockedToolApprovals {
+    pub fn contains(&self, review: &ToolReview) -> bool {
+        self.pending.contains(&review.tool_id)
+    }
+
+    pub async fn approve(
+        &mut self,
+        review: &ToolReview,
+        actor: &str,
+    ) -> Result<bool, CatalogError> {
+        if !self.pending.remove(&review.tool_id) {
+            return Ok(false);
+        }
+        approve_in_transaction(&mut self.tx, review, actor).await
+    }
+
+    pub async fn commit(self) -> Result<(), CatalogError> {
+        self.tx.commit().await?;
+        Ok(())
+    }
+}
+
+async fn approve_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    review: &ToolReview,
+    actor: &str,
+) -> Result<bool, CatalogError> {
+    let result = sqlx::query(
+        "UPDATE tool_contract_reviews r SET approved_hash=observed_hash,
              approved_contract=observed_contract,quarantined=false,decided_at=now(),decided_by=$4
              FROM mcp_tools t JOIN mcp_servers s ON s.id=t.server_id
              WHERE r.tool_id=t.id AND r.tool_id=$1 AND r.generation=$2
              AND r.observed_hash=$3 AND s.tenant_id=$5
              AND r.observed_contract <> 'null'::jsonb",
-        )
-        .bind(review.tool_id)
-        .bind(review.generation)
-        .bind(&review.observed_hash)
-        .bind(actor)
-        .bind(&review.tenant_id)
-        .execute(&mut *tx)
-        .await?;
-        let changed = result.rows_affected() == 1;
-        if changed {
-            sqlx::query("INSERT INTO catalog_approvals
+    )
+    .bind(review.tool_id)
+    .bind(review.generation)
+    .bind(&review.observed_hash)
+    .bind(actor)
+    .bind(&review.tenant_id)
+    .execute(&mut **tx)
+    .await?;
+    let changed = result.rows_affected() == 1;
+    if changed {
+        sqlx::query("INSERT INTO catalog_approvals
                 (id,tenant_id,subject_type,subject_id,subject_version_hash,action,actor,reason,created_at)
                 VALUES ($1,$2,'tool_version',$3,$4,'approved',$5,'Accepted observed tool contract',clock_timestamp())")
                 .bind(Uuid::new_v4()).bind(&review.tenant_id).bind(review.tool_id)
-                .bind(&review.observed_hash).bind(actor).execute(&mut *tx).await?;
-        }
-        tx.commit().await?;
-        Ok(changed)
+                .bind(&review.observed_hash).bind(actor).execute(&mut **tx).await?;
     }
+    Ok(changed)
 }
 
 fn review_from_row(r: sqlx::postgres::PgRow) -> ToolReview {

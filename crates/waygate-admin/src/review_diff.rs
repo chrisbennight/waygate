@@ -305,6 +305,16 @@ impl DiffSection {
 
 /// Compare two versions of a text. `None` means the text is absent on that side.
 pub(crate) fn compare(before: Option<&str>, after: Option<&str>) -> Comparison {
+    compare_before(before, after, Instant::now() + BUDGET)
+}
+
+/// Several comparisons on one page share a deadline while retaining complete
+/// text. Exhausting matching time can coarsen highlighting, never omit content.
+pub(crate) fn compare_before(
+    before: Option<&str>,
+    after: Option<&str>,
+    deadline: Instant,
+) -> Comparison {
     let fits = |text: Option<&str>| text.is_none_or(|text| text.len() <= MAX_TEXT_BYTES);
     if !fits(before) || !fits(after) {
         return Comparison {
@@ -318,7 +328,6 @@ pub(crate) fn compare(before: Option<&str>, after: Option<&str>) -> Comparison {
             after: after.map(text_segments),
         };
     }
-    let deadline = Instant::now() + BUDGET;
     let old_text = before.unwrap_or_default();
     let new_text = after.unwrap_or_default();
     let old = lines(old_text);
@@ -343,6 +352,9 @@ pub(crate) fn compare(before: Option<&str>, after: Option<&str>) -> Comparison {
         }
     }
     let mut notes = Vec::new();
+    if Instant::now() > deadline {
+        notes.push("Some highlighting is coarser because detailed matching was limited. Complete definitions remain available.");
+    }
     match (before, after) {
         (None, Some(_)) => notes.push("Not present before this change."),
         (Some(_), None) => notes.push("Removed by this change."),
@@ -848,6 +860,20 @@ fn visible(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exhausted_matching_time_preserves_both_complete_definitions() {
+        let before = "First line\nOld description\nLast line\n";
+        let after = "First line\nNew description with a changed effect\nLast line\n";
+        let comparison = compare_before(
+            Some(before),
+            Some(after),
+            Instant::now() - Duration::from_secs(1),
+        );
+        assert_eq!(plain(comparison.before.as_ref().unwrap()), before);
+        assert_eq!(plain(comparison.after.as_ref().unwrap()), after);
+        assert!(comparison.notes.iter().any(|note| note.contains("coarser")));
+    }
 
     fn plain(segments: &[Segment]) -> String {
         segments.iter().map(|s| s.text.as_str()).collect()

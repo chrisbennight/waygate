@@ -1,0 +1,13 @@
+{% extends "layout.html" %}
+{% block main %}
+<section class="page-section">
+<header class="page-header"><h1 class="page-title">Recent bulk decisions</h1></header>
+<p>Submissions made by your administrator identity in this tenant. Receipts are retained for seven days.</p>
+<p><a href="{{ self.chrome.nav_url("/decisions") }}">Decisions</a> · <a href="{{ self.chrome.nav_url("/servers/tool-changes") }}">Tool changes</a></p>
+{% if rows.is_empty() %}<div class="card"><p>No retained bulk submissions.</p></div>{% else %}
+<div class="card card--table table-scroll"><table class="data-table"><thead><tr><th scope="col">Created</th><th scope="col">Selection</th><th scope="col">Recorded outcomes</th></tr></thead><tbody>
+{% for row in rows %}<tr><td><a href="{{ self.chrome.nav_url(row.url) }}">{{ row.created }}</a></td><td>{{ row.action }} · {{ row.items }} {{ row.kind }} decisions</td><td>{{ row.completed }} of {{ row.items }} · <a href="{{ self.chrome.nav_url(row.url) }}">Review progress</a></td></tr>{% endfor %}
+</tbody></table></div>
+{% endif %}
+</section>
+{% endblock %}

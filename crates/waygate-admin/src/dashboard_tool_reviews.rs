@@ -101,6 +101,8 @@ struct ViewQuery {
     view: Option<DiffView>,
 }
 struct PendingRow {
+    label: String,
+    choice: Option<crate::dashboard_bulk_decisions::ToolChoice>,
     server: String,
     tool: String,
     url: String,
@@ -128,6 +130,8 @@ struct ReviewPage {
     pending_count: i64,
     next: Option<String>,
     include_decided: bool,
+    bulk_available: bool,
+    receipts_available: bool,
 }
 
 pub(crate) fn trigger(review: &waygate_catalog::tool_reviews::ToolReview) -> String {
@@ -162,21 +166,35 @@ pub(crate) fn trigger(review: &waygate_catalog::tool_reviews::ToolReview) -> Str
 
 /// The summary of a change from one stored contract to another, when both
 /// were retained.
-fn summary(before: &serde_json::Value, after: &serde_json::Value) -> Option<ContractSummary> {
+pub(crate) fn summary(
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+) -> Option<ContractSummary> {
     (!before.is_null() && !after.is_null()).then(|| contract_summary::summarize(before, after))
 }
 
 /// The review's changed fields, and why whole definitions are shown when
 /// there is no accepted definition to compare with.
-fn review_sections(
+pub(crate) fn review_sections(
     review: &waygate_catalog::tool_reviews::ToolReview,
+) -> (Vec<DiffSection>, Option<&'static str>) {
+    review_sections_before(review, None)
+}
+
+pub(crate) fn review_sections_before(
+    review: &waygate_catalog::tool_reviews::ToolReview,
+    deadline: Option<std::time::Instant>,
 ) -> (Vec<DiffSection>, Option<&'static str>) {
     if review.observed_contract.is_null() {
         return (Vec::new(), None);
     }
     if !review.approved_contract.is_null() {
         return (
-            field_sections(&review.approved_contract, &review.observed_contract),
+            field_sections_before(
+                &review.approved_contract,
+                &review.observed_contract,
+                deadline,
+            ),
             None,
         );
     }
@@ -208,6 +226,14 @@ fn field_text(value: &serde_json::Value) -> String {
 /// Compare each changed top-level field. Both contracts are read from jsonb
 /// columns, whose normalized key order keeps unchanged keys on matching lines.
 fn field_sections(before: &serde_json::Value, after: &serde_json::Value) -> Vec<DiffSection> {
+    field_sections_before(before, after, None)
+}
+
+fn field_sections_before(
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+    deadline: Option<std::time::Instant>,
+) -> Vec<DiffSection> {
     changed_fields(before, after)
         .into_iter()
         .map(|key| {
@@ -215,7 +241,12 @@ fn field_sections(before: &serde_json::Value, after: &serde_json::Value) -> Vec<
             let new = after.get(&key).map(field_text);
             DiffSection {
                 name: field_label(&key).to_owned(),
-                body: SectionBody::Compared(review_diff::compare(old.as_deref(), new.as_deref())),
+                body: SectionBody::Compared(match deadline {
+                    Some(deadline) => {
+                        review_diff::compare_before(old.as_deref(), new.as_deref(), deadline)
+                    }
+                    None => review_diff::compare(old.as_deref(), new.as_deref()),
+                }),
             }
         })
         .collect()
@@ -402,9 +433,12 @@ async fn page(
     } else {
         None
     };
+    let manifests = state.upstreams.manifests();
     let rows = candidates
         .into_iter()
         .map(|r| PendingRow {
+            label: format!("{} · {}", r.server, r.tool),
+            choice: crate::dashboard_bulk_decisions::tool_choice(&r, &manifests),
             trigger: trigger(&r),
             status: if r.decided_at.is_some() {
                 "Kept blocked"
@@ -432,6 +466,8 @@ async fn page(
         .map(|r| waygate_core::fmt::format_ts_abs(r.observed_at))
         .unwrap_or_default();
     let page = ReviewPage {
+        receipts_available: state.hitl.decision_batches.get().is_some(),
+        bulk_available: state.hitl.decision_batches.get().is_some() && !query.include_decided,
         next,
         include_decided: query.include_decided,
         trigger: review.as_ref().map(trigger).unwrap_or_default(),

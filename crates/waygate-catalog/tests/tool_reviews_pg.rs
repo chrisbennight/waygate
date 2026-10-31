@@ -80,6 +80,29 @@ async fn pending_review_pages_honor_counts_offsets_and_tenant_scope() {
         .await
         .unwrap()
         .is_empty());
+    assert!(store
+        .reject(&first[1], "another-administrator")
+        .await
+        .unwrap());
+    let selected = vec![first[0].clone(), first[1].clone()];
+    let mut locked = store.lock_pending_approvals(&selected).await.unwrap();
+    assert!(locked.contains(&first[0]));
+    assert!(
+        !locked.contains(&first[1]),
+        "a completed refusal cannot be overwritten by bulk approval"
+    );
+    assert!(locked.approve(&first[0], "administrator").await.unwrap());
+    assert!(!locked.approve(&first[0], "administrator").await.unwrap());
+    assert!(!locked.approve(&first[1], "administrator").await.unwrap());
+    locked.commit().await.unwrap();
+    assert!(
+        store
+            .get(&tenant, "fixture", &first[1].tool)
+            .await
+            .unwrap()
+            .unwrap()
+            .quarantined
+    );
     sqlx::query("DELETE FROM tenants WHERE id=$1")
         .bind(&tenant)
         .execute(&pool)

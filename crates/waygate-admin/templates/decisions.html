@@ -9,6 +9,7 @@
         <span class="chip chip--warn">decision stores not configured</span>
     {% endif %}
 </header>
+{% if receipts_available %}<p><a href="{{ self.chrome.nav_url("/decisions/bulk") }}">Recent bulk decisions and interrupted submissions</a></p>{% endif %}
 
 {# The merged decisions queue: control surfaces that need an
    operator decision — pending tool and skill reviews, change requests, and active break-glass
@@ -68,6 +69,7 @@
 </div>
 {% else if !items.is_empty() %}
 <section class="page-section" aria-label="Pending decisions">
+    {% if bulk_tools_available %}{% include "_bulk_tool_actions.html" %}{% endif %}
     <div class="card card--table">
         <ul class="attn-list">
             {% for i in items %}
@@ -75,6 +77,7 @@
                 <span class="attn-chip attn-chip--{{ i.severity }}">{{ i.kind }}</span>
                 <div class="attn-item__main">
                     <div class="attn-label mono">{{ i.summary }}</div>
+                    {% if bulk_tools_available %}{% match i.tool_choice %}{% when Some with (choice) %}{% let selection_name = i.summary %}{% include "_bulk_tool_choice.html" %}{% when None %}{% endmatch %}{% endif %}
                     <div class="attn-hint">
                         <code>{{ i.handle }}</code> ·
                         <span title="{{ i.age_abs }}">{{ i.age_rel }}</span>

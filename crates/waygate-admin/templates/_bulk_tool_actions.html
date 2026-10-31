@@ -1,0 +1,11 @@
+<form id="bulk-tools" class="card bulk-actions" data-bulk-selection method="post" action="{{ self.chrome.nav_url("/decisions/bulk/tools/review") }}">
+<input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+<input type="hidden" name="manifest_hash" value="{{ manifest_hash }}">
+<label data-bulk-select-all-label hidden><input type="checkbox" data-bulk-select-all> Select eligible items on this page</label>
+<span data-bulk-count role="status" aria-live="polite">Choose pending tool reviews</span>
+<button class="btn btn-primary" type="submit" name="action" value="approve" data-bulk-submit data-bulk-approve>Review and approve replacements</button>
+<button class="btn btn-secondary" type="submit" name="action" value="reject" data-bulk-submit formnovalidate>Review and keep blocked</button>
+<button class="btn btn-secondary" type="button" data-bulk-clear hidden>Clear selection</button>
+<p class="muted" data-bulk-hint>Selecting items does not approve them. Review the complete selection before confirmation.</p>
+</form>
+<script src="{{ self.chrome.asset_url("/admin/static/js/bulk_decisions.js") }}" defer></script>

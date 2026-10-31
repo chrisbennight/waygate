@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Administrators can select pending tool definitions on Tool changes or
+  Decisions, review their complete comparisons, and approve replacements or
+  keep them blocked together. Initial approvals require individual gateway
+  risk choices. Each selected definition retains its existing authorization
+  and freshness checks.
+- Recent bulk decisions retain per-item outcomes and interrupted progress for
+  the administrator who submitted them. Repeated confirmation does not repeat
+  a claimed submission. Database migration `0117` adds the receipt storage;
+  existing individual decision flows are unchanged.
+
 ## 2.0.1
 
 - Upload and download authorization over upstream HTTP preserve transfer fields

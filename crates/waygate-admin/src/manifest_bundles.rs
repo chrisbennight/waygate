@@ -391,6 +391,16 @@ async fn publish_bundle_locked(
     // since proposal/merge loses the CAS instead of being silently clobbered.
     expected_base: Option<&str>,
 ) -> ApiResult<ManifestBundle> {
+    publish_bundle_locked_with_notification(state, principal, id, expected_base, true).await
+}
+
+async fn publish_bundle_locked_with_notification(
+    state: &Arc<AdminState>,
+    principal: Option<&Principal>,
+    id: Uuid,
+    expected_base: Option<&str>,
+    notify: bool,
+) -> ApiResult<ManifestBundle> {
     let store = manifest_store(state)?;
     let p = principal;
     let tenant = caller_tenant(principal);
@@ -465,7 +475,9 @@ async fn publish_bundle_locked(
     // a ledger failure never tells the fleet to reload an unrecorded change. The
     // hash is the canonical on-disk hash (matches the pointer/disk), not the raw
     // bundle hash.
-    let _ = store.notify_reload(&disk_hash).await;
+    if notify {
+        let _ = store.notify_reload(&disk_hash).await;
+    }
     // AdminMutation evidence: publishing changes which manifest set boot
     // and SIGHUP will activate, so it's the most operationally-relevant
     // action here and must land in the audit trail.
@@ -520,6 +532,30 @@ pub(crate) async fn stage_and_publish_core(
     // before any live-disk or ledger mutation.
     let _write_guard = state.servers.manifest_write_lock.lock().await;
     publish_bundle_locked(state, principal, draft.id, Some(proposed_base)).await
+}
+
+/// Tool decisions hold review rows until their catalog acceptance commits.
+/// Return the published hash so their caller rings the fleet doorbell afterward.
+/// The caller acquires the manifest mutex before any catalog row locks.
+pub(crate) async fn publish_tool_approval_set(
+    state: &Arc<AdminState>,
+    actor: &Principal,
+    content: &str,
+    base: &str,
+    _manifest_guard: &tokio::sync::MutexGuard<'_, ()>,
+) -> ApiResult<String> {
+    waygate_upstream::parse_manifest_set(content)
+        .map_err(|_| ApiError::BadRequest("The reviewed server set is invalid".into()))?;
+    let store = manifest_store(state)?;
+    let draft = store
+        .create_draft(actor.tenant.as_str(), content, Some(&actor.sub))
+        .await
+        .map_err(map_manifest_err)?;
+    let hash = canonical_disk_hash(content)
+        .map_err(|_| ApiError::Internal("Could not identify the reviewed server set".into()))?;
+    publish_bundle_locked_with_notification(state, Some(actor), draft.id, Some(base), false)
+        .await?;
+    Ok(hash)
 }
 
 /// Canonical 503 detail for paths that require the on-disk manifest source.

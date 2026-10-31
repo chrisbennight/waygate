@@ -91,6 +91,11 @@ hits=$(grep -vE '^(--)?$' "$hits_file" \
     | grep -v '^crates/waygate-admin/src/capability\.rs[:-]' || true)
 
 allowed_patterns=(
+    # Bulk services have already passed their capability gates. These are
+    # runtime receipt failures and failed upstream refreshes, not missing wiring.
+    'crates/waygate-admin/src/dashboard_bulk_decisions\.rs.*Decision receipts are unavailable'
+    'crates/waygate-admin/src/bulk_tool_reviews\.rs.*ApiError::ServiceUnavailable\($'
+    'crates/waygate-admin/src/bulk_tool_reviews\.rs.*Refresh the upstream before accepting its replacement'
     # These failures occur after the tool-review capability is configured:
     # a database operation failed or the upstream could not refresh.
     'crates/waygate-admin/src/tool_reviews\.rs.*Tool review storage is unavailable'

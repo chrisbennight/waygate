@@ -1689,6 +1689,10 @@ async fn gateway_main() -> anyhow::Result<()> {
             )
                 as Arc<dyn waygate_dashboard_stores::activity_saved_views::ActivitySavedViewStore>
         }))
+        .with_decision_batches(db_pool.clone().map(|pg| {
+            Arc::new(waygate_dashboard_stores::decision_batches::PgDecisionBatchStore::new(pg))
+                as waygate_dashboard_stores::decision_batches::SharedDecisionBatchStore
+        }))
         // Canonical tenants registry backing
         // /api/v1/admin/tenants/*. Same DB-pool gating pattern
         // as the rest of the admin stores; absence ⇒ tenant

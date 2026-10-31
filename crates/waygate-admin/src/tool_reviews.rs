@@ -7,7 +7,7 @@ use std::sync::Arc;
 use waygate_catalog::tool_reviews::{PgCatalogStore, ToolReview};
 use waygate_oidc::Principal;
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ToolReviewParams {
     /// Upstream name shown on the review page.
@@ -58,6 +58,68 @@ pub(crate) async fn approve_core(
     actor: &Principal,
     params: &ToolReviewParams,
 ) -> Result<ToolReview, ApiError> {
+    let prepared = prepare_approval(state, tenant, actor, params, true).await?;
+    let review = prepared.review;
+    let manifest = prepared.manifest;
+    let initial_classification = prepared.initial_classification;
+    if matches!(
+        manifest.classification_mode,
+        waygate_upstream::ClassificationMode::McpAnnotations
+    ) {
+        let tool = manifest.tools.iter().find(|t| t.name == params.tool);
+        if tool.and_then(|tool| tool.approved_behavior_hash.as_deref())
+            != Some(&review.observed_hash)
+        {
+            let manifests = state.servers.manifest_store.require()?;
+            crate::dashboard_servers::patch_and_publish(
+                state,
+                manifests,
+                Some(actor),
+                &params.server,
+                &params.manifest_hash,
+                "tool_contract.approve",
+                |manifest| {
+                    if !matches!(
+                        manifest.classification_mode,
+                        waygate_upstream::ClassificationMode::McpAnnotations
+                    ) {
+                        return Err("Classification mode changed; reload the review".into());
+                    }
+                    if let Some(tool) = manifest.tools.iter_mut().find(|t| t.name == params.tool) {
+                        if initial_classification.is_some() {
+                            return Err("Tool classification changed; reload the review".into());
+                        }
+                        tool.approved_behavior_hash = Some(review.observed_hash.clone());
+                    } else if let Some(classification) = initial_classification {
+                        manifest.tools.push(classification);
+                    } else {
+                        return Err("Tool is no longer classified".into());
+                    }
+                    Ok(())
+                },
+            )
+            .await
+            .map_err(ApiError::Conflict)?;
+        }
+    }
+    accept_prepared(state, actor, params, &review, None).await
+}
+
+pub(crate) struct PreparedToolApproval {
+    pub review: ToolReview,
+    pub manifest: waygate_upstream::UpstreamManifest,
+    pub initial_classification: Option<waygate_upstream::ToolClassification>,
+}
+
+/// Validate one reviewed identity after the caller's upstream refresh. Bulk
+/// callers refresh once per server; the individual path refreshes here.
+pub(crate) async fn prepare_approval(
+    state: &Arc<AdminState>,
+    tenant: &str,
+    actor: &Principal,
+    params: &ToolReviewParams,
+    refresh: bool,
+) -> Result<PreparedToolApproval, ApiError> {
     authorize(actor, tenant)?;
     let store = store(state)?;
     let previous = store
@@ -71,19 +133,21 @@ pub(crate) async fn approve_core(
     // Refresh before accepting so a review cannot release a replacement that
     // the upstream no longer advertises. A concurrent later observation still
     // wins through the store's conditional generation update.
-    let refreshed = state
-        .upstreams
-        .refresh_server_catalog(&params.server, actor)
-        .await
-        .ok_or(ApiError::NotFound("Upstream not configured"))?;
-    if !matches!(
-        refreshed.outcome,
-        waygate_upstream::CatalogRefreshOutcome::Updated
-            | waygate_upstream::CatalogRefreshOutcome::Unchanged
-    ) {
-        return Err(ApiError::ServiceUnavailable(
-            "Refresh the upstream successfully before accepting its replacement",
-        ));
+    if refresh {
+        let refreshed = state
+            .upstreams
+            .refresh_server_catalog(&params.server, actor)
+            .await
+            .ok_or(ApiError::NotFound("Upstream not configured"))?;
+        if !matches!(
+            refreshed.outcome,
+            waygate_upstream::CatalogRefreshOutcome::Updated
+                | waygate_upstream::CatalogRefreshOutcome::Unchanged
+        ) {
+            return Err(ApiError::ServiceUnavailable(
+                "Refresh the upstream successfully before accepting its replacement",
+            ));
+        }
     }
     let review = store
         .get(tenant, &params.server, &params.tool)
@@ -121,6 +185,7 @@ pub(crate) async fn approve_core(
     {
         return Err(stale());
     }
+    let mut initial_classification = None;
     if matches!(
         manifest.classification_mode,
         waygate_upstream::ClassificationMode::McpAnnotations
@@ -133,7 +198,7 @@ pub(crate) async fn approve_core(
             return Err(ApiError::Conflict("The replacement has invalid or changed annotation metadata; refresh and review the upstream".into()));
         }
         let tool = manifest.tools.iter().find(|t| t.name == params.tool);
-        let initial_classification = if tool.is_none() {
+        initial_classification = if tool.is_none() {
             let risk = params.risk.ok_or_else(|| {
                 ApiError::BadRequest(
                     "Select a gateway risk classification before initially approving this tool"
@@ -149,48 +214,46 @@ pub(crate) async fn approve_core(
         } else {
             None
         };
-        if tool.and_then(|tool| tool.approved_behavior_hash.as_deref())
-            != Some(&review.observed_hash)
-        {
-            let manifests = state.servers.manifest_store.require()?;
-            crate::dashboard_servers::patch_and_publish(
-                state,
-                manifests,
-                Some(actor),
-                &params.server,
-                &params.manifest_hash,
-                "tool_contract.approve",
-                |manifest| {
-                    if !matches!(
-                        manifest.classification_mode,
-                        waygate_upstream::ClassificationMode::McpAnnotations
-                    ) {
-                        return Err("Classification mode changed; reload the review".into());
-                    }
-                    if let Some(tool) = manifest.tools.iter_mut().find(|t| t.name == params.tool) {
-                        if initial_classification.is_some() {
-                            return Err("Tool classification changed; reload the review".into());
-                        }
-                        tool.approved_behavior_hash = Some(review.observed_hash.clone());
-                    } else if let Some(classification) = initial_classification {
-                        manifest.tools.push(classification);
-                    } else {
-                        return Err("Tool is no longer classified".into());
-                    }
-                    Ok(())
-                },
-            )
-            .await
-            .map_err(ApiError::Conflict)?;
-        }
     }
+    Ok(PreparedToolApproval {
+        review,
+        manifest,
+        initial_classification,
+    })
+}
+
+pub(crate) async fn accept_prepared(
+    state: &Arc<AdminState>,
+    actor: &Principal,
+    params: &ToolReviewParams,
+    review: &ToolReview,
+    batch_id: Option<uuid::Uuid>,
+) -> Result<ToolReview, ApiError> {
+    let tenant = actor.tenant.as_str();
+    authorize(actor, tenant)?;
+    let store = store(state)?;
     if !store
-        .approve(&review, &actor.sub)
+        .approve(review, &actor.sub)
         .await
         .map_err(unavailable)?
     {
         return Err(stale());
     }
+    record_acceptance(state, actor, params, batch_id).await?;
+    store
+        .get(tenant, &params.server, &params.tool)
+        .await
+        .map_err(unavailable)?
+        .ok_or(ApiError::NotFound("Tool review no longer exists"))
+}
+
+pub(crate) async fn record_acceptance(
+    state: &Arc<AdminState>,
+    actor: &Principal,
+    params: &ToolReviewParams,
+    batch_id: Option<uuid::Uuid>,
+) -> Result<(), ApiError> {
+    let tenant = actor.tenant.as_str();
     state
         .upstreams
         .release_accepted_tool(&params.server, &params.tool, &params.observed_hash)
@@ -204,16 +267,17 @@ pub(crate) async fn approve_core(
         Some(actor),
         "tool_contract.approve",
         format!(
-            "server={} tool={} accepted_hash={}",
-            params.server, params.tool, params.observed_hash
+            "server={} tool={} accepted_hash={}{}",
+            params.server,
+            params.tool,
+            params.observed_hash,
+            batch_id
+                .map(|id| format!(" batch={id}"))
+                .unwrap_or_default()
         ),
     )
     .await?;
-    store
-        .get(tenant, &params.server, &params.tool)
-        .await
-        .map_err(unavailable)?
-        .ok_or(ApiError::NotFound("Tool review no longer exists"))
+    Ok(())
 }
 
 pub(crate) async fn reject_core(
@@ -222,6 +286,21 @@ pub(crate) async fn reject_core(
     actor: &Principal,
     params: &ToolReviewParams,
 ) -> Result<ToolReview, ApiError> {
+    reject_for_batch(state, tenant, actor, params, None).await?;
+    store(state)?
+        .get(tenant, &params.server, &params.tool)
+        .await
+        .map_err(unavailable)?
+        .ok_or(ApiError::NotFound("Tool review no longer exists"))
+}
+
+pub(crate) async fn reject_for_batch(
+    state: &Arc<AdminState>,
+    tenant: &str,
+    actor: &Principal,
+    params: &ToolReviewParams,
+    batch_id: Option<uuid::Uuid>,
+) -> Result<(), ApiError> {
     authorize(actor, tenant)?;
     let store = store(state)?;
     let review = store
@@ -248,16 +327,17 @@ pub(crate) async fn reject_core(
         Some(actor),
         "tool_contract.reject",
         format!(
-            "server={} tool={} blocked_hash={}",
-            params.server, params.tool, params.observed_hash
+            "server={} tool={} blocked_hash={}{}",
+            params.server,
+            params.tool,
+            params.observed_hash,
+            batch_id
+                .map(|id| format!(" batch={id}"))
+                .unwrap_or_default()
         ),
     )
     .await?;
-    store
-        .get(tenant, &params.server, &params.tool)
-        .await
-        .map_err(unavailable)?
-        .ok_or(ApiError::NotFound("Tool review no longer exists"))
+    Ok(())
 }
 
 /// Select an exact tool, or omit both names to list pending reviews.
