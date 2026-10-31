@@ -2391,6 +2391,13 @@ async fn waiting_approval_can_be_listed_and_denied_once() {
         .expect("list approval requests");
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, id);
+    let metadata = store
+        .list_waiting_approval_summaries(&tenant, 10)
+        .await
+        .unwrap();
+    assert_eq!(metadata.len(), 1);
+    assert_eq!(metadata[0].id, id);
+    assert_eq!(metadata[0].principal_sub, "alice");
     assert!(!store
         .deny_waiting_approval("other-tenant", id, "reviewer", None, None)
         .await

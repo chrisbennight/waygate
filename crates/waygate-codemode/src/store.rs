@@ -906,6 +906,21 @@ impl ExecutionStore for PgExecutionStore {
         Ok(rows.iter().map(row_to_execution).collect())
     }
 
+    async fn list_waiting_approval_summaries(
+        &self,
+        tenant_id: &str,
+        limit: u16,
+    ) -> Result<Vec<crate::PendingApprovalSummary>, StoreError> {
+        let rows=sqlx::query("SELECT id,principal_sub,submitted_at FROM codemode_executions WHERE tenant_id=$1 AND status='waiting_for_approval' AND claim_owner IS NULL AND cancellation_requested_at IS NULL AND completed_at IS NULL AND retention_until>now() ORDER BY submitted_at,id LIMIT $2").bind(tenant_id).bind(i64::from(limit)).fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::PendingApprovalSummary {
+                id: row.get("id"),
+                principal_sub: row.get("principal_sub"),
+                submitted_at: row.get("submitted_at"),
+            })
+            .collect())
+    }
     async fn count_waiting_approvals(
         &self,
         tenant_id: &str,

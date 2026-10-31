@@ -1,11 +1,11 @@
 {% extends "layout.html" %}
 {% block main %}
 <header class="page-header"><h1 class="page-title">Pending invocation requests</h1></header>
-<p>Review individual calls that were refused because they require human approval. Approval permits one matching retry; it does not execute a tool or grant standing permission.</p>
+<p>Review individual calls, including current Code Mode calls, that were refused because they require human approval. Approval permits one matching retry; it does not execute a tool or grant standing permission.</p>
 <p><a href="{{ self.chrome.nav_url("/invocation-requests") }}">Pending requests</a> · <a href="{{ self.chrome.nav_url("/approvals") }}">Issued grants</a> · <a href="{{ self.chrome.nav_url("/decisions") }}">Decisions</a></p>
 {% match note %}{% when Some with (message) %}<p class="callout" role="status">{{ message }}</p>{% when None %}{% endmatch %}
 {% if bulk_available && !detail && !rows.is_empty() %}{% let group_id = "bulk-direct-invocations" %}{% let group_title = "Selected direct invocation requests" %}{% include "_bulk_invocation_actions.html" %}{% endif %}
-{% if rows.is_empty() && codemode.is_empty() && note.is_none() %}<div class="empty-state"><p class="empty-state__title">No pending direct invocation requests</p><p>Requests expire automatically. Code Mode requests are retained in their execution journal.</p></div>{% endif %}
+{% if rows.is_empty() && codemode.is_empty() && note.is_none() %}<div class="empty-state"><p class="empty-state__title">No pending direct invocation requests</p><p>Requests expire automatically. Historical Code Mode requests remain in their execution journal.</p></div>{% endif %}
 {% for row in rows %}<article class="card">
 {% if bulk_available && !detail && row.can_deny %}<label><input type="checkbox" name="selected" form="bulk-direct-invocations" value="{{ row.choice }}" data-bulk-item data-approvable="{{ row.can_approve }}"> Select {{ row.server }} · {{ row.tool }}</label>{% endif %}
 <h2 class="card-title skills-source">{{ row.server }} · {{ row.tool }}</h2>
@@ -28,10 +28,10 @@
 {% else %}<p><a href="{{ self.chrome.nav_url(row.url) }}">Review this invocation request</a></p>{% endif %}
 </article>{% endfor %}
 {% if !detail && rows.len()==50 %}<p>The oldest pending requests are shown. Resolve this page to reveal later requests.</p>{% endif %}
-{% if !codemode.is_empty() %}<h2>Code Mode invocation requests</h2><p>Review one exact connector call in each program. Approval does not automatically resume the program. Prior effects remain completed.</p>
-{% if bulk_available %}{% let group_id = "bulk-codemode-invocations" %}{% let group_title = "Selected Code Mode invocation requests" %}{% include "_bulk_invocation_actions.html" %}{% endif %}
+{% if !codemode.is_empty() %}<h2>Historical Code Mode approval waits</h2><p>These executions cannot continue on this runtime. They may be reviewed and denied. Current Code Mode calls use the ordinary per-call requests above. Do not replay completed program effects.</p>
+{% if bulk_available %}{% let group_id = "bulk-codemode-invocations" %}{% let group_title = "Selected historical Code Mode requests" %}{% include "_bulk_invocation_actions.html" %}{% endif %}
 {% for row in codemode %}<article class="card"><h3 class="card-title skills-source">{{ row.title }}</h3>
-{% if bulk_available %}<label><input type="checkbox" name="selected" form="bulk-codemode-invocations" value="{{ row.choice }}" data-bulk-item data-approvable="{{ row.can_approve }}"> Select this Code Mode call</label>{% endif %}
-<p><a href="{{ self.chrome.nav_url(row.url) }}">Open individual request</a></p><pre class="skills-content" tabindex="0" aria-label="Complete Code Mode request">{% let segs = row.context %}{% include "_diff_segments.html" %}</pre></article>{% endfor %}
+{% if bulk_available %}<label><input type="checkbox" name="selected" form="bulk-codemode-invocations" value="{{ row.choice }}" data-bulk-item data-approvable="{{ row.can_approve }}"> Select this historical request for denial</label>{% endif %}
+<p><a href="{{ self.chrome.nav_url(row.url) }}">Open individual request</a></p>{% if !row.context.is_empty() %}<pre class="skills-content" tabindex="0" aria-label="Complete Code Mode request">{% let segs = row.context %}{% include "_diff_segments.html" %}</pre>{% endif %}</article>{% endfor %}
 {% if codemode.len()==50 %}<p>This page shows a bounded set of waiting Code Mode requests. Resolve them to reveal later requests.</p>{% endif %}{% endif %}
 {% endblock %}

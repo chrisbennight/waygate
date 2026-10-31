@@ -377,7 +377,7 @@ impl DecisionOutcome {
     fn guidance(&self) -> &'static str {
         match self {
             Self::Approved=>"Existing configuration and access policies still apply.",
-            Self::GrantIssued=>"No execution was confirmed by this decision. The requester must retry or explicitly resume through the ordinary invocation boundary before the grant expires.",
+            Self::GrantIssued=>"No execution was confirmed by this decision. The requester must retry only the reviewed call through the ordinary invocation boundary before the grant expires. Do not replay completed program effects.",
             Self::InvocationDenied=>"No permission was issued. A denied Code Mode execution cannot resume this request.",
             Self::ApprovalRecorded=>"The request remains pending until enough distinct eligible administrators approve it. No execution was confirmed by this decision.",
             Self::ApprovalCompleted=>"Inspect the individual request and Activity before continuing execution. This submission will not replay the decision.",

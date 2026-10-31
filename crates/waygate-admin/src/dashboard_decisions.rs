@@ -452,7 +452,7 @@ async fn decisions_page(
             }
         }
         if let Some(store) = state.hitl.codemode_executions.get() {
-            match store.list_waiting_approvals(&tenant, 50).await {
+            match store.list_waiting_approval_summaries(&tenant, 50).await {
                 Ok(rows) => {
                     for row in rows {
                         items.push(invocation_item(

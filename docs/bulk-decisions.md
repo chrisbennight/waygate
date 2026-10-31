@@ -66,18 +66,22 @@ Rejecting candidates preserves any previously serving version; quarantine
 remains an individual operation.
 
 Invocation selections are limited to fifty requests and two MiB of complete
-serialized review context. Direct requests and Code Mode requests have separate
-selection groups. Direct review includes value-free context and exact identities;
-review argument values with the requester through a trusted channel. Code Mode
-review includes the durable request preview, execution, source, call, prior effects,
-and contract. Approval permits only the exact matching call. It does not execute
-or automatically resume it. Full requester identity, current request digest,
-expiry, and the existing dispatch rules remain enforced. Concurrent Code Mode
-approvals reuse the same unexpired call grant, including its original lifetime
-and attribution; a consumed or revoked grant cannot become new permission through
-a repeated approval while that grant remains unexpired. Current grant lifecycle
-is shown in Issued grants. Denial of a Code Mode request terminates its waiting
-execution and preserves completed prior effects.
+serialized review context. Current Code Mode calls use the ordinary direct
+channel and the same per-call request queue as direct tool calls. Review includes
+value-free context, full requester identity, and exact behavior and argument
+identities; review argument values with the requester through a trusted channel.
+Approval permits only that matching call. It does not execute a tool, restart a
+program, or authorize replay of prior effects. The caller retries only the
+reviewed call through the ordinary invocation boundary.
+
+Historical `approval_bound_mutation` executions cannot continue on the current
+runtime. Their separate selection group offers reviewed denial only. The queue
+loads identifying metadata rather than complete request payloads. Individual
+and selected review load the full captured context within the review budget;
+oversized context is refused without truncation. Denial binds the exact durable
+request and execution at the owning store mutation, ends the waiting execution,
+and preserves completed prior effects. Issued grants remain separate lifecycle
+records.
 
 Administrative selections currently support `rate_limit.create` only. Select
 new policies with the same scope and action, and distinct scope targets. The

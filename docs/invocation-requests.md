@@ -4,8 +4,9 @@ Open **Decisions → Invocation requests** to review direct tool calls that were
 refused because they require human approval. With the PostgreSQL catalog
 configured, these requests survive a missed notification or gateway restart.
 Notifications include a link to the same retained request when capture succeeds.
-Code Mode retains its requests in its separate execution journal and lists them
-in a separate selection group on the same page.
+Current Code Mode calls use this same direct-channel approval boundary.
+Historical Code Mode waits remain in their execution journal and appear in a
+separate group for reviewed denial only.
 
 A retained request is a reference for a human decision. It does not queue tool
 execution, grant permission, or automatically retry a call. Approval issues a
@@ -36,7 +37,8 @@ retained request and issued grant before taking further action.
 
 ## Selected decisions
 
-Select direct requests or Code Mode calls within their own group, provide an
+Select current per-call requests or historical Code Mode denials within their
+own group, provide an
 operator reason, review every complete request, and confirm approval or denial.
 Selection never issues permission. Changed, expired, or concurrently decided
 items have separate outcomes; successful siblings remain recorded. Recent bulk
@@ -44,9 +46,11 @@ decisions retains interrupted submissions and will not replay a started decision
 Inspect each request, execution history, issued grant, and Activity before
 starting a new decision after an uncertain outcome.
 
-Code Mode approval permits the displayed execution's exact source and call;
-the requester explicitly resumes through the ordinary execution boundary. A
-Code Mode denial ends the waiting execution without undoing its prior effects.
+Current Code Mode calls receive the same exact per-call permission as direct
+tool calls. Retry only the reviewed call; approval does not restart a program or
+authorize replay of completed effects. Historical approval-bound executions
+cannot continue on this runtime and cannot receive new permission here. Their
+reviewed denial ends the waiting execution without undoing its prior effects.
 See [bulk decisions](bulk-decisions.md) for selection and review limits.
 
 ## Lifetime, limits, and recovery

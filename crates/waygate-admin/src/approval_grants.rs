@@ -611,7 +611,7 @@ async fn list_codemode_approval_requests(
         (status = 403, description = "Bearer token lacks mcp:admin", body = ApiErrorBody),
     ),
 )]
-pub(crate) async fn approve_codemode_request(
+async fn approve_codemode_request(
     State(state): State<Arc<AdminState>>,
     principal: Option<Extension<Principal>>,
     Path(id): Path<Uuid>,
