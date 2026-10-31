@@ -662,6 +662,14 @@ pub trait ExecutionStore: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    async fn count_waiting_approvals(
+        &self,
+        tenant_id: &str,
+        limit: u16,
+    ) -> Result<usize, StoreError> {
+        Ok(self.list_waiting_approvals(tenant_id, limit).await?.len())
+    }
+
     /// List the owner's in-flight Code Mode executions, newest submission
     /// first. Rows whose profile is [`TOOL_CALL_EXECUTION_PROFILE`] are not
     /// Code Mode programs and are never listed.
@@ -709,8 +717,9 @@ pub trait ExecutionStore: Send + Sync + 'static {
         id: Uuid,
         approver: &str,
         reason: Option<&str>,
+        expected_approval: Option<&Value>,
     ) -> Result<bool, StoreError> {
-        let _ = (tenant_id, id, approver, reason);
+        let _ = (tenant_id, id, approver, reason, expected_approval);
         Ok(false)
     }
 

@@ -1107,6 +1107,41 @@ impl CatalogStore for PgCatalogStore {
         // Live catalog tool before calling; the table accepts both as
         // soft references (no FK, see migration 0013 + the parallel
         // catalog_approvals reasoning).
+        let mut tx = self.pool.begin().await?;
+        if let Some(binding) = grant.execution_binding {
+            // All approval surfaces serialize issuance for a single execution
+            // call. A concurrent decision must not create another usable grant.
+            let key = format!(
+                "{}:{}:{}",
+                grant.tenant_id, binding.execution_id, binding.call_id
+            );
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(key)
+                .execute(&mut *tx)
+                .await?;
+            let existing = sqlx::query("SELECT * FROM approval_grants WHERE tenant_id=$1 AND execution_id=$2 AND call_id=$3 AND expires_at>clock_timestamp() ORDER BY created_at LIMIT 1 FOR UPDATE")
+                .bind(grant.tenant_id).bind(binding.execution_id).bind(binding.call_id)
+                .fetch_optional(&mut *tx).await?;
+            if let Some(row) = existing {
+                let existing = approval_grant_from_row(&row);
+                if existing.principal_sub != grant.principal_sub
+                    || existing.principal_issuer.as_deref() != Some(grant.principal_issuer)
+                    || existing.tool_id != grant.tool_id
+                    || existing.argument_hash != grant.argument_hash
+                    || existing
+                        .execution_binding
+                        .as_ref()
+                        .map(|value| value.source_digest.as_str())
+                        != Some(binding.source_digest)
+                {
+                    return Err(CatalogError::InvalidInput(
+                        "An execution call already has a different approval binding".into(),
+                    ));
+                }
+                tx.commit().await?;
+                return Ok(existing);
+            }
+        }
         let id = Uuid::now_v7();
         let row = sqlx::query(
             r#"
@@ -1136,10 +1171,11 @@ impl CatalogStore for PgCatalogStore {
         .bind(grant.expires_at)
         .bind(grant.approver)
         .bind(grant.reason)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(CatalogError::Database)?;
 
+        tx.commit().await?;
         Ok(approval_grant_from_row(&row))
     }
 

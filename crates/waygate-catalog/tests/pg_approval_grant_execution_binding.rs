@@ -73,6 +73,25 @@ async fn execution_bound_grants_match_only_the_exact_execution_call() {
         .await
         .expect("create execution-bound grant");
 
+    let draft = NewApprovalGrant {
+        tenant_id: &tenant,
+        principal_sub: principal,
+        principal_issuer: "https://issuer.test",
+        client_id: None,
+        server_id,
+        tool_id,
+        argument_hash,
+        execution_binding: Some(exact_binding),
+        expires_at,
+        approver: "second-operator",
+        reason: Some("Same exact call"),
+    };
+    let (first, second) = tokio::join!(store.create_grant(draft), store.create_grant(draft));
+    assert_eq!(first.unwrap().id, bound.id);
+    assert_eq!(second.unwrap().id, bound.id);
+    let count:i64=sqlx::query_scalar("SELECT count(*) FROM approval_grants WHERE tenant_id=$1 AND execution_id=$2 AND consumed_at IS NULL").bind(&tenant).bind(execution_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(count, 1, "overlapping approvals share the exact call grant");
+
     let direct_match = store
         .find_grant(GrantLookup {
             tenant_id: &tenant,

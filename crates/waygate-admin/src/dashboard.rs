@@ -512,10 +512,35 @@ async fn decisions_badge(
     } else {
         0
     };
-    let total = break_glass + pending_changes + pending_skills + pending_tools;
+    let mut invocation_count = 0;
+    let mut invocation_saturated = false;
+    if let Some(store) = state
+        .servers
+        .catalog
+        .get()
+        .and_then(|catalog| catalog.pending_invocations())
+    {
+        match store.pending_count(&tenant).await {
+            Ok(count) => {
+                invocation_count += count as usize;
+                invocation_saturated |= count >= 50;
+            }
+            Err(_) => review_unavailable = true,
+        }
+    }
+    if let Some(store) = state.hitl.codemode_executions.get() {
+        match store.count_waiting_approvals(&tenant, 50).await {
+            Ok(count) => {
+                invocation_count += count;
+                invocation_saturated |= count >= 50;
+            }
+            Err(_) => review_unavailable = true,
+        }
+    }
+    let total = break_glass + pending_changes + pending_skills + pending_tools + invocation_count;
     let label = if review_unavailable {
         "?".into()
-    } else if bg_saturated || cr_saturated {
+    } else if bg_saturated || cr_saturated || invocation_saturated {
         format!("{total}+")
     } else {
         total.to_string()
@@ -605,6 +630,7 @@ fn page_routes(state: Arc<AdminState>) -> Router<()> {
         .merge(crate::dashboard_decisions::router())
         .merge(crate::dashboard_bulk_decisions::router())
         .merge(crate::dashboard_bulk_skills::router())
+        .merge(crate::dashboard_bulk_invocations::router())
         .merge(crate::dashboard_invocation_requests::router())
         .merge(crate::dashboard_skills::router())
         .merge(crate::dashboard_tool_reviews::router())

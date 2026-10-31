@@ -1,0 +1,9 @@
+<form id="{{ group_id }}" class="card bulk-actions" data-bulk-selection data-bulk-unavailable-hint="A selected request cannot be approved. Review its identity and complete context, or deny the selection." method="post" action="{{ self.chrome.nav_url("/decisions/bulk/invocations/review") }}">
+<input type="hidden" name="csrf" value="{{ chrome.csrf_token }}"><h2 class="card-title">{{ group_title }}</h2>
+<label data-bulk-select-all-label hidden><input type="checkbox" data-bulk-select-all> Select eligible requests in this group on this page</label>
+<span data-bulk-count role="status" aria-live="polite">Choose pending requests</span>
+<label>Reason for these decisions <input class="form-input" name="reason" required maxlength="4096"></label>
+<button class="btn btn-primary" type="submit" name="action" value="approve" data-bulk-submit data-bulk-approve>Review and approve requests</button>
+<button class="btn btn-secondary" type="submit" name="action" value="deny" data-bulk-submit>Review and deny requests</button>
+<button class="btn btn-secondary" type="button" data-bulk-clear hidden>Clear selection</button><p class="muted" data-bulk-hint>Selecting requests issues no permission. Review every request before confirmation.</p>
+</form><script src="{{ self.chrome.asset_url("/admin/static/js/bulk_decisions.js") }}" defer></script>

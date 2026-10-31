@@ -906,6 +906,15 @@ impl ExecutionStore for PgExecutionStore {
         Ok(rows.iter().map(row_to_execution).collect())
     }
 
+    async fn count_waiting_approvals(
+        &self,
+        tenant_id: &str,
+        limit: u16,
+    ) -> Result<usize, StoreError> {
+        let count:i64=sqlx::query_scalar("SELECT count(*) FROM (SELECT id FROM codemode_executions WHERE tenant_id=$1 AND status='waiting_for_approval' AND claim_owner IS NULL AND cancellation_requested_at IS NULL AND completed_at IS NULL AND retention_until>now() LIMIT $2) pending").bind(tenant_id).bind(i64::from(limit)).fetch_one(&self.pool).await?;
+        Ok(count as usize)
+    }
+
     async fn list_owned_in_flight(
         &self,
         owner: &OwnedInFlight,
@@ -1050,6 +1059,7 @@ impl ExecutionStore for PgExecutionStore {
         id: Uuid,
         approver: &str,
         reason: Option<&str>,
+        expected_approval: Option<&Value>,
     ) -> Result<bool, StoreError> {
         let mut tx = self.pool.begin().await?;
         let row = execution_query!(
@@ -1061,6 +1071,7 @@ impl ExecutionStore for PgExecutionStore {
              WHERE tenant_id = $1
                AND id = $2
                AND status = 'waiting_for_approval'
+               AND ($3::jsonb IS NULL OR resume_context->'approval' = $3)
                AND claim_owner IS NULL
                AND cancellation_requested_at IS NULL
                AND completed_at IS NULL
@@ -1071,6 +1082,7 @@ impl ExecutionStore for PgExecutionStore {
         )
         .bind(tenant_id)
         .bind(id)
+        .bind(expected_approval)
         .fetch_optional(&mut *tx)
         .await?;
         if row.is_none() {

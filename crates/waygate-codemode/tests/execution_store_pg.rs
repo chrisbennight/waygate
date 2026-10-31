@@ -2392,15 +2392,28 @@ async fn waiting_approval_can_be_listed_and_denied_once() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, id);
     assert!(!store
-        .deny_waiting_approval("other-tenant", id, "reviewer", None)
+        .deny_waiting_approval("other-tenant", id, "reviewer", None, None)
         .await
         .expect("cross-tenant denial is refused"));
+    assert!(
+        !store
+            .deny_waiting_approval(
+                &tenant,
+                id,
+                "reviewer",
+                Some("Stale review"),
+                Some(&json!({"argument_hash":"changed"}))
+            )
+            .await
+            .unwrap(),
+        "denial cannot transfer to a different captured request"
+    );
     assert!(store
-        .deny_waiting_approval(&tenant, id, "reviewer", Some("recipient mismatch"))
+        .deny_waiting_approval(&tenant, id, "reviewer", Some("recipient mismatch"), None)
         .await
         .expect("deny approval request"));
     assert!(!store
-        .deny_waiting_approval(&tenant, id, "reviewer", None)
+        .deny_waiting_approval(&tenant, id, "reviewer", None, None)
         .await
         .expect("second denial is refused"));
 

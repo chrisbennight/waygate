@@ -9,6 +9,7 @@
         <span class="chip chip--warn">decision stores not configured</span>
     {% endif %}
 </header>
+<p><a href="{{ self.chrome.nav_url("/invocation-requests") }}">Review and select pending invocation requests</a></p>
 {% if receipts_available %}<p><a href="{{ self.chrome.nav_url("/decisions/bulk") }}">Recent bulk decisions and interrupted submissions</a></p>{% endif %}
 
 {# The merged decisions queue: control surfaces that need an
@@ -60,7 +61,7 @@
                 (set <code>GATEWAY_DATABASE_URL</code>). Pending change
                 requests and active break-glass tokens would appear here.
             {% else %}
-                No pending change requests, tool or skill reviews, or active break-glass tokens.
+                No pending change requests, invocation requests, tool or skill reviews, or active break-glass tokens.
                 New items appear here and on the Decisions badge in the
                 sidebar.
             {% endif %}

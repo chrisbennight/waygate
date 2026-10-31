@@ -107,6 +107,7 @@ pub(crate) async fn decide_core(
 }
 
 struct RequestRow {
+    choice: String,
     decide_url: String,
     url: String,
     server: String,
@@ -130,12 +131,22 @@ struct RequestsPage {
     chrome: PageChrome,
     rows: Vec<RequestRow>,
     detail: bool,
+    bulk_available: bool,
+    codemode: Vec<CodeModeRow>,
     note: Option<String>,
 }
 #[derive(Default, Deserialize)]
 struct RequestQuery {
     request: Option<Uuid>,
+    execution: Option<Uuid>,
     note: Option<String>,
+}
+struct CodeModeRow {
+    choice: String,
+    title: String,
+    url: String,
+    context: Vec<Segment>,
+    can_approve: bool,
 }
 
 async fn page(
@@ -147,54 +158,94 @@ async fn page(
     Query(query): Query<RequestQuery>,
 ) -> Result<Response, ApiError> {
     let actor = batches::authorize(&user, &tenant)?;
-    let requests = store(&state)?;
-    let rows = match query.request {
-        Some(id) => vec![requests
-            .get(actor.tenant.as_str(), id)
-            .await
-            .map_err(request_error)?
-            .ok_or(ApiError::NotFound(
-                "Invocation request expired or is unavailable",
-            ))?],
-        None => requests
-            .pending(actor.tenant.as_str())
-            .await
-            .map_err(request_error)?,
-    }
-    .into_iter()
-    .map(|row| {
-        let can_deny = row.status == "pending";
-        let can_approve = can_deny
-            && row.summary.is_some()
-            && (row.principal_issuer != actor.issuer || row.principal_sub != actor.sub);
-        let context_available = row.summary.is_some();
-        let (description, fields) = row
-            .summary
-            .map(|summary| (summary.description, summary.affected_fields))
-            .unwrap_or_default();
-        RequestRow {
-            decide_url: format!("/invocation-requests/{}/decide", row.id),
-            url: review_url(row.id),
-            server: row.server,
-            tool: row.tool,
-            requester: row.principal_sub,
-            issuer: row.principal_issuer,
-            status: row.status,
-            expires: waygate_core::fmt::format_ts_abs(row.expires_at),
-            behavior: row.behavior_hash,
-            arguments: row.argument_hash,
-            description: description.map(|text| review_diff::text_segments(&text)),
-            fields: fields
-                .into_iter()
-                .map(|text| review_diff::text_segments(&text))
-                .collect(),
-            context_available,
-            can_approve,
-            can_deny,
-            grant: row.grant_id.map(|id| id.to_string()),
+    let mut note = query.note;
+    let direct_rows = if query.execution.is_some() {
+        Vec::new()
+    } else if let Ok(requests) = store(&state) {
+        match query.request {
+            Some(id) => vec![requests
+                .get(actor.tenant.as_str(), id)
+                .await
+                .map_err(request_error)?
+                .ok_or(ApiError::NotFound(
+                    "Invocation request expired or is unavailable",
+                ))?],
+            None => requests
+                .pending(actor.tenant.as_str())
+                .await
+                .map_err(request_error)?,
         }
-    })
-    .collect();
+    } else {
+        note = Some("Direct invocation request storage is unavailable.".into());
+        Vec::new()
+    };
+    let rows = direct_rows
+        .into_iter()
+        .map(|row| {
+            let can_deny = row.status == "pending";
+            let can_approve = can_deny
+                && row.summary.is_some()
+                && (row.principal_issuer != actor.issuer || row.principal_sub != actor.sub);
+            let context_available = row.summary.is_some();
+            let (description, fields) = row
+                .summary
+                .map(|summary| (summary.description, summary.affected_fields))
+                .unwrap_or_default();
+            RequestRow {
+                choice: crate::dashboard_bulk_invocations::direct_choice(row.id),
+                decide_url: format!("/invocation-requests/{}/decide", row.id),
+                url: review_url(row.id),
+                server: row.server,
+                tool: row.tool,
+                requester: row.principal_sub,
+                issuer: row.principal_issuer,
+                status: row.status,
+                expires: waygate_core::fmt::format_ts_abs(row.expires_at),
+                behavior: row.behavior_hash,
+                arguments: row.argument_hash,
+                description: description.map(|text| review_diff::text_segments(&text)),
+                fields: fields
+                    .into_iter()
+                    .map(|text| review_diff::text_segments(&text))
+                    .collect(),
+                context_available,
+                can_approve,
+                can_deny,
+                grant: row.grant_id.map(|id| id.to_string()),
+            }
+        })
+        .collect();
+    let mut codemode = Vec::new();
+    if query.request.is_none() {
+        if let Some(executions) = state.hitl.codemode_executions.get() {
+            let result = if let Some(id) = query.execution {
+                executions
+                    .get(actor.tenant.as_str(), id)
+                    .await
+                    .map(|row| row.into_iter().collect())
+            } else {
+                executions
+                    .list_waiting_approvals(actor.tenant.as_str(), 50)
+                    .await
+            };
+            match result {
+                Ok(executions)=>for execution in executions {
+                    let id=execution.id;
+                    match crate::approval_grants::codemode_request(&execution) {
+                        Ok((_,digest))=>{
+                            let selected=crate::dashboard_bulk_invocations::SelectedInvocation::CodeMode{id,digest:digest.clone()};
+                            match crate::dashboard_bulk_invocations::view(&state,actor,&selected,false).await {
+                                Ok(row)=>codemode.push(CodeModeRow{choice:crate::dashboard_bulk_invocations::codemode_choice(id,digest),title:row.title,url:row.url,context:row.context,can_approve:row.can_approve}),
+                                Err(error)=>note=Some(error.detail()),
+                            }
+                        },
+                        Err(_)=>note=Some(format!("Code Mode execution {id} is no longer awaiting a decision. Current state: {:?}. Inspect its execution history and issued grants before further action.",execution.status)),
+                    }
+                },
+                Err(_)=>note=Some("Code Mode invocation requests could not be loaded. The queue may be incomplete.".into()),
+            }
+        }
+    }
     Ok(render(&RequestsPage {
         chrome: PageChrome::build(
             &state,
@@ -207,7 +258,9 @@ async fn page(
         ),
         rows,
         detail: query.request.is_some(),
-        note: query.note,
+        bulk_available: state.hitl.decision_batches.get().is_some(),
+        codemode,
+        note,
     }))
 }
 

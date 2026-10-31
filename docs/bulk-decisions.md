@@ -1,9 +1,8 @@
 # Bulk administrator decisions
 
-Tool changes, Skills, and their entries in Decisions support selected decisions.
-This guide describes that experience and the requirements for extending it to
-other queues. Bulk invocation and administrative-change decisions are not yet
-available.
+Tool changes, Skills, and pending invocation requests support selected decisions.
+Decisions links to the owning review queues. This guide describes the shared
+experience; bulk administrative-change decisions are not yet available.
 
 ## Purpose
 
@@ -23,7 +22,7 @@ decision rules.
 | --- | --- | --- |
 | Tool changes | Approve replacements; Keep blocked | Exact observed definitions, changed fields, flags, and any required initial classification. |
 | Skills | Approve; Reject | Exact candidate content, supporting files, and an operator reason. |
-| Pending invocation requests | Approve selected requests | Request effects, requester identity, reviewed tool behavior, and the particular request being authorized. |
+| Pending invocation requests | Approve; Deny | Request effects, requester identity, reviewed tool behavior, and the particular request being authorized. |
 | Administrative changes | Approve selected supported changes | Captured intent, required effect previews, and every individual approval condition. |
 
 The Decisions inbox groups selection by decision type. A selected tool review
@@ -65,6 +64,20 @@ Unavailable candidate source or files prevent approval from that review.
 An operator reason is required and retained for every selected decision.
 Rejecting candidates preserves any previously serving version; quarantine
 remains an individual operation.
+
+Invocation selections are limited to fifty requests and two MiB of complete
+serialized review context. Direct requests and Code Mode requests have separate
+selection groups. Direct review includes value-free context and exact identities;
+review argument values with the requester through a trusted channel. Code Mode
+review includes the durable request preview, execution, source, call, prior effects,
+and contract. Approval permits only the exact matching call. It does not execute
+or automatically resume it. Full requester identity, current request digest,
+expiry, and the existing dispatch rules remain enforced. Concurrent Code Mode
+approvals reuse the same unexpired call grant, including its original lifetime
+and attribution; a consumed or revoked grant cannot become new permission through
+a repeated approval while that grant remains unexpired. Current grant lifecycle
+is shown in Issued grants. Denial of a Code Mode request terminates its waiting
+execution and preserves completed prior effects.
 
 For example, selecting several tool replacements shows their server and tool
 names, changed-field summaries, flags, and complete stored comparisons. A

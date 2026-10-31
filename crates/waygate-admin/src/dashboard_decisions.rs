@@ -124,6 +124,31 @@ struct InboxItem {
     created_unix: i64,
 }
 
+fn invocation_item(summary: String, url: String, created: time::OffsetDateTime) -> InboxItem {
+    InboxItem {
+        kind: "invocation",
+        skill_choice: None,
+        tool_choice: None,
+        severity: "warn",
+        summary,
+        handle: "Pending call permission".into(),
+        params_pretty: None,
+        approval_requirement: None,
+        age_rel: format_ts_rel(created),
+        age_abs: format_ts_abs(created),
+        cr_approve_rel: None,
+        cr_deny_rel: None,
+        bg_revoke_rel: None,
+        policy_preview: None,
+        manifest_preview: None,
+        effect_preview_acknowledgement_required: false,
+        approval_blocked: false,
+        content_review_rel: Some(url),
+        review_label: "Review invocation request",
+        created_unix: created.unix_timestamp(),
+    }
+}
+
 #[derive(Template)]
 #[template(path = "decisions.html")]
 struct DecisionsPage {
@@ -191,7 +216,14 @@ async fn decisions_page(
     let stores_unconfigured = cr_store.is_none()
         && bg_store.is_none()
         && state.hitl.reviewed_skills.get().is_none()
-        && state.servers.tool_reviews.get().is_none();
+        && state.servers.tool_reviews.get().is_none()
+        && state
+            .servers
+            .catalog
+            .get()
+            .and_then(|catalog| catalog.pending_invocations())
+            .is_none()
+        && state.hitl.codemode_executions.get().is_none();
 
     let mut items: Vec<InboxItem> = Vec::new();
     let mut changes_saturated = false;
@@ -398,6 +430,39 @@ async fn decisions_page(
                     }
                     Err(_) => load_error = true,
                 }
+            }
+        }
+        if let Some(store) = state
+            .servers
+            .catalog
+            .get()
+            .and_then(|catalog| catalog.pending_invocations())
+        {
+            match store.pending(&tenant).await {
+                Ok(rows) => {
+                    for row in rows {
+                        items.push(invocation_item(
+                            format!("{} · {} · {}", row.principal_sub, row.server, row.tool),
+                            crate::dashboard_invocation_requests::review_url(row.id),
+                            row.created_at,
+                        ));
+                    }
+                }
+                Err(_) => load_error = true,
+            }
+        }
+        if let Some(store) = state.hitl.codemode_executions.get() {
+            match store.list_waiting_approvals(&tenant, 50).await {
+                Ok(rows) => {
+                    for row in rows {
+                        items.push(invocation_item(
+                            format!("{} · Code Mode execution {}", row.principal_sub, row.id),
+                            format!("/invocation-requests?execution={}", row.id),
+                            row.submitted_at,
+                        ));
+                    }
+                }
+                Err(_) => load_error = true,
             }
         }
         // Newest first — consistent with the activity feed.

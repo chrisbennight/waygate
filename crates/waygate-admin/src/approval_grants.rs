@@ -501,7 +501,7 @@ async fn create_grant(
     Ok((StatusCode::CREATED, Json(GrantView::from(grant))))
 }
 
-fn codemode_request(
+pub(crate) fn codemode_request(
     execution: &waygate_codemode::Execution,
 ) -> ApiResult<(CodeModeApprovalRequestView, String)> {
     if execution.status != waygate_codemode::ExecutionStatus::WaitingForApproval
@@ -611,7 +611,7 @@ async fn list_codemode_approval_requests(
         (status = 403, description = "Bearer token lacks mcp:admin", body = ApiErrorBody),
     ),
 )]
-async fn approve_codemode_request(
+pub(crate) async fn approve_codemode_request(
     State(state): State<Arc<AdminState>>,
     principal: Option<Extension<Principal>>,
     Path(id): Path<Uuid>,
@@ -805,7 +805,7 @@ async fn approve_codemode_request(
         (status = 403, description = "Bearer token lacks mcp:admin", body = ApiErrorBody),
     ),
 )]
-async fn deny_codemode_request(
+pub(crate) async fn deny_codemode_request(
     State(state): State<Arc<AdminState>>,
     principal: Option<Extension<Principal>>,
     Path(id): Path<Uuid>,
@@ -819,6 +819,7 @@ async fn deny_codemode_request(
     // authority, so denial works without a digest — but when the caller names
     // the request it reviewed, a swapped request is surfaced instead of
     // silently denying a different one.
+    let mut expected_approval = None;
     if let Some(reviewed_digest) = body.request_digest.as_deref() {
         let execution = store
             .get(&tenant, id)
@@ -829,9 +830,18 @@ async fn deny_codemode_request(
             .ok_or(ApiError::NotFound("Code Mode approval request"))?;
         let (_, current_digest) = codemode_request(&execution)?;
         verify_reviewed_digest(reviewed_digest, &current_digest)?;
+        expected_approval = execution
+            .resume_context
+            .and_then(|context| context.get("approval").cloned());
     }
     let denied = store
-        .deny_waiting_approval(&tenant, id, approver, body.reason.as_deref())
+        .deny_waiting_approval(
+            &tenant,
+            id,
+            approver,
+            body.reason.as_deref(),
+            expected_approval.as_ref(),
+        )
         .await
         .map_err(|error| ApiError::Internal(format!("deny Code Mode approval request: {error}")))?;
     if !denied {

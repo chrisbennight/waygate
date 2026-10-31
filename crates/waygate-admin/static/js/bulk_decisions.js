@@ -35,7 +35,7 @@
                     button.disabled = selected.length === 0 || (button.hasAttribute("data-bulk-approve") && unavailable);
                 });
                 hint.textContent = unavailable
-                    ? "A selected definition is unavailable. The selection can only be kept blocked."
+                    ? (form.dataset.bulkUnavailableHint || "A selected definition is unavailable. The selection can only be kept blocked.")
                     : "Review the complete selection before confirmation.";
             }
             form.querySelector("[data-bulk-select-all-label]").hidden = false;
