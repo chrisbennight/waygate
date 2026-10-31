@@ -48,10 +48,12 @@ reviewed identities; changed or removed items require another review. While a
 submission is in progress, conflicting mutation controls are unavailable.
 
 The initial tool-review ceiling is fifty items, matching the existing listing
-size. The service must also bound the aggregate review content and reject a
-selection that cannot be reviewed within that budget. Other queues may need a
-smaller ceiling. A limit is a resource boundary, not a reason to truncate
-significant decision details.
+size. The complete selection also has a two-MiB review budget, measured as the
+combined UTF-8 bytes of the stored approved and observed contract definitions
+before escaping or diff rendering. A selection exceeding either limit is
+refused with guidance to select fewer items; significant decision details are
+never truncated to fit. Other queues retain their existing aggregate review
+bounds and may need a smaller item ceiling.
 
 For example, selecting several tool replacements shows their server and tool
 names, changed-field summaries, flags, and complete stored comparisons. A
