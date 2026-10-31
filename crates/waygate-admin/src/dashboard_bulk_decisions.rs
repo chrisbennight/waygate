@@ -383,7 +383,7 @@ impl DecisionOutcome {
             Self::ApprovalCompleted=>"Inspect the individual request and Activity before continuing execution. This submission will not replay the decision.",
             Self::ChangeExecuted=>"The captured administrative change took effect. Inspect its owning request for the execution receipt.",
             Self::ChangeFailed=>"Inspect the individual request, target, and Activity. A reported failure does not guarantee that no effect occurred; this submission will not replay it.",
-            Self::RequirementsNotMet=>"Use an eligible administrator session with the required fresh authentication evidence and satisfy the captured timing conditions.",
+            Self::RequirementsNotMet=>"Use an eligible administrator session with the required fresh authentication evidence and satisfy the captured timing conditions. Open current request state for the earliest approval time.",
             Self::KeptBlocked=>"The reviewed definition remains blocked.",
             Self::Rejected=>"The candidate was rejected. Any previously serving skill version retains its existing eligibility.",
             Self::AlreadyDecided=>"A completed decision already resolved this candidate. Inspect its current review before reconsidering it.",

@@ -74,6 +74,7 @@ struct StatePage {
     chrome: PageChrome,
     id: String,
     status: &'static str,
+    approval_after: Option<String>,
     context: Vec<Segment>,
     outcome: Vec<Segment>,
     note: Option<&'static str>,
@@ -122,6 +123,13 @@ async fn current_state(
         status: row
             .effective_status(time::OffsetDateTime::now_utc())
             .as_db_str(),
+        approval_after: row
+            .cooldown_seconds
+            .and_then(|seconds| {
+                row.created_at
+                    .checked_add(time::Duration::seconds(i64::from(seconds)))
+            })
+            .map(waygate_core::fmt::format_ts_abs),
         context,
         outcome: review_diff::text_segments(&outcome),
         note,
@@ -394,6 +402,14 @@ pub(crate) async fn confirm(
                     .get(actor.tenant.as_str(), item.id)
                     .await;
                 match observed {
+                    Ok(Some(change))
+                        if digest(&change) == item.digest
+                            && change.effective_status(time::OffsetDateTime::now_utc())
+                                == ChangeRequestStatus::Pending
+                            && matches!(error, ApiError::Conflict(_)) =>
+                    {
+                        DecisionOutcome::RequirementsNotMet
+                    }
                     Ok(Some(change))
                         if digest(&change) == item.digest
                             && matches!(

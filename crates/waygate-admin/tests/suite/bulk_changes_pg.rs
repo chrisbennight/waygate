@@ -281,7 +281,7 @@ async fn selected_changes_preserve_conditions_exact_intent_and_independent_execu
                 assert_eq!(current.status, ChangeRequestStatus::Failed);
                 "change_failed"
             }
-            "role" | "factor" => {
+            "role" | "factor" | "cooldown" => {
                 assert_eq!(current.status, ChangeRequestStatus::Pending);
                 "requirements_not_met"
             }
@@ -304,6 +304,17 @@ async fn selected_changes_preserve_conditions_exact_intent_and_independent_execu
                 .as_db_str()
         )));
         assert!(detail.contains(&row.id.to_string()));
+        if *scenario == "cooldown" {
+            assert!(changes
+                .list_approvers("default", row.id)
+                .await
+                .unwrap()
+                .is_empty());
+            assert!(detail.contains("Approval is available after"));
+            assert!(detail.contains(&waygate_core::fmt::format_ts_abs(
+                current.created_at + time::Duration::hours(1)
+            )));
+        }
     }
     let (_, results) = get(app.clone(), &location).await;
     assert!(results.contains("Approval recorded toward quorum"));

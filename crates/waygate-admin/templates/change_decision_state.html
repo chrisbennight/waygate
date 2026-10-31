@@ -3,6 +3,7 @@
 <header class="page-header"><h1 class="page-title">Administrative request state</h1></header>
 <p><a href="{{ self.chrome.nav_url("/changes") }}">Change requests</a> · <a href="{{ self.chrome.nav_url("/decisions/bulk") }}">Recent bulk decisions</a></p>
 <article class="card"><h2 class="card-title skills-source">Change {{ id }}</h2><p role="status">Current state: <strong>{{ status }}</strong></p>
+{% match approval_after %}{% when Some with (deadline) %}<p>Approval is available after {{ deadline }}, subject to the other captured conditions and request expiry.</p>{% when None %}{% endmatch %}
 <p>This is the current authoritative request state. Inspect Activity for approval and execution evidence. An executed state alone does not confirm that every required evidence record was written. Do not repeat an uncertain effect.</p>
 {% match note %}{% when Some with (message) %}<p class="callout callout--err" role="alert">{{ message }}</p>{% when None %}{% endmatch %}
 {% if !context.is_empty() %}<h3>Captured intent and approval conditions</h3><pre class="skills-content" tabindex="0" aria-label="Captured request">{% let segs = context %}{% include "_diff_segments.html" %}</pre>{% endif %}
