@@ -237,44 +237,69 @@ impl DefaultInvocationService {
                     tool = %ctx.tool,
                     "no HITL grant matched (or already consumed); refusing dispatch",
                 );
-                // Fan out the "needs approval" signal to
-                // subscribed operators (WebSocket / future notifiers).
-                // Best-effort — the denial path is unchanged regardless
-                // of whether anyone receives the event.
-                if let Some(notifier) = self.hitl_notifier.as_ref() {
-                    notifier.notify_approval_needed(waygate_invocation::HitlApprovalNeeded {
-                        summary: waygate_invocation::ApprovalSummary {
-                            description: ctx
-                                .tool_snapshot()
-                                .published_definition()
-                                .and_then(|tool| tool.description.as_deref())
-                                .map(str::to_owned),
-                            affected_fields: ctx
-                                .tool_snapshot()
-                                .input_schema()
-                                .and_then(|schema| schema.get("properties"))
-                                .and_then(serde_json::Value::as_object)
-                                .map(|fields| {
-                                    fields
-                                        .keys()
-                                        .filter(|name| {
-                                            ctx.arguments.as_ref().is_some_and(|arguments| {
-                                                arguments.contains_key(name.as_str())
-                                            })
+                let mut event = waygate_invocation::HitlApprovalNeeded {
+                    pending_request_id: None,
+                    summary: waygate_invocation::ApprovalSummary {
+                        description: ctx
+                            .tool_snapshot()
+                            .published_definition()
+                            .and_then(|tool| tool.description.as_deref())
+                            .map(str::to_owned),
+                        affected_fields: ctx
+                            .tool_snapshot()
+                            .input_schema()
+                            .and_then(|schema| schema.get("properties"))
+                            .and_then(serde_json::Value::as_object)
+                            .map(|fields| {
+                                fields
+                                    .keys()
+                                    .filter(|name| {
+                                        ctx.arguments.as_ref().is_some_and(|arguments| {
+                                            arguments.contains_key(name.as_str())
                                         })
-                                        .cloned()
-                                        .collect()
-                                })
-                                .unwrap_or_default(),
-                        },
-                        tenant_id: tenant.to_owned(),
-                        principal_sub: principal.sub.clone(),
-                        principal_issuer: principal.issuer.clone(),
-                        server: ctx.server.to_owned(),
-                        tool: ctx.tool.to_owned(),
-                        argument_hash: arg_hash.clone(),
-                        behavior_hash: tool_behavior_hash.to_owned(),
-                    });
+                                    })
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    },
+                    tenant_id: tenant.to_owned(),
+                    principal_sub: principal.sub.clone(),
+                    principal_issuer: principal.issuer.clone(),
+                    server: ctx.server.to_owned(),
+                    tool: ctx.tool.to_owned(),
+                    argument_hash: arg_hash.clone(),
+                    behavior_hash: tool_behavior_hash.to_owned(),
+                };
+                // Code Mode already retains its exact request in the execution
+                // journal. Direct calls retain only an approval reference and
+                // value-free context; neither path queues tool execution here.
+                if ctx.approval_binding.is_none() {
+                    if let Some(requests) = catalog_store.pending_invocations() {
+                        let request = waygate_catalog::pending_invocations::NewInvocationRequest {
+                            tenant: tenant.into(),
+                            principal_issuer: principal.issuer.clone(),
+                            principal_sub: principal.sub.clone(),
+                            tool_id,
+                            server: ctx.server.into(),
+                            tool: ctx.tool.into(),
+                            behavior_hash: tool_behavior_hash.into(),
+                            argument_hash: arg_hash.clone(),
+                            summary: waygate_catalog::pending_invocations::InvocationSummary {
+                                description: event.summary.description.clone(),
+                                affected_fields: event.summary.affected_fields.clone(),
+                            },
+                        };
+                        match requests.retain(&request).await {
+                                    Ok(id) => event.pending_request_id = Some(id),
+                                    Err(_) => tracing::warn!("Direct invocation was refused, but its approval request could not be retained"),
+                                }
+                    }
+                }
+                // Notification delivery never substitutes for authoritative
+                // pending state or changes the already-refused invocation.
+                if let Some(notifier) = self.hitl_notifier.as_ref() {
+                    notifier.notify_approval_needed(event);
                 }
                 Err(InvocationError::ApprovalRequired {
                     tool: fq,

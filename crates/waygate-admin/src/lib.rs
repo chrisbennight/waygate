@@ -75,6 +75,7 @@ pub mod dashboard_embeddings;
 pub mod dashboard_evidence;
 pub mod dashboard_federation;
 pub mod dashboard_groups;
+pub mod dashboard_invocation_requests;
 pub mod dashboard_llm_credentials;
 pub mod dashboard_llm_models;
 pub mod dashboard_oauth_consent;

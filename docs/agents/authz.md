@@ -145,6 +145,14 @@ stored values are behavior-and-argument binding digests. Approval-needed
 notifications carry the raw canonical argument digest and the reviewed
 `behavior_hash` so the admin endpoint can bind exactly what was reviewed.
 
+Direct calls without a matching grant also retain a bounded pending request in
+the PostgreSQL catalog. The administrator queue and notification link refer to
+that same request. Approval records a single-use grant and the decision together;
+it neither dispatches a tool nor relaxes the requester's next invocation checks.
+Argument values are not retained in the queue. See
+[pending invocation requests](../invocation-requests.md) for review, expiry,
+retention, and recovery.
+
 ## Built-in namespace governance (Tier 3 forbid-overlay)
 
 The gateway answers three of its **own** MCP namespaces locally rather

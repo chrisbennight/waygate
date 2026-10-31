@@ -929,10 +929,14 @@ pub struct ApprovalSummary {
 
 /// One operator-actionable HITL event the invocation pipeline hands to the
 /// notifier when an `ApprovalRequired` denial would be raised. The WebSocket
-/// representation adds timestamping and a TTL to this request binding and
-/// value-free review summary.
+/// representation adds timestamping and, when durable capture succeeds, a link
+/// to the retained direct-call request. The request store owns its deadline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HitlApprovalNeeded {
+    /// Authoritative retained direct-call request, when durable capture succeeds.
+    /// Code Mode requests use their execution journal instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_request_id: Option<uuid::Uuid>,
     /// Value-free review information from the admitted tool contract.
     #[serde(default)]
     pub summary: ApprovalSummary,

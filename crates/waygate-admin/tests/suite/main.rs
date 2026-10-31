@@ -33,6 +33,7 @@ mod codemode_executions_api;
 mod confidential_clients_api;
 mod dashboard_server_manifests;
 mod hitl_ws_integration;
+mod invocation_requests_pg;
 mod manifest_bundles_api;
 mod openapi_dump;
 mod openapi_spec;

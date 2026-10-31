@@ -1,0 +1,29 @@
+{% extends "layout.html" %}
+{% block main %}
+<header class="page-header"><h1 class="page-title">Pending invocation requests</h1></header>
+<p>Review individual calls that were refused because they require human approval. Approval permits one matching retry; it does not execute a tool or grant standing permission.</p>
+<p><a href="{{ self.chrome.nav_url("/invocation-requests") }}">Pending requests</a> · <a href="{{ self.chrome.nav_url("/approvals") }}">Issued grants</a> · <a href="{{ self.chrome.nav_url("/decisions") }}">Decisions</a></p>
+{% match note %}{% when Some with (message) %}<p class="callout" role="status">{{ message }}</p>{% when None %}{% endmatch %}
+{% if rows.is_empty() %}<div class="empty-state"><p class="empty-state__title">No pending direct invocation requests</p><p>Requests expire automatically. Code Mode requests are retained in their execution journal.</p></div>{% endif %}
+{% for row in rows %}<article class="card">
+<h2 class="card-title skills-source">{{ row.server }} · {{ row.tool }}</h2>
+<p class="skills-source">Requested by {{ row.requester }} · issuer {{ row.issuer }}</p>
+<p>Status: <strong>{{ row.status }}</strong> · Request expires {{ row.expires }}</p>
+{% match row.description %}{% when Some with (description) %}<p class="skills-source">{% let segs = description %}{% include "_diff_segments.html" %}</p>{% when None %}<p>No tool description is available.</p>{% endmatch %}
+{% if !row.fields.is_empty() %}<p class="skills-source">Submitted fields: {% for field in row.fields %}<code>{% let segs = field %}{% include "_diff_segments.html" %}</code>{% if !loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+{% if !row.context_available %}<p class="callout callout--err">Complete review context is unavailable here. Approval requires individual request evidence.</p>{% endif %}
+{% if detail %}
+<p class="skills-source">Reviewed behavior: <code>{{ row.behavior }}</code></p><p class="skills-source">Exact argument identity: <code>{{ row.arguments }}</code></p>
+<p>Argument values are not stored in this queue. Review the exact requested values and effects with the requester using a trusted channel before approving.</p>
+{% match row.grant %}{% when Some with (id) %}<p class="skills-source">Single-use grant: {{ id }}. Current grant lifecycle appears in Issued grants.</p>{% when None %}{% endmatch %}
+{% if row.can_deny %}<form method="post" action="{{ self.chrome.nav_url(row.decide_url) }}">
+<input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+<label class="form-field">Operator reason <input class="form-input" name="reason" required maxlength="4096"></label>
+<label class="effect-preview-ack"><input type="checkbox" name="reviewed" value="true" required> I reviewed this exact request and its effects</label>
+{% if row.can_approve %}<button class="btn btn-primary" type="submit" name="action" value="approve">Approve this invocation request</button>{% else %}<p>Approval is unavailable: an administrator cannot approve their own request, and complete review context is required.</p>{% endif %}
+<button class="btn btn-secondary" type="submit" name="action" value="deny">Deny this request</button>
+</form>{% endif %}
+{% else %}<p><a href="{{ self.chrome.nav_url(row.url) }}">Review this invocation request</a></p>{% endif %}
+</article>{% endfor %}
+{% if !detail && rows.len()==50 %}<p>The oldest pending requests are shown. Resolve this page to reveal later requests.</p>{% endif %}
+{% endblock %}
