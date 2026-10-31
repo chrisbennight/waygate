@@ -166,7 +166,10 @@ pub(crate) fn trigger(review: &waygate_catalog::tool_reviews::ToolReview) -> Str
 
 /// The summary of a change from one stored contract to another, when both
 /// were retained.
-fn summary(before: &serde_json::Value, after: &serde_json::Value) -> Option<ContractSummary> {
+pub(crate) fn summary(
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+) -> Option<ContractSummary> {
     (!before.is_null() && !after.is_null()).then(|| contract_summary::summarize(before, after))
 }
 

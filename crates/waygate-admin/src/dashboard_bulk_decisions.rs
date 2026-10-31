@@ -25,7 +25,7 @@ use crate::{
     auth::CsrfToken,
     bulk_tool_reviews,
     chrome::PageChrome,
-    contract_summary::{self, ContractSummary},
+    contract_summary::ContractSummary,
     dashboard::{csrf_matches, overview_break_glass_admin, render, user_display},
     dashboard_tool_reviews,
     error::ApiError,
@@ -552,12 +552,10 @@ async fn page(
                     (
                         sections,
                         note,
-                        (!review.approved_contract.is_null()).then(|| {
-                            contract_summary::summarize(
-                                &review.approved_contract,
-                                &review.observed_contract,
-                            )
-                        }),
+                        dashboard_tool_reviews::summary(
+                            &review.approved_contract,
+                            &review.observed_contract,
+                        ),
                         dashboard_tool_reviews::trigger(review),
                     )
                 }
