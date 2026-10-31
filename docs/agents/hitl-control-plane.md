@@ -130,6 +130,15 @@ Teleport's risk-tiered routing, expressed in the existing Cedar engine
 (`crates/waygate-authz/src/cedar.rs`, which already returns
 `StepUpRequired`).
 
+## Selected supported decisions
+
+The dashboard supports selected approval of independent `rate_limit.create`
+requests. Full intent review and per-request role, reviewer quorum, session
+factor, cooldown, expiry, and execution rules remain owned by the existing
+change service. Bulk receipt progress does not replace change-request state or
+permit replay of a started effect. See [bulk decisions](../bulk-decisions.md)
+for compatibility rules, excluded actions, and recovery.
+
 ## Captured approval requirement
 
 Two independent controls make up the approval boundary:

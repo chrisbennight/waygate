@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Change requests support selected approval of independent new rate-limit
+  policies. Full captured intent and individual approval conditions remain in
+  force; per-item results distinguish partial reviewer quorum from completed
+  approval, execution success, and failure. Privileged or dependent changes
+  retain individual review. No migration or dependency changes are required.
+
 - Pending invocation requests, including current direct-channel Code Mode calls,
   support selected approval or denial with complete review, operator reasons,
   and recoverable per-item results. Approval grants exact single-use permission

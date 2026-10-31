@@ -2,7 +2,7 @@
 
 Tool changes, Skills, and pending invocation requests support selected decisions.
 Decisions links to the owning review queues. This guide describes the shared
-experience; bulk administrative-change decisions are not yet available.
+experience, including selected approval of supported administrative changes.
 
 ## Purpose
 
@@ -23,7 +23,7 @@ decision rules.
 | Tool changes | Approve replacements; Keep blocked | Exact observed definitions, changed fields, flags, and any required initial classification. |
 | Skills | Approve; Reject | Exact candidate content, supporting files, and an operator reason. |
 | Pending invocation requests | Approve; Deny | Request effects, requester identity, reviewed tool behavior, and the particular request being authorized. |
-| Administrative changes | Approve selected supported changes | Captured intent, required effect previews, and every individual approval condition. |
+| Administrative changes | Approve independent rate-limit policy creations | Captured intent, required effect previews, and every individual approval condition. |
 
 The Decisions inbox groups selection by decision type. A selected tool review
 cannot select an administrative change or an active break-glass control.
@@ -83,6 +83,23 @@ request and execution at the owning store mutation, ends the waiting execution,
 and preserves completed prior effects. Issued grants remain separate lifecycle
 records.
 
+Administrative selections currently support `rate_limit.create` only. Select
+new policies with the same scope and action, and distinct scope targets. The
+review presents complete captured parameters, requester, justification, binding
+code, freshness witness, expiry, and frozen approval requirements. Each item
+retains its own eligible role, distinct-administrator quorum, fresh session
+factors, and proposal-age cooldown. Required approvals can remain pending toward
+a quorum; approval completion and execution success or failure are distinct
+outcomes. A single confirmation never counts as multiple administrators.
+
+The existing change service owns approval and executes the captured intent;
+the policy store's uniqueness constraint rejects a target created concurrently.
+Updates and deletions, policy/manifest publication, identity and secret changes,
+break-glass controls, mixed scope/action selections, and dependent operations
+remain on individual review. Their effects or freshness requirements need their
+own supported design before bulk approval can be offered. An unsupported or
+incompatible selection is refused before any selected effect.
+
 For example, selecting several tool replacements shows their server and tool
 names, changed-field summaries, flags, and complete stored comparisons. A
 missing baseline is identified explicitly. An unavailable observed definition
@@ -93,6 +110,13 @@ Confirmation says **Approve these selected tool replacements** and identifies
 the selection and its effect. Accepting a definition restores its eligibility
 under existing configuration and policy. Approving an invocation instead
 authorizes that particular request; it does not create standing permission.
+
+Administrative receipt links open the owning request directly, including
+pending, executing, and terminal states, independent of the bounded history
+page. A committed execution followed by an evidence error remains explicitly
+marked as requiring attention. Inspect the request and Activity before any
+further action; an executed status alone does not prove that required evidence
+was recorded.
 
 ## Decision boundaries
 

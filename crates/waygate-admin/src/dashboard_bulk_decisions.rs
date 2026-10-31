@@ -342,6 +342,11 @@ pub(crate) enum DecisionOutcome {
     Rejected,
     GrantIssued,
     InvocationDenied,
+    ApprovalRecorded,
+    ApprovalCompleted,
+    ChangeExecuted,
+    ChangeFailed,
+    RequirementsNotMet,
     AlreadyDecided,
     Changed,
     Unavailable,
@@ -357,6 +362,11 @@ impl DecisionOutcome {
             Self::Rejected => "Rejected",
             Self::GrantIssued => "Single-use grant issued",
             Self::InvocationDenied => "Invocation request denied",
+            Self::ApprovalRecorded => "Approval recorded toward quorum",
+            Self::ApprovalCompleted => "Approval completed; execution not confirmed",
+            Self::ChangeExecuted => "Approval completed; execution succeeded",
+            Self::ChangeFailed => "Execution reported failure",
+            Self::RequirementsNotMet => "Approval conditions not met",
             Self::AlreadyDecided => "Already decided",
             Self::Changed => "Changed since review",
             Self::Unavailable => "Unavailable",
@@ -369,6 +379,11 @@ impl DecisionOutcome {
             Self::Approved=>"Existing configuration and access policies still apply.",
             Self::GrantIssued=>"No execution was confirmed by this decision. The requester must retry only the reviewed call through the ordinary invocation boundary before the grant expires. Do not replay completed program effects.",
             Self::InvocationDenied=>"No permission was issued. A denied Code Mode execution cannot resume this request.",
+            Self::ApprovalRecorded=>"The request remains pending until enough distinct eligible administrators approve it. No execution was confirmed by this decision.",
+            Self::ApprovalCompleted=>"Inspect the individual request and Activity before continuing execution. This submission will not replay the decision.",
+            Self::ChangeExecuted=>"The captured administrative change took effect. Inspect its owning request for the execution receipt.",
+            Self::ChangeFailed=>"Inspect the individual request, target, and Activity. A reported failure does not guarantee that no effect occurred; this submission will not replay it.",
+            Self::RequirementsNotMet=>"Use an eligible administrator session with the required fresh authentication evidence and satisfy the captured timing conditions. Open current request state for the earliest approval time.",
             Self::KeptBlocked=>"The reviewed definition remains blocked.",
             Self::Rejected=>"The candidate was rejected. Any previously serving skill version retains its existing eligibility.",
             Self::AlreadyDecided=>"A completed decision already resolved this candidate. Inspect its current review before reconsidering it.",
@@ -521,6 +536,17 @@ async fn page(
         .ok_or(ApiError::NotFound(
             "Decision receipt expired or is unavailable",
         ))?;
+    if batch.request.kind == "change" {
+        return crate::dashboard_bulk_changes::page(
+            &state,
+            actor,
+            tenant.map(|Extension(t)| t),
+            token.map(|Extension(t)| t.0).unwrap_or_default(),
+            &headers,
+            batch,
+        )
+        .await;
+    }
     if batch.request.kind == "invocation" {
         return crate::dashboard_bulk_invocations::page(
             &state,
@@ -632,6 +658,7 @@ struct Confirmation {
 
 async fn confirm(
     State(state): State<Arc<AdminState>>,
+    session: Option<Extension<waygate_oidc::Session>>,
     user: Option<Extension<Principal>>,
     token: Option<Extension<CsrfToken>>,
     tenant: Option<Extension<TenantContext>>,
@@ -654,6 +681,19 @@ async fn confirm(
         .ok_or(ApiError::NotFound(
             "Decision receipt expired or is unavailable",
         ))?;
+    if batch.request.kind == "change" {
+        crate::dashboard_bulk_changes::confirm(
+            &state,
+            actor,
+            session.as_ref().map(|Extension(session)| session),
+            &batch,
+        )
+        .await?;
+        return Ok(Redirect::to(&tenant_ctx::nav_url(
+            tenant.as_ref().map(|Extension(t)| t),
+            &format!("/decisions/bulk/{id}"),
+        )));
+    }
     if batch.request.kind == "skill" {
         crate::dashboard_bulk_skills::confirm(&state, actor, &batch).await?;
         return Ok(Redirect::to(&tenant_ctx::nav_url(

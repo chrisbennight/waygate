@@ -10,6 +10,7 @@
     {% endif %}
 </header>
 <p><a href="{{ self.chrome.nav_url("/invocation-requests") }}">Review and select pending invocation requests</a></p>
+<p><a href="{{ self.chrome.nav_url("/changes") }}">Review and select supported administrative changes</a></p>
 {% if receipts_available %}<p><a href="{{ self.chrome.nav_url("/decisions/bulk") }}">Recent bulk decisions and interrupted submissions</a></p>{% endif %}
 
 {# The merged decisions queue: control surfaces that need an
