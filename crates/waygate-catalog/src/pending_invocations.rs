@@ -78,6 +78,9 @@ pub trait PendingInvocationStore: Send + Sync {
     async fn retain(&self, request: &NewInvocationRequest) -> Result<Uuid, RequestError>;
     async fn get(&self, tenant: &str, id: Uuid) -> Result<Option<InvocationRequest>, RequestError>;
     async fn pending(&self, tenant: &str) -> Result<Vec<InvocationRequest>, RequestError>;
+    async fn pending_count(&self, tenant: &str) -> Result<i64, RequestError> {
+        Ok(self.pending(tenant).await?.len() as i64)
+    }
     /// Decide once and, for approval, commit a single-use grant in the same
     /// transaction. A second decision cannot mint another usable grant.
     async fn decide(
@@ -179,6 +182,9 @@ impl PendingInvocationStore for PgPendingInvocationStore {
     async fn pending(&self, tenant: &str) -> Result<Vec<InvocationRequest>, RequestError> {
         sqlx::query(concat!(request_columns!()," WHERE r.tenant_id=$1 AND r.status='pending' AND r.expires_at>clock_timestamp() ORDER BY r.created_at,r.id LIMIT 50"))
             .bind(tenant).fetch_all(&self.pool).await?.into_iter().map(from_row).collect()
+    }
+    async fn pending_count(&self, tenant: &str) -> Result<i64, RequestError> {
+        Ok(sqlx::query_scalar("SELECT count(*) FROM (SELECT id FROM pending_invocation_requests WHERE tenant_id=$1 AND status='pending' AND expires_at>clock_timestamp() LIMIT 50) pending").bind(tenant).fetch_one(&self.pool).await?)
     }
     async fn decide(
         &self,

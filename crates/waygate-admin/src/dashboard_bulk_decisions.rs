@@ -340,6 +340,8 @@ pub(crate) enum DecisionOutcome {
     Approved,
     KeptBlocked,
     Rejected,
+    GrantIssued,
+    InvocationDenied,
     AlreadyDecided,
     Changed,
     Unavailable,
@@ -353,6 +355,8 @@ impl DecisionOutcome {
             Self::Approved => "Approved",
             Self::KeptBlocked => "Kept blocked",
             Self::Rejected => "Rejected",
+            Self::GrantIssued => "Single-use grant issued",
+            Self::InvocationDenied => "Invocation request denied",
             Self::AlreadyDecided => "Already decided",
             Self::Changed => "Changed since review",
             Self::Unavailable => "Unavailable",
@@ -363,6 +367,8 @@ impl DecisionOutcome {
     fn guidance(&self) -> &'static str {
         match self {
             Self::Approved=>"Existing configuration and access policies still apply.",
+            Self::GrantIssued=>"No execution was confirmed by this decision. The requester must retry only the reviewed call through the ordinary invocation boundary before the grant expires. Do not replay completed program effects.",
+            Self::InvocationDenied=>"No permission was issued. A denied Code Mode execution cannot resume this request.",
             Self::KeptBlocked=>"The reviewed definition remains blocked.",
             Self::Rejected=>"The candidate was rejected. Any previously serving skill version retains its existing eligibility.",
             Self::AlreadyDecided=>"A completed decision already resolved this candidate. Inspect its current review before reconsidering it.",
@@ -515,6 +521,17 @@ async fn page(
         .ok_or(ApiError::NotFound(
             "Decision receipt expired or is unavailable",
         ))?;
+    if batch.request.kind == "invocation" {
+        return crate::dashboard_bulk_invocations::page(
+            &state,
+            actor,
+            tenant.map(|Extension(t)| t),
+            token.map(|Extension(t)| t.0).unwrap_or_default(),
+            &headers,
+            batch,
+        )
+        .await;
+    }
     if batch.request.kind == "skill" {
         return crate::dashboard_bulk_skills::page(
             &state,
@@ -639,6 +656,13 @@ async fn confirm(
         ))?;
     if batch.request.kind == "skill" {
         crate::dashboard_bulk_skills::confirm(&state, actor, &batch).await?;
+        return Ok(Redirect::to(&tenant_ctx::nav_url(
+            tenant.as_ref().map(|Extension(t)| t),
+            &format!("/decisions/bulk/{id}"),
+        )));
+    }
+    if batch.request.kind == "invocation" {
+        crate::dashboard_bulk_invocations::confirm(&state, actor, &batch).await?;
         return Ok(Redirect::to(&tenant_ctx::nav_url(
             tenant.as_ref().map(|Extension(t)| t),
             &format!("/decisions/bulk/{id}"),

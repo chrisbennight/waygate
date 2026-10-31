@@ -22,6 +22,13 @@ use waygate_core::store::StoreError;
 pub use store::{PgExecutionStore, SourceRetentionLimits};
 
 pub type SharedExecutionStore = Arc<dyn ExecutionStore>;
+/// Payload-free metadata for administrator selection. Complete captured
+/// approval context is loaded only for an explicit review.
+pub struct PendingApprovalSummary {
+    pub id: Uuid,
+    pub principal_sub: String,
+    pub submitted_at: OffsetDateTime,
+}
 pub type SharedSourceArtifactStore = Arc<dyn SourceArtifactStore>;
 /// Intrinsic live retained-source budgets. Operator quota may be stricter,
 /// but absence of a matching policy never removes these storage ceilings.
@@ -662,6 +669,31 @@ pub trait ExecutionStore: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    async fn count_waiting_approvals(
+        &self,
+        tenant_id: &str,
+        limit: u16,
+    ) -> Result<usize, StoreError> {
+        Ok(self.list_waiting_approvals(tenant_id, limit).await?.len())
+    }
+
+    async fn list_waiting_approval_summaries(
+        &self,
+        tenant_id: &str,
+        limit: u16,
+    ) -> Result<Vec<PendingApprovalSummary>, StoreError> {
+        Ok(self
+            .list_waiting_approvals(tenant_id, limit)
+            .await?
+            .into_iter()
+            .map(|row| PendingApprovalSummary {
+                id: row.id,
+                principal_sub: row.principal_sub,
+                submitted_at: row.submitted_at,
+            })
+            .collect())
+    }
+
     /// List the owner's in-flight Code Mode executions, newest submission
     /// first. Rows whose profile is [`TOOL_CALL_EXECUTION_PROFILE`] are not
     /// Code Mode programs and are never listed.
@@ -709,8 +741,9 @@ pub trait ExecutionStore: Send + Sync + 'static {
         id: Uuid,
         approver: &str,
         reason: Option<&str>,
+        expected_approval: Option<&Value>,
     ) -> Result<bool, StoreError> {
-        let _ = (tenant_id, id, approver, reason);
+        let _ = (tenant_id, id, approver, reason, expected_approval);
         Ok(false)
     }
 

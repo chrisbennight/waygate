@@ -1234,8 +1234,16 @@ async fn direct_approval_summary_uses_admitted_description_and_schema_fields_wit
     let result = service
         .invoke(
             Some(&principal("fixture-reader")),
+            // Current Code Mode nested calls use this same direct-channel
+            // request with hierarchy metadata and no legacy approval binding.
             InvocationRequest::new("example-messages", "send")
-                .with_arguments(Some(arguments.clone())),
+                .with_arguments(Some(arguments.clone()))
+                .with_hierarchy(waygate_core::InvocationHierarchy::new(
+                    Uuid::new_v4(),
+                    std::num::NonZeroU32::MIN,
+                    Uuid::new_v4(),
+                    std::num::NonZeroU32::MIN,
+                )),
         )
         .await;
     assert!(matches!(

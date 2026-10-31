@@ -422,11 +422,19 @@ impl ExecutionStore for GrantFakeExecutionStore {
         id: Uuid,
         approver: &str,
         reason: Option<&str>,
+        expected_approval: Option<&Value>,
     ) -> Result<bool, StoreError> {
         let mut execution = self.execution.lock().unwrap();
         if execution.tenant_id != tenant_id
             || execution.id != id
             || execution.status != ExecutionStatus::WaitingForApproval
+            || expected_approval.is_some_and(|expected| {
+                execution
+                    .resume_context
+                    .as_ref()
+                    .and_then(|value| value.get("approval"))
+                    != Some(expected)
+            })
         {
             return Ok(false);
         }

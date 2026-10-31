@@ -1,0 +1,18 @@
+{% extends "layout.html" %}
+{% block main %}
+<header class="page-header"><h1 class="page-title">{% if started %}Invocation decision results{% else %}Review selected invocation requests{% endif %}</h1></header>
+<p><a href="{{ self.chrome.nav_url("/invocation-requests") }}">Pending invocation requests</a> · <a href="{{ self.chrome.nav_url("/decisions/bulk") }}">Recent bulk decisions</a></p>
+<p>Approval issues single-use permission for the reviewed calls. It does not confirm execution or automatically resume a program. Denial issues no permission.</p>
+{% match note %}{% when Some with (message) %}<p class="callout callout--err" role="alert">{{ message }}</p>{% when None %}{% endmatch %}
+{% for item in items %}<article class="card">
+<h2 class="card-title skills-source">{{ item.title }}</h2><p><a href="{{ self.chrome.nav_url(item.url) }}">Open individual request and current state</a></p>
+{% if started %}<p role="status"><strong>{{ item.outcome }}</strong></p><p>{{ item.guidance }}</p>{% else %}
+<p>Operator reason: {{ item.reason }}</p><pre class="skills-content" tabindex="0" aria-label="Complete reviewed request">{% let segs = item.context %}{% include "_diff_segments.html" %}</pre>
+{% endif %}</article>{% endfor %}
+{% if confirmable %}<form class="card" method="post" action="{{ self.chrome.nav_url(confirm_url) }}">
+<input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+<p>Direct-call argument values are not stored. Review the exact values and effects with the requester through a trusted channel. Historical Code Mode waits may only be denied. For current Code Mode calls, retry only the reviewed call and avoid replaying prior effects.</p>
+<label class="effect-preview-ack"><input type="checkbox" name="reviewed" value="true" required> I reviewed every exact request and its effects</label>
+<button class="btn btn-primary" type="submit">{% if approving %}Approve these {{ items.len() }} invocation requests{% else %}Deny these {{ items.len() }} invocation requests{% endif %}</button>
+</form>{% endif %}
+{% endblock %}

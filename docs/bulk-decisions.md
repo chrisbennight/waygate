@@ -1,9 +1,8 @@
 # Bulk administrator decisions
 
-Tool changes, Skills, and their entries in Decisions support selected decisions.
-This guide describes that experience and the requirements for extending it to
-other queues. Bulk invocation and administrative-change decisions are not yet
-available.
+Tool changes, Skills, and pending invocation requests support selected decisions.
+Decisions links to the owning review queues. This guide describes the shared
+experience; bulk administrative-change decisions are not yet available.
 
 ## Purpose
 
@@ -23,7 +22,7 @@ decision rules.
 | --- | --- | --- |
 | Tool changes | Approve replacements; Keep blocked | Exact observed definitions, changed fields, flags, and any required initial classification. |
 | Skills | Approve; Reject | Exact candidate content, supporting files, and an operator reason. |
-| Pending invocation requests | Approve selected requests | Request effects, requester identity, reviewed tool behavior, and the particular request being authorized. |
+| Pending invocation requests | Approve; Deny | Request effects, requester identity, reviewed tool behavior, and the particular request being authorized. |
 | Administrative changes | Approve selected supported changes | Captured intent, required effect previews, and every individual approval condition. |
 
 The Decisions inbox groups selection by decision type. A selected tool review
@@ -65,6 +64,24 @@ Unavailable candidate source or files prevent approval from that review.
 An operator reason is required and retained for every selected decision.
 Rejecting candidates preserves any previously serving version; quarantine
 remains an individual operation.
+
+Invocation selections are limited to fifty requests and two MiB of complete
+serialized review context. Current Code Mode calls use the ordinary direct
+channel and the same per-call request queue as direct tool calls. Review includes
+value-free context, full requester identity, and exact behavior and argument
+identities; review argument values with the requester through a trusted channel.
+Approval permits only that matching call. It does not execute a tool, restart a
+program, or authorize replay of prior effects. The caller retries only the
+reviewed call through the ordinary invocation boundary.
+
+Historical `approval_bound_mutation` executions cannot continue on the current
+runtime. Their separate selection group offers reviewed denial only. The queue
+loads identifying metadata rather than complete request payloads. Individual
+and selected review load the full captured context within the review budget;
+oversized context is refused without truncation. Denial binds the exact durable
+request and execution at the owning store mutation, ends the waiting execution,
+and preserves completed prior effects. Issued grants remain separate lifecycle
+records.
 
 For example, selecting several tool replacements shows their server and tool
 names, changed-field summaries, flags, and complete stored comparisons. A
