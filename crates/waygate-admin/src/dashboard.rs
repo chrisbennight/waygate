@@ -631,6 +631,7 @@ fn page_routes(state: Arc<AdminState>) -> Router<()> {
         .merge(crate::dashboard_bulk_decisions::router())
         .merge(crate::dashboard_bulk_skills::router())
         .merge(crate::dashboard_bulk_invocations::router())
+        .merge(crate::dashboard_bulk_changes::router())
         .merge(crate::dashboard_invocation_requests::router())
         .merge(crate::dashboard_skills::router())
         .merge(crate::dashboard_tool_reviews::router())

@@ -1,0 +1,12 @@
+{% extends "layout.html" %}
+{% block main %}
+<header class="page-header"><h1 class="page-title">{% if started %}Administrative decision results{% else %}Review selected rate-limit policy creations{% endif %}</h1></header>
+<p><a href="{{ self.chrome.nav_url("/changes") }}">Change requests</a> · <a href="{{ self.chrome.nav_url("/decisions/bulk") }}">Recent bulk decisions</a></p>
+<p>Approval can execute each captured policy creation immediately. Each request retains its own role, reviewer quorum, authentication factors, cooldown, and expiry. A partial quorum records approval without executing.</p>
+{% match note %}{% when Some with (message) %}<p class="callout callout--err" role="alert">{{ message }}</p>{% when None %}{% endmatch %}
+{% for item in items %}<article class="card"><h2 class="card-title skills-source">Change {{ item.id }}</h2><p><a href="{{ self.chrome.nav_url(item.url) }}">Open individual request and current state</a></p>
+{% if started %}<p role="status"><strong>{{ item.outcome }}</strong></p><p>{{ item.guidance }}</p>{% else %}<p>Operator reason: {{ item.reason }}</p><pre class="skills-content" tabindex="0" aria-label="Complete captured administrative intent">{% let segs = item.context %}{% include "_diff_segments.html" %}</pre>{% endif %}</article>{% endfor %}
+{% if confirmable %}<form class="card" method="post" action="{{ self.chrome.nav_url(confirm_url) }}"><input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+<label class="effect-preview-ack"><input type="checkbox" name="reviewed" value="true" required> I reviewed every captured policy, its effects, binding code, and approval conditions</label>
+<button class="btn btn-primary" type="submit">Approve these {{ items.len() }} administrative changes</button></form>{% endif %}
+{% endblock %}

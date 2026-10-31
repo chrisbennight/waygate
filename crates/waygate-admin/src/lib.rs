@@ -63,6 +63,7 @@ pub mod dashboard_approvals;
 pub mod dashboard_blocked_tools;
 pub mod dashboard_break_glass;
 pub mod dashboard_builtins;
+pub mod dashboard_bulk_changes;
 pub mod dashboard_bulk_decisions;
 pub mod dashboard_bulk_invocations;
 pub mod dashboard_bulk_skills;

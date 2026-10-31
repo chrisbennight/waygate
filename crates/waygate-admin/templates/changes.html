@@ -63,6 +63,13 @@
 
 <section class="page-section" aria-label="Pending change requests">
     <h2 class="section-heading">Pending <span class="count">{{ pending.len() }}</span></h2>
+    {% if bulk_available %}<form id="bulk-changes" class="card bulk-actions" data-bulk-selection method="post" action="{{ self.chrome.nav_url("/decisions/bulk/changes/review") }}">
+    <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}"><h3 class="card-title">Selected rate-limit policy creations</h3>
+    <label data-bulk-select-all-label hidden><input type="checkbox" data-bulk-select-all> Select eligible changes on this page</label>
+    <span data-bulk-count role="status" aria-live="polite">Choose pending policy creations</span>
+    <label>Reason for these decisions <input class="form-input" name="reason" required maxlength="4096"></label>
+    <button class="btn btn-primary" type="submit" data-bulk-submit data-bulk-approve>Review and approve changes</button><button class="btn btn-secondary" type="button" data-bulk-clear hidden>Clear selection</button>
+    <p class="muted">Select independent new policies with the same scope and action and distinct targets. Other actions, updates, deletions, and privileged changes require individual review.</p><p class="muted" data-bulk-hint>Selecting changes does not approve or execute them.</p></form><script src="{{ self.chrome.asset_url("/admin/static/js/bulk_decisions.js") }}" defer></script>{% endif %}
     <div class="card card--table">
         {% if pending.is_empty() %}
             <div class="empty-state">
@@ -89,7 +96,7 @@
                 <tbody>
                     {% for c in pending %}
                     <tr id="change-{{ c.id }}">
-                        <td class="mono">{{ c.action_type }}</td>
+                        <td class="mono">{% if bulk_available %}{% match c.bulk_choice %}{% when Some with (choice) %}<label><input type="checkbox" name="selected" value="{{ choice }}" form="bulk-changes" data-bulk-item data-approvable="true"> Select {{ c.binding_code }}</label>{% when None %}{% endmatch %}{% endif %}{{ c.action_type }}</td>
                         <td>{{ c.requested_by }}</td>
                         <td class="cell-narrative">{{ c.justification }}</td>
                         <td><span class="binding-chip">{{ c.binding_code }}</span></td>

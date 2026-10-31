@@ -81,6 +81,7 @@ struct ChangesPage {
     /// non-admin SSO session can't read proposed-change detail by
     /// browsing instead of curling.
     insufficient_scope: bool,
+    bulk_available: bool,
     pending: Vec<ChangeRow>,
     pending_prev_rel: Option<String>,
     pending_next_rel: Option<String>,
@@ -99,6 +100,7 @@ struct ChangesPage {
 }
 
 struct ChangeRow {
+    bulk_choice: Option<String>,
     id: Uuid,
     /// Relative URLs for the per-row decision forms (rendered only on
     /// Pending rows). Precomputed because askama can't `format!` inline.
@@ -832,6 +834,10 @@ async fn changes_page(
     };
 
     let page = ChangesPage {
+        bulk_available: state.hitl.decision_batches.get().is_some()
+            && tenant_ctx
+                .as_ref()
+                .is_none_or(|ctx| ctx.slug == read_tenant),
         chrome: PageChrome::build(
             &state,
             "Change requests",
@@ -1393,7 +1399,9 @@ async fn load_changes(
                 .manifest
                 .as_ref()
                 .is_some_and(|preview| preview.blocked.is_some());
+        let bulk_choice = crate::dashboard_bulk_changes::choice(&c);
         let mut row = change_row(c, true);
+        row.bulk_choice = bulk_choice;
         row.policy_preview = previews.policy;
         row.manifest_preview = previews.manifest;
         row.effect_preview_acknowledgement_required = effect_preview_acknowledgement_required;
@@ -1542,6 +1550,7 @@ fn change_row(c: impl Into<ChangeRowSource>, pending: bool) -> ChangeRow {
         _ => None,
     };
     ChangeRow {
+        bulk_choice: None,
         approve_rel: format!("/changes/{}/approve", c.id),
         deny_rel: format!("/changes/{}/deny", c.id),
         id: c.id,
