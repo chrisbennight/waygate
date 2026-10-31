@@ -293,6 +293,10 @@ a row. Preserve these properties when changing the page:
 
 ## Review comparisons
 
+The [bulk decision design contract](../bulk-decisions.md) defines the intended
+selection, confirmation, accessibility, and recovery behavior for future bulk
+actions. Each queue must preserve its existing decision rules when adopting it.
+
 The tool change review page, each tool change event page, and the skill review
 page show changed text as a diff built by `review_diff`: each changed contract
 field, and a skill's changed metadata and selected file. Preserve these
