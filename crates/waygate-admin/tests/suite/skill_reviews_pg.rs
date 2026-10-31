@@ -21,13 +21,39 @@ impl SkillCatalogSource for Source {
     }
 }
 
+struct MutableResources(std::sync::Mutex<BTreeMap<String, Vec<u8>>>);
+#[async_trait::async_trait]
+impl waygate_skills::SkillResourceLoader for MutableResources {
+    async fn load(
+        &self,
+        descriptor: &SkillResourceDescriptor,
+    ) -> Result<Vec<u8>, waygate_skills::SkillResourceLoadError> {
+        self.0
+            .lock()
+            .unwrap()
+            .get(&descriptor.uri)
+            .cloned()
+            .ok_or_else(|| {
+                waygate_skills::SkillResourceLoadError::Unavailable(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "synthetic file unavailable",
+                )))
+            })
+    }
+}
+
 #[tokio::test]
 async fn bulk_skill_decisions_bind_complete_content_reason_and_partial_results() {
     use waygate_skills::review::{CandidateStatus, DecisionActor, ReviewDecision};
     let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
         return;
     };
-    for action in ["approve", "reject"] {
+    for scenario in ["approve", "reject", "unavailable"] {
+        let action = if scenario == "unavailable" {
+            "approve"
+        } else {
+            scenario
+        };
         let prefix = format!("bulk-{}", uuid::Uuid::new_v4());
         let mut skills = Vec::new();
         let mut resources = BTreeMap::new();
@@ -36,7 +62,7 @@ async fn bulk_skill_decisions_bind_complete_content_reason_and_partial_results()
             let uri = format!("skill://fixture/{name}/SKILL.md");
             let script = format!("skill://fixture/{name}/scripts/helper.js");
             let instructions=format!("---\nname: {name}\ndescription: Bulk fixture\n---\nReview {suffix} instructions.\n").into_bytes();
-            let code=b"// Supporting file must be reviewed as inert text.\n<script>untrusted()</script>\n".to_vec();
+            let code="// Supporting\u{200B} file must be reviewed as inert text.\n<script>untrusted()</script>\n".as_bytes().to_vec();
             let files = [
                 (
                     uri.clone(),
@@ -71,7 +97,12 @@ async fn bulk_skill_decisions_bind_complete_content_reason_and_partial_results()
                 resources: descriptors,
             });
         }
-        let snapshot = verify_in_memory_catalog(
+        let roots = skills
+            .iter()
+            .map(|skill| (skill.uri.clone(), resources[&skill.uri].clone()))
+            .collect();
+        let loader = Arc::new(MutableResources(std::sync::Mutex::new(resources)));
+        let snapshot = waygate_skills::verify_catalog_snapshot(
             CatalogSourceIdentity {
                 origin: "git+https://fixture.test/api/v1/team/skills".into(),
                 reference: "main".into(),
@@ -82,7 +113,8 @@ async fn bulk_skill_decisions_bind_complete_content_reason_and_partial_results()
                 schema_version: CATALOG_SCHEMA_VERSION,
                 skills,
             },
-            resources,
+            roots,
+            loader.clone(),
         )
         .unwrap();
         let store = Arc::new(PgSkillReviewStore::new(pool.clone()));
@@ -185,6 +217,8 @@ async fn bulk_skill_decisions_bind_complete_content_reason_and_partial_results()
                 || preview.contains("&lt;script&gt;untrusted()&lt;/script&gt;")
         );
         assert!(!preview.contains("<script>untrusted()</script>"));
+        assert!(preview.contains("U+200B"));
+        assert!(!preview.contains('\u{200B}'));
         assert_eq!(
             request(
                 app.clone(),
@@ -195,6 +229,20 @@ async fn bulk_skill_decisions_bind_complete_content_reason_and_partial_results()
             .0,
             StatusCode::BAD_REQUEST
         );
+        if scenario == "unavailable" {
+            let file = &pending[0]
+                .candidate
+                .skill()
+                .resources
+                .iter()
+                .find(|file| file.uri.ends_with("helper.js"))
+                .unwrap()
+                .uri;
+            loader.0.lock().unwrap().remove(file);
+            let (_, blocked) = request(app.clone(), &url, None).await;
+            assert!(blocked.contains("unavailable source content"));
+            assert!(!blocked.contains("Approve these 2 skill candidates"));
+        }
         store
             .decide(
                 &pending[1],
@@ -221,7 +269,9 @@ async fn bulk_skill_decisions_bind_complete_content_reason_and_partial_results()
         );
         assert_eq!(first.unwrap().status(), StatusCode::SEE_OTHER);
         assert_eq!(retry.unwrap().status(), StatusCode::SEE_OTHER);
-        let expected = if action == "approve" {
+        let expected = if scenario == "unavailable" {
+            CandidateStatus::Pending
+        } else if action == "approve" {
             CandidateStatus::Approved
         } else {
             CandidateStatus::Rejected
@@ -244,15 +294,19 @@ async fn bulk_skill_decisions_bind_complete_content_reason_and_partial_results()
             .unwrap();
         assert_eq!(
             history.len(),
-            1,
+            if scenario == "unavailable" { 0 } else { 1 },
             "confirmation retries cannot duplicate skill decisions"
         );
-        assert_eq!(history[0].reason, "Reviewed supporting files");
+        if let Some(entry) = history.first() {
+            assert_eq!(entry.reason, "Reviewed supporting files");
+        }
         let outcomes:Vec<String>=sqlx::query_scalar("SELECT result->>'outcome' FROM admin_decision_batch_items WHERE batch_id=$1 ORDER BY item_index").bind(id).fetch_all(&pool).await.unwrap();
         assert_eq!(
             outcomes,
             vec![
-                if action == "approve" {
+                if scenario == "unavailable" {
+                    "unavailable"
+                } else if action == "approve" {
                     "approved"
                 } else {
                     "rejected"

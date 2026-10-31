@@ -11,9 +11,9 @@
 <p><a href="{{ self.chrome.nav_url(item.url) }}">Open individual content comparison and history</a></p>
 {% if started %}<p role="status"><strong>{{ item.outcome }}</strong></p><p>{{ item.guidance }}</p>{% else %}
 <p class="skills-source">{{ item.source }}</p><p>Operator reason: {{ item.reason }}</p>
-<h3>Candidate metadata</h3><pre class="skills-content" tabindex="0" aria-label="Candidate metadata">{{ item.metadata }}</pre>
+<h3>Candidate metadata</h3><pre class="skills-content" tabindex="0" aria-label="Candidate metadata">{% let segs = item.metadata %}{% include "_diff_segments.html" %}</pre>
 {% for file in item.files %}<section><h3 class="skills-source">{{ file.path }}</h3><p class="skills-source">{{ file.media }} · {{ file.size }} bytes · <code>{{ file.object }}</code></p>
-{% match file.text %}{% when Some with (text) %}<pre class="skills-content" tabindex="0" aria-label="{{ file.path }}">{{ text }}</pre>{% when None %}{% endmatch %}
+{% match file.text %}{% when Some with (text) %}<pre class="skills-content" tabindex="0" aria-label="{{ file.path }}">{% let segs = text %}{% include "_diff_segments.html" %}</pre>{% when None %}{% endmatch %}
 {% match file.note %}{% when Some with (message) %}<p class="diff-note">{{ message }}</p>{% when None %}{% endmatch %}
 </section>{% endfor %}
 {% endif %}

@@ -816,7 +816,10 @@ async fn bulk_decision_workflow(
             .unwrap()
     };
     let store = state.servers.tool_reviews.require().unwrap();
-    for (phase, action) in ["approve", "reject", "approve"].into_iter().enumerate() {
+    for (phase, action) in ["approve", "reject", "approve", "approve"]
+        .into_iter()
+        .enumerate()
+    {
         upstream.0.write().unwrap().description =
             Some(format!("Reviewed search replacement {phase}").into());
         upstream.1.write().unwrap().as_mut().unwrap().description =
@@ -1015,6 +1018,12 @@ async fn bulk_decision_workflow(
             upstream.0.write().unwrap().description =
                 Some("An unseen replacement after review".into());
         }
+        if phase == 3 {
+            // This workflow owns its disposable database. Refuse only the
+            // required search-decision event after catalog acceptance commits.
+            sqlx::query("ALTER TABLE audit_log ADD CONSTRAINT bulk_test_audit_failure CHECK(action<>'tool_contract.approve' OR position(' tool=search ' in coalesce(reason,''))=0) NOT VALID")
+                .execute(db).await.unwrap();
+        }
         let confirmation = vec![
             ("csrf".into(), "dev-csrf".into()),
             ("reviewed".into(), "true".into()),
@@ -1040,7 +1049,8 @@ async fn bulk_decision_workflow(
             match phase {
                 0 => vec!["approved", "approved"],
                 1 => vec!["kept_blocked", "kept_blocked"],
-                _ => vec!["changed", "approved"],
+                2 => vec!["changed", "approved"],
+                _ => vec!["applied_evidence_attention", "approved"],
             }
         );
         let evidence: i64 =
@@ -1056,7 +1066,7 @@ async fn bulk_decision_workflow(
                 .unwrap();
         assert_eq!(
             evidence,
-            if phase == 2 { 1 } else { 2 },
+            if phase >= 2 { 1 } else { 2 },
             "retries do not duplicate per-item evidence"
         );
         let results = app
@@ -1069,6 +1079,15 @@ async fn bulk_decision_workflow(
         assert!(std::str::from_utf8(&results)
             .unwrap()
             .contains("Bulk tool decision results"));
+        if phase == 3 {
+            assert!(std::str::from_utf8(&results)
+                .unwrap()
+                .contains("Applied; evidence needs attention"));
+            sqlx::query("ALTER TABLE audit_log DROP CONSTRAINT bulk_test_audit_failure")
+                .execute(db)
+                .await
+                .unwrap();
+        }
         if let Some(Ok((set, _))) = state.read_manifest_set_from_disk() {
             if phase == 0 {
                 for review in store.blocked_after("default", None, true).await.unwrap() {
@@ -1081,7 +1100,7 @@ async fn bulk_decision_workflow(
             }
             state.upstreams.reload_manifests(&set).await;
         }
-        if phase == 0 {
+        if matches!(phase, 0 | 3) {
             for tool in ["search", "sibling"] {
                 assert!(matches!(
                     state

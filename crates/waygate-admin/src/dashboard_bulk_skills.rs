@@ -22,6 +22,7 @@ use crate::{
     dashboard::{render, user_display},
     dashboard_bulk_decisions::{self as batches, DecisionOutcome},
     error::ApiError,
+    review_diff::{self, Segment},
     skill_reviews::{self, SkillDecisionParams},
     state::AdminState,
     tenant_ctx::{self, TenantContext},
@@ -186,13 +187,14 @@ struct FileView {
     media: String,
     object: String,
     size: u64,
-    text: Option<String>,
+    text: Option<Vec<Segment>>,
     note: Option<&'static str>,
+    unavailable: bool,
 }
 struct SkillView {
     uri: String,
     url: String,
-    metadata: String,
+    metadata: Vec<Segment>,
     source: String,
     reason: String,
     files: Vec<FileView>,
@@ -209,6 +211,49 @@ struct ReviewPage {
     confirmable: bool,
     confirm_url: String,
     note: Option<String>,
+}
+
+async fn review_files(state: &AdminState, review: &SkillReview) -> Result<Vec<FileView>, ApiError> {
+    let snapshot = state
+        .hitl
+        .reviewed_skills
+        .require()?
+        .review_snapshot(&review.candidate)
+        .await
+        .ok();
+    let mut files = Vec::new();
+    for file in &review.candidate.skill().resources {
+        let mut row = FileView {
+            path: file.source_path.clone(),
+            media: file.media_type.clone(),
+            object: file.source_object.clone(),
+            size: file.size,
+            text: None,
+            note: None,
+            unavailable: false,
+        };
+        if let Some(snapshot) = &snapshot {
+            match snapshot.load_resource(&file.uri).await {
+                Ok(Some(resource)) => match std::str::from_utf8(&resource.bytes) {
+                    Ok(text) => row.text = Some(review_diff::text_segments(text)),
+                    Err(_) => row.note = Some(
+                        "Binary file: review its immutable object identity, size, and media type.",
+                    ),
+                },
+                _ => {
+                    row.unavailable = true;
+                    row.note =
+                        Some("Exact file unavailable. No replacement content was substituted.");
+                }
+            }
+        } else {
+            row.unavailable = true;
+            row.note =
+                Some("Exact source revision unavailable. No replacement content was substituted.");
+        }
+        files.push(row);
+    }
+    Ok(files)
 }
 
 pub(crate) async fn page(
@@ -241,7 +286,7 @@ pub(crate) async fn page(
         let mut view = SkillView {
             uri: selection.uri.clone(),
             url: crate::dashboard_skills::review_url(&selection.uri),
-            metadata: String::new(),
+            metadata: Vec::new(),
             source: String::new(),
             reason: selection.reason.clone(),
             files: Vec::new(),
@@ -249,50 +294,19 @@ pub(crate) async fn page(
             guidance,
         };
         if let Some(review) = rows.as_ref().and_then(|rows| rows.get(index)) {
-            view.metadata = serde_json::to_string_pretty(&review.candidate.skill().frontmatter)
-                .expect("metadata serializes");
+            view.metadata = review_diff::text_segments(
+                &serde_json::to_string_pretty(&review.candidate.skill().frontmatter)
+                    .expect("metadata serializes"),
+            );
             view.source = format!(
                 "{} · {} · {}",
                 review.candidate.source().origin,
                 review.candidate.source().reference,
                 review.candidate.source().resolved_digest
             );
-            let snapshot = state
-                .hitl
-                .reviewed_skills
-                .require()?
-                .review_snapshot(&review.candidate)
-                .await
-                .ok();
-            for file in &review.candidate.skill().resources {
-                let mut row = FileView {
-                    path: file.source_path.clone(),
-                    media: file.media_type.clone(),
-                    object: file.source_object.clone(),
-                    size: file.size,
-                    text: None,
-                    note: None,
-                };
-                let mut unavailable = false;
-                if let Some(snapshot) = &snapshot {
-                    match snapshot.load_resource(&file.uri).await {
-                        Ok(Some(resource)) => match std::str::from_utf8(&resource.bytes) {
-                            Ok(text) => row.text = Some(text.to_owned()),
-                            Err(_) => row.note = Some("Binary file: review its immutable object identity, size, and media type."),
-                        },
-                        _ => {
-                            unavailable = true;
-                            row.note = Some("Exact file unavailable. No replacement content was substituted.");
-                        }
-                    }
-                } else {
-                    unavailable = true;
-                    row.note = Some("Exact source revision unavailable. No replacement content was substituted.");
-                }
-                if approving && unavailable {
-                    note = Some("A selected candidate has unavailable source content. Use its individual review after restoring the exact revision.".into());
-                }
-                view.files.push(row);
+            view.files = review_files(state, review).await?;
+            if approving && view.files.iter().any(|file| file.unavailable) {
+                note = Some("A selected candidate has unavailable source content. Use its individual review after restoring the exact revision.".into());
             }
         }
         items.push(view);
@@ -339,7 +353,15 @@ pub(crate) async fn confirm(
             ReviewDecision::Reject
         };
         let result = async {
-            current(state, actor, item).await?;
+            let review = current(state, actor, item).await?;
+            if decision == ReviewDecision::Approve
+                && review_files(state, &review)
+                    .await?
+                    .iter()
+                    .any(|file| file.unavailable)
+            {
+                return Err(skill_reviews::unavailable_revision());
+            }
             let params = SkillDecisionParams {
                 skill_uri: item.uri.clone(),
                 generation: item.generation,

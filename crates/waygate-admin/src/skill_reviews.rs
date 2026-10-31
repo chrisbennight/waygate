@@ -116,6 +116,12 @@ pub(crate) async fn current_review(
         ))
 }
 
+pub(crate) fn unavailable_revision() -> ApiError {
+    ApiError::ServiceUnavailable(
+        "The exact candidate revision is unavailable; approval was not recorded",
+    )
+}
+
 pub(crate) async fn decide_core(
     state: &AdminState,
     tenant: &str,
@@ -151,11 +157,7 @@ pub(crate) async fn decide_for_batch(
         reviewed
             .review_snapshot(&review.candidate)
             .await
-            .map_err(|_| {
-                ApiError::ServiceUnavailable(
-                    "The exact candidate revision is unavailable; approval was not recorded",
-                )
-            })?;
+            .map_err(|_| unavailable_revision())?;
     }
     let decided = reviewed
         .store()
