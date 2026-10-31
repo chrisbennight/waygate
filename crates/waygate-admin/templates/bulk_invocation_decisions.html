@@ -11,7 +11,7 @@
 {% endif %}</article>{% endfor %}
 {% if confirmable %}<form class="card" method="post" action="{{ self.chrome.nav_url(confirm_url) }}">
 <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
-<p>Direct-call argument values are not stored. Review the exact values and effects with the requester through a trusted channel. Code Mode permission is limited to the displayed execution, source, and call.</p>
+<p>Direct-call argument values are not stored. Review the exact values and effects with the requester through a trusted channel. Historical Code Mode waits may only be denied. For current Code Mode calls, retry only the reviewed call and avoid replaying prior effects.</p>
 <label class="effect-preview-ack"><input type="checkbox" name="reviewed" value="true" required> I reviewed every exact request and its effects</label>
 <button class="btn btn-primary" type="submit">{% if approving %}Approve these {{ items.len() }} invocation requests{% else %}Deny these {{ items.len() }} invocation requests{% endif %}</button>
 </form>{% endif %}

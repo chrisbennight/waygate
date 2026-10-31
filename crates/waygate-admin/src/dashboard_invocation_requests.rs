@@ -218,31 +218,26 @@ async fn page(
     let mut codemode = Vec::new();
     if query.request.is_none() {
         if let Some(executions) = state.hitl.codemode_executions.get() {
-            let result = if let Some(id) = query.execution {
-                executions
-                    .get(actor.tenant.as_str(), id)
-                    .await
-                    .map(|row| row.into_iter().collect())
-            } else {
-                executions
-                    .list_waiting_approvals(actor.tenant.as_str(), 50)
-                    .await
-            };
-            match result {
-                Ok(executions)=>for execution in executions {
-                    let id=execution.id;
-                    match crate::approval_grants::codemode_request(&execution) {
+            if let Some(id) = query.execution {
+                match executions.get(actor.tenant.as_str(),id).await {
+                    Ok(Some(execution))=>match crate::approval_grants::codemode_request(&execution) {
                         Ok((_,digest))=>{
                             let selected=crate::dashboard_bulk_invocations::SelectedInvocation::CodeMode{id,digest:digest.clone()};
                             match crate::dashboard_bulk_invocations::view(&state,actor,&selected,false).await {
-                                Ok(row)=>codemode.push(CodeModeRow{choice:crate::dashboard_bulk_invocations::codemode_choice(id,digest),title:row.title,url:row.url,context:row.context,can_approve:row.can_approve}),
+                                Ok(row)=>codemode.push(CodeModeRow{choice:crate::dashboard_bulk_invocations::codemode_choice(id,digest),title:row.title,url:row.url,context:row.context,can_approve:false}),
                                 Err(error)=>note=Some(error.detail()),
                             }
                         },
-                        Err(_)=>note=Some(format!("Code Mode execution {id} is no longer awaiting a decision. Current state: {:?}. Inspect its execution history and issued grants before further action.",execution.status)),
-                    }
-                },
-                Err(_)=>note=Some("Code Mode invocation requests could not be loaded. The queue may be incomplete.".into()),
+                        Err(_)=>note=Some(format!("Code Mode execution {id} is no longer awaiting a decision. Current state: {:?}. Inspect its execution history before further action.",execution.status)),
+                    },
+                    Ok(None)=>note=Some("Code Mode request is unavailable or expired.".into()),
+                    Err(_)=>note=Some("Code Mode request could not be loaded.".into()),
+                }
+            } else {
+                match executions.list_waiting_approval_summaries(actor.tenant.as_str(),50).await {
+                    Ok(rows)=>for row in rows {codemode.push(CodeModeRow{choice:crate::dashboard_bulk_invocations::codemode_choice(row.id,String::new()),title:format!("{} · execution {}",row.principal_sub,row.id),url:format!("/invocation-requests?execution={}",row.id),context:Vec::new(),can_approve:false});},
+                    Err(_)=>note=Some("Historical Code Mode requests could not be loaded. The queue may be incomplete.".into()),
+                }
             }
         }
     }

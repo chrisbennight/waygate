@@ -85,7 +85,6 @@ pub(crate) struct RequestView {
     pub title: String,
     pub url: String,
     pub context: Vec<Segment>,
-    pub can_approve: bool,
     bytes: usize,
 }
 pub(crate) async fn view(
@@ -117,6 +116,9 @@ pub(crate) async fn view(
             )
         }
         SelectedInvocation::CodeMode { id, digest } => {
+            if approving {
+                return Err(ApiError::Conflict("Historical Code Mode approval waits cannot continue on this runtime. They may be denied; current Code Mode calls use the ordinary per-call request queue.".into()));
+            }
             let execution = state
                 .hitl
                 .codemode_executions
@@ -125,15 +127,20 @@ pub(crate) async fn view(
                 .await
                 .map_err(|_| ApiError::Internal("Code Mode request read failed".into()))?
                 .ok_or(ApiError::NotFound("Code Mode request"))?;
+            if serde_json::to_vec(&execution.resume_context)
+                .map(|value| value.len())
+                .unwrap_or(usize::MAX)
+                > 2 * 1024 * 1024
+            {
+                return Err(ApiError::PayloadTooLarge("Complete request context exceeds two MiB. Use the existing individual request API; no review context was truncated.".into()));
+            }
             let (request, current) = approval_grants::codemode_request(&execution)?;
             if &current != digest || execution.retention_until <= time::OffsetDateTime::now_utc() {
                 return Err(ApiError::Conflict(
                     "The Code Mode request changed or expired".into(),
                 ));
             }
-            let can_approve = execution.principal_issuer.as_ref().is_some_and(|issuer| {
-                issuer != &actor.issuer || execution.principal_sub != actor.sub
-            });
+            let can_approve = false;
             let context=serde_json::to_string_pretty(&serde_json::json!({"execution":id,"requester":{"issuer":execution.principal_issuer,"subject":execution.principal_sub},"retained_until":execution.retention_until.to_string(),"request_digest":digest,"reviewed_request":request})).expect("request context serializes");
             (
                 format!("{} · {}", request.connector, request.operation),
@@ -151,7 +158,6 @@ pub(crate) async fn view(
         url,
         bytes: context.len(),
         context: review_diff::text_segments(&context),
-        can_approve,
     })
 }
 async fn reviews(
@@ -216,6 +222,21 @@ async fn prepare(
                 .map_err(|_| ApiError::BadRequest("Invalid invocation selection".into()))?,
             reason: reason.into(),
         });
+    }
+    for item in &mut selected {
+        if let SelectedInvocation::CodeMode { id, digest } = &mut item.request {
+            if digest.is_empty() {
+                let execution = state
+                    .hitl
+                    .codemode_executions
+                    .require()?
+                    .get(actor.tenant.as_str(), *id)
+                    .await
+                    .map_err(|_| ApiError::Internal("Code Mode request read failed".into()))?
+                    .ok_or(ApiError::NotFound("Code Mode request"))?;
+                *digest = approval_grants::codemode_request(&execution)?.1;
+            }
+        }
     }
     reviews(&state, actor, &selected, action == "approve").await?;
     let request = BatchRequest {
@@ -343,7 +364,6 @@ pub(crate) async fn confirm(
         batches::begin(receipts.as_ref(), batches::owner(actor), batch.id, index).await?;
         let result = async {
             view(state, actor, &item.request, approving).await?;
-            let mut already_issued = false;
             match &item.request {
                 SelectedInvocation::Direct { id } => {
                     direct::decide_core(state, actor, *id, approving, &item.reason, Some(batch.id))
@@ -355,24 +375,13 @@ pub(crate) async fn confirm(
                         request_digest: Some(digest.clone()),
                         ..Default::default()
                     };
-                    if approving {
-                        let (_, Json(grant)) = approval_grants::approve_codemode_request(
-                            State(state.clone()),
-                            Some(Extension(actor.clone())),
-                            Path(*id),
-                            Json(body),
-                        )
-                        .await?;
-                        already_issued = grant.consumed_at.is_some();
-                    } else {
-                        approval_grants::deny_codemode_request(
-                            State(state.clone()),
-                            Some(Extension(actor.clone())),
-                            Path(*id),
-                            Json(body),
-                        )
-                        .await?;
-                    }
+                    approval_grants::deny_codemode_request(
+                        State(state.clone()),
+                        Some(Extension(actor.clone())),
+                        Path(*id),
+                        Json(body),
+                    )
+                    .await?;
                     crate::admin_mutation::record_admin_mutation(
                         state,
                         "Code Mode invocation requests",
@@ -389,14 +398,12 @@ pub(crate) async fn confirm(
                     .await?;
                 }
             }
-            Ok::<_, ApiError>(already_issued)
+            Ok::<_, ApiError>(())
         }
         .await;
         let observed = match result {
-            Ok(already_issued) => {
-                if already_issued {
-                    DecisionOutcome::AlreadyDecided
-                } else if approving {
+            Ok(()) => {
+                if approving {
                     DecisionOutcome::GrantIssued
                 } else {
                     DecisionOutcome::InvocationDenied

@@ -2,11 +2,12 @@
 
 ## Unreleased
 
-- Pending direct and Code Mode invocation requests support selected approval or
-  denial with complete review, operator reasons, and recoverable per-item
-  results. Approval grants exact single-use permission without running tools or
-  resuming programs. Overlapping Code Mode approvals share the existing call
-  grant, and reviewed denials refuse a changed request at the owning store.
+- Pending invocation requests, including current direct-channel Code Mode calls,
+  support selected approval or denial with complete review, operator reasons,
+  and recoverable per-item results. Approval grants exact single-use permission
+  without running tools or restarting programs. Historical approval-bound Code
+  Mode waits offer reviewed denial only. Their listing reads metadata, and full
+  reviewed denials refuse a changed request at the owning store.
 
 - Direct invocations awaiting human approval have a durable administrator review
   queue when the PostgreSQL catalog is configured. Notifications link to retained

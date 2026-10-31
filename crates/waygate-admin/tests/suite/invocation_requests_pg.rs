@@ -220,6 +220,11 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
                         .unwrap()
                         .unwrap();
                     let approval = serde_json::json!({"connector":name,"operation":"write","argument_hash":format!("{action}-{suffix}"),"arguments_preview":{"payload":"[redacted]"},"description":"Reviewed one call","risk":"high","source_digest":digest,"call_id":Uuid::new_v4(),"step":1,"contract":{"authority":{"authority":"catalog","tool_id":tool_id,"catalog_schema_hash":draft.behavior_hash}},"prior_effects":1});
+                    let mut approval = approval;
+                    if action == "approve" && suffix == "first" {
+                        approval["arguments_preview"] =
+                            serde_json::json!({"oversized-marker":"x".repeat(2*1024*1024)});
+                    }
                     let request_digest = waygate_catalog::argument_hash(approval.as_object());
                     executions
                         .transition(
@@ -244,7 +249,7 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
                         .unwrap()
                         .unwrap();
                     selected.push(
-                        serde_json::json!({"source":"code_mode","id":id,"digest":request_digest})
+                        serde_json::json!({"source":"code_mode","id":id,"digest":if action=="deny"{String::new()}else{request_digest}})
                             .to_string(),
                     );
                     id
@@ -260,6 +265,12 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
             } else {
                 "bulk-codemode-invocations"
             }));
+            if source == "code_mode" {
+                assert!(
+                    !list.contains("Complete Code Mode request"),
+                    "the initial listing carries no full request payloads"
+                );
+            }
             let (_, inbox) = get(app.clone(), "/t/default/decisions").await;
             assert!(inbox.contains(&ids[0].to_string()));
             let form = url::form_urlencoded::Serializer::new(String::new())
@@ -273,6 +284,20 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
                 .oneshot(post("/t/default/decisions/bulk/invocations/review", form))
                 .await
                 .unwrap();
+            if source == "code_mode" && action == "approve" {
+                assert_eq!(response.status(),StatusCode::CONFLICT,"historical programs have no supported continuation and must not receive new permission");
+                let count:i64=sqlx::query_scalar("SELECT count(*) FROM approval_grants WHERE tenant_id='default' AND execution_id=ANY($1)").bind(&ids).fetch_one(&pool).await.unwrap();
+                assert_eq!(count, 0);
+                let (status, detail) = get(
+                    app.clone(),
+                    &format!("/t/default/invocation-requests?execution={}", ids[0]),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                assert!(detail.contains("exceeds two MiB"));
+                assert!(!detail.contains("oversized-marker"));
+                continue;
+            }
             assert_eq!(response.status(), StatusCode::SEE_OTHER);
             let location = response.headers()["location"]
                 .to_str()
