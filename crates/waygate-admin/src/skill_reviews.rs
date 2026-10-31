@@ -116,12 +116,29 @@ pub(crate) async fn current_review(
         ))
 }
 
+pub(crate) fn unavailable_revision() -> ApiError {
+    ApiError::ServiceUnavailable(
+        "The exact candidate revision is unavailable; approval was not recorded",
+    )
+}
+
 pub(crate) async fn decide_core(
     state: &AdminState,
     tenant: &str,
     actor: &Principal,
     params: &SkillDecisionParams,
     decision: ReviewDecision,
+) -> Result<SkillReview, ApiError> {
+    decide_for_batch(state, tenant, actor, params, decision, None).await
+}
+
+pub(crate) async fn decide_for_batch(
+    state: &AdminState,
+    tenant: &str,
+    actor: &Principal,
+    params: &SkillDecisionParams,
+    decision: ReviewDecision,
+    batch_id: Option<uuid::Uuid>,
 ) -> Result<SkillReview, ApiError> {
     if actor.tenant.as_str() != tenant || !crate::dashboard::overview_break_glass_admin(Some(actor))
     {
@@ -140,11 +157,7 @@ pub(crate) async fn decide_core(
         reviewed
             .review_snapshot(&review.candidate)
             .await
-            .map_err(|_| {
-                ApiError::ServiceUnavailable(
-                    "The exact candidate revision is unavailable; approval was not recorded",
-                )
-            })?;
+            .map_err(|_| unavailable_revision())?;
     }
     let decided = reviewed
         .store()
@@ -175,10 +188,13 @@ pub(crate) async fn decide_core(
         Some(actor),
         action,
         format!(
-            "skill={} content={} generation={}",
+            "skill={} content={} generation={}{}",
             decided.skill_uri,
             decided.candidate.content_digest(),
-            decided.generation
+            decided.generation,
+            batch_id
+                .map(|id| format!(" batch={id}"))
+                .unwrap_or_default()
         ),
     )
     .await?;

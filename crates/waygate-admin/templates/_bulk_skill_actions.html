@@ -1,0 +1,13 @@
+<form id="bulk-skills" class="card bulk-actions" data-bulk-selection method="post" action="{{ self.chrome.nav_url("/decisions/bulk/skills/review") }}">
+<input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+<h2 class="card-title">Selected skill candidates</h2>
+<label data-bulk-select-all-label hidden><input type="checkbox" data-bulk-select-all> Select eligible skills on this page</label>
+<span data-bulk-count role="status" aria-live="polite">Choose pending skill reviews</span>
+<label>Reason for these skill decisions <input class="form-input" name="reason" required maxlength="4096"></label>
+<button class="btn btn-primary" type="submit" name="action" value="approve" data-bulk-submit data-bulk-approve>Review and approve skills</button>
+<button class="btn btn-secondary" type="submit" name="action" value="reject" data-bulk-submit>Review and reject candidates</button>
+<button class="btn btn-secondary" type="button" data-bulk-clear hidden>Clear selection</button>
+<p class="muted">Select up to ten skills. Review their exact content and supporting files before confirmation.</p>
+<p class="muted" data-bulk-hint>Selecting candidates does not approve them.</p>
+</form>
+<script src="{{ self.chrome.asset_url("/admin/static/js/bulk_decisions.js") }}" defer></script>

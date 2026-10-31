@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Skills and Decisions support selected approval or rejection of pending skill
+  candidates, with complete supporting-file review, required operator reasons,
+  and recoverable item outcomes. Distribution decisions retain exact content
+  identity and do not grant tool or script execution permission.
+
 - Administrators can select pending tool definitions on Tool changes or
   Decisions, review their complete comparisons, and approve replacements or
   keep them blocked together. Initial approvals require individual gateway

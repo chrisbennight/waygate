@@ -603,6 +603,7 @@ fn page_routes(state: Arc<AdminState>) -> Router<()> {
         // change-request / break-glass mutation cores.
         .merge(crate::dashboard_decisions::router())
         .merge(crate::dashboard_bulk_decisions::router())
+        .merge(crate::dashboard_bulk_skills::router())
         .merge(crate::dashboard_skills::router())
         .merge(crate::dashboard_tool_reviews::router())
         // The Decision Log — server-rendered audit-decision

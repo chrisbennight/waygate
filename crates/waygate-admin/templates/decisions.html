@@ -70,6 +70,7 @@
 {% else if !items.is_empty() %}
 <section class="page-section" aria-label="Pending decisions">
     {% if bulk_tools_available %}{% include "_bulk_tool_actions.html" %}{% endif %}
+    {% if bulk_skills_available %}{% include "_bulk_skill_actions.html" %}{% endif %}
     <div class="card card--table">
         <ul class="attn-list">
             {% for i in items %}
@@ -78,6 +79,7 @@
                 <div class="attn-item__main">
                     <div class="attn-label mono">{{ i.summary }}</div>
                     {% if bulk_tools_available %}{% match i.tool_choice %}{% when Some with (choice) %}{% let selection_name = i.summary %}{% include "_bulk_tool_choice.html" %}{% when None %}{% endmatch %}{% endif %}
+                    {% if bulk_skills_available %}{% match i.skill_choice %}{% when Some with (choice) %}{% let selection_name = i.summary %}{% include "_bulk_skill_choice.html" %}{% when None %}{% endmatch %}{% endif %}
                     <div class="attn-hint">
                         <code>{{ i.handle }}</code> ·
                         <span title="{{ i.age_abs }}">{{ i.age_rel }}</span>

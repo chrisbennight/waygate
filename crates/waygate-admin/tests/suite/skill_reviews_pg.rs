@@ -21,6 +21,305 @@ impl SkillCatalogSource for Source {
     }
 }
 
+struct MutableResources(std::sync::Mutex<BTreeMap<String, Vec<u8>>>);
+#[async_trait::async_trait]
+impl waygate_skills::SkillResourceLoader for MutableResources {
+    async fn load(
+        &self,
+        descriptor: &SkillResourceDescriptor,
+    ) -> Result<Vec<u8>, waygate_skills::SkillResourceLoadError> {
+        self.0
+            .lock()
+            .unwrap()
+            .get(&descriptor.uri)
+            .cloned()
+            .ok_or_else(|| {
+                waygate_skills::SkillResourceLoadError::Unavailable(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "synthetic file unavailable",
+                )))
+            })
+    }
+}
+
+#[tokio::test]
+async fn bulk_skill_decisions_bind_complete_content_reason_and_partial_results() {
+    use waygate_skills::review::{CandidateStatus, DecisionActor, ReviewDecision};
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    for scenario in ["approve", "reject", "unavailable"] {
+        let action = if scenario == "unavailable" {
+            "approve"
+        } else {
+            scenario
+        };
+        let prefix = format!("bulk-{}", uuid::Uuid::new_v4());
+        let mut skills = Vec::new();
+        let mut resources = BTreeMap::new();
+        for suffix in ["first", "second"] {
+            let name = format!("{prefix}-{suffix}");
+            let uri = format!("skill://fixture/{name}/SKILL.md");
+            let script = format!("skill://fixture/{name}/scripts/helper.js");
+            let instructions=format!("---\nname: {name}\ndescription: Bulk fixture\n---\nReview {suffix} instructions.\n").into_bytes();
+            let code="// Supporting\u{200B} file must be reviewed as inert text.\n<script>untrusted()</script>\n".as_bytes().to_vec();
+            let files = [
+                (
+                    uri.clone(),
+                    format!("{name}/SKILL.md"),
+                    "text/markdown",
+                    instructions,
+                ),
+                (
+                    script,
+                    format!("{name}/scripts/helper.js"),
+                    "application/javascript",
+                    code,
+                ),
+            ];
+            let mut descriptors = Vec::new();
+            for (file, path, media, bytes) in files {
+                descriptors.push(SkillResourceDescriptor {
+                    uri: file.clone(),
+                    source_path: path,
+                    source_object: waygate_skills::sha256_digest(&bytes),
+                    size: bytes.len() as u64,
+                    media_type: media.into(),
+                });
+                resources.insert(file, bytes);
+            }
+            skills.push(CatalogSkill {
+                uri,
+                frontmatter: serde_json::from_value(
+                    serde_json::json!({"name":name,"description":"Bulk fixture"}),
+                )
+                .unwrap(),
+                resources: descriptors,
+            });
+        }
+        let roots = skills
+            .iter()
+            .map(|skill| (skill.uri.clone(), resources[&skill.uri].clone()))
+            .collect();
+        let loader = Arc::new(MutableResources(std::sync::Mutex::new(resources)));
+        let snapshot = waygate_skills::verify_catalog_snapshot(
+            CatalogSourceIdentity {
+                origin: "git+https://fixture.test/api/v1/team/skills".into(),
+                reference: "main".into(),
+                resolved_digest: waygate_skills::sha256_digest(prefix.as_bytes()),
+                resolved_tree_digest: waygate_skills::sha256_digest(prefix.as_bytes()),
+            },
+            CatalogManifest {
+                schema_version: CATALOG_SCHEMA_VERSION,
+                skills,
+            },
+            roots,
+            loader.clone(),
+        )
+        .unwrap();
+        let store = Arc::new(PgSkillReviewStore::new(pool.clone()));
+        let mut pending = Vec::new();
+        for skill in snapshot.skills() {
+            let candidate = ReviewCandidate::from_snapshot(&snapshot, &skill.uri).unwrap();
+            pending.push(store.observe("default", None, &candidate).await.unwrap());
+        }
+        let source = Arc::new(Source(snapshot));
+        let catalog = Arc::new(ReloadableSkillCatalog::default());
+        catalog.refresh(source.as_ref()).await.unwrap();
+        let reviewed = Arc::new(ReviewedSkillCatalog::new(
+            catalog.clone(),
+            source,
+            Some(store.clone()),
+        ));
+        let receipts = Arc::new(
+            waygate_dashboard_stores::decision_batches::PgDecisionBatchStore::new(pool.clone()),
+        );
+        let mut state = crate::admin_state::base_admin_state()
+            .with_skill_catalog(Some(catalog))
+            .with_skill_distribution(Some(reviewed))
+            .with_decision_batches(Some(receipts));
+        state.evidence = Arc::new(waygate_mcp::audit::InMemorySink::default());
+        let app = dashboard_router(Arc::new(state), DashboardAuth::Disabled);
+        let (status, list) = request(app.clone(), "/t/default/skills", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let tokens: Vec<_> = list
+            .split("<input ")
+            .filter(|tag| tag.split('>').next().unwrap().contains("data-bulk-item"))
+            .map(|tag| {
+                tag.split("value=\"")
+                    .nth(1)
+                    .unwrap()
+                    .split('"')
+                    .next()
+                    .unwrap()
+                    .replace("&#34;", "\"")
+                    .replace("&quot;", "\"")
+                    .replace("&amp;", "&")
+            })
+            .collect();
+        assert_eq!(tokens.len(), 2);
+        let (_, inbox) = request(app.clone(), "/t/default/decisions", None).await;
+        assert!(inbox.contains("id=\"bulk-skills\""));
+        let form = |reason: &str, csrf: &str| {
+            url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("csrf", csrf)
+                .append_pair("action", action)
+                .append_pair("reason", reason)
+                .extend_pairs(tokens.iter().map(|token| ("selected", token)))
+                .finish()
+        };
+        assert_eq!(
+            request(
+                app.clone(),
+                "/t/default/decisions/bulk/skills/review",
+                Some(form("", "dev-csrf"))
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            request(
+                app.clone(),
+                "/t/default/decisions/bulk/skills/review",
+                Some(form("Reviewed supporting files", "wrong"))
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/t/default/decisions/bulk/skills/review")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(form("Reviewed supporting files", "dev-csrf")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let url = response.headers()["location"]
+            .to_str()
+            .unwrap()
+            .strip_prefix("/admin")
+            .unwrap()
+            .to_owned();
+        let id = uuid::Uuid::parse_str(url.rsplit('/').next().unwrap()).unwrap();
+        let (status, preview) = request(app.clone(), &url, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(preview.contains("Reviewed supporting files"));
+        assert!(preview.contains("scripts/helper.js"));
+        assert!(
+            preview.contains("&#60;script&#62;untrusted()&#60;/script&#62;")
+                || preview.contains("&lt;script&gt;untrusted()&lt;/script&gt;")
+        );
+        assert!(!preview.contains("<script>untrusted()</script>"));
+        assert!(preview.contains("U+200B"));
+        assert!(!preview.contains('\u{200B}'));
+        assert_eq!(
+            request(
+                app.clone(),
+                &format!("{url}/confirm"),
+                Some("csrf=dev-csrf".into())
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        if scenario == "unavailable" {
+            let file = &pending[0]
+                .candidate
+                .skill()
+                .resources
+                .iter()
+                .find(|file| file.uri.ends_with("helper.js"))
+                .unwrap()
+                .uri;
+            loader.0.lock().unwrap().remove(file);
+            let (_, blocked) = request(app.clone(), &url, None).await;
+            assert!(blocked.contains("unavailable source content"));
+            assert!(!blocked.contains("Approve these 2 skill candidates"));
+        }
+        store
+            .decide(
+                &pending[1],
+                ReviewDecision::Reject,
+                DecisionActor {
+                    subject: "other-admin",
+                    issuer: "fixture",
+                    reason: "Concurrent decision",
+                },
+            )
+            .await
+            .unwrap();
+        let confirm = || {
+            Request::builder()
+                .method("POST")
+                .uri(format!("{url}/confirm"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("csrf=dev-csrf&reviewed=true"))
+                .unwrap()
+        };
+        let (first, retry) = tokio::join!(
+            app.clone().oneshot(confirm()),
+            app.clone().oneshot(confirm())
+        );
+        assert_eq!(first.unwrap().status(), StatusCode::SEE_OTHER);
+        assert_eq!(retry.unwrap().status(), StatusCode::SEE_OTHER);
+        let expected = if scenario == "unavailable" {
+            CandidateStatus::Pending
+        } else if action == "approve" {
+            CandidateStatus::Approved
+        } else {
+            CandidateStatus::Rejected
+        };
+        let decided = store
+            .get("default", &pending[0].source_key, &pending[0].skill_uri)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decided.candidate_status, expected);
+        let history = store
+            .history(
+                "default",
+                &pending[0].source_key,
+                &pending[0].skill_uri,
+                i64::MAX,
+                20,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            history.len(),
+            if scenario == "unavailable" { 0 } else { 1 },
+            "confirmation retries cannot duplicate skill decisions"
+        );
+        if let Some(entry) = history.first() {
+            assert_eq!(entry.reason, "Reviewed supporting files");
+        }
+        let outcomes:Vec<String>=sqlx::query_scalar("SELECT result->>'outcome' FROM admin_decision_batch_items WHERE batch_id=$1 ORDER BY item_index").bind(id).fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            outcomes,
+            vec![
+                if scenario == "unavailable" {
+                    "unavailable"
+                } else if action == "approve" {
+                    "approved"
+                } else {
+                    "rejected"
+                },
+                "already_decided"
+            ]
+        );
+        let (status, result) = request(app.clone(), &url, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(result.contains("Bulk skill decision results"));
+    }
+}
+
 async fn request(app: axum::Router, path: &str, form: Option<String>) -> (StatusCode, String) {
     let mut request = Request::builder().uri(path);
     let body = match form {
