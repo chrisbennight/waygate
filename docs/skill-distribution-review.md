@@ -112,6 +112,14 @@ Decisions require an administrator session, CSRF protection, the displayed
 content digest and review generation, and an attributed reason. Concurrent or
 stale decisions return a conflict and require a fresh review.
 
+On Skills or Decisions, select pending candidates to review and approve or
+reject them together. The confirmation includes complete candidate text and
+supporting-file identities, plus a required operator reason. Approval applies
+only to the captured candidates; changed or already-decided items have their
+own outcomes. Recent bulk decisions retain results and interrupted progress
+without repeating a claimed submission. See [bulk decisions](bulk-decisions.md)
+for selection limits and recovery. Quarantine remains an individual decision.
+
 The same mutation core backs the registered `skill.approve`, `skill.reject`, and
 `skill.quarantine` control-plane actions. Distribution decisions do not replace
 the existing maker/checker change-request workflow.

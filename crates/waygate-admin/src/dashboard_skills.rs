@@ -138,6 +138,7 @@ fn status(review: &SkillReview) -> &'static str {
 }
 
 struct SkillRow {
+    choice: Option<String>,
     name: String,
     description: String,
     status: &'static str,
@@ -149,6 +150,7 @@ struct SkillRow {
 #[derive(Template)]
 #[template(path = "skills.html")]
 struct SkillsPage {
+    bulk_skills_available: bool,
     chrome: PageChrome,
     rows: Vec<SkillRow>,
     query: String,
@@ -175,6 +177,11 @@ async fn skills_page(
     Query(query): Query<SkillsQuery>,
 ) -> Response {
     let principal = user.as_ref().map(|Extension(p)| p);
+    let bulk_skills_available = state.hitl.decision_batches.get().is_some()
+        && overview_break_glass_admin(principal)
+        && tenant
+            .as_ref()
+            .is_none_or(|Extension(t)| principal.is_some_and(|p| t.slug == p.tenant.as_str()));
     let chrome = PageChrome::build(
         &state,
         "Skills",
@@ -185,6 +192,7 @@ async fn skills_page(
         csrf.map(|Extension(c)| c.0).unwrap_or_default(),
     );
     let mut page = SkillsPage {
+        bulk_skills_available,
         chrome,
         rows: Vec::new(),
         query: query.q.clone(),
@@ -256,6 +264,7 @@ async fn skills_page(
                 };
                 let fields = &review.candidate.skill().frontmatter;
                 page.rows.push(SkillRow {
+                    choice: crate::dashboard_bulk_skills::choice(&review),
                     name: fields
                         .get("name")
                         .and_then(|v| v.as_str())

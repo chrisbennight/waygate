@@ -1,9 +1,9 @@
 # Bulk administrator decisions
 
-Tool changes and their entries in Decisions support bulk approval and keeping
-selected definitions blocked. This guide describes that experience and the
-requirements for extending it to other queues. Bulk skill, invocation, and
-administrative-change decisions are not yet available.
+Tool changes, Skills, and their entries in Decisions support selected decisions.
+This guide describes that experience and the requirements for extending it to
+other queues. Bulk invocation and administrative-change decisions are not yet
+available.
 
 ## Purpose
 
@@ -56,6 +56,15 @@ before escaping or diff rendering. A selection exceeding either limit is
 refused with guidance to select fewer items; significant decision details are
 never truncated to fit. Other queues retain their existing aggregate review
 bounds and may need a smaller item ceiling.
+
+Skill selections are limited to ten pending candidates and two MiB of combined
+candidate metadata and declared file sizes. The review displays every candidate's
+metadata, source revision, supporting-file inventory, and complete text files.
+Binary files retain their immutable object identity, media type, and size.
+Unavailable candidate source or files prevent approval from that review.
+An operator reason is required and retained for every selected decision.
+Rejecting candidates preserves any previously serving version; quarantine
+remains an individual operation.
 
 For example, selecting several tool replacements shows their server and tool
 names, changed-field summaries, flags, and complete stored comparisons. A

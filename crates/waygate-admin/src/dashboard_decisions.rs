@@ -76,6 +76,7 @@ pub fn router() -> Router<Arc<AdminState>> {
 /// plain-language line; the inline form fields (`approve_rel` etc.) are
 /// queue-owned action paths so the post returns to the queue.
 struct InboxItem {
+    skill_choice: Option<String>,
     tool_choice: Option<crate::dashboard_bulk_decisions::ToolChoice>,
     /// `"change request"` | `"break-glass"` | `"skill"` | `"tool"`.
     kind: &'static str,
@@ -151,6 +152,7 @@ struct DecisionsPage {
     flash_ok: Option<String>,
     flash_err: Option<String>,
     bulk_tools_available: bool,
+    bulk_skills_available: bool,
     receipts_available: bool,
     manifest_hash: String,
 }
@@ -256,6 +258,7 @@ async fn decisions_page(
                                 .is_some_and(|preview| preview.blocked.is_some());
                         items.push(InboxItem {
                             kind: "change request",
+                            skill_choice: None,
                             tool_choice: None,
                             severity: "warn",
                             summary: format!("{} · {}", c.requested_by, c.action_type),
@@ -292,6 +295,7 @@ async fn decisions_page(
                     for t in rows {
                         items.push(InboxItem {
                             kind: "break-glass",
+                            skill_choice: None,
                             tool_choice: None,
                             severity: "critical",
                             summary: format!("{} · {}", t.issued_to, t.scope_pattern),
@@ -327,6 +331,7 @@ async fn decisions_page(
                     }) {
                         items.push(InboxItem {
                             kind: "skill",
+                            skill_choice: crate::dashboard_bulk_skills::choice(&review),
                             tool_choice: None,
                             severity: "warn",
                             summary: review.skill_uri.clone(),
@@ -362,6 +367,7 @@ async fn decisions_page(
                         for review in reviews {
                             items.push(InboxItem {
                                 kind: "tool",
+                                skill_choice: None,
                                 tool_choice: crate::dashboard_bulk_decisions::tool_choice(
                                     &review, &manifests,
                                 ),
@@ -404,12 +410,15 @@ async fn decisions_page(
     let receipts_available = !insufficient_scope
         && state.hitl.decision_batches.get().is_some()
         && tenant_ctx.as_ref().is_none_or(|ctx| ctx.slug == tenant);
+    let bulk_skills_available =
+        receipts_available && items.iter().any(|item| item.skill_choice.is_some());
     let manifest_hash = if bulk_tools_available {
         crate::dashboard_bulk_decisions::manifest_hash(&state)
     } else {
         String::new()
     };
     render(&DecisionsPage {
+        bulk_skills_available,
         receipts_available,
         bulk_tools_available,
         manifest_hash,

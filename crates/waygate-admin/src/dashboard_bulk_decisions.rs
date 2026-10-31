@@ -106,7 +106,7 @@ pub(crate) fn manifest_hash(state: &AdminState) -> String {
         .unwrap_or_default()
 }
 
-fn owner(actor: &Principal) -> BatchOwner<'_> {
+pub(crate) fn owner(actor: &Principal) -> BatchOwner<'_> {
     BatchOwner {
         tenant: actor.tenant.as_str(),
         issuer: &actor.issuer,
@@ -114,7 +114,7 @@ fn owner(actor: &Principal) -> BatchOwner<'_> {
     }
 }
 
-fn authorize<'a>(
+pub(crate) fn authorize<'a>(
     user: &'a Option<Extension<Principal>>,
     tenant: &Option<Extension<TenantContext>>,
 ) -> Result<&'a Principal, ApiError> {
@@ -134,7 +134,7 @@ fn authorize<'a>(
     Ok(actor)
 }
 
-fn csrf(csrf: &Option<Extension<CsrfToken>>, supplied: &str) -> Result<(), ApiError> {
+pub(crate) fn csrf(csrf: &Option<Extension<CsrfToken>>, supplied: &str) -> Result<(), ApiError> {
     let Some(Extension(expected)) = csrf else {
         return Err(ApiError::Forbidden("csrf mismatch"));
     };
@@ -144,7 +144,7 @@ fn csrf(csrf: &Option<Extension<CsrfToken>>, supplied: &str) -> Result<(), ApiEr
     Ok(())
 }
 
-fn store_error(error: BatchError) -> ApiError {
+pub(crate) fn store_error(error: BatchError) -> ApiError {
     match error {
         BatchError::Invalid(message)=>ApiError::BadRequest(message.into()),
         BatchError::Conflict=>ApiError::Conflict("This submission identifies a different selection".into()),
@@ -153,7 +153,10 @@ fn store_error(error: BatchError) -> ApiError {
     }
 }
 
-fn field<'a>(fields: &'a [(String, String)], name: &str) -> Result<Option<&'a str>, ApiError> {
+pub(crate) fn field<'a>(
+    fields: &'a [(String, String)],
+    name: &str,
+) -> Result<Option<&'a str>, ApiError> {
     let mut values = fields
         .iter()
         .filter(|(key, _)| key == name)
@@ -333,9 +336,10 @@ struct ReviewPage {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum DecisionOutcome {
+pub(crate) enum DecisionOutcome {
     Approved,
     KeptBlocked,
+    Rejected,
     AlreadyDecided,
     Changed,
     Unavailable,
@@ -348,6 +352,7 @@ impl DecisionOutcome {
         match self {
             Self::Approved => "Approved",
             Self::KeptBlocked => "Kept blocked",
+            Self::Rejected => "Rejected",
             Self::AlreadyDecided => "Already decided",
             Self::Changed => "Changed since review",
             Self::Unavailable => "Unavailable",
@@ -359,6 +364,7 @@ impl DecisionOutcome {
         match self {
             Self::Approved=>"Existing configuration and access policies still apply.",
             Self::KeptBlocked=>"The reviewed definition remains blocked.",
+            Self::Rejected=>"The candidate was rejected. Any previously serving skill version retains its existing eligibility.",
             Self::AlreadyDecided=>"A completed decision already resolved this candidate. Inspect its current review before reconsidering it.",
             Self::Changed=>"Review the current candidate before making another decision.",
             Self::Unavailable=>"No decision was confirmed for this item. Inspect its current review.",
@@ -368,7 +374,7 @@ impl DecisionOutcome {
     }
 }
 
-fn outcome(error: &ApiError) -> DecisionOutcome {
+pub(crate) fn outcome(error: &ApiError) -> DecisionOutcome {
     match error {
         ApiError::Conflict(_)
         | ApiError::NotFound(_)
@@ -380,7 +386,7 @@ fn outcome(error: &ApiError) -> DecisionOutcome {
     }
 }
 
-fn progress(
+pub(crate) fn progress(
     progress: &ItemProgress,
     started: bool,
 ) -> Result<(&'static str, &'static str), ApiError> {
@@ -412,7 +418,7 @@ fn batch_id(params: &HashMap<String, String>) -> Result<Uuid, ApiError> {
         .ok_or(ApiError::NotFound("Decision receipt not found"))
 }
 
-async fn begin(
+pub(crate) async fn begin(
     receipts: &dyn DecisionBatchStore,
     owner: BatchOwner<'_>,
     id: Uuid,
@@ -430,7 +436,7 @@ async fn begin(
     Ok(())
 }
 
-async fn finish(
+pub(crate) async fn finish(
     receipts: &dyn DecisionBatchStore,
     owner: BatchOwner<'_>,
     id: Uuid,
@@ -509,6 +515,17 @@ async fn page(
         .ok_or(ApiError::NotFound(
             "Decision receipt expired or is unavailable",
         ))?;
+    if batch.request.kind == "skill" {
+        return crate::dashboard_bulk_skills::page(
+            &state,
+            actor,
+            tenant.map(|Extension(t)| t),
+            token.map(|Extension(t)| t.0).unwrap_or_default(),
+            &headers,
+            batch,
+        )
+        .await;
+    }
     let selected = selections(&batch)?;
     tool_reviews::authorize(actor, actor.tenant.as_str())?;
     let started = batch.started_at.is_some();
@@ -607,7 +624,6 @@ async fn confirm(
     Form(form): Form<Confirmation>,
 ) -> Result<Redirect, ApiError> {
     let actor = authorize(&user, &tenant)?;
-    tool_reviews::authorize(actor, actor.tenant.as_str())?;
     csrf(&token, &form.csrf)?;
     if !form.reviewed {
         return Err(ApiError::BadRequest(
@@ -623,6 +639,14 @@ async fn confirm(
         .ok_or(ApiError::NotFound(
             "Decision receipt expired or is unavailable",
         ))?;
+    if batch.request.kind == "skill" {
+        crate::dashboard_bulk_skills::confirm(&state, actor, &batch).await?;
+        return Ok(Redirect::to(&tenant_ctx::nav_url(
+            tenant.as_ref().map(|Extension(t)| t),
+            &format!("/decisions/bulk/{id}"),
+        )));
+    }
+    tool_reviews::authorize(actor, actor.tenant.as_str())?;
     let selected = selections(&batch)?;
     if batch.started_at.is_none()
         && receipts

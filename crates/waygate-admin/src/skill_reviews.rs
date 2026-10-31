@@ -123,6 +123,17 @@ pub(crate) async fn decide_core(
     params: &SkillDecisionParams,
     decision: ReviewDecision,
 ) -> Result<SkillReview, ApiError> {
+    decide_for_batch(state, tenant, actor, params, decision, None).await
+}
+
+pub(crate) async fn decide_for_batch(
+    state: &AdminState,
+    tenant: &str,
+    actor: &Principal,
+    params: &SkillDecisionParams,
+    decision: ReviewDecision,
+    batch_id: Option<uuid::Uuid>,
+) -> Result<SkillReview, ApiError> {
     if actor.tenant.as_str() != tenant || !crate::dashboard::overview_break_glass_admin(Some(actor))
     {
         return Err(ApiError::Forbidden(
@@ -175,10 +186,13 @@ pub(crate) async fn decide_core(
         Some(actor),
         action,
         format!(
-            "skill={} content={} generation={}",
+            "skill={} content={} generation={}{}",
             decided.skill_uri,
             decided.candidate.content_digest(),
-            decided.generation
+            decided.generation,
+            batch_id
+                .map(|id| format!(" batch={id}"))
+                .unwrap_or_default()
         ),
     )
     .await?;
