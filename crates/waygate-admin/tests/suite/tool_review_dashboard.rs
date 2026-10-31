@@ -833,6 +833,10 @@ async fn bulk_decision_workflow(
             .await
             .unwrap();
         assert!(refreshed.status().is_success());
+        if phase == 1 {
+            sqlx::query("UPDATE tool_contract_reviews SET observed_contract='null'::jsonb WHERE tool_id IN (SELECT t.id FROM mcp_tools t JOIN mcp_servers s ON s.id=t.server_id WHERE s.name=$1 AND t.name='search')")
+                .bind(&server).execute(db).await.unwrap();
+        }
         let listed = app
             .clone()
             .oneshot(
@@ -981,6 +985,13 @@ async fn bulk_decision_workflow(
         assert_eq!(preview.status(), StatusCode::OK);
         let preview = to_bytes(preview.into_body(), 1024 * 1024).await.unwrap();
         let preview = std::str::from_utf8(&preview).unwrap();
+        if phase == 1 {
+            assert!(preview.contains("comparison unavailable"));
+            assert!(
+                !preview.contains("Description removed"),
+                "unavailable content must not be summarized as removed fields"
+            );
+        }
         assert!(preview.contains(if action == "approve" {
             "Approve these 2 tool replacements"
         } else {
