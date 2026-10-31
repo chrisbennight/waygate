@@ -1,0 +1,26 @@
+{% extends "layout.html" %}
+{% block main %}
+<section class="page-section">
+<header class="page-header"><h1 class="page-title">{% if started %}Bulk tool decision results{% else %}Review selected tool decisions{% endif %}</h1></header>
+<p><a href="{{ self.chrome.nav_url("/decisions/bulk") }}">Recent bulk decisions</a> · <a href="{{ self.chrome.nav_url("/servers/tool-changes") }}">Pending tool reviews</a> · <a href="{{ self.chrome.nav_url("/decisions") }}">Decisions</a></p>
+{% if !started %}<p>{{ items.len() }} selected. {% if approving %}Accept only these observed replacements. Existing configuration and access policies still apply.{% else %}Keep these exact definitions blocked.{% endif %}</p>{% else %}<p role="status">Each item below has its own outcome. A missing confirmation is not proof that no change took effect.</p>{% endif %}
+{% match note %}{% when Some with (message) %}<div class="callout callout--err" role="alert">{{ message }}</div>{% when None %}{% endmatch %}
+{% for item in items %}
+<article class="card">
+<h2 class="card-title skills-source">{{ item.name }}</h2>
+{% if started %}<p><strong>{{ item.outcome }}</strong></p><p>{{ item.guidance }}</p>{% else %}<p>{{ item.trigger }}</p>{% if !item.risk.is_empty() %}<p>Gateway risk classification: <strong>{{ item.risk }}</strong></p>{% endif %}{% endif %}
+<p><a href="{{ self.chrome.nav_url(item.url) }}">Open this tool review</a></p>
+{% match item.baseline_note %}{% when Some with (message) %}<p class="diff-note">{{ message }}</p>{% when None %}{% endmatch %}
+{% let summary = item.summary %}{% include "_contract_summary.html" %}
+{% for section in item.sections %}{% include "_review_diff.html" %}{% endfor %}
+</article>
+{% endfor %}
+{% if confirmable %}
+<form class="card" method="post" action="{{ self.chrome.nav_url(confirm_url) }}">
+<input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
+<label class="effect-preview-ack"><input type="checkbox" name="reviewed" value="true" required> I reviewed the complete selection and its effects</label>
+<button class="btn btn-primary" type="submit">{% if approving %}Approve these {{ items.len() }} tool replacements{% else %}Keep these {{ items.len() }} definitions blocked{% endif %}</button>
+</form>
+{% endif %}
+</section>
+{% endblock %}

@@ -486,6 +486,9 @@ pub struct LlmPlane {
 /// out-of-band notifier, secret-return crypto, the approvals WebSocket hub,
 /// and the two-approver knob.
 pub struct HitlPlane {
+    /// Administrator-owned selections and outcomes for replay-safe decisions.
+    pub decision_batches:
+        Capability<waygate_dashboard_stores::decision_batches::SharedDecisionBatchStore>,
     /// Durable Code Mode execution journal used to list and resolve
     /// approval-bound data-plane mutations.
     pub codemode_executions: Capability<waygate_codemode::SharedExecutionStore>,
@@ -922,6 +925,7 @@ impl AdminState {
                 llm_resolver: None,
             },
             hitl: HitlPlane {
+                decision_batches: Capability::absent("Durable decision receipts require a configured database"),
                 codemode_executions: Capability::absent(
                     "Code Mode execution store not configured",
                 ),
@@ -1679,6 +1683,17 @@ impl AdminState {
         >,
     ) -> Self {
         self.dashboard.activity_saved_views.set(store);
+        self
+    }
+
+    /// Attach durable administrator decision receipts without changing domain
+    /// approval authority or the availability of individual decisions.
+    #[must_use]
+    pub fn with_decision_batches(
+        mut self,
+        store: Option<waygate_dashboard_stores::decision_batches::SharedDecisionBatchStore>,
+    ) -> Self {
+        self.hitl.decision_batches.set(store);
         self
     }
 

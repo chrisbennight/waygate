@@ -602,6 +602,7 @@ fn page_routes(state: Arc<AdminState>) -> Router<()> {
         // active break-glass in one inbox, inline actions reusing the
         // change-request / break-glass mutation cores.
         .merge(crate::dashboard_decisions::router())
+        .merge(crate::dashboard_bulk_decisions::router())
         .merge(crate::dashboard_skills::router())
         .merge(crate::dashboard_tool_reviews::router())
         // The Decision Log — server-rendered audit-decision

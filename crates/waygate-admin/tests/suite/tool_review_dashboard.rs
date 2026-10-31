@@ -48,28 +48,44 @@ impl rmcp::ServerHandler for ReviewUpstream {
 
 #[tokio::test]
 async fn dashboard_acceptance_refreshes_and_restores_the_reviewed_tool() {
-    acceptance_workflow(false, false, false).await;
+    acceptance_workflow(false, false, false, false).await;
 }
 
 #[tokio::test]
 async fn annotation_acceptance_updates_the_manifest_source_of_truth() {
-    acceptance_workflow(true, false, false).await;
+    acceptance_workflow(true, false, false, false).await;
 }
 
 #[tokio::test]
 async fn startup_mismatch_is_discoverable_and_can_be_kept_blocked_then_approved() {
-    acceptance_workflow(true, true, false).await;
+    acceptance_workflow(true, true, false, false).await;
 }
 
 #[tokio::test]
 async fn unclassified_annotation_tool_requires_initial_review_and_operator_risk() {
-    acceptance_workflow(true, true, true).await;
+    acceptance_workflow(true, true, true, false).await;
+}
+
+#[tokio::test]
+async fn bulk_annotation_decisions_publish_selected_tools_and_recover_retries() {
+    acceptance_workflow(true, false, false, true).await;
+}
+
+#[tokio::test]
+async fn bulk_manifest_decisions_keep_each_review_and_result_bound() {
+    acceptance_workflow(false, false, false, true).await;
+}
+
+#[tokio::test]
+async fn bulk_initial_approvals_require_individual_gateway_risk_choices() {
+    acceptance_workflow(true, false, true, true).await;
 }
 
 async fn acceptance_workflow(
     annotation_mode: bool,
     startup_mismatch: bool,
     initial_approval: bool,
+    bulk: bool,
 ) {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -122,11 +138,13 @@ async fn acceptance_workflow(
             .clone(),
         ));
     }
-    let sibling = Arc::new(std::sync::RwLock::new((!annotation_mode).then(|| {
-        let mut tool = descriptor.read().unwrap().clone();
-        tool.name = "sibling".into();
-        tool
-    })));
+    let sibling = Arc::new(std::sync::RwLock::new((!annotation_mode || bulk).then(
+        || {
+            let mut tool = descriptor.read().unwrap().clone();
+            tool.name = "sibling".into();
+            tool
+        },
+    )));
     let upstream = ReviewUpstream(descriptor.clone(), sibling.clone());
     let service = StreamableHttpService::new(
         move || Ok(upstream.clone()),
@@ -155,15 +173,19 @@ async fn acceptance_workflow(
             &descriptor.read().unwrap(),
         ));
     }
-    if !annotation_mode {
-        manifest
-            .tools
-            .push(waygate_upstream::ToolClassification::new(
-                "sibling",
-                waygate_core::RiskTier::Low,
-                false,
-                false,
+    if !annotation_mode || bulk {
+        let mut classification = waygate_upstream::ToolClassification::new(
+            "sibling",
+            waygate_core::RiskTier::Low,
+            false,
+            false,
+        );
+        if annotation_mode {
+            classification.approved_behavior_hash = Some(waygate_upstream::tool_behavior_hash(
+                sibling.read().unwrap().as_ref().unwrap(),
             ));
+        }
+        manifest.tools.push(classification);
     }
     if initial_approval {
         manifest.tools.clear();
@@ -224,6 +246,11 @@ async fn acceptance_workflow(
     );
     let mut state = crate::admin_state::base_admin_state_with_pool(pool.clone());
     state.evidence = Arc::new(waygate_storage::PgAuditSink::with_pool(db.clone()));
+    if bulk {
+        state = state.with_decision_batches(Some(Arc::new(
+            waygate_dashboard_stores::decision_batches::PgDecisionBatchStore::new(db.clone()),
+        )));
+    }
     if annotation_mode {
         state = state
             .with_servers_dir(dir.clone())
@@ -370,7 +397,7 @@ async fn acceptance_workflow(
             to_bytes(badge.into_body(), 1024).await.unwrap().as_ref(),
             b"0"
         );
-    } else {
+    } else if !bulk {
         assert!(
             matches!(
                 pool.resolve_invocation_tool("default", &server, "search")
@@ -409,6 +436,24 @@ async fn acceptance_workflow(
         .unwrap()
         .unwrap();
     assert!(review.quarantined);
+    if bulk {
+        bulk_decision_workflow(
+            &app,
+            &state,
+            &db,
+            &ReviewUpstream(descriptor.clone(), sibling.clone()),
+        )
+        .await;
+        task.abort();
+        if annotation_mode {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+        db.close().await;
+        sqlx::Postgres::drop_database(database_url.as_str())
+            .await
+            .unwrap();
+        return;
+    }
     if startup_mismatch {
         assert!(
             review.decided_at.is_none(),
@@ -748,6 +793,332 @@ async fn acceptance_workflow(
     sqlx::Postgres::drop_database(database_url.as_str())
         .await
         .unwrap();
+}
+
+async fn bulk_decision_workflow(
+    app: &axum::Router,
+    state: &Arc<waygate_admin::AdminState>,
+    db: &sqlx::PgPool,
+    upstream: &ReviewUpstream,
+) {
+    use waygate_mcp::catalog::{ResolvedInvocationTool, UpstreamCatalog};
+    let server = state.upstreams.manifests()[0].name.clone();
+    let post = |path: &str, fields: &[(String, String)]| {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(
+                url::form_urlencoded::Serializer::new(String::new())
+                    .extend_pairs(fields)
+                    .finish(),
+            ))
+            .unwrap()
+    };
+    let store = state.servers.tool_reviews.require().unwrap();
+    for (phase, action) in ["approve", "reject", "approve"].into_iter().enumerate() {
+        upstream.0.write().unwrap().description =
+            Some(format!("Reviewed search replacement {phase}").into());
+        upstream.1.write().unwrap().as_mut().unwrap().description =
+            Some(format!("Reviewed sibling replacement {phase}").into());
+        let refreshed = app
+            .clone()
+            .oneshot(post(
+                "/t/default/servers/catalog/refresh",
+                &[
+                    ("csrf".into(), "dev-csrf".into()),
+                    ("server".into(), server.clone()),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert!(refreshed.status().is_success());
+        let listed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/t/default/servers/tool-changes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed = to_bytes(listed.into_body(), 1024 * 1024).await.unwrap();
+        let listed = std::str::from_utf8(&listed).unwrap();
+        assert!(listed.contains("Select eligible items on this page"));
+        let tokens: Vec<_> = listed
+            .split("<input ")
+            .filter(|tag| tag.split('>').next().unwrap().contains("data-bulk-item"))
+            .map(|tag| {
+                tag.split("value=\"")
+                    .nth(1)
+                    .unwrap()
+                    .split('"')
+                    .next()
+                    .unwrap()
+                    .replace("&quot;", "\"")
+                    .replace("&#34;", "\"")
+                    .replace("&#x22;", "\"")
+                    .replace("&amp;", "&")
+            })
+            .collect();
+        assert_eq!(tokens.len(), 2, "both pending tools are selectable");
+        let base = state
+            .read_manifest_set_from_disk()
+            .map(|v| v.unwrap().1)
+            .unwrap_or_default();
+        let mut fields = vec![
+            ("csrf".into(), "dev-csrf".into()),
+            ("manifest_hash".into(), base),
+            ("action".into(), action.into()),
+        ];
+        for token in &tokens {
+            let selected: serde_json::Value = serde_json::from_str(token).unwrap();
+            let id = uuid::Uuid::parse_str(selected["tool_id"].as_str().unwrap()).unwrap();
+            fields.push(("selected".into(), token.clone()));
+            let risk_name = format!("risk_{}", id.simple());
+            if listed.contains(&format!("form=\"bulk-tools\" name=\"{risk_name}\"")) {
+                fields.push((risk_name, "high".into()));
+            }
+        }
+        if phase == 0 {
+            let decisions = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/t/default/decisions")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(decisions.status(), StatusCode::OK);
+            let decisions = to_bytes(decisions.into_body(), 1024 * 1024).await.unwrap();
+            assert!(std::str::from_utf8(&decisions)
+                .unwrap()
+                .contains("data-bulk-item"));
+            let mut bad = fields.clone();
+            bad[0].1 = "wrong".into();
+            assert_eq!(
+                app.clone()
+                    .oneshot(post("/t/default/decisions/bulk/tools/review", &bad))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+            if !fields.iter().any(|(key, _)| key.starts_with("risk_")) {
+                let selected: serde_json::Value = serde_json::from_str(&tokens[0]).unwrap();
+                let id = uuid::Uuid::parse_str(selected["tool_id"].as_str().unwrap()).unwrap();
+                let mut wrong_risk = fields.clone();
+                wrong_risk.push((format!("risk_{}", id.simple()), "high".into()));
+                assert_eq!(
+                    app.clone()
+                        .oneshot(post("/t/default/decisions/bulk/tools/review", &wrong_risk))
+                        .await
+                        .unwrap()
+                        .status(),
+                    StatusCode::BAD_REQUEST,
+                    "review cannot claim to reclassify an already classified tool"
+                );
+            }
+            assert_eq!(
+                app.clone()
+                    .oneshot(post("/t/other-tenant/decisions/bulk/tools/review", &fields))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+            if store
+                .pending("default")
+                .await
+                .unwrap()
+                .iter()
+                .any(|review| review.approved_hash.is_empty())
+            {
+                let missing: Vec<_> = fields
+                    .iter()
+                    .filter(|(key, _)| !key.starts_with("risk_"))
+                    .cloned()
+                    .collect();
+                assert_eq!(
+                    app.clone()
+                        .oneshot(post("/t/default/decisions/bulk/tools/review", &missing))
+                        .await
+                        .unwrap()
+                        .status(),
+                    StatusCode::BAD_REQUEST
+                );
+            }
+        }
+        let captured = app
+            .clone()
+            .oneshot(post("/t/default/decisions/bulk/tools/review", &fields))
+            .await
+            .unwrap();
+        let status = captured.status();
+        if status != StatusCode::SEE_OTHER {
+            let body = to_bytes(captured.into_body(), 65536).await.unwrap();
+            panic!(
+                "capture returned {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        let url = captured.headers()["location"]
+            .to_str()
+            .unwrap()
+            .strip_prefix("/admin")
+            .unwrap()
+            .to_owned();
+        let id = uuid::Uuid::parse_str(url.rsplit('/').next().unwrap()).unwrap();
+        let preview = app
+            .clone()
+            .oneshot(Request::builder().uri(&url).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(preview.status(), StatusCode::OK);
+        let preview = to_bytes(preview.into_body(), 1024 * 1024).await.unwrap();
+        let preview = std::str::from_utf8(&preview).unwrap();
+        assert!(preview.contains(if action == "approve" {
+            "Approve these 2 tool replacements"
+        } else {
+            "Keep these 2 definitions blocked"
+        }));
+        assert_eq!(
+            store.pending("default").await.unwrap().len(),
+            2,
+            "review alone decides nothing"
+        );
+        let confirm_url = format!("{url}/confirm");
+        assert_eq!(
+            app.clone()
+                .oneshot(post(&confirm_url, &[("csrf".into(), "dev-csrf".into())]))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        if phase == 2 {
+            upstream.0.write().unwrap().description =
+                Some("An unseen replacement after review".into());
+        }
+        let confirmation = vec![
+            ("csrf".into(), "dev-csrf".into()),
+            ("reviewed".into(), "true".into()),
+        ];
+        let (first, retry) = tokio::join!(
+            app.clone().oneshot(post(&confirm_url, &confirmation)),
+            app.clone().oneshot(post(&confirm_url, &confirmation))
+        );
+        assert_eq!(first.unwrap().status(), StatusCode::SEE_OTHER);
+        assert_eq!(retry.unwrap().status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            app.clone()
+                .oneshot(post(&confirm_url, &confirmation))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SEE_OTHER
+        );
+        let outcomes:Vec<String>=sqlx::query_scalar("SELECT result->>'outcome' FROM admin_decision_batch_items WHERE batch_id=$1 ORDER BY item_index")
+            .bind(id).fetch_all(db).await.unwrap();
+        assert_eq!(
+            outcomes,
+            match phase {
+                0 => vec!["approved", "approved"],
+                1 => vec!["kept_blocked", "kept_blocked"],
+                _ => vec!["changed", "approved"],
+            }
+        );
+        let evidence: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action=$1 AND reason LIKE $2")
+                .bind(if action == "approve" {
+                    "tool_contract.approve"
+                } else {
+                    "tool_contract.reject"
+                })
+                .bind(format!("server={server} % batch={id}"))
+                .fetch_one(db)
+                .await
+                .unwrap();
+        assert_eq!(
+            evidence,
+            if phase == 2 { 1 } else { 2 },
+            "retries do not duplicate per-item evidence"
+        );
+        let results = app
+            .clone()
+            .oneshot(Request::builder().uri(&url).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(results.status(), StatusCode::OK);
+        let results = to_bytes(results.into_body(), 1024 * 1024).await.unwrap();
+        assert!(std::str::from_utf8(&results)
+            .unwrap()
+            .contains("Bulk tool decision results"));
+        if let Some(Ok((set, _))) = state.read_manifest_set_from_disk() {
+            if phase == 0 {
+                for review in store.blocked_after("default", None, true).await.unwrap() {
+                    assert_ne!(
+                        review.server, server,
+                        "both approved definitions must leave the blocked queue"
+                    );
+                }
+                assert_eq!(set[&server].tools.len(), 2);
+            }
+            state.upstreams.reload_manifests(&set).await;
+        }
+        if phase == 0 {
+            for tool in ["search", "sibling"] {
+                assert!(matches!(
+                    state
+                        .upstreams
+                        .resolve_invocation_tool("default", &server, tool)
+                        .await,
+                    ResolvedInvocationTool::Ready(_)
+                ));
+            }
+        } else if phase == 1 {
+            for tool in ["search", "sibling"] {
+                let review = store.get("default", &server, tool).await.unwrap().unwrap();
+                assert!(review.quarantined && review.decided_at.is_some());
+            }
+        } else {
+            assert!(
+                store
+                    .get("default", &server, "search")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .quarantined
+            );
+            assert!(
+                !store
+                    .get("default", &server, "sibling")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .quarantined
+            );
+        }
+    }
+    let recent = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/t/default/decisions/bulk")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recent.status(), StatusCode::OK);
+    let recent = to_bytes(recent.into_body(), 1024 * 1024).await.unwrap();
+    assert!(std::str::from_utf8(&recent)
+        .unwrap()
+        .contains("Review progress"));
 }
 
 #[tokio::test]

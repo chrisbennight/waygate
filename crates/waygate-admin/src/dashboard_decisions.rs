@@ -76,6 +76,7 @@ pub fn router() -> Router<Arc<AdminState>> {
 /// plain-language line; the inline form fields (`approve_rel` etc.) are
 /// queue-owned action paths so the post returns to the queue.
 struct InboxItem {
+    tool_choice: Option<crate::dashboard_bulk_decisions::ToolChoice>,
     /// `"change request"` | `"break-glass"` | `"skill"` | `"tool"`.
     kind: &'static str,
     /// Decision-contract severity: `"warn"` (a pending change awaiting a
@@ -149,6 +150,9 @@ struct DecisionsPage {
     /// PRG flash channels (urlencoded on the way out).
     flash_ok: Option<String>,
     flash_err: Option<String>,
+    bulk_tools_available: bool,
+    receipts_available: bool,
+    manifest_hash: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -252,6 +256,7 @@ async fn decisions_page(
                                 .is_some_and(|preview| preview.blocked.is_some());
                         items.push(InboxItem {
                             kind: "change request",
+                            tool_choice: None,
                             severity: "warn",
                             summary: format!("{} · {}", c.requested_by, c.action_type),
                             handle: c.binding_code.clone(),
@@ -287,6 +292,7 @@ async fn decisions_page(
                     for t in rows {
                         items.push(InboxItem {
                             kind: "break-glass",
+                            tool_choice: None,
                             severity: "critical",
                             summary: format!("{} · {}", t.issued_to, t.scope_pattern),
                             handle: short(t.id),
@@ -321,6 +327,7 @@ async fn decisions_page(
                     }) {
                         items.push(InboxItem {
                             kind: "skill",
+                            tool_choice: None,
                             severity: "warn",
                             summary: review.skill_uri.clone(),
                             handle: crate::dashboard_skills::review_trigger(&review),
@@ -351,9 +358,13 @@ async fn decisions_page(
                 match store.pending(&tenant).await {
                     Ok(reviews) => {
                         tools_saturated = reviews.len() == 50;
+                        let manifests = state.upstreams.manifests();
                         for review in reviews {
                             items.push(InboxItem {
                                 kind: "tool",
+                                tool_choice: crate::dashboard_bulk_decisions::tool_choice(
+                                    &review, &manifests,
+                                ),
                                 severity: "warn",
                                 summary: format!("{} · {}", review.server, review.tool),
                                 handle: crate::dashboard_tool_reviews::trigger(&review),
@@ -387,7 +398,21 @@ async fn decisions_page(
         items.sort_by_key(|i| std::cmp::Reverse(i.created_unix));
     }
 
+    let bulk_tools_available = state.hitl.decision_batches.get().is_some()
+        && tenant_ctx.as_ref().is_none_or(|ctx| ctx.slug == tenant)
+        && items.iter().any(|item| item.tool_choice.is_some());
+    let receipts_available = !insufficient_scope
+        && state.hitl.decision_batches.get().is_some()
+        && tenant_ctx.as_ref().is_none_or(|ctx| ctx.slug == tenant);
+    let manifest_hash = if bulk_tools_available {
+        crate::dashboard_bulk_decisions::manifest_hash(&state)
+    } else {
+        String::new()
+    };
     render(&DecisionsPage {
+        receipts_available,
+        bulk_tools_available,
+        manifest_hash,
         chrome: PageChrome::build(
             &state,
             "Decisions",

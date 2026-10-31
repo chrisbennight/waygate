@@ -13,6 +13,7 @@
 
 pub mod activity_saved_views;
 pub mod agent_config;
+pub mod decision_batches;
 pub mod inspection_rules;
 pub mod playground_scenarios;
 pub mod response_settings;

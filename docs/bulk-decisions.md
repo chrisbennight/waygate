@@ -1,8 +1,9 @@
 # Bulk administrator decisions
 
-This design contract defines the intended administrator experience for bulk
-decisions. It does not describe an already-shipped capability. Each supported
-queue must satisfy these requirements before exposing bulk actions.
+Tool changes and their entries in Decisions support bulk approval and keeping
+selected definitions blocked. This guide describes that experience and the
+requirements for extending it to other queues. Bulk skill, invocation, and
+administrative-change decisions are not yet available.
 
 ## Purpose
 
@@ -49,7 +50,8 @@ submission is in progress, conflicting mutation controls are unavailable.
 
 The initial tool-review ceiling is fifty items, matching the existing listing
 size. The complete selection also has a two-MiB review budget, measured as the
-combined UTF-8 bytes of the stored approved and observed contract definitions
+combined UTF-8 bytes of the compact JSON serialization of the stored approved
+and observed contract definitions
 before escaping or diff rendering. A selection exceeding either limit is
 refused with guidance to select fewer items; significant decision details are
 never truncated to fit. Other queues retain their existing aggregate review
@@ -102,6 +104,19 @@ decisions; changing the submitted selection requires a new confirmation.
 Uncertain effects are reconciled against authoritative state before any retry.
 There is no implied all-or-nothing transaction across configuration files,
 database state, runtime activation, and evidence delivery.
+
+**Recent bulk decisions and interrupted submissions**, available from both
+entry pages even when no tools remain pending, lists this administrator's
+receipts in the current tenant. Receipts expire after seven days, and each
+administrator can retain at most one hundred. An interrupted item with no
+confirmed result requires checking its current review and Activity. Refreshing
+or resubmitting its confirmation never repeats the claimed submission.
+
+Bulk tool reviews require the same administrator authority in the upstream
+configuration tenant as individual tool reviews, plus a configured database
+for receipts. Other tenants and individual decisions retain their existing
+boundaries. A compact selection has its own receipt size limit; full tool
+contracts are read from the review store rather than copied into the receipt.
 
 Existing per-item attribution and evidence remain available, with correlation
 to the bulk submission. General summaries and logs do not copy credentials,

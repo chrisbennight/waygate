@@ -1,0 +1,5 @@
+<div class="bulk-choice">
+<label><input type="checkbox" form="bulk-tools" name="selected" value="{{ choice.token }}" data-bulk-item data-risk-name="{{ choice.risk_name }}" data-approvable="{{ choice.approvable }}"> Select {{ selection_name }}</label>
+{% if choice.initial %}<label>Gateway risk for {{ selection_name }} <select class="form-select" form="bulk-tools" name="{{ choice.risk_name }}"><option value="">Choose risk for initial approval</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>{% endif %}
+{% if !choice.approvable %}<p class="muted">The observed definition is unavailable. This item can only be kept blocked.</p>{% endif %}
+</div>
