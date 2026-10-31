@@ -291,6 +291,19 @@ async fn selected_changes_preserve_conditions_exact_intent_and_independent_execu
             }
         };
         assert_eq!(outcome, expected, "{scenario}");
+        let (status, detail) = get(
+            app.clone(),
+            &format!("/t/default/changes/{}/decision-state", row.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(detail.contains(&format!(
+            "Current state: <strong>{}</strong>",
+            current
+                .effective_status(time::OffsetDateTime::now_utc())
+                .as_db_str()
+        )));
+        assert!(detail.contains(&row.id.to_string()));
     }
     let (_, results) = get(app.clone(), &location).await;
     assert!(results.contains("Approval recorded toward quorum"));
@@ -303,7 +316,100 @@ async fn selected_changes_preserve_conditions_exact_intent_and_independent_execu
     );
     let evidence:i64=sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE tenant_id='default' AND action='change.bulk_approve' AND reason LIKE $1").bind(format!("%batch={batch}")).fetch_one(&pool).await.unwrap();
     assert_eq!(
-        evidence, 3,
-        "only recorded approvals are attributed to the batch once"
+        evidence, 4,
+        "every recorded approval is attributed once, including failed execution"
     );
+    let (status, _) = get(
+        app.clone(),
+        &format!(
+            "/t/other-tenant/changes/{}/decision-state",
+            rows["success"].id
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let value = format!("{prefix}-evidence");
+    let mut requirement = ApprovalRequirement::single("dashboard-admins");
+    requirement.required_approvals = 2;
+    let row=changes.propose(NewChangeRequest{tenant_id:"default".into(),requested_by:"propose-only-agent".into(),client_id:None,action_type:"rate_limit.create".into(),params:serde_json::json!({"name":value,"scope":"principal","scope_value":value,"action":"call","bucket_capacity":10,"refill_per_second":1.0}),preview:None,target_etag:None,justification:"Post-commit evidence fixture".into(),requirement,expires_at:time::OffsetDateTime::now_utc()+time::Duration::hours(1)}).await.unwrap();
+    changes
+        .record_approval("default", row.id, "bulk-evidence-reviewer")
+        .await
+        .unwrap();
+    let (_, focused) = get(
+        app.clone(),
+        &format!("/t/default/changes?pending_id={}", row.id),
+    )
+    .await;
+    let response = app
+        .clone()
+        .oneshot(post(
+            "/t/default/decisions/bulk/changes/review",
+            form(&[tokens(&focused)[&row.id].clone()], "dev-csrf"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response.headers()["location"]
+        .to_str()
+        .unwrap()
+        .strip_prefix("/admin")
+        .unwrap()
+        .to_owned();
+    let batch = uuid::Uuid::parse_str(location.rsplit('/').next().unwrap()).unwrap();
+    sqlx::query("ALTER TABLE audit_log ADD CONSTRAINT bulk_change_test_audit_failure CHECK(action <> 'ChangeRequestExecute' OR position('bulk-evidence-reviewer' in coalesce(reason,''))=0) NOT VALID").execute(&pool).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(post(
+            &format!("{location}/confirm"),
+            "csrf=dev-csrf&reviewed=true".into(),
+        ))
+        .await;
+    sqlx::query("ALTER TABLE audit_log DROP CONSTRAINT bulk_change_test_audit_failure")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(response.unwrap().status(), StatusCode::SEE_OTHER);
+    let stored = changes.get("default", row.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, ChangeRequestStatus::Executed);
+    let outcome: String = sqlx::query_scalar(
+        "SELECT result->>'outcome' FROM admin_decision_batch_items WHERE batch_id=$1",
+    )
+    .bind(batch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(outcome, "applied_evidence_attention");
+    let evidence:i64=sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE tenant_id='default' AND action='change.bulk_approve' AND reason=$1").bind(format!("change={} batch={batch}",row.id)).fetch_one(&pool).await.unwrap();
+    assert_eq!(evidence, 1);
+    let (_, result) = get(app.clone(), &location).await;
+    assert!(result.contains("Applied; evidence needs attention"));
+    assert!(result.contains(&format!("/changes/{}/decision-state", row.id)));
+    let (status, detail) = get(
+        app.clone(),
+        &format!("/t/default/changes/{}/decision-state", row.id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(detail.contains("Current state: <strong>executed</strong>"));
+    assert!(detail.contains("does not confirm"));
+    assert_eq!(
+        app.clone()
+            .oneshot(post(
+                &format!("{location}/confirm"),
+                "csrf=dev-csrf&reviewed=true".into()
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rate_limit_policies WHERE tenant_id='default' AND scope_value=$1",
+    )
+    .bind(&value)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
 }

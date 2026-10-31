@@ -11,10 +11,10 @@ use crate::{
 };
 use askama::Template;
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::HeaderMap,
     response::{Redirect, Response},
-    routing::post,
+    routing::{get, post},
     Extension, Form, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -63,7 +63,69 @@ pub(crate) fn choice(change: &ChangeRequest) -> Option<String> {
     })
 }
 pub fn router() -> Router<Arc<AdminState>> {
-    Router::new().route("/decisions/bulk/changes/review", post(prepare))
+    Router::new()
+        .route("/decisions/bulk/changes/review", post(prepare))
+        .route("/changes/{id}/decision-state", get(current_state))
+}
+
+#[derive(Template)]
+#[template(path = "change_decision_state.html")]
+struct StatePage {
+    chrome: PageChrome,
+    id: String,
+    status: &'static str,
+    context: Vec<Segment>,
+    outcome: Vec<Segment>,
+    note: Option<&'static str>,
+}
+
+async fn current_state(
+    State(state): State<Arc<AdminState>>,
+    user: Option<Extension<Principal>>,
+    token: Option<Extension<CsrfToken>>,
+    tenant: Option<Extension<TenantContext>>,
+    headers: HeaderMap,
+    Path(params): Path<std::collections::HashMap<String, String>>,
+) -> Result<Response, ApiError> {
+    let actor = batches::authorize(&user, &tenant)?;
+    let id = params
+        .get("id")
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or(ApiError::NotFound("Administrative change request"))?;
+    let row = state
+        .hitl
+        .change_requests
+        .require()?
+        .get(actor.tenant.as_str(), id)
+        .await
+        .map_err(|_| ApiError::Internal("Administrative request read failed".into()))?
+        .ok_or(ApiError::NotFound("Administrative change request"))?;
+    target(&row)?;
+    let context = serde_json::to_string_pretty(&intent(&row)).expect("intent serializes");
+    let (context, note) = if context.len() > 2 * 1024 * 1024 {
+        (Vec::new(),Some("Complete captured context exceeds the review limit. Current state is shown; use the individual request API for the complete record."))
+    } else {
+        (review_diff::text_segments(&context), None)
+    };
+    let outcome=serde_json::to_string_pretty(&serde_json::json!({"approver":row.approver_sub,"result":row.execution_result,"error":row.error_message,"denied_reason":row.denied_reason})).expect("request outcome serializes");
+    Ok(render(&StatePage {
+        chrome: PageChrome::build(
+            &state,
+            "Administrative request state",
+            "/changes",
+            &headers,
+            Some(user_display(actor)),
+            tenant.map(|Extension(t)| t),
+            token.map(|Extension(t)| t.0).unwrap_or_default(),
+        ),
+        id: id.to_string(),
+        status: row
+            .effective_status(time::OffsetDateTime::now_utc())
+            .as_db_str(),
+        context,
+        outcome: review_diff::text_segments(&outcome),
+        note,
+    }))
 }
 fn selections(batch: &DecisionBatch) -> Result<Vec<SelectedChange>, ApiError> {
     if batch.request.kind != "change" || batch.request.action != "approve" {
@@ -246,7 +308,7 @@ pub(crate) async fn page(
             .unwrap_or_default();
         items.push(ItemView {
             id: item.id.to_string(),
-            url: format!("/changes?pending_id={}", item.id),
+            url: format!("/changes/{}/decision-state", item.id),
             context,
             reason: item.reason.clone(),
             outcome,
@@ -341,7 +403,34 @@ pub(crate) async fn confirm(
                                     | ChangeRequestStatus::Failed
                             ) =>
                     {
-                        status_outcome(&change)
+                        // The core can fail after committing execution while
+                        // recording required attribution or execution evidence.
+                        // Observed state alone cannot turn that into success.
+                        let outcome = if matches!(
+                            error,
+                            ApiError::Internal(_) | ApiError::InternalOperatorVisible(_)
+                        ) && change.status != ChangeRequestStatus::Failed
+                        {
+                            DecisionOutcome::AppliedEvidenceAttention
+                        } else if change.status == ChangeRequestStatus::Executed {
+                            DecisionOutcome::AlreadyDecided
+                        } else {
+                            status_outcome(&change)
+                        };
+                        match crate::admin_mutation::record_admin_mutation(
+                            state,
+                            "administrative decisions",
+                            "the change request page",
+                            actor.tenant.as_str(),
+                            Some(actor),
+                            "change.bulk_approve",
+                            format!("change={} batch={}", item.id, batch.id),
+                        )
+                        .await
+                        {
+                            Ok(()) => outcome,
+                            Err(_) => DecisionOutcome::AppliedEvidenceAttention,
+                        }
                     }
                     _ => match error {
                         ApiError::Forbidden(_) | ApiError::ForbiddenDyn(_) => {

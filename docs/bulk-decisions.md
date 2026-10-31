@@ -111,6 +111,13 @@ the selection and its effect. Accepting a definition restores its eligibility
 under existing configuration and policy. Approving an invocation instead
 authorizes that particular request; it does not create standing permission.
 
+Administrative receipt links open the owning request directly, including
+pending, executing, and terminal states, independent of the bounded history
+page. A committed execution followed by an evidence error remains explicitly
+marked as requiring attention. Inspect the request and Activity before any
+further action; an executed status alone does not prove that required evidence
+was recorded.
+
 ## Decision boundaries
 
 The authenticated administrator and authoritative tenant context govern every
