@@ -16,7 +16,7 @@ impl LlmDispatcher {
         }
         let bearer = self
             .credentials
-            .bearer(route.provider, &route.credential_label)
+            .api_key(route.provider, &route.credential_label)
             .await?;
         let sse = request.sse;
         let media_type = request.format.media_type();

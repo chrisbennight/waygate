@@ -43,6 +43,8 @@ The explicit envelope distinguishes API keys from subscription OAuth material.
 Malformed or mixed credential envelopes are rejected, rather than sent as a
 bearer string. Existing OAuth credential forms remain supported for their
 existing operations.
+Speech retrieves only API-key material, under the credential lock. Subscription
+OAuth credentials are refused without refresh or provider contact.
 
 List only formats and named voices the provider supports. `custom_voices`
 permits standard object selectors such as `{"id":"voice_example"}`; the provider

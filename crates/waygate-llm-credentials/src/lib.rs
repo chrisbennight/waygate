@@ -173,6 +173,8 @@ pub struct CredentialStatus {
 /// Failure modes surfaced by [`LlmCredentialStore::bearer`].
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialError {
+    #[error("an API-key credential is required for provider {0}")]
+    ApiKeyRequired(&'static str),
     #[error("no credential configured for {provider}/{label}")]
     NotConfigured {
         provider: &'static str,
@@ -547,7 +549,11 @@ fn parse_material(provider: LlmProvider, value: &str) -> Option<Material> {
         struct ApiKeyEnvelope {
             api_key: String,
         }
-        if let Ok(envelope) = serde_json::from_str::<ApiKeyEnvelope>(value) {
+        if serde_json::from_str::<serde_json::Value>(value)
+            .ok()
+            .is_some_and(|object| object.get("api_key").is_some())
+        {
+            let envelope = serde_json::from_str::<ApiKeyEnvelope>(value).ok()?;
             let key = envelope.api_key.trim();
             return (!key.is_empty() && !key.starts_with('{'))
                 .then(|| Material::ApiKey(key.to_owned()));
@@ -801,6 +807,28 @@ impl LlmCredentialStore {
         let cell = self.creds.get(&(provider, label.to_string()))?;
         let state = cell.lock().await;
         Some(matches!(state.material, Material::OAuth(_)))
+    }
+
+    /// Retrieve an API key under the credential lock without OAuth refresh.
+    /// Reload cannot substitute a subscription token between a kind check and
+    /// the value read; an incompatible credential is refused atomically.
+    pub async fn api_key(
+        &self,
+        provider: LlmProvider,
+        label: &str,
+    ) -> Result<String, CredentialError> {
+        let cell = self
+            .creds
+            .get(&(provider, label.to_string()))
+            .ok_or_else(|| CredentialError::NotConfigured {
+                provider: provider.as_str(),
+                label: label.to_string(),
+            })?;
+        let state = cell.lock().await;
+        match &state.material {
+            Material::ApiKey(key) => Ok(key.clone()),
+            Material::OAuth(_) => Err(CredentialError::ApiKeyRequired(provider.as_str())),
+        }
     }
 
     /// Return a currently-valid bearer token for a credential, refreshing an
@@ -1142,6 +1170,10 @@ mod tests {
             "fixture-provider-key"
         );
         assert_eq!(
+            store.api_key(LlmProvider::OpenAi, "SPEECH").await.unwrap(),
+            "fixture-provider-key"
+        );
+        assert_eq!(
             store
                 .credential_is_oauth(LlmProvider::OpenAi, "SPEECH")
                 .await,
@@ -1157,9 +1189,24 @@ mod tests {
             r#"{"api_key":"fixture","refresh_token":"fixture-refresh"}"#,
             r#"{"api_key":"fixture","tokens":{"refresh_token":"fixture-refresh"}}"#,
             r#"{"tokens":{"refresh_token":"fixture-refresh"}}"#,
+            r#"{"api_key":"fixture","tokens":{"access_token":"fixture-subscription","refresh_token":"fixture-refresh"},"expires_at":"2099-01-01T00:00:00Z"}"#,
+            r#"{"api_key":null,"tokens":{"access_token":"fixture-subscription","refresh_token":"fixture-refresh"},"expires_at":"2099-01-01T00:00:00Z"}"#,
         ] {
             assert!(parse_material(LlmProvider::OpenAi, value).is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn api_key_access_refuses_subscription_material_after_reload() {
+        let store = LlmCredentialStore::from_vars([(
+            "LLM_CRED_OPENAI_SPEECH".into(),
+            r#"{"api_key":"fixture-key"}"#.into(),
+        )]);
+        store.reload(LlmProvider::OpenAi, "SPEECH", r#"{"tokens":{"access_token":"fixture-subscription","refresh_token":"fixture-refresh"},"expires_at":"2099-01-01T00:00:00Z"}"#).await.unwrap();
+        assert!(matches!(
+            store.api_key(LlmProvider::OpenAi, "SPEECH").await,
+            Err(CredentialError::ApiKeyRequired(_))
+        ));
     }
 
     #[test]

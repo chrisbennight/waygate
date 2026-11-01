@@ -246,9 +246,10 @@ fn deliver_speech(
                                 Some("speech.audio.done") if saw_audio => (true, 0),
                                 _ => return Err("invalid_event"),
                             };
-                        // The event payload is relayed without treating provider usage as measured.
+                        // Compact JSON preserves valid SSE framing for multiline provider data.
+                        // Provider usage fields are not treated as measured accounting.
                         (
-                            Bytes::from(format!("data: {}\n\n", frame.data)),
+                            Bytes::from(format!("data: {value}\n\n")),
                             terminal,
                             audio_bytes,
                         )

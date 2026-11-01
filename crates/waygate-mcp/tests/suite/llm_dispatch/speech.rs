@@ -208,8 +208,12 @@ async fn audio_arrives_before_generation_completes_and_usage_remains_unknown() {
 async fn sse_requires_completion_and_never_accounts_placeholder_tokens() {
     for complete in [true, false] {
         let addr=serve(Router::new().route("/audio/speech",post(move || async move {
-            let mut data="data: {\"type\":\"speech.audio.delta\",\"audio\":\"AQACAA==\"}\n\n".to_string();
-            if complete { data.push_str("data: {\"type\":\"speech.audio.done\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}\n\n"); }
+            let frame = |value: Value| {
+                let json = serde_json::to_string_pretty(&value).unwrap();
+                json.lines().map(|line| format!("data: {line}\n")).collect::<String>() + "\n"
+            };
+            let mut data = frame(json!({"type":"speech.audio.delta","audio":"AQACAA=="}));
+            if complete { data.push_str(&frame(json!({"type":"speech.audio.done","usage":{"input_tokens":0,"output_tokens":0}}))); }
             Response::builder().header("content-type","text/event-stream").body(Body::from(data)).unwrap()
         }))).await;
         let usage = Arc::new(RecordingUsage::default());
@@ -241,12 +245,21 @@ async fn sse_requires_completion_and_never_accounts_placeholder_tokens() {
             }
         }
         assert_eq!(failed, !complete);
-        assert_eq!(
-            String::from_utf8(data)
-                .unwrap()
-                .contains("speech.audio.done"),
-            complete
-        );
+        let data = String::from_utf8(data).unwrap();
+        for event in data.split("\n\n").filter(|frame| !frame.is_empty()) {
+            let payload = event
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let decoded: Value = serde_json::from_str(&payload)
+                .expect("downstream SSE payload must remain valid JSON");
+            assert!(matches!(
+                decoded["type"].as_str(),
+                Some("speech.audio.delta" | "speech.audio.done")
+            ));
+        }
+        assert_eq!(data.contains("speech.audio.done"), complete);
         let rows = usage.rows.lock().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].input_tokens, None);
