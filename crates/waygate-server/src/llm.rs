@@ -50,11 +50,14 @@ pub const LLM_SERVER: &str = waygate_core::LLM_RESERVED_NAMESPACE;
 /// Env var carrying the model catalog as a JSON array of [`ModelDef`].
 const MODELS_ENV: &str = "GATEWAY_LLM_MODELS";
 
+#[cfg(test)]
+mod audio_qualification;
 mod audio_resources;
 mod embedding_config;
 mod embedding_errors;
 mod images;
 mod messages;
+mod realtime;
 mod speech;
 
 /// Max inbound request body (bytes) for an LLM call.
@@ -77,6 +80,8 @@ pub fn deps_as_dyn(deps: &LlmDeps) -> (LlmDispatcher, Arc<dyn LlmModelResolver>)
 /// One configured inference model and its provider capabilities.
 #[derive(Debug, Clone, Deserialize)]
 struct ModelDef {
+    #[serde(default)]
+    realtime: Option<waygate_core::realtime::RealtimeCapabilities>,
     /// Explicit capabilities required for a configured speech model.
     #[serde(default)]
     speech: Option<waygate_llm_translate::speech::SpeechCapabilities>,
@@ -238,6 +243,12 @@ fn is_speech(def: &ModelDef) -> bool {
         .is_some_and(|kind| kind.eq_ignore_ascii_case("speech"))
 }
 
+fn is_realtime(def: &ModelDef) -> bool {
+    def.kind
+        .as_deref()
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("realtime"))
+}
+
 /// Whether this model serves the OpenAI-compatible embeddings operation.
 fn is_embeddings(def: &ModelDef) -> bool {
     def.kind
@@ -254,6 +265,9 @@ fn is_embeddings(def: &ModelDef) -> bool {
 /// [`routes_for_target`] resolves, so the catalog never disagrees with the live
 /// route (#395).
 fn upstream_api_for(def: &ModelDef) -> &'static str {
+    if is_realtime(def) {
+        return "realtime";
+    }
     if is_speech(def) {
         return "speech";
     }
@@ -507,10 +521,21 @@ fn build_from_defs(
             .filter(|def| def
                 .speech
                 .as_ref()
-                .is_some_and(|caps| !caps.resources.is_empty()))
+                .is_some_and(|caps| !caps.resources.is_empty())
+                || def
+                    .realtime
+                    .as_ref()
+                    .is_some_and(|caps| !caps.resources.is_empty()))
             .count()
             <= 1,
-        "only one speech model may own standard audio resource routes"
+        "only one configured model may own standard audio resource routes"
+    );
+    anyhow::ensure!(
+        defs.iter()
+            .filter(|def| def.realtime.as_ref().is_some_and(|caps| caps.webrtc))
+            .count()
+            <= 1,
+        "only one configured Realtime model may enable WebRTC call routes"
     );
     for def in defs {
         let risk = parse_risk(def.risk.as_deref());
@@ -520,7 +545,9 @@ fn build_from_defs(
         let is_emb = is_embeddings(&def);
         let is_img = is_images(&def);
         let is_speech = is_speech(&def);
+        let is_realtime = is_realtime(&def);
         speech::validate_config(&def)?;
+        realtime::validate_config(&def)?;
         let no_auth = embedding_config::no_auth(&def)?;
         if is_img
             && (!def.provider.eq_ignore_ascii_case("openai")
@@ -547,7 +574,9 @@ fn build_from_defs(
             def.credential_label.clone(),
             def.credential_labels.clone(),
             def.base_url.clone(),
-            if is_speech {
+            if is_realtime {
+                Some("realtime".into())
+            } else if is_speech {
                 Some(def.path.clone().unwrap_or_else(|| "audio/speech".into()))
             } else if is_img {
                 Some(def.path.clone().unwrap_or_else(|| "images".into()))
@@ -585,7 +614,13 @@ fn build_from_defs(
             def.alias,
             ResolvedModel {
                 route,
-                operation: if is_speech {
+                operation: if is_realtime {
+                    LlmOperation::Realtime(
+                        def.realtime
+                            .clone()
+                            .expect("validated Realtime capabilities"),
+                    )
+                } else if is_speech {
                     LlmOperation::Speech(def.speech.clone().expect("validated speech capabilities"))
                 } else if is_img {
                     LlmOperation::Images
@@ -661,7 +696,9 @@ fn build_from_defs(
 fn resolved_from_catalog_row(row: &waygate_storage::LlmModelRow) -> Option<ResolvedModel> {
     // Speech capabilities are explicit configuration; a catalog row cannot
     // revive a removed pin by guessing what its provider supports.
-    if row.upstream_api.eq_ignore_ascii_case("speech") {
+    if row.upstream_api.eq_ignore_ascii_case("speech")
+        || row.upstream_api.eq_ignore_ascii_case("realtime")
+    {
         return None;
     }
     let provider = parse_provider(&row.provider).ok()?;
@@ -782,7 +819,9 @@ fn model_def_to_upsert(def: &ModelDef) -> waygate_storage::LlmModelUpsert {
         // provider string doesn't parse (build_from_defs surfaces that as a hard
         // error).
         path: def.path.clone().unwrap_or_else(|| {
-            if is_speech(def) {
+            if is_realtime(def) {
+                "realtime".to_string()
+            } else if is_speech(def) {
                 "audio/speech".to_string()
             } else if is_images(def) {
                 "images".to_string()
@@ -925,6 +964,12 @@ pub fn router(
         .route("/v1/images/generations", post(images::generations))
         .route("/v1/images/edits", post(images::edits))
         .route("/v1/audio/speech", post(speech::create))
+        .route("/v1/realtime", get(realtime::websocket))
+        .route("/v1/realtime/calls", post(realtime::create_call))
+        .route(
+            "/v1/realtime/calls/{call_id}/hangup",
+            post(realtime::hangup),
+        )
         .route("/v1/audio/voices", post(audio_resources::create_voice))
         .route(
             "/v1/audio/voices/{voice_id}",
@@ -979,6 +1024,9 @@ fn models_list_json(rows: Vec<waygate_storage::LlmModelRow>) -> Value {
 /// clients tell the surfaces apart without calling each one. Speech is
 /// `text->audio` and images are `text+image->image`; `?type=` filters by operation.
 fn model_modality(upstream_api: &str) -> &'static str {
+    if upstream_api.eq_ignore_ascii_case("realtime") {
+        return "realtime-audio";
+    }
     if upstream_api.eq_ignore_ascii_case("speech") {
         return "text->audio";
     }
@@ -996,6 +1044,7 @@ fn model_modality(upstream_api: &str) -> &'static str {
 /// kind: chat, embeddings, images, or speech.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ModelKindFilter {
+    Realtime,
     Speech,
     Images,
     Embeddings,
@@ -1010,6 +1059,7 @@ impl ModelKindFilter {
         query.split('&').find_map(|pair| {
             let v = pair.strip_prefix("type=")?;
             match v.to_ascii_lowercase().as_str() {
+                "realtime" => Some(Self::Realtime),
                 "speech" => Some(Self::Speech),
                 "embeddings" | "embedding" => Some(Self::Embeddings),
                 "chat" => Some(Self::Chat),
@@ -1023,6 +1073,7 @@ impl ModelKindFilter {
     fn matches(self, upstream_api: &str) -> bool {
         let is_emb = upstream_api.eq_ignore_ascii_case("embeddings");
         match self {
+            Self::Realtime => upstream_api.eq_ignore_ascii_case("realtime"),
             Self::Speech => upstream_api.eq_ignore_ascii_case("speech"),
             Self::Images => upstream_api.eq_ignore_ascii_case("images"),
             Self::Embeddings => is_emb,
@@ -1030,6 +1081,7 @@ impl ModelKindFilter {
                 !is_emb
                     && !upstream_api.eq_ignore_ascii_case("images")
                     && !upstream_api.eq_ignore_ascii_case("speech")
+                    && !upstream_api.eq_ignore_ascii_case("realtime")
             }
         }
     }
@@ -1102,7 +1154,26 @@ async fn models_response(
             None => true,
         })
         .collect();
-    (StatusCode::OK, Json(models_list_json(rows))).into_response()
+    let mut body = models_list_json(rows);
+    if let Some(models) = body.get_mut("data").and_then(Value::as_array_mut) {
+        for model in models {
+            if let Some(resolved) = model
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|alias| resolver.resolve(LLM_SERVER, alias))
+            {
+                let capabilities = match resolved.operation {
+                    LlmOperation::Speech(caps) => Some(json!({"speech":caps})),
+                    LlmOperation::Realtime(caps) => Some(json!({"realtime":caps})),
+                    _ => None,
+                };
+                if let Some(capabilities) = capabilities {
+                    model["capabilities"] = capabilities;
+                }
+            }
+        }
+    }
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 /// Shared inference-route body reader: consume the size-capped request body,
@@ -1162,7 +1233,9 @@ async fn chat_completions(State(state): State<LlmRouterState>, req: Request) -> 
         Ok(InvocationResponse::UnaryValue(body)) => (StatusCode::OK, Json(body)).into_response(),
         // An MCP CallToolResult (or MRTR pause — this surface declares no
         // input capabilities) on the LLM route is a wiring bug.
-        Ok(InvocationResponse::Media { .. })
+        Ok(InvocationResponse::Realtime { .. })
+        | Ok(InvocationResponse::RealtimeCall { .. })
+        | Ok(InvocationResponse::Media { .. })
         | Ok(InvocationResponse::Unary(_))
         | Ok(InvocationResponse::InputRequired(_))
         | Ok(InvocationResponse::Task(_)) => error_response(
@@ -1232,7 +1305,9 @@ async fn responses(State(state): State<LlmRouterState>, req: Request) -> Respons
         // The body is already Responses-shaped — dispatch rendered the canonical
         // response to the Responses surface.
         Ok(InvocationResponse::UnaryValue(body)) => (StatusCode::OK, Json(body)).into_response(),
-        Ok(InvocationResponse::Media { .. })
+        Ok(InvocationResponse::Realtime { .. })
+        | Ok(InvocationResponse::RealtimeCall { .. })
+        | Ok(InvocationResponse::Media { .. })
         | Ok(InvocationResponse::Unary(_))
         | Ok(InvocationResponse::InputRequired(_))
         | Ok(InvocationResponse::Task(_)) => error_response(
@@ -1270,7 +1345,9 @@ async fn embeddings(State(state): State<LlmRouterState>, req: Request) -> Respon
         Ok(InvocationResponse::UnaryValue(body)) => (StatusCode::OK, Json(body)).into_response(),
         // `invoke_embeddings` only ever returns a unary value or an error; an MCP
         // tool result or a stream on the embeddings route is a wiring bug.
-        Ok(InvocationResponse::Media { .. })
+        Ok(InvocationResponse::Realtime { .. })
+        | Ok(InvocationResponse::RealtimeCall { .. })
+        | Ok(InvocationResponse::Media { .. })
         | Ok(InvocationResponse::Unary(_))
         | Ok(InvocationResponse::Stream(_))
         | Ok(InvocationResponse::InputRequired(_))

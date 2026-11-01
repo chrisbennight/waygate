@@ -229,6 +229,24 @@ async fn sink_prices_a_call_from_the_catalog() {
         .bind(&tenant)
         .execute(&pool)
         .await
+        .unwrap();
+    let mut realtime = row.clone();
+    realtime.inbound_surface = "realtime".into();
+    sink.record_usage(realtime).await;
+    let mixed = sqlx::query(
+        "SELECT input_tokens,total_cost,cost_source FROM llm_usage WHERE tenant_id = $1",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(mixed.get::<Option<i64>, _>("input_tokens"), Some(1000));
+    assert_eq!(mixed.get::<Option<Decimal>, _>("total_cost"), None);
+    assert_eq!(mixed.get::<String, _>("cost_source"), "unknown");
+    sqlx::query("DELETE FROM llm_usage WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
         .expect("cleanup usage");
     sqlx::query("DELETE FROM llm_models WHERE tenant_id = $1")
         .bind(&tenant)

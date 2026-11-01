@@ -22,6 +22,7 @@
 //!   dispatch stage calls *after* enforcement has passed.
 
 pub mod audio_resources;
+pub mod realtime;
 pub mod speech;
 mod sse;
 

@@ -75,6 +75,7 @@ struct ModelRow {
     /// Images use a distinct operation badge, independent of chat discovery.
     is_images: bool,
     is_speech: bool,
+    is_realtime: bool,
     risk: String,
     enabled: bool,
     requires_approval: bool,
@@ -179,6 +180,7 @@ fn model_row(m: LlmModelRow) -> ModelRow {
     let is_embeddings = m.upstream_api.eq_ignore_ascii_case("embeddings");
     let is_images = m.upstream_api.eq_ignore_ascii_case("images");
     let is_speech = m.upstream_api.eq_ignore_ascii_case("speech");
+    let is_realtime = m.upstream_api.eq_ignore_ascii_case("realtime");
     ModelRow {
         alias: m.alias,
         provider: m.provider,
@@ -188,6 +190,7 @@ fn model_row(m: LlmModelRow) -> ModelRow {
         is_embeddings,
         is_images,
         is_speech,
+        is_realtime,
         risk: m.risk,
         enabled: m.enabled,
         requires_approval: m.requires_approval,

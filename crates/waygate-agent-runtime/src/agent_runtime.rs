@@ -137,7 +137,10 @@ impl AgentModel for OpenAiAgentModel {
                     "inference returned an MCP tool result on the model path".to_owned(),
                 ));
             }
-            Ok(InvocationResponse::Media { .. }) | Ok(InvocationResponse::Stream(_)) => {
+            Ok(InvocationResponse::Realtime { .. })
+            | Ok(InvocationResponse::RealtimeCall { .. })
+            | Ok(InvocationResponse::Media { .. })
+            | Ok(InvocationResponse::Stream(_)) => {
                 return Err(AgentError::Model(
                     "inference returned a streaming response on a non-streaming model call"
                         .to_owned(),
@@ -608,12 +611,13 @@ impl AgentToolDispatch for UpstreamAgentDispatch {
                 content: v.to_string(),
                 is_error: false,
             }),
-            Ok(InvocationResponse::Media { .. }) | Ok(InvocationResponse::Stream(_)) => {
-                Ok(ToolOutcome {
-                    content: "tool returned an unexpected streaming response".to_owned(),
-                    is_error: true,
-                })
-            }
+            Ok(InvocationResponse::Realtime { .. })
+            | Ok(InvocationResponse::RealtimeCall { .. })
+            | Ok(InvocationResponse::Media { .. })
+            | Ok(InvocationResponse::Stream(_)) => Ok(ToolOutcome {
+                content: "tool returned an unexpected streaming response".to_owned(),
+                is_error: true,
+            }),
             // The runtime declares no input capabilities, so the pipeline
             // fails an MRTR pause closed before it can surface here; treat a
             // stray one as an (error) tool result the model can adapt to.

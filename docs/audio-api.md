@@ -1,4 +1,4 @@
-# Speech API
+# Audio APIs
 
 `POST /v1/audio/speech` provides OpenAI-compatible speech generation through a
 configured provider. The same invocation service applies model authorization,
@@ -119,9 +119,9 @@ do not become a known free call or a hard spending guarantee.
 
 ## Voice and consent resources
 
-One configured speech model may also provide standard recording-based voice and
+One configured Speech or Realtime model may also provide standard recording-based voice and
 consent operations. Add only the operations its provider supports to that model's
-`speech.resources` array:
+`speech.resources` or `realtime.resources` array:
 
 ```json
 {"resources": [
@@ -172,11 +172,141 @@ The `audio_resource` usage surface retains unknown token counts and costs rather
 than treating resource operations as known free calls. Evidence finalization is
 bounded and best effort.
 
-Realtime sessions are a separate transport contract. This implementation does not
-yet expose them.
+## Realtime configuration
+
+Realtime uses the current OpenAI GA session and event contract. Configure a
+separate model with the provider's actual supported features:
+
+```json
+{
+  "alias": "live-narration",
+  "provider": "openai",
+  "credential_label": "SPEECH",
+  "base_url": "http://speech-provider:8000/v1",
+  "upstream_model": "provider-realtime-model",
+  "kind": "realtime",
+  "realtime": {
+    "websocket": true,
+    "webrtc": true,
+    "voices": ["narrator"],
+    "custom_voices": true,
+    "instructions": true,
+    "audio_input": false,
+    "tools": false,
+    "max_session_seconds": 600,
+    "measured_usage": false
+  }
+}
+```
+
+The base URL is HTTP(S), including for the WebSocket upgrade. Realtime uses the
+same strict API-key envelope, proxy/TLS policy, model governance, and single
+attempt rule as Speech. There is no credential pool, fallback, or cache. Declared
+capabilities are gateway configuration, not extra OpenAI request fields. Only
+configured models can supply audio routes; discovery cannot infer capabilities
+from model names. `GET /v1/models?type=realtime` and the additional `modality` and
+`capabilities` fields are gateway discovery metadata, outside the OpenAI standard.
+
+### WebSocket sessions
+
+Connect to `/v1/realtime?model=live-narration` using a gateway bearer credential
+and an ordinary OpenAI Realtime client. Send standard GA `session.update`,
+`conversation.item.create`, and `response.create` events. Session updates use
+`session.type="realtime"`, `output_modalities`, and `audio.output.voice`.
+Provider response and item IDs and `response.output_audio.*`, transcript,
+`response.done`, cancellation, and truncation events pass through unchanged.
+The provider owns conversation, voice-locking, and cancellation semantics.
+The gateway prevents model changes and refuses unsupported configured options.
+Native incremental text append/flush operations are not standard Realtime
+events and are refused. Standard complete text items and response input work
+without a gateway-specific extension.
+
+### WebRTC calls
+
+Use the standard unified `POST /v1/realtime/calls` multipart flow: `sdp` contains
+the offer and `session` contains JSON with `type: realtime`, the model alias,
+and supported session options. The response is HTTP 201 with `application/sdp`
+and a gateway `Location`. Native call IDs are preserved. A standard
+`POST /v1/realtime/calls/{call_id}/hangup` terminates a call through the same
+model gates.
+
+The provider terminates WebRTC media and its `oai-events` data channel. Its ICE
+or TURN addresses must be reachable from clients even when its HTTP API is
+private. The gateway observes the call through the provider's standard sideband
+WebSocket. It does not relay RTP or claim client playback. A failed or abandoned
+setup triggers bounded hangup cleanup once a provider call ID is known; failures
+before an ID is returned leave the remote outcome unknown. Session termination
+also attempts bounded provider hangup.
+
+Only one configured Realtime model may enable WebRTC. This is a gateway routing
+limit, not an OpenAI requirement: model-less call controls resolve consistently
+on every replica without a gateway call ownership database. WebSocket-only models
+can coexist. External client-secret minting and external sideband attachment are
+not exposed. Browser applications can use the unified offer flow through an
+authenticated application server. Provider-global resources retain their
+provider authorization model; the gateway adds no per-user voice overlay.
+
+### Session bounds and evidence
+
+Realtime has 32 concurrent session slots, separate from HTTP inference capacity.
+The configured lifetime is 1–3600 seconds (default 600), with 1 MiB events,
+64 KiB SDP, 256 MiB combined event traffic, 100,000 events, and 128 responses per
+session. Uploads, setup, writes, delivery, cleanup, and evidence have deadlines.
+Existing request quotas count session/control admission. Live policies and
+applicable recorded-usage budgets are checked every five seconds and before
+new WebSocket responses or session changes, using the admitted identity facts.
+Explicit hangup retains authorization and rate controls but is not refused
+because a generation budget is exhausted.
+These are lagging budgets; in-flight activity and unknown usage are not a hard
+spending guarantee. Identity attributes are the admission snapshot.
+
+Metadata-only generation evidence records response status and observed timing;
+the session record separately reports termination and delivery failure. First
+audio latency starts when the gateway receives `response.created`; it excludes
+earlier client input and provider queue time. The timing origin is recorded.
+WebRTC output-buffer stopped/cleared events separately record the provider's
+media completion/interruption boundary. Neither confirms client receipt.
+First
+audio means a received WebSocket audio delta or the provider's standard WebRTC
+`output_audio_buffer.started` event. The latter is a provider media boundary,
+not browser receipt. Missing observations stay unknown. Audio, conversation
+text, transcripts, SDP, ICE credentials, and provider keys are never placed in
+routine evidence.
+
+Usage is aggregated at session close. Set `measured_usage` only when the provider's
+`response.done.usage` counts are authoritative; placeholders remain unknown by
+default. Missing or incomplete response usage leaves the session aggregate
+unknown. Measured counts do not imply measured cost: the current text-rate
+catalog cannot price Realtime's mixed audio/text token classes, so Realtime cost
+remains unknown. Provider-confirmed response cancellation and acknowledged call
+termination are distinct from a locally closed connection.
+
+See the [OpenAI Realtime guide](https://developers.openai.com/api/docs/guides/realtime)
+and [WebRTC flow](https://developers.openai.com/api/docs/guides/realtime-webrtc).
 
 See the [OpenAI Speech contract](https://developers.openai.com/api/reference/resources/audio/subresources/speech/methods/create)
 and [inference governance](inference-plane.md#2-invariants-load-bearing-rules).
 The [voice](https://developers.openai.com/api/reference/resources/audio/subresources/voices/)
 and [consent](https://developers.openai.com/api/reference/resources/audio/subresources/voice_consents/)
 contracts define the resource operations.
+
+## Local client qualification
+
+The opt-in SDK test runs an authenticated gateway against a private loopback
+provider and a real application WebRTC peer. It checks complete WAV, incremental
+PCM, standard SSE, recording voice/consent lifecycle, WebSocket audio/transcript
+events, cancellation/truncation, decoded Opus and data-channel events, and
+standard call hangup. Direct and proxied first-audio samples are diagnostic,
+not a production latency guarantee. Python SDK versions that expose Speech SSE
+as a binary response can read its standard frames with `iter_lines()`.
+
+Use an isolated environment with `openai[realtime]`, `aiortc`, and `aiohttp`, then:
+
+```sh
+AUDIO_SDK_PYTHON=/path/to/venv/bin/python cargo test -p waygate-server \
+  openai_audio_sdk_and_real_webrtc_media -- --ignored --nocapture
+```
+
+The default workspace suite skips this optional environment-dependent test.
+Provider deployment qualification must additionally verify its real inference,
+voice resources, private HTTP routing, and client-reachable ICE/TURN addresses.

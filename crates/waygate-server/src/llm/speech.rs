@@ -76,7 +76,8 @@ pub(super) fn error_response(error: &InvocationError) -> Option<Response> {
     let data = error.data.as_ref()?;
     let status = data
         .get("speech_http_status")
-        .or_else(|| data.get("audio_http_status"))?
+        .or_else(|| data.get("audio_http_status"))
+        .or_else(|| data.get("realtime_http_status"))?
         .as_u64()?;
     let (status, kind) = match status {
         429 => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error"),

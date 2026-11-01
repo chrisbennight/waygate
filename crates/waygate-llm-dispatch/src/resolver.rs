@@ -45,6 +45,7 @@ pub enum LlmOperation {
     Embeddings,
     Images,
     Speech(waygate_llm_translate::speech::SpeechCapabilities),
+    Realtime(waygate_core::realtime::RealtimeCapabilities),
 }
 
 /// A resolved model target: where to send it and how the gates should treat it.
@@ -78,6 +79,17 @@ pub struct ResolvedModel {
     pub cache_ttl: Option<Duration>,
 }
 
+impl ResolvedModel {
+    /// Resource operations use the same configured provider and model gates.
+    pub fn audio_resource_operations(&self) -> &[waygate_core::audio::AudioResourceOperation] {
+        match &self.operation {
+            LlmOperation::Speech(caps) => &caps.resources,
+            LlmOperation::Realtime(caps) => &caps.resources,
+            _ => &[],
+        }
+    }
+}
+
 /// Resolves an inbound `(server, model)` pair to a model target, or `None` when
 /// the pair is not an LLM model (so the caller falls back to the MCP path).
 pub trait LlmModelResolver: Send + Sync + 'static {
@@ -86,6 +98,12 @@ pub trait LlmModelResolver: Send + Sync + 'static {
     /// The explicitly configured provider for standard audio resources, which
     /// have no client model selector. Absence and ambiguity both fail closed.
     fn audio_resource_model(&self, _server: &str) -> Option<String> {
+        None
+    }
+
+    /// One explicit WebRTC provider keeps model-less call controls unambiguous
+    /// across gateway replicas without a separate call-ownership store.
+    fn realtime_call_model(&self, _server: &str) -> Option<String> {
         None
     }
 
@@ -128,8 +146,18 @@ impl StaticModelResolver {
 }
 
 impl LlmModelResolver for StaticModelResolver {
+    fn realtime_call_model(&self, server: &str) -> Option<String> {
+        let mut models = self.models.iter().filter(|((s, _), model)| {
+            s == server && matches!(&model.operation,LlmOperation::Realtime(caps) if caps.webrtc)
+        });
+        let ((_, alias), _) = models.next()?;
+        models.next().is_none().then(|| alias.clone())
+    }
     fn audio_resource_model(&self, server: &str) -> Option<String> {
-        let mut models = self.models.iter().filter(|((s, _), model)| s == server && matches!(&model.operation, LlmOperation::Speech(caps) if !caps.resources.is_empty()));
+        let mut models = self
+            .models
+            .iter()
+            .filter(|((s, _), model)| s == server && !model.audio_resource_operations().is_empty());
         let ((_, alias), _) = models.next()?;
         models.next().is_none().then(|| alias.clone())
     }
@@ -224,6 +252,9 @@ impl DbModelResolver {
 }
 
 impl LlmModelResolver for DbModelResolver {
+    fn realtime_call_model(&self, server: &str) -> Option<String> {
+        self.pins.realtime_call_model(server)
+    }
     fn audio_resource_model(&self, server: &str) -> Option<String> {
         self.pins.audio_resource_model(server)
     }

@@ -24,6 +24,7 @@
 
 mod audio_resources;
 mod images;
+mod realtime;
 mod resolver;
 mod speech;
 
@@ -55,6 +56,8 @@ use waygate_llm_translate::{
 // Re-export the provider SSE types so consumers (the invocation pipeline's
 // streaming egress) can map a `DispatchOutcome::Stream` without a direct
 // dependency on `waygate-llm-providers`.
+pub use realtime::{RealtimeCallControl, RealtimeCallSetup};
+pub use waygate_llm_providers::realtime::{RealtimeMessage, RealtimeSocket};
 pub use waygate_llm_providers::speech::{AudioStream, SpeechResponse, MAX_AUDIO_RESPONSE_BYTES};
 pub use waygate_llm_providers::{SseEvent, SseStream as ProviderSseStream};
 
@@ -214,6 +217,7 @@ pub struct LlmDispatcher {
     /// unwired handle) falls back to the providers crate's compiled default.
     codex_ua_version: Option<SharedCodexUaVersion>,
     response_capacity: Arc<tokio::sync::Semaphore>,
+    realtime_capacity: Arc<tokio::sync::Semaphore>,
 }
 
 /// Shared gateway capacity for chat, Responses, and embedding processing.
@@ -227,6 +231,7 @@ impl LlmDispatcher {
             cooldowns: Arc::new(Mutex::new(HashMap::new())),
             codex_ua_version: None,
             response_capacity: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_RESPONSES)),
+            realtime_capacity: Arc::new(tokio::sync::Semaphore::new(32)),
         }
     }
 
@@ -235,6 +240,10 @@ impl LlmDispatcher {
     /// Clones share admission, including services created for new MCP sessions.
     pub fn try_admit_response(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         self.response_capacity.clone().try_acquire_owned().ok()
+    }
+
+    pub fn try_admit_realtime_session(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.realtime_capacity.clone().try_acquire_owned().ok()
     }
 
     /// Wire the shared Codex CLI version handle (see the field docs). Builder

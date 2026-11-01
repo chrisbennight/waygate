@@ -145,6 +145,11 @@ impl LlmUsageRecorder for PgLlmUsageSink {
         // there is no model row (cost is then Unknown / NULL anyway, so the
         // currency label is never actually attached to a cost increment).
         let (cost, currency) = match lookup {
+            // Realtime totals combine audio and text tokens. The text-rate catalog
+            // cannot price those modality classes, even when counts are measured.
+            Ok(Some(_)) if row.inbound_surface == "realtime" => {
+                (CostBreakdown::default(), "USD".to_string())
+            }
             Ok(Some(model)) => {
                 let breakdown = compute_cost(
                     &model,

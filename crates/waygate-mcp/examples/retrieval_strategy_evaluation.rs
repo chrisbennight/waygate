@@ -256,6 +256,8 @@ impl EvaluationGateway {
                     Ok(InvocationResponse::InputRequired(_))
                     | Ok(InvocationResponse::Task(_))
                     | Ok(InvocationResponse::UnaryValue(_))
+                    | Ok(InvocationResponse::Realtime { .. })
+                    | Ok(InvocationResponse::RealtimeCall { .. })
                     | Ok(InvocationResponse::Media { .. })
                     | Ok(InvocationResponse::Stream(_)) => return None,
                 }

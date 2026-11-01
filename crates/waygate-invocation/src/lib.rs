@@ -278,6 +278,8 @@ pub struct InvocationRequest {
     /// never enter serialized invocation envelopes or diagnostic output.
     #[serde(skip)]
     pub audio_resource: Option<waygate_core::audio::AudioResourceRequest>,
+    #[serde(skip)]
+    pub realtime: Option<waygate_core::realtime::RealtimeRequest>,
     /// LLM fast-path only: `true` when the call arrived on the provider-native
     /// Anthropic Messages surface (`POST /v1/messages`). The request body is
     /// validated and forwarded without canonical translation, so it is only
@@ -342,6 +344,7 @@ impl InvocationRequest {
             images_surface: None,
             speech_surface: false,
             audio_resource: None,
+            realtime: None,
             native_messages_surface: false,
             input_responses: None,
             request_state: None,
@@ -791,6 +794,17 @@ impl InvocationError {
 /// dispatch method) is what lets the authorize / quota / inspect / audit
 /// stages stay on one path for both shapes.
 pub enum InvocationResponse {
+    /// A governed standard Realtime event connection. Payloads stay inside the runtime.
+    Realtime {
+        commands: futures::channel::mpsc::Sender<Value>,
+        events: BoxStream<'static, Result<Value, InvocationError>>,
+    },
+    /// A created provider call. Dropping its unconsumed answer cancels setup.
+    RealtimeCall {
+        call_id: String,
+        sdp: String,
+        delivery_guard: tokio_util::sync::DropGuard,
+    },
     /// Incremental non-JSON media, with an admitted response content type.
     Media {
         media_type: &'static str,
@@ -827,6 +841,8 @@ impl std::fmt::Debug for InvocationResponse {
     // type to be `Debug`, so the impl is part of the contract.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Realtime { .. } => f.write_str("Realtime(..)"),
+            Self::RealtimeCall { .. } => f.write_str("RealtimeCall(..)"),
             Self::Media { media_type, .. } => f
                 .debug_struct("Media")
                 .field("media_type", media_type)

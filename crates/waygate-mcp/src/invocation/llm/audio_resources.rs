@@ -19,10 +19,9 @@ impl DefaultInvocationService {
         request
             .validate()
             .map_err(|message| InvocationError::InvalidArguments(message.into()))?;
-        let LlmOperation::Speech(caps) = &model.operation else {
-            unreachable!()
-        };
-        if !caps.resources.contains(&request.operation)
+        if !model
+            .audio_resource_operations()
+            .contains(&request.operation)
             || model.route.openai_chatgpt
             || model.route.embeddings_no_auth
             || !model.fallbacks.is_empty()
