@@ -115,8 +115,8 @@ async def webrtc():
             transcript.set()
         if value["type"] == "response.done":
             (completed if value["response"]["status"] == "completed" else cancelled).set()
-        if value["type"] == "response.output_audio.delta" and completed.is_set():
-            channel.send(json.dumps({"type": "response.cancel"}))
+        if value["type"] == "response.created" and completed.is_set():
+            channel.send(json.dumps({"type": "response.cancel", "response_id": value["response"]["id"]}))
 
     @pc.on("track")
     def track(track):

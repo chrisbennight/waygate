@@ -194,8 +194,14 @@ impl RealtimeCapabilities {
 #[derive(Clone)]
 pub enum RealtimeRequest {
     WebSocket,
-    WebRtc { sdp: String, session: Value },
-    Hangup { call_id: String },
+    WebRtc {
+        sdp: String,
+        session: Value,
+    },
+    /// Control authority follows the configured provider account, without a caller overlay.
+    Hangup {
+        call_id: String,
+    },
 }
 
 impl std::fmt::Debug for RealtimeRequest {

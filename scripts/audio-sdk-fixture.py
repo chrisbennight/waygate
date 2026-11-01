@@ -119,10 +119,13 @@ async def serve():
         elif kind == "response.create":
             state["ordinal"] = state.get("ordinal", 0) + 1
             response_id = "resp_" + str(state["ordinal"])
+            state["cancelled"] = False
             await emit({"type": "response.created", "response": {"id": response_id, "status": "in_progress"}})
             await emit({"type": "response.output_item.added", "response_id": response_id, "output_index": 0, "item": {"id": "item_audio", "type": "message", "role": "assistant", "status": "in_progress", "content": []}})
             await emit({"type": "response.output_audio.delta", "response_id": response_id, "item_id": "item_audio", "output_index": 0, "content_index": 0, "delta": base64.b64encode(pcm).decode()})
             if "pc" in state:
+                if state["cancelled"]:
+                    return
                 state["enabled"].set()
                 await state["first_frame"].wait()
                 await emit({"type": "output_audio_buffer.started", "response_id": response_id})
@@ -131,6 +134,7 @@ async def serve():
             if state["ordinal"] == 1:
                 await emit({"type": "response.done", "response": {"id": response_id, "status": "completed", "output": [], "usage": {"input_tokens": 0, "output_tokens": 0}}})
         elif kind == "response.cancel":
+            state["cancelled"] = True
             if "pc" in state:
                 state["enabled"].clear()
             await emit({"type": "response.done", "response": {"id": "resp_" + str(state["ordinal"]), "status": "cancelled", "output": [], "usage": {"input_tokens": 0, "output_tokens": 0}}})

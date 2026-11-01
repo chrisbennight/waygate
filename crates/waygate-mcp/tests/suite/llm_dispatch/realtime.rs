@@ -54,6 +54,179 @@ async fn server(app: Router) -> SocketAddr {
     addr
 }
 
+async fn idle_call_provider(hangups: Arc<AtomicUsize>) -> SocketAddr {
+    server(
+        Router::new()
+            .route(
+                "/realtime/calls",
+                post(|| async {
+                    Response::builder()
+                        .status(201)
+                        .header("location", "/realtime/calls/call_shared")
+                        .header("content-type", "application/sdp")
+                        .body(Body::from("v=0\r\n"))
+                        .unwrap()
+                }),
+            )
+            .route(
+                "/realtime",
+                get(|ws: WebSocketUpgrade| async {
+                    ws.on_upgrade(
+                        |mut socket| async move { while socket.next().await.is_some() {} },
+                    )
+                }),
+            )
+            .route(
+                "/realtime/calls/call_shared/hangup",
+                post(move |headers: HeaderMap| {
+                    let hangups = hangups.clone();
+                    async move {
+                        assert_eq!(headers["authorization"], "Bearer fixture-speech-key");
+                        hangups.fetch_add(1, Ordering::SeqCst);
+                        axum::http::StatusCode::OK
+                    }
+                }),
+            ),
+    )
+    .await
+}
+
+fn call_request() -> InvocationRequest {
+    request(RealtimeRequest::WebRtc {
+        sdp: "v=0\r\n".into(),
+        session: json!({"type":"realtime","model":"live"}),
+    })
+}
+
+#[tokio::test]
+async fn graceful_shutdown_waits_for_call_hangup_and_final_evidence() {
+    let hangups = Arc::new(AtomicUsize::new(0));
+    let addr = idle_call_provider(hangups.clone()).await;
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let work = tokio_util::task::TaskTracker::new();
+    let audit = Arc::new(RecordingSink::default());
+    let usage = Arc::new(RecordingUsage::default());
+    let dispatcher =
+        super::speech::speech_dispatcher().with_realtime_lifecycle(shutdown.clone(), work.clone());
+    let service =
+        DefaultInvocationService::new(Arc::new(FakeCatalog), Arc::new(AllowAllGate), audit.clone())
+            .with_llm(dispatcher, resolver(addr, false))
+            .with_llm_usage_store(usage.clone());
+    let InvocationResponse::RealtimeCall { delivery_guard, .. } = service
+        .invoke(Some(&principal()), call_request())
+        .await
+        .unwrap()
+    else {
+        panic!("expected call")
+    };
+    delivery_guard.disarm();
+    work.close();
+    assert!(
+        !work.is_empty(),
+        "an established call remains drain work after SDP delivery"
+    );
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(3), work.wait())
+        .await
+        .unwrap();
+    assert_eq!(hangups.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        usage.rows.lock().unwrap()[0].finish_reason.as_deref(),
+        Some("service_shutdown")
+    );
+    assert!(audit
+        .best_effort
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| event.action == "RealtimeSession"
+            && event
+                .reason
+                .as_ref()
+                .is_some_and(|reason| reason.contains("service_shutdown")
+                    && reason.contains("\"call_termination_confirmed\":true"))));
+    assert!(service
+        .invoke(Some(&principal()), call_request())
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn native_call_controls_follow_shared_provider_authority_and_model_authorization() {
+    let hangups = Arc::new(AtomicUsize::new(0));
+    let addr = idle_call_provider(hangups.clone()).await;
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let work = tokio_util::task::TaskTracker::new();
+    let dispatcher =
+        super::speech::speech_dispatcher().with_realtime_lifecycle(shutdown.clone(), work.clone());
+    let usage = Arc::new(RecordingUsage::default());
+    let service = DefaultInvocationService::new(
+        Arc::new(FakeCatalog),
+        Arc::new(AllowAllGate),
+        Arc::new(RecordingSink::default()),
+    )
+    .with_llm(dispatcher.clone(), resolver(addr, false))
+    .with_llm_usage_store(usage.clone());
+    let InvocationResponse::RealtimeCall {
+        call_id,
+        delivery_guard,
+        ..
+    } = service
+        .invoke(Some(&principal()), call_request())
+        .await
+        .unwrap()
+    else {
+        panic!("expected call")
+    };
+    delivery_guard.disarm();
+    let mut other = principal_named("another-authorized-caller");
+    other.tenant = waygate_core::TenantId::parse("other-tenant").unwrap();
+    assert!(service
+        .invoke(
+            Some(&other),
+            request(RealtimeRequest::Hangup {
+                call_id: call_id.clone()
+            })
+        )
+        .await
+        .is_ok());
+    assert_eq!(hangups.load(Ordering::SeqCst), 1);
+    {
+        let rows = usage.rows.lock().unwrap();
+        assert_eq!(rows[0].principal_sub.as_deref(), Some(other.sub.as_str()));
+        assert_eq!(rows[0].tenant_id, other.tenant.as_str());
+    }
+    let denied = DefaultInvocationService::new(
+        Arc::new(FakeCatalog),
+        Arc::new(FixedGate(AuthzVerdict::Deny {
+            reason: "model not granted".into(),
+            policy_ids: vec![],
+            reasons: vec![],
+        })),
+        Arc::new(RecordingSink::default()),
+    )
+    .with_llm(dispatcher, resolver(addr, false));
+    assert!(matches!(
+        denied
+            .invoke(
+                Some(&principal()),
+                request(RealtimeRequest::Hangup { call_id })
+            )
+            .await,
+        Err(InvocationError::Forbidden { .. })
+    ));
+    assert_eq!(
+        hangups.load(Ordering::SeqCst),
+        1,
+        "a denied caller must not reach provider controls"
+    );
+    work.close();
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(3), work.wait())
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn standard_events_keep_ids_and_completion_separate_from_disconnect() {
     let ended = Arc::new(tokio::sync::Notify::new());

@@ -233,6 +233,13 @@ and a gateway `Location`. Native call IDs are preserved. A standard
 `POST /v1/realtime/calls/{call_id}/hangup` terminates a call through the same
 model gates.
 
+Call controls retain the configured provider credential's account/service scope.
+Model authorization grants creation and termination of calls that credential
+can control, irrespective of which authorized gateway caller created a call.
+Caller and tenant identity remain audit attribution and authorization inputs;
+the gateway adds no creator or tenant ownership restriction to native call IDs.
+The provider remains authoritative for whether a call belongs to that credential.
+
 The provider terminates WebRTC media and its `oai-events` data channel. Its ICE
 or TURN addresses must be reachable from clients even when its HTTP API is
 private. The gateway validates the initial session options; later data-channel
@@ -261,6 +268,8 @@ Realtime has 32 concurrent session slots, separate from HTTP inference capacity.
 The configured lifetime is 1–3600 seconds (default 600), with 1 MiB events,
 64 KiB SDP, 256 MiB combined event traffic, 100,000 events, and 128 responses per
 session. Uploads, setup, writes, delivery, cleanup, and evidence have deadlines.
+Session runners, downstream event delivery, and cleanup participate in the
+service's existing cancellation and graceful-drain lifecycle.
 Existing request quotas count session/control admission. Live policies and
 applicable recorded-usage budgets are checked every five seconds and before
 new WebSocket responses or session changes, using the admitted identity facts.
@@ -270,13 +279,15 @@ These are lagging budgets; in-flight activity and unknown usage are not a hard
 spending guarantee. Identity attributes are the admission snapshot.
 
 Metadata-only generation evidence records response status and observed timing;
-the session record separately reports termination and delivery failure. First
-audio latency starts when the gateway receives `response.created`; it excludes
+the session record separately reports termination.
+WebSocket delivery has its own outcome: all observed events written to the
+transport, or abandoned delivery. This is independent of generation success and
+does not confirm client receipt or playback.
+First-audio latency starts when the gateway receives `response.created`; it excludes
 earlier client input and provider queue time. The timing origin is recorded.
 WebRTC output-buffer stopped/cleared events separately record the provider's
 media completion/interruption boundary. Neither confirms client receipt.
-First
-audio means a received WebSocket audio delta or the provider's standard WebRTC
+First audio means a received WebSocket audio delta or the provider's standard WebRTC
 `output_audio_buffer.started` event. The latter is a provider media boundary,
 not browser receipt. Missing observations stay unknown. Audio, conversation
 text, transcripts, SDP, ICE credentials, and provider keys are never placed in

@@ -218,6 +218,8 @@ pub struct LlmDispatcher {
     codex_ua_version: Option<SharedCodexUaVersion>,
     response_capacity: Arc<tokio::sync::Semaphore>,
     realtime_capacity: Arc<tokio::sync::Semaphore>,
+    realtime_shutdown: tokio_util::sync::CancellationToken,
+    realtime_tasks: tokio_util::task::TaskTracker,
 }
 
 /// Shared gateway capacity for chat, Responses, and embedding processing.
@@ -232,6 +234,8 @@ impl LlmDispatcher {
             codex_ua_version: None,
             response_capacity: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_RESPONSES)),
             realtime_capacity: Arc::new(tokio::sync::Semaphore::new(32)),
+            realtime_shutdown: tokio_util::sync::CancellationToken::new(),
+            realtime_tasks: tokio_util::task::TaskTracker::new(),
         }
     }
 
@@ -244,6 +248,24 @@ impl LlmDispatcher {
 
     pub fn try_admit_realtime_session(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         self.realtime_capacity.clone().try_acquire_owned().ok()
+    }
+
+    /// Join the service's existing cancellation and evidence-drain lifecycle.
+    pub fn with_realtime_lifecycle(
+        mut self,
+        shutdown: tokio_util::sync::CancellationToken,
+        tasks: tokio_util::task::TaskTracker,
+    ) -> Self {
+        self.realtime_shutdown = shutdown;
+        self.realtime_tasks = tasks;
+        self
+    }
+
+    pub fn realtime_shutdown(&self) -> tokio_util::sync::CancellationToken {
+        self.realtime_shutdown.clone()
+    }
+    pub fn realtime_tasks(&self) -> tokio_util::task::TaskTracker {
+        self.realtime_tasks.clone()
     }
 
     /// Wire the shared Codex CLI version handle (see the field docs). Builder

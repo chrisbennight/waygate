@@ -21,6 +21,12 @@ impl DefaultInvocationService {
         model: ResolvedModel,
         dispatcher: &LlmDispatcher,
     ) -> Result<InvocationResponse, InvocationError> {
+        let tasks = dispatcher.realtime_tasks();
+        let _admitted_work = tasks.token();
+        let shutdown = dispatcher.realtime_shutdown();
+        if shutdown.is_cancelled() {
+            return Err(realtime_error(503));
+        }
         let LlmOperation::Realtime(caps) = &model.operation else {
             unreachable!()
         };
@@ -91,6 +97,7 @@ impl DefaultInvocationService {
         );
         record.usage = Default::default();
         let mut evidence = SessionEvidence {
+            tasks: tasks.clone(),
             audit: self.audit.clone(),
             base: llm_audit_base(&ctx),
             started: std::time::Instant::now(),
@@ -139,7 +146,10 @@ impl DefaultInvocationService {
             };
         }
         let permit = Arc::new(permit);
-        let mut cleanup = CallCleanup(None);
+        let mut cleanup = CallCleanup {
+            control: None,
+            tasks: tasks.clone(),
+        };
         let setup = async {
             match request {
                 RealtimeRequest::WebSocket => dispatcher
@@ -150,11 +160,11 @@ impl DefaultInvocationService {
                     let call = dispatcher
                         .create_realtime_call(&model.route, sdp, session)
                         .await?;
-                    cleanup.0 = Some(call.control);
+                    cleanup.control = Some(call.control);
                     // Install cleanup before reading a potentially stalled or failed SDP body.
                     let answer = call.answer.await?;
                     let socket = cleanup
-                        .0
+                        .control
                         .as_ref()
                         .expect("known provider call")
                         .connect_sideband()
@@ -164,7 +174,21 @@ impl DefaultInvocationService {
                 RealtimeRequest::Hangup { .. } => unreachable!(),
             }
         };
-        let (socket, answer) = match tokio::time::timeout(SETUP_TIME, setup).await {
+        let setup_result = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => None,
+            result = tokio::time::timeout(SETUP_TIME,setup) => Some(result),
+        };
+        let setup_result = match setup_result {
+            Some(result) => result,
+            None => {
+                drop(permit);
+                let confirmed = cleanup.finish().await;
+                evidence.finish("service_shutdown", confirmed).await;
+                return Err(realtime_error(503));
+            }
+        };
+        let (socket, answer) = match setup_result {
             Ok(Ok(result)) => result,
             result => {
                 let status = match result {
@@ -201,7 +225,7 @@ impl DefaultInvocationService {
         let result = if let Some(sdp) = answer {
             InvocationResponse::RealtimeCall {
                 call_id: cleanup
-                    .0
+                    .control
                     .as_ref()
                     .expect("WebRTC provider call")
                     .call_id()
@@ -211,7 +235,13 @@ impl DefaultInvocationService {
             }
         } else {
             let delivery_guard = cancel.clone().drop_guard();
-            let stream = async_stream_events(events_rx, delivery_guard, permit.clone());
+            let delivery = DeliveryEvidence::new(
+                tasks.clone(),
+                self.audit.clone(),
+                evidence.base.clone(),
+                evidence.started,
+            );
+            let stream = async_stream_events(events_rx, delivery_guard, permit.clone(), delivery);
             InvocationResponse::Realtime {
                 commands,
                 events: stream,
@@ -222,12 +252,13 @@ impl DefaultInvocationService {
             alias: ctx.tool.to_owned(),
             upstream_model: model.route.upstream_model,
         };
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             let mut socket = socket;
             let deadline = tokio::time::Instant::now()
                 + std::time::Duration::from_secs(config.caps.max_session_seconds)
                     .saturating_sub(evidence.started.elapsed());
             let outcome = tokio::select! {
+                _ = shutdown.cancelled() => "service_shutdown",
                 _ = cancel.cancelled() => "client_disconnected",
                 _ = tokio::time::sleep_until(deadline) => "session_deadline",
                 outcome = run_session(&mut socket, (!rtc).then_some(command_rx), (!rtc).then_some(events_tx), &config, &guard, &mut evidence) => outcome,
@@ -257,24 +288,84 @@ fn async_stream_events(
     receiver: mpsc::Receiver<Result<Value, InvocationError>>,
     guard: tokio_util::sync::DropGuard,
     permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+    delivery: DeliveryEvidence,
 ) -> futures::stream::BoxStream<'static, Result<Value, InvocationError>> {
     // The adapter holds capacity while sending an event, even after provider EOF.
     futures::stream::unfold(
-        (receiver, guard, permit),
-        |(mut receiver, guard, permit)| async move {
-            receiver
-                .next()
-                .await
-                .map(|item| (item, (receiver, guard, permit)))
+        (receiver, guard, permit, delivery),
+        |(mut receiver, guard, permit, mut delivery)| async move {
+            match receiver.next().await {
+                Some(item) => Some((item, (receiver, guard, permit, delivery))),
+                None => {
+                    delivery.complete = true;
+                    drop(delivery);
+                    None
+                }
+            }
         },
     )
     .boxed()
 }
 
-struct CallCleanup(Option<RealtimeCallControl>);
+struct DeliveryEvidence {
+    tasks: tokio_util::task::TaskTracker,
+    _work: tokio_util::task::task_tracker::TaskTrackerToken,
+    audit: SharedEvidence,
+    event: AuditEvent,
+    started: std::time::Instant,
+    complete: bool,
+}
+impl DeliveryEvidence {
+    fn new(
+        tasks: tokio_util::task::TaskTracker,
+        audit: SharedEvidence,
+        mut event: AuditEvent,
+        started: std::time::Instant,
+    ) -> Self {
+        event.id = uuid::Uuid::now_v7();
+        event.action = "RealtimeDelivery".into();
+        let work = tasks.token();
+        Self {
+            tasks,
+            _work: work,
+            audit,
+            event,
+            started,
+            complete: false,
+        }
+    }
+}
+impl Drop for DeliveryEvidence {
+    fn drop(&mut self) {
+        let mut event = self.event.clone();
+        event.outcome = if self.complete {
+            AuditOutcome::Success
+        } else {
+            AuditOutcome::ExecutionError
+        };
+        event.latency_ms = Some(elapsed_ms(self.started));
+        event.reason=Some(json!({"transport":"websocket","outcome":if self.complete {"events_written_to_transport"} else {"delivery_abandoned"},"client_playback_confirmed":false}).to_string());
+        let audit = self.audit.clone();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            self.tasks.spawn(async move {
+                if tokio::time::timeout(IO_TIME, audit.record_chained_best_effort(event))
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Realtime delivery evidence exceeded its deadline");
+                }
+            });
+        }
+    }
+}
+
+struct CallCleanup {
+    control: Option<RealtimeCallControl>,
+    tasks: tokio_util::task::TaskTracker,
+}
 impl CallCleanup {
     async fn finish(&mut self) -> bool {
-        let Some(control) = self.0.take() else {
+        let Some(control) = self.control.take() else {
             return false;
         };
         matches!(
@@ -285,9 +376,9 @@ impl CallCleanup {
 }
 impl Drop for CallCleanup {
     fn drop(&mut self) {
-        if let Some(control) = self.0.take() {
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {
+        if let Some(control) = self.control.take() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                self.tasks.spawn(async move {
                     if !matches!(
                         tokio::time::timeout(IO_TIME, control.hangup()).await,
                         Ok(Ok(()))
@@ -417,6 +508,7 @@ struct ResponseEvidence {
     media_end_ms: Option<i64>,
 }
 struct SessionEvidence {
+    tasks: tokio_util::task::TaskTracker,
     audit: SharedEvidence,
     base: AuditEvent,
     started: std::time::Instant,
@@ -648,8 +740,8 @@ impl Drop for SessionEvidence {
             event.outcome = AuditOutcome::ExecutionError;
             event.reason = Some("Realtime setup abandoned; call termination unconfirmed".into());
             let audit = self.audit.clone();
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                self.tasks.spawn(async move {
                     let _ = tokio::time::timeout(IO_TIME, audit.record_chained_best_effort(event))
                         .await;
                 });
@@ -664,6 +756,7 @@ mod tests {
 
     fn evidence() -> SessionEvidence {
         SessionEvidence {
+            tasks: tokio_util::task::TaskTracker::new(),
             audit: Arc::new(crate::audit::NullSink),
             base: AuditEvent::new("RealtimeSession", AuditOutcome::Success),
             started: std::time::Instant::now(),
@@ -729,10 +822,19 @@ mod tests {
                 .await
                 .unwrap();
             drop(sender);
+            let tasks = tokio_util::task::TaskTracker::new();
+            let audit = Arc::new(crate::audit::InMemorySink::new());
+            let delivery = DeliveryEvidence::new(
+                tasks.clone(),
+                audit.clone(),
+                AuditEvent::new("RealtimeSession", AuditOutcome::Success),
+                std::time::Instant::now(),
+            );
             let mut stream = async_stream_events(
                 receiver,
                 CancellationToken::new().drop_guard(),
                 permit.clone(),
+                delivery,
             );
             drop(permit);
             assert!(stream.next().await.unwrap().is_ok());
@@ -745,6 +847,18 @@ mod tests {
             }
             drop(stream);
             assert!(capacity.try_acquire_owned().is_ok());
+            tasks.close();
+            tasks.wait().await;
+            let events = audit.snapshot().await;
+            assert_eq!(events[0].action, "RealtimeDelivery");
+            assert_eq!(
+                events[0].outcome,
+                if consume_eof {
+                    AuditOutcome::Success
+                } else {
+                    AuditOutcome::ExecutionError
+                }
+            );
         }
     }
 
