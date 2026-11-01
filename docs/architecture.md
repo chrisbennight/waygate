@@ -374,7 +374,12 @@ Speech uses the same inference model gates and a separate binary media response
 on the invocation seam. The speech pipeline owns bounded generation and delivery,
 with distinct evidence for provider completion and HTTP body consumption. The
 server owns only configuration, ingress, and HTTP framing; providers own voice
-assets and inference. See [Speech API](audio-api.md).
+assets and inference. Realtime uses bounded duplex event sessions and provider
+WebRTC media with standard sideband monitoring. The gateway owns admission,
+session limits, and cleanup; the provider owns media and conversation semantics.
+Realtime runners and delivery evidence join the service's cancellation and drain
+so shutdown waits for bounded call cleanup before closing evidence storage.
+See [Audio APIs](audio-api.md).
 
 Two adjacent planes:
 

@@ -715,7 +715,8 @@ async fn gateway_main() -> anyhow::Result<()> {
     // injected (Infisical) and read by the store; we're a pure consumer (I4).
     // Provider calls are bounded by the same upstream call timeout as MCP tool
     // calls.
-    let llm_deps = llm::build_from_env(cfg.upstream_call_timeout, !discovery_targets.is_empty())?;
+    let mut llm_deps =
+        llm::build_from_env(cfg.upstream_call_timeout, !discovery_targets.is_empty())?;
     // The SAME in-process credential store the dispatcher resolves
     // bearers from, handed to the admin credential-status panel so it reads live
     // pool health (not a separate snapshot that could drift). `None` when no LLM
@@ -1046,6 +1047,12 @@ async fn gateway_main() -> anyhow::Result<()> {
     // In-flight MCP requests and detached Code Mode runs that shutdown lets
     // finish before closing the MCP transport.
     let inflight_work = tokio_util::task::TaskTracker::new();
+    llm_deps = llm_deps.map(|(dispatcher, resolver)| {
+        (
+            dispatcher.with_realtime_lifecycle(ct.clone(), inflight_work.clone()),
+            resolver,
+        )
+    });
     let codemode_capacity = mcp_codemode::CodeModeExecutionCapacity::shared(
         cfg.codemode_capacity,
         inflight_work.clone(),

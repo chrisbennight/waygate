@@ -22,6 +22,7 @@ pub mod http_client;
 mod invocation;
 pub mod net;
 pub mod page;
+pub mod realtime;
 mod risk;
 pub mod store;
 mod tenant;

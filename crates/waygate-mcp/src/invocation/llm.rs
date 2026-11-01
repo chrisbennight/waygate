@@ -11,6 +11,7 @@ use super::*;
 mod audio_resources;
 mod images;
 mod native;
+mod realtime;
 mod speech;
 
 const COMPLETION_CACHE_WRITE_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
@@ -54,8 +55,9 @@ impl DefaultInvocationService {
         dispatcher: &LlmDispatcher,
     ) -> Result<InvocationResponse, InvocationError> {
         if ctx.audio_resource.is_some() {
-            if !matches!(model.operation, LlmOperation::Speech(_))
+            if model.audio_resource_operations().is_empty()
                 || ctx.speech_surface
+                || ctx.realtime.is_some()
                 || ctx.images_surface.is_some()
                 || ctx.embeddings_surface
                 || ctx.responses_surface
@@ -66,6 +68,21 @@ impl DefaultInvocationService {
                 ));
             }
             return self.invoke_audio_resource(ctx, model, dispatcher).await;
+        }
+        if matches!(model.operation, LlmOperation::Realtime(_)) || ctx.realtime.is_some() {
+            if !matches!(model.operation, LlmOperation::Realtime(_))
+                || ctx.realtime.is_none()
+                || ctx.speech_surface
+                || ctx.images_surface.is_some()
+                || ctx.embeddings_surface
+                || ctx.responses_surface
+                || ctx.native_messages_surface
+            {
+                return Err(InvocationError::InvalidArguments(
+                    "Realtime models require a standard Realtime transport".into(),
+                ));
+            }
+            return self.invoke_realtime(ctx, model, dispatcher).await;
         }
         // Branch on the model's operation, and reject a surface/operation
         // mismatch with a clean client error BEFORE any gate or cost: an

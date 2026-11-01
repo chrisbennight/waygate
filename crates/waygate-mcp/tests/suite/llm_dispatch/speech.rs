@@ -40,7 +40,7 @@ fn speech_resolver(addr: SocketAddr) -> Arc<dyn LlmModelResolver> {
     ))
 }
 
-fn speech_dispatcher() -> LlmDispatcher {
+pub(super) fn speech_dispatcher() -> LlmDispatcher {
     let creds = LlmCredentialStore::from_vars([(
         "LLM_CRED_OPENAI_TEST".into(),
         json!({"api_key":"fixture-speech-key"}).to_string(),

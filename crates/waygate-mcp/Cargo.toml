@@ -58,7 +58,7 @@ rmcp = { workspace = true, features = [
 
 [dev-dependencies]
 waygate-test-support.workspace = true
-axum = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
 waygate-llm-providers.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util"] }
 tower.workspace = true

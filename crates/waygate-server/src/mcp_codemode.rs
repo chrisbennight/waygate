@@ -3735,7 +3735,9 @@ impl CodeModeTools {
             // Code Mode declares no input capabilities, so the pipeline
             // fails an MRTR pause closed before it can surface here; its own
             // pauses ride the approval-gate/task model instead.
-            InvocationResponse::Media { .. }
+            InvocationResponse::Realtime { .. }
+            | InvocationResponse::RealtimeCall { .. }
+            | InvocationResponse::Media { .. }
             | InvocationResponse::Stream(_)
             | InvocationResponse::UnaryValue(_)
             | InvocationResponse::InputRequired(_)

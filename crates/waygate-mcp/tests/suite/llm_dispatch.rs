@@ -2459,6 +2459,7 @@ async fn embeddings_cache_is_per_principal() {
 mod audio_resources;
 mod images;
 mod native_messages;
+mod realtime;
 mod speech;
 
 #[tokio::test]

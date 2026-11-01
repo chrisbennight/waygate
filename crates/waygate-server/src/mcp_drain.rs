@@ -8,6 +8,8 @@
 //! `subscriptions/listen` stream never end on their own, so counting them
 //! would hold every restart open for the whole drain window. The HTTP server's
 //! own graceful shutdown still waits for any other read.
+//! Realtime handshakes are admitted work; their session runners and delivery
+//! evidence retain the same tracker after the HTTP upgrade or SDP response.
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -26,13 +28,16 @@ pub async fn track_request(work: TaskTracker, request: Request, next: Next) -> R
     // Only a 2026-07-28 request has its routing header checked against its
     // body, so only there does the header prove a listen stream.
     let headers = request.headers();
-    let listen = headers
-        .get(HEADER_MCP_METHOD)
-        .is_some_and(|method| method == "subscriptions/listen")
+    let mcp = matches!(request.uri().path(), "/mcp" | "/mcp/");
+    let realtime = request.uri().path() == "/v1/realtime";
+    let listen = mcp
+        && headers
+            .get(HEADER_MCP_METHOD)
+            .is_some_and(|method| method == "subscriptions/listen")
         && headers
             .get(HEADER_MCP_PROTOCOL_VERSION)
             .is_some_and(|version| version == waygate_mcp::MCP_SPEC_VERSION);
-    let standing = request.method() != Method::POST || listen;
+    let standing = (request.method() != Method::POST && !realtime) || listen;
     if standing {
         return next.run(request).await;
     }
@@ -53,6 +58,8 @@ mod tests {
     fn router(work: TaskTracker) -> axum::Router {
         axum::Router::new()
             .route("/mcp", any(|| async { "result" }))
+            .route("/v1/realtime", any(|| async { "result" }))
+            .route("/v1/realtime/calls", any(|| async { "result" }))
             .layer(axum::middleware::from_fn(move |request, next| {
                 let work = work.clone();
                 async move { track_request(work, request, next).await }
@@ -97,6 +104,26 @@ mod tests {
                 .oneshot(request)
                 .await
                 .expect("response");
+            assert!(work.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn realtime_admission_is_work_and_cannot_use_an_mcp_listen_exemption() {
+        for request in [
+            Request::get("/v1/realtime").body(Body::empty()).unwrap(),
+            Request::post("/v1/realtime/calls")
+                .header(HEADER_MCP_METHOD, "subscriptions/listen")
+                .header(HEADER_MCP_PROTOCOL_VERSION, waygate_mcp::MCP_SPEC_VERSION)
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            let work = TaskTracker::new();
+            let response = router(work.clone()).oneshot(request).await.unwrap();
+            assert_eq!(work.len(), 1);
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
             assert!(work.is_empty());
         }
     }

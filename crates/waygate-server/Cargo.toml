@@ -45,7 +45,7 @@ waygate-skills.workspace = true
 
 tokio.workspace = true
 tokio-util.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["ws"] }
 base64.workspace = true
 bytes.workspace = true
 http-body.workspace = true

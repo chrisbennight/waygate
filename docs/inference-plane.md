@@ -2,12 +2,16 @@
 
 ## Supported behavior
 
+- **Realtime surfaces:** standard WebSocket sessions and unified WebRTC calls
+  use explicit provider capabilities and model gates. Providers terminate media;
+  the gateway observes standard sideband events and applies bounded session
+  lifetimes and cleanup. See [Realtime configuration](audio-api.md#realtime-configuration).
 - **Speech surface:** `POST /v1/audio/speech` serves explicitly configured
   OpenAI-compatible speech providers through the shared model gates. Audio bytes
   and speech SSE retain their separate delivery contracts; usage stays unknown
   when no authoritative counts are reported. See [Speech API](audio-api.md).
 - Standard recording-based voice and consent resources use one explicitly
-  configured speech provider and the same model gates. Resource visibility and
+  configured audio provider and the same model gates. Resource visibility and
   persistence remain provider-owned; see [voice and consent resources](audio-api.md#voice-and-consent-resources).
 - Client surfaces: `POST /v1/chat/completions` and `POST /v1/responses` are both mounted
   today, **unary and streaming**. The Responses route parses to the same canonical
