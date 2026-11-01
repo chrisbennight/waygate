@@ -76,6 +76,7 @@ impl DefaultInvocationService {
             principal,
             bytes: 0,
             first_audio_ms: None,
+            completed_latency_ms: None,
         };
         let response = match tokio::time::timeout(
             MAX_SPEECH_TIME,
@@ -130,6 +131,7 @@ struct SpeechEvidence {
     principal: Option<String>,
     bytes: usize,
     first_audio_ms: Option<i64>,
+    completed_latency_ms: Option<i64>,
 }
 
 impl SpeechEvidence {
@@ -144,6 +146,9 @@ impl SpeechEvidence {
 
     async fn finish(mut self, outcome: &'static str, complete: bool) {
         self.finished = true;
+        let latency_ms = self
+            .completed_latency_ms
+            .unwrap_or_else(|| elapsed_ms(self.started));
         let mut event = self.base.clone();
         event.action = "SpeechGeneration".into();
         event.outcome = if complete {
@@ -160,7 +165,7 @@ impl SpeechEvidence {
             .to_string(),
         );
         self.audit
-            .record_chained_best_effort(event.with_latency_ms(elapsed_ms(self.started)))
+            .record_chained_best_effort(event.with_latency_ms(latency_ms))
             .await;
         if let Some(sink) = &self.usage {
             let mut row = build_usage_row(
@@ -168,7 +173,7 @@ impl SpeechEvidence {
                 self.tenant.clone(),
                 self.principal.clone(),
                 self.record.model_requested.clone(),
-                Some(elapsed_ms(self.started)),
+                Some(latency_ms),
             );
             row.finish_reason = Some(outcome.into());
             sink.record_usage(row).await;
@@ -209,52 +214,57 @@ fn deliver_speech(
     let deadline =
         tokio::time::Instant::now() + MAX_SPEECH_TIME.saturating_sub(evidence.started.elapsed());
     tokio::spawn(async move {
+        let mut permit = Some(permit);
         let send = async {
-            let mut response = response;
+            let mut response = Some(response);
             let mut saw_audio = false;
             let mut wire_bytes = 0usize;
             loop {
-                let (data, terminal, audio_bytes) = match &mut response {
-                    SpeechResponse::Audio(stream) => match stream.next().await {
-                        Some(Ok(bytes)) => {
-                            let len = bytes.len();
-                            (bytes, false, len)
-                        }
-                        Some(Err(_)) => return Err("incomplete_audio"),
-                        None if saw_audio => return Ok(()),
-                        None => return Err("empty_audio"),
-                    },
-                    SpeechResponse::Events(stream) => {
-                        let frame = match stream.next().await {
-                            Some(Ok(frame)) => frame,
-                            _ => return Err("incomplete_events"),
-                        };
-                        let value: Value =
-                            serde_json::from_str(&frame.data).map_err(|_| "invalid_event")?;
-                        let (terminal, audio_bytes) =
-                            match value.get("type").and_then(Value::as_str) {
-                                Some("speech.audio.delta") => {
-                                    let audio = value
-                                        .get("audio")
-                                        .and_then(Value::as_str)
-                                        .ok_or("invalid_audio_event")?;
-                                    let bytes = base64::engine::general_purpose::STANDARD
-                                        .decode(audio)
-                                        .map_err(|_| "invalid_audio_event")?;
-                                    (false, bytes.len())
-                                }
-                                Some("speech.audio.done") if saw_audio => (true, 0),
-                                _ => return Err("invalid_event"),
+                let (data, terminal, audio_bytes) =
+                    match response.as_mut().expect("active provider stream") {
+                        SpeechResponse::Audio(stream) => match stream.next().await {
+                            Some(Ok(bytes)) => {
+                                let len = bytes.len();
+                                (bytes, false, len)
+                            }
+                            Some(Err(_)) => return Err("incomplete_audio"),
+                            None if saw_audio => {
+                                evidence.completed_latency_ms = Some(elapsed_ms(evidence.started));
+                                return Ok(());
+                            }
+                            None => return Err("empty_audio"),
+                        },
+                        SpeechResponse::Events(stream) => {
+                            let frame = match stream.next().await {
+                                Some(Ok(frame)) => frame,
+                                _ => return Err("incomplete_events"),
                             };
-                        // Compact JSON preserves valid SSE framing for multiline provider data.
-                        // Provider usage fields are not treated as measured accounting.
-                        (
-                            Bytes::from(format!("data: {value}\n\n")),
-                            terminal,
-                            audio_bytes,
-                        )
-                    }
-                };
+                            let value: Value =
+                                serde_json::from_str(&frame.data).map_err(|_| "invalid_event")?;
+                            let (terminal, audio_bytes) =
+                                match value.get("type").and_then(Value::as_str) {
+                                    Some("speech.audio.delta") => {
+                                        let audio = value
+                                            .get("audio")
+                                            .and_then(Value::as_str)
+                                            .ok_or("invalid_audio_event")?;
+                                        let bytes = base64::engine::general_purpose::STANDARD
+                                            .decode(audio)
+                                            .map_err(|_| "invalid_audio_event")?;
+                                        (false, bytes.len())
+                                    }
+                                    Some("speech.audio.done") if saw_audio => (true, 0),
+                                    _ => return Err("invalid_event"),
+                                };
+                            // Compact JSON preserves valid SSE framing for multiline provider data.
+                            // Provider usage fields are not treated as measured accounting.
+                            (
+                                Bytes::from(format!("data: {value}\n\n")),
+                                terminal,
+                                audio_bytes,
+                            )
+                        }
+                    };
                 if audio_bytes > MAX_AUDIO_RESPONSE_BYTES.saturating_sub(evidence.bytes) {
                     return Err("audio_limit");
                 }
@@ -268,6 +278,11 @@ fn deliver_speech(
                     evidence
                         .first_audio_ms
                         .get_or_insert_with(|| elapsed_ms(evidence.started));
+                }
+                if terminal {
+                    evidence.completed_latency_ms = Some(elapsed_ms(evidence.started));
+                    drop(response.take());
+                    drop(permit.take());
                 }
                 for chunk in data.chunks(DELIVERY_CHUNK) {
                     sender
@@ -284,12 +299,14 @@ fn deliver_speech(
             _ = sender.closed() => Err("client_disconnected"),
             result = tokio::time::timeout_at(deadline, send) => result.unwrap_or(Err("deadline_exceeded")),
         };
-        let outcome = match result {
-            Ok(()) => "provider_complete",
-            Err(reason) => reason,
+        let complete = evidence.completed_latency_ms.is_some();
+        let outcome = match (complete, result) {
+            (true, _) => "provider_complete",
+            (false, Err(reason)) => reason,
+            (false, Ok(())) => "incomplete_audio",
         };
         drop(permit);
-        evidence.finalize(outcome, result.is_ok()).await;
+        evidence.finalize(outcome, complete).await;
         // Completion has its own slot so a full data queue cannot hide failure.
         let _ = completion_sender.send(result);
     });
@@ -393,15 +410,10 @@ mod tests {
     use super::*;
     use crate::audit::InMemorySink;
 
-    #[tokio::test(start_paused = true)]
-    async fn unread_speech_releases_processing_capacity_at_its_deadline() {
-        let sink = Arc::new(InMemorySink::default());
-        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
-        let permit = capacity.clone().acquire_owned().await.unwrap();
-        let base = AuditEvent::new("SpeechGeneration", AuditOutcome::Success);
-        let evidence = SpeechEvidence {
-            audit: sink.clone(),
-            base,
+    fn evidence(audit: SharedEvidence) -> SpeechEvidence {
+        SpeechEvidence {
+            audit,
+            base: AuditEvent::new("SpeechGeneration", AuditOutcome::Success),
             started: std::time::Instant::now(),
             finished: false,
             usage: None,
@@ -416,7 +428,42 @@ mod tests {
             principal: None,
             bytes: 0,
             first_audio_ms: None,
-        };
+            completed_latency_ms: None,
+        }
+    }
+
+    #[derive(Default)]
+    struct GenerationSink {
+        inner: InMemorySink,
+        recorded: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::audit::EvidenceRecorder for GenerationSink {
+        async fn record_required(
+            &self,
+            event: AuditEvent,
+        ) -> Result<uuid::Uuid, crate::audit::EvidenceError> {
+            self.inner.record_required(event).await
+        }
+        async fn record_chained_best_effort(&self, event: AuditEvent) {
+            let generation = event.action == "SpeechGeneration";
+            self.inner.record_chained_best_effort(event).await;
+            if generation {
+                self.recorded.notify_one();
+            }
+        }
+        async fn record_best_effort(&self, event: AuditEvent) {
+            self.inner.record_best_effort(event).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unread_speech_releases_processing_capacity_at_its_deadline() {
+        let sink = Arc::new(InMemorySink::default());
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = capacity.clone().acquire_owned().await.unwrap();
+        let evidence = evidence(sink.clone());
         let InvocationResponse::Media { mut body, .. } = deliver_speech(
             SpeechResponse::Audio(futures::stream::pending().boxed()),
             evidence,
@@ -435,6 +482,58 @@ mod tests {
             .reason
             .as_deref()
             .is_some_and(|reason| reason.contains("deadline_exceeded"))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn provider_completion_survives_a_terminal_event_blocked_by_delivery() {
+        let sink = Arc::new(GenerationSink::default());
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = capacity.clone().acquire_owned().await.unwrap();
+        let frames = [
+            serde_json::json!({"type":"speech.audio.delta","audio":"AQA="}),
+            serde_json::json!({"type":"speech.audio.done"}),
+        ]
+        .map(|value| {
+            Ok(waygate_llm_dispatch::SseEvent {
+                data: value.to_string(),
+            })
+        });
+        let InvocationResponse::Media { mut body, .. } = deliver_speech(
+            SpeechResponse::Events(futures::stream::iter(frames).boxed()),
+            evidence(sink.clone()),
+            permit,
+            "text/event-stream",
+        ) else {
+            unreachable!()
+        };
+        let _recovered = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            capacity.clone().acquire_owned(),
+        )
+        .await
+        .expect("observed provider completion retained processing capacity")
+        .unwrap();
+        tokio::time::advance(MAX_SPEECH_TIME).await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), sink.recorded.notified())
+            .await
+            .expect("generation evidence was not finalized while delivery remained blocked");
+        assert!(body.next().await.unwrap().is_ok());
+        assert!(body.next().await.unwrap().is_err());
+        assert!(body.next().await.is_none());
+        let events = sink.inner.snapshot().await;
+        let generation = events
+            .iter()
+            .find(|event| event.action == "SpeechGeneration")
+            .unwrap();
+        assert_eq!(generation.outcome, AuditOutcome::Success);
+        let reason: serde_json::Value =
+            serde_json::from_str(generation.reason.as_deref().unwrap()).unwrap();
+        assert_eq!(reason["provider_complete"], true);
+        let delivery = events
+            .iter()
+            .find(|event| event.action == "SpeechDelivery")
+            .unwrap();
+        assert_eq!(delivery.outcome, AuditOutcome::ExecutionError);
     }
 
     #[tokio::test]

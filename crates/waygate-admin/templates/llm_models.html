@@ -91,6 +91,8 @@
                                 <span class="chip">images</span>
                             {% else if m.is_embeddings %}
                                 <span class="chip chip--accent">embeddings</span>
+                            {% else if m.is_speech %}
+                                <span class="chip">speech</span>
                             {% else %}
                                 <span class="chip">chat</span>
                             {% endif %}
