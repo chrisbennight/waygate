@@ -60,6 +60,49 @@ fn speech_request() -> InvocationRequest {
     req
 }
 
+#[tokio::test(start_paused = true)]
+async fn dispatch_failure_releases_capacity_before_stalled_usage_and_returns_on_deadline() {
+    struct StalledUsage(Arc<tokio::sync::Notify>);
+    #[async_trait]
+    impl waygate_mcp::usage::LlmUsageRecorder for StalledUsage {
+        async fn record_usage(&self, _: waygate_mcp::usage::LlmUsageRow) {
+            self.0.notify_one();
+            futures::future::pending::<()>().await;
+        }
+    }
+    let dispatcher = LlmDispatcher::new(
+        ProviderClient::new(reqwest::Client::new()),
+        Arc::new(LlmCredentialStore::from_vars(Vec::<(String, String)>::new())),
+    );
+    let mut held = Vec::new();
+    while let Some(permit) = dispatcher.try_admit_response() {
+        held.push(permit);
+    }
+    drop(held.pop().expect("one available inference slot"));
+    let usage_started = Arc::new(tokio::sync::Notify::new());
+    let service = DefaultInvocationService::new(
+        Arc::new(FakeCatalog),
+        Arc::new(AllowAllGate),
+        Arc::new(RecordingSink::default()),
+    )
+    .with_llm(
+        dispatcher.clone(),
+        speech_resolver("127.0.0.1:9".parse().unwrap()),
+    )
+    .with_llm_usage_store(Arc::new(StalledUsage(usage_started.clone())));
+    let call =
+        tokio::spawn(async move { service.invoke(Some(&principal()), speech_request()).await });
+    usage_started.notified().await;
+    let available = dispatcher.try_admit_response();
+    assert!(
+        available.is_some(),
+        "failed dispatch retained processing capacity during evidence finalization"
+    );
+    assert!(!call.is_finished());
+    tokio::time::advance(Duration::from_secs(5)).await;
+    assert!(call.await.unwrap().is_err());
+}
+
 async fn serve(app: Router) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -144,6 +187,18 @@ async fn audio_arrives_before_generation_completes_and_usage_remains_unknown() {
     assert!(events
         .iter()
         .any(|e| e.action == "SpeechDelivery" && e.outcome == AuditOutcome::Success));
+    let generation = events
+        .iter()
+        .find(|e| e.action == "SpeechGeneration")
+        .unwrap();
+    let delivery = events
+        .iter()
+        .find(|e| e.action == "SpeechDelivery")
+        .unwrap();
+    assert_ne!(
+        generation.id, delivery.id,
+        "separate durable observations need unique IDs"
+    );
     assert!(!serde_json::to_string(&*events)
         .unwrap()
         .contains("Private words"));

@@ -9,6 +9,7 @@ use waygate_llm_translate::speech::SpeechRequest;
 
 use waygate_llm_dispatch::MAX_AUDIO_RESPONSE_BYTES;
 const MAX_SPEECH_TIME: std::time::Duration = std::time::Duration::from_secs(300);
+const EVIDENCE_FINALIZATION_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 const DELIVERY_CHUNK: usize = 64 * 1024;
 
 impl DefaultInvocationService {
@@ -91,7 +92,13 @@ impl DefaultInvocationService {
                     ),
                     _ => (504, None),
                 };
-                evidence.finish("dispatch_failed", false).await;
+                let outcome = match status {
+                    429 | 503 => "provider_overload",
+                    504 => "deadline_exceeded",
+                    _ => "dispatch_failed",
+                };
+                drop(permit);
+                evidence.finalize(outcome, false).await;
                 return Err(speech_error(
                     "speech provider request failed; generation was not retried",
                     status,
@@ -126,6 +133,15 @@ struct SpeechEvidence {
 }
 
 impl SpeechEvidence {
+    async fn finalize(self, outcome: &'static str, complete: bool) {
+        if tokio::time::timeout(EVIDENCE_FINALIZATION_TIME, self.finish(outcome, complete))
+            .await
+            .is_err()
+        {
+            tracing::warn!("speech evidence finalization exceeded its deadline");
+        }
+    }
+
     async fn finish(mut self, outcome: &'static str, complete: bool) {
         self.finished = true;
         let mut event = self.base.clone();
@@ -171,7 +187,7 @@ impl Drop for SpeechEvidence {
             let audit = self.audit.clone();
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 runtime.spawn(async move {
-                    audit.record_chained_best_effort(event).await;
+                    record_speech_evidence(audit, event).await;
                 });
             }
         }
@@ -188,6 +204,7 @@ fn deliver_speech(
     let (completion_sender, completion) = tokio::sync::oneshot::channel();
     let audit = evidence.audit.clone();
     let mut delivery_event = evidence.base.clone();
+    delivery_event.id = uuid::Uuid::now_v7();
     delivery_event.action = "SpeechDelivery".into();
     let deadline =
         tokio::time::Instant::now() + MAX_SPEECH_TIME.saturating_sub(evidence.started.elapsed());
@@ -271,15 +288,7 @@ fn deliver_speech(
             Err(reason) => reason,
         };
         drop(permit);
-        if tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            evidence.finish(outcome, result.is_ok()),
-        )
-        .await
-        .is_err()
-        {
-            tracing::warn!("speech evidence finalization exceeded its deadline");
-        }
+        evidence.finalize(outcome, result.is_ok()).await;
         // Completion has its own slot so a full data queue cannot hide failure.
         let _ = completion_sender.send(result);
     });
@@ -312,7 +321,7 @@ fn delivery_stream(
                 let audit = self.audit.clone();
                 if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                     runtime.spawn(async move {
-                        audit.record_chained_best_effort(event).await;
+                        record_speech_evidence(audit, event).await;
                     });
                 }
             }
@@ -352,7 +361,7 @@ fn delivery_stream(
                 }
                 .into(),
             );
-            state.audit.record_chained_best_effort(event).await;
+            record_speech_evidence(state.audit.clone(), event).await;
             if complete {
                 None
             } else {
@@ -364,6 +373,18 @@ fn delivery_stream(
         },
     )
     .boxed()
+}
+
+async fn record_speech_evidence(audit: SharedEvidence, event: AuditEvent) {
+    if tokio::time::timeout(
+        EVIDENCE_FINALIZATION_TIME,
+        audit.record_chained_best_effort(event),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("speech lifecycle evidence exceeded its deadline");
+    }
 }
 
 #[cfg(test)]

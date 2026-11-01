@@ -77,6 +77,7 @@ pub(super) fn error_response(error: &InvocationError) -> Option<Response> {
     let status = data.get("speech_http_status")?.as_u64()?;
     let (status, kind) = match status {
         429 => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error"),
+        503 => (StatusCode::SERVICE_UNAVAILABLE, "api_error"),
         400..=499 if !matches!(status, 401 | 403) => (
             StatusCode::from_u16(status as u16).ok()?,
             "invalid_request_error",
@@ -151,6 +152,13 @@ mod tests {
         .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers()["retry-after"], "10");
+        let response = error_response(&InvocationError::Upstream(rmcp::ErrorData::internal_error(
+            "speech provider request failed",
+            Some(json!({"speech_http_status":503,"retry_after_seconds":5})),
+        )))
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "5");
         let response = error_response(&InvocationError::Upstream(rmcp::ErrorData::internal_error(
             "speech provider request failed",
             Some(json!({"speech_http_status":401})),
