@@ -202,7 +202,9 @@ separate model with the provider's actual supported features:
 The base URL is HTTP(S), including for the WebSocket upgrade. Realtime uses the
 same strict API-key envelope, proxy/TLS policy, model governance, and single
 attempt rule as Speech. There is no credential pool, fallback, or cache. Declared
-capabilities are gateway configuration, not extra OpenAI request fields. Only
+capabilities state the provider's supported behavior, not per-feature access
+policy or extra OpenAI request fields. Model/call authorization remains the
+gateway boundary. Only
 configured models can supply audio routes; discovery cannot infer capabilities
 from model names. `GET /v1/models?type=realtime` and the additional `modality` and
 `capabilities` fields are gateway discovery metadata, outside the OpenAI standard.
@@ -216,7 +218,8 @@ and an ordinary OpenAI Realtime client. Send standard GA `session.update`,
 Provider response and item IDs and `response.output_audio.*`, transcript,
 `response.done`, cancellation, and truncation events pass through unchanged.
 The provider owns conversation, voice-locking, and cancellation semantics.
-The gateway prevents model changes and refuses unsupported configured options.
+On this WebSocket path the gateway prevents model changes and refuses unsupported
+configured options before forwarding.
 Native incremental text append/flush operations are not standard Realtime
 events and are refused. Standard complete text items and response input work
 without a gateway-specific extension.
@@ -232,7 +235,13 @@ model gates.
 
 The provider terminates WebRTC media and its `oai-events` data channel. Its ICE
 or TURN addresses must be reachable from clients even when its HTTP API is
-private. The gateway observes the call through the provider's standard sideband
+private. The gateway validates the initial session options; later data-channel
+commands go directly to the provider, which must enforce its declared feature
+support, model immutability, and standard unsupported-option errors. Sideband
+monitoring does not intercept those commands. Operators must qualify those
+provider guarantees; capability flags cannot disable a feature the provider
+continues to accept over its data channel.
+The gateway observes the call through the provider's standard sideband
 WebSocket. It does not relay RTP or claim client playback. A failed or abandoned
 setup triggers bounded hangup cleanup once a provider call ID is known; failures
 before an ID is returned leave the remote outcome unknown. Session termination

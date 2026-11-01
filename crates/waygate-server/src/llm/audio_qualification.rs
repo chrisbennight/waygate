@@ -54,14 +54,14 @@ async fn openai_audio_sdk_and_real_webrtc_media() {
         .unwrap()
         .to_owned();
     let mut defs:Vec<ModelDef>=serde_json::from_value(json!([
-        {"alias":"speech","provider":"openai","credential_label":"TEST","base_url":provider_url,"upstream_model":"fixture-speech","kind":"speech","speech":{"formats":["pcm","wav"],"sse_formats":["pcm"],"voices":["narrator"],"custom_voices":true,"resources":["voice_create","voice_delete","consent_create","consent_list","consent_retrieve","consent_update","consent_delete"]}},
+        {"alias":"speech","provider":"openai","credential_label":"TEST","base_url":provider_url,"upstream_model":"fixture-speech","kind":"speech","speech":{"formats":["pcm","wav"],"sse_formats":["pcm"],"voices":["narrator"],"custom_voices":true,"instructions":true,"resources":["voice_create","voice_delete","consent_create","consent_list","consent_retrieve","consent_update","consent_delete"]}},
         {"alias":"live","provider":"openai","credential_label":"TEST","base_url":provider_url,"upstream_model":"fixture-live","kind":"realtime","realtime":{"websocket":true,"webrtc":true,"voices":["narrator"],"custom_voices":true,"max_session_seconds":30}}
     ])).unwrap();
     normalize_model_defs(&mut defs).unwrap();
     let (_, resolver) = build_from_defs(defs, None).unwrap().unwrap();
     let dispatcher = LlmDispatcher::new(
-        ProviderClient::new(reqwest::Client::new())
-            .with_single_attempt_http(reqwest::Client::builder())
+        ProviderClient::new(http_client::client(Profile::Standard).unwrap())
+            .with_single_attempt_http(http_client::builder(Profile::Standard))
             .unwrap(),
         Arc::new(LlmCredentialStore::from_vars([(
             "LLM_CRED_OPENAI_TEST".into(),

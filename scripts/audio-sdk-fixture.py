@@ -60,6 +60,9 @@ async def serve():
     async def speech(req):
         body = await req.json()
         assert body["model"] == "fixture-speech"
+        if "instructions" in body:
+            assert body["instructions"] == "Quiet fixture direction"
+            assert body["speed"] == 1
         if isinstance(body["voice"], dict) and body["voice"]["id"] not in voices:
             return web.json_response({"error": {"message": "voice missing"}}, status=404)
         if body.get("stream_format") == "sse":
@@ -106,6 +109,9 @@ async def serve():
 
     async def handle_event(event, emit, state):
         kind = event["type"]
+        if "pc" in state and kind == "response.create" and event.get("response", {}).get("instructions"):
+            await emit({"type": "error", "error": {"type": "invalid_request_error", "code": "unsupported_option", "message": "Fixture provider does not support response instructions"}})
+            return
         if kind == "session.update":
             await emit({"type": "session.updated", "session": event["session"]})
         elif kind == "conversation.item.create":

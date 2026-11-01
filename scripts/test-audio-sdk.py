@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import json
+import statistics
 import sys
 import time
 import wave
@@ -26,7 +27,7 @@ provider = loopback(sys.argv[2])
 
 def speech_and_resources():
     with OpenAI(base_url=gateway, api_key="fixture-gateway", max_retries=0, timeout=10) as client:
-        audio = client.audio.speech.create(model="speech", input="Fixture narration", voice="narrator", response_format="wav")
+        audio = client.audio.speech.create(model="speech", input="Fixture narration", voice="narrator", instructions="Quiet fixture direction", response_format="wav", speed=1)
         with wave.open(io.BytesIO(audio.content), "rb") as wav:
             assert wav.getnframes() == 480
         with client.audio.speech.with_streaming_response.create(model="speech", input="Fixture narration", voice="narrator", response_format="pcm") as stream:
@@ -99,6 +100,7 @@ async def webrtc():
     cancelled = asyncio.Event()
     media = asyncio.Event()
     transcript = asyncio.Event()
+    unsupported = asyncio.Event()
 
     @channel.on("open")
     def ready():
@@ -107,6 +109,8 @@ async def webrtc():
     @channel.on("message")
     def event(data):
         value = json.loads(data)
+        if value["type"] == "error" and value["error"]["code"] == "unsupported_option":
+            unsupported.set()
         if value["type"] == "response.output_audio_transcript.delta":
             transcript.set()
         if value["type"] == "response.done":
@@ -133,6 +137,8 @@ async def webrtc():
         try:
             await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="answer"))
             await asyncio.wait_for(opened.wait(), 15)
+            channel.send(json.dumps({"type": "response.create", "response": {"instructions": "unsupported fixture direction"}}))
+            await asyncio.wait_for(unsupported.wait(), 5)
             channel.send(json.dumps({"type": "conversation.item.create", "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Fixture narration"}]}}))
             channel.send(json.dumps({"type": "response.create"}))
             await asyncio.wait_for(asyncio.gather(completed.wait(), transcript.wait(), media.wait()), 15)
@@ -145,10 +151,16 @@ async def webrtc():
 
 async def main():
     speech_and_resources()
-    direct = await asyncio.wait_for(websocket(provider, "fixture-provider", "fixture-live"), 15)
-    proxied = await asyncio.wait_for(websocket(gateway, "fixture-gateway", "live"), 15)
+    targets = {"direct": (provider, "fixture-provider", "fixture-live"), "gateway": (gateway, "fixture-gateway", "live")}
+    for target in targets.values():
+        await asyncio.wait_for(websocket(*target), 15)
+    samples = {name: [] for name in targets}
+    for index in range(3):
+        for name in (["direct", "gateway"] if index % 2 == 0 else ["gateway", "direct"]):
+            samples[name].append(await asyncio.wait_for(websocket(*targets[name]), 15))
+    medians = {name: round(statistics.median(values), 2) for name, values in samples.items()}
     await webrtc()
-    print(json.dumps({"speech": "wav/early PCM/SSE", "resources": "consent and voice lifecycle", "websocket": "audio/transcript/completion/cancel/truncate", "webrtc": "Opus decoded and data channel events", "first_audio_ms": {"direct": direct, "gateway": proxied}}))
+    print(json.dumps({"speech": "wav/early PCM/SSE/direction", "resources": "consent and voice lifecycle", "websocket": "audio/transcript/completion/cancel/truncate", "webrtc": "Opus decoded and data channel events", "first_audio_ms": {"samples": samples, "median": medians, "added_gateway_median_ms": round(medians["gateway"] - medians["direct"], 2)}}))
 
 
 if __name__ == "__main__":

@@ -12,6 +12,8 @@ fn default_session_seconds() -> u64 {
     600
 }
 
+/// The provider's declared support, not per-feature authorization policy.
+/// WebRTC data-channel validation belongs to the provider terminating that channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RealtimeCapabilities {

@@ -138,6 +138,7 @@ impl DefaultInvocationService {
                 Err(realtime_error(502))
             };
         }
+        let permit = Arc::new(permit);
         let mut cleanup = CallCleanup(None);
         let setup = async {
             match request {
@@ -210,7 +211,7 @@ impl DefaultInvocationService {
             }
         } else {
             let delivery_guard = cancel.clone().drop_guard();
-            let stream = async_stream_events(events_rx, delivery_guard);
+            let stream = async_stream_events(events_rx, delivery_guard, permit.clone());
             InvocationResponse::Realtime {
                 commands,
                 events: stream,
@@ -255,10 +256,18 @@ fn realtime_error(status: u16) -> InvocationError {
 fn async_stream_events(
     receiver: mpsc::Receiver<Result<Value, InvocationError>>,
     guard: tokio_util::sync::DropGuard,
+    permit: Arc<tokio::sync::OwnedSemaphorePermit>,
 ) -> futures::stream::BoxStream<'static, Result<Value, InvocationError>> {
-    futures::stream::unfold((receiver, guard), |(mut receiver, guard)| async move {
-        receiver.next().await.map(|item| (item, (receiver, guard)))
-    })
+    // The adapter holds capacity while sending an event, even after provider EOF.
+    futures::stream::unfold(
+        (receiver, guard, permit),
+        |(mut receiver, guard, permit)| async move {
+            receiver
+                .next()
+                .await
+                .map(|item| (item, (receiver, guard, permit)))
+        },
+    )
     .boxed()
 }
 
@@ -568,7 +577,10 @@ impl SessionEvidence {
         self.finished = true;
         let mut counts = (!self.responses.is_empty()
             && self.pending == 0
-            && matches!(outcome, "provider_closed" | "client_disconnected"))
+            && !matches!(
+                outcome,
+                "session_limit" | "response_limit" | "provider_protocol_failed"
+            ))
         .then_some((0u64, 0u64));
         for response in &self.responses {
             counts = counts.and_then(|(input, output)| {
@@ -650,9 +662,8 @@ impl Drop for SessionEvidence {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn webrtc_audio_deltas_do_not_claim_provider_media_start() {
-        let mut evidence = SessionEvidence {
+    fn evidence() -> SessionEvidence {
+        SessionEvidence {
             audit: Arc::new(crate::audit::NullSink),
             base: AuditEvent::new("RealtimeSession", AuditOutcome::Success),
             started: std::time::Instant::now(),
@@ -677,7 +688,12 @@ mod tests {
             events: 0,
             measured_usage: false,
             transport: "webrtc",
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn webrtc_audio_deltas_do_not_claim_provider_media_start() {
+        let mut evidence = evidence();
         evidence
             .observe(&json!({"type":"response.created","response":{"id":"response"}}))
             .unwrap();
@@ -700,5 +716,59 @@ mod tests {
             evidence.responses[0].media_outcome,
             "provider_buffer_stopped"
         );
+    }
+
+    #[tokio::test]
+    async fn downstream_event_holds_capacity_after_provider_eof_until_delivery_ends() {
+        for consume_eof in [false, true] {
+            let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+            let permit = Arc::new(capacity.clone().acquire_owned().await.unwrap());
+            let (mut sender, receiver) = mpsc::channel(1);
+            sender
+                .send(Ok(json!({"type":"response.done"})))
+                .await
+                .unwrap();
+            drop(sender);
+            let mut stream = async_stream_events(
+                receiver,
+                CancellationToken::new().drop_guard(),
+                permit.clone(),
+            );
+            drop(permit);
+            assert!(stream.next().await.unwrap().is_ok());
+            assert!(
+                capacity.clone().try_acquire_owned().is_err(),
+                "sending the final event still owns a live adapter"
+            );
+            if consume_eof {
+                assert!(stream.next().await.is_none());
+            }
+            drop(stream);
+            assert!(capacity.try_acquire_owned().is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_session_expiry_retains_all_completed_measured_usage() {
+        #[derive(Default)]
+        struct Usage(std::sync::Mutex<Vec<crate::usage::LlmUsageRow>>);
+        #[async_trait::async_trait]
+        impl crate::usage::LlmUsageRecorder for Usage {
+            async fn record_usage(&self, row: crate::usage::LlmUsageRow) {
+                self.0.lock().unwrap().push(row);
+            }
+        }
+        let usage = Arc::new(Usage::default());
+        let mut evidence = evidence();
+        evidence.measured_usage = true;
+        evidence.usage = Some(usage.clone());
+        evidence
+            .observe(&json!({"type":"response.created","response":{"id":"response"}}))
+            .unwrap();
+        evidence.observe(&json!({"type":"response.done","response":{"id":"response","status":"completed","usage":{"input_tokens":5,"output_tokens":7}}})).unwrap();
+        evidence.finish("session_deadline", true).await;
+        let rows = usage.0.lock().unwrap();
+        assert_eq!(rows[0].input_tokens, Some(5));
+        assert_eq!(rows[0].output_tokens, Some(7));
     }
 }

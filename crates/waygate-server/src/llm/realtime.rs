@@ -105,11 +105,14 @@ pub(super) async fn websocket(
                 let write = async {
                     while let Some(event) = events.next().await {
                         let Ok(value) = event else { break };
-                        if output
-                            .send(Message::Text(value.to_string().into()))
-                            .await
-                            .is_err()
-                        {
+                        if !matches!(
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                output.send(Message::Text(value.to_string().into()))
+                            )
+                            .await,
+                            Ok(Ok(()))
+                        ) {
                             break;
                         }
                     }
@@ -272,8 +275,21 @@ pub(super) async fn hangup(
         return bad("Realtime hangup does not accept query fields");
     }
     let principal = waygate_oidc::middleware::principal_from_req(&req).cloned();
-    if axum::body::to_bytes(req.into_body(), 0).await.is_err() {
-        return bad("Realtime hangup does not accept a request body");
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        axum::body::to_bytes(req.into_body(), 0),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(_)) => return bad("Realtime hangup does not accept a request body"),
+        Err(_) => {
+            return error_response(
+                StatusCode::REQUEST_TIMEOUT,
+                "invalid_request_error",
+                "Realtime hangup body exceeded its deadline",
+            )
+        }
     }
     let Some(model) = state.resolver.realtime_call_model(LLM_SERVER) else {
         return error_response(
