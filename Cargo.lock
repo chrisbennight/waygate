@@ -5918,6 +5918,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "waygate-core",
  "waygate-llm-credentials",
  "waygate-llm-providers",
  "waygate-llm-translate",
@@ -5937,6 +5938,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "uuid",
+ "waygate-core",
 ]
 
 [[package]]
@@ -5946,6 +5948,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "waygate-core",
  "waygate-llm-credentials",
 ]
 

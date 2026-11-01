@@ -50,6 +50,7 @@ pub const LLM_SERVER: &str = waygate_core::LLM_RESERVED_NAMESPACE;
 /// Env var carrying the model catalog as a JSON array of [`ModelDef`].
 const MODELS_ENV: &str = "GATEWAY_LLM_MODELS";
 
+mod audio_resources;
 mod embedding_config;
 mod embedding_errors;
 mod images;
@@ -73,7 +74,7 @@ pub fn deps_as_dyn(deps: &LlmDeps) -> (LlmDispatcher, Arc<dyn LlmModelResolver>)
     (deps.0.clone(), resolver)
 }
 
-/// One configured model. v1 is OpenAI-chat-compatible across all providers.
+/// One configured inference model and its provider capabilities.
 #[derive(Debug, Clone, Deserialize)]
 struct ModelDef {
     /// Explicit capabilities required for a configured speech model.
@@ -501,6 +502,16 @@ fn build_from_defs(
     call_timeout: Option<std::time::Duration>,
 ) -> anyhow::Result<Option<LlmDeps>> {
     let mut resolver = StaticModelResolver::new();
+    anyhow::ensure!(
+        defs.iter()
+            .filter(|def| def
+                .speech
+                .as_ref()
+                .is_some_and(|caps| !caps.resources.is_empty()))
+            .count()
+            <= 1,
+        "only one speech model may own standard audio resource routes"
+    );
     for def in defs {
         let risk = parse_risk(def.risk.as_deref());
         // A model is wholly chat or wholly embeddings; the operation applies to
@@ -884,7 +895,7 @@ fn parse_risk(s: Option<&str>) -> ModelRisk {
 }
 
 /// Shared state for the OpenAI-compatible `/v1` router. `invocation` drives the
-/// governed dispatch path for `/v1/chat/completions`; `models` is the read-only
+/// governed dispatch path for inference and audio resources; `models` is the read-only
 /// catalog the `/v1/models` discovery endpoint lists (`None` in DB-less dev mode,
 /// where routing still works from the env resolver but there is no catalog to
 /// enumerate); `resolver` is the same routing resolver `/v1/chat/completions`
@@ -896,6 +907,7 @@ struct LlmRouterState {
     models: Option<waygate_storage::SharedLlmModelCatalog>,
     resolver: Arc<dyn LlmModelResolver>,
     image_capacity: Arc<tokio::sync::Semaphore>,
+    audio_resource_capacity: Arc<tokio::sync::Semaphore>,
 }
 
 /// The OpenAI-compatible inference router. Mounted behind the gateway's bearer
@@ -913,12 +925,28 @@ pub fn router(
         .route("/v1/images/generations", post(images::generations))
         .route("/v1/images/edits", post(images::edits))
         .route("/v1/audio/speech", post(speech::create))
+        .route("/v1/audio/voices", post(audio_resources::create_voice))
+        .route(
+            "/v1/audio/voices/{voice_id}",
+            axum::routing::delete(audio_resources::delete_voice),
+        )
+        .route(
+            "/v1/audio/voice_consents",
+            get(audio_resources::consents).post(audio_resources::consents),
+        )
+        .route(
+            "/v1/audio/voice_consents/{consent_id}",
+            get(audio_resources::consent)
+                .post(audio_resources::consent)
+                .delete(audio_resources::consent),
+        )
         .route("/v1/models", get(list_models))
         .with_state(LlmRouterState {
             invocation,
             models,
             resolver,
             image_capacity: Arc::new(tokio::sync::Semaphore::new(images::MAX_CONCURRENT_IMAGES)),
+            audio_resource_capacity: Arc::new(tokio::sync::Semaphore::new(2)),
         })
 }
 

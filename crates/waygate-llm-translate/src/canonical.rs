@@ -21,6 +21,7 @@ pub enum Surface {
     ImagesGenerations,
     ImagesEdits,
     AudioSpeech,
+    AudioResource,
     /// The provider-native Anthropic Messages surface: the client body is
     /// forwarded to an Anthropic Messages route without canonical translation.
     AnthropicMessages,
@@ -35,6 +36,7 @@ impl Surface {
             Self::ImagesGenerations => "images_generations",
             Self::ImagesEdits => "images_edits",
             Self::AudioSpeech => "audio_speech",
+            Self::AudioResource => "audio_resource",
             Self::AnthropicMessages => "anthropic_messages",
         }
     }

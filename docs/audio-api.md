@@ -101,7 +101,7 @@ the HTTP body with a transport error. The gateway never appends JSON to audio.
 
 Audio is delivered incrementally with bounded buffering and no proxy buffering
 hint. There is a decoded audio limit of 64 MiB and an independent five-minute
-request deadline. Speech shares the inference processing capacity. A client
+generation deadline. Speech shares the inference processing capacity. A client
 disconnect closes the upstream body; slow readers cannot hold provider work
 indefinitely. Connection closure is not proof that a remote provider acknowledged
 cancellation.
@@ -117,8 +117,66 @@ placeholders are not measured usage. Speech token counts and costs currently
 remain unknown; unknown costs
 do not become a known free call or a hard spending guarantee.
 
-This surface does not implement Realtime sessions or voice-resource management.
-Providers retain ownership of voices, recordings, and persistence.
+## Voice and consent resources
+
+One configured speech model may also provide standard recording-based voice and
+consent operations. Add only the operations its provider supports to that model's
+`speech.resources` array:
+
+```json
+{"resources": [
+  "voice_create", "voice_delete",
+  "consent_create", "consent_list", "consent_retrieve",
+  "consent_update", "consent_delete"
+]}
+```
+
+Resource requests do not carry a model selector. The explicitly configured model
+supplies the provider, credential, model authorization, profile, quota, budget,
+and audit boundary. Configuring more than one resource provider fails startup;
+without one the resource routes report that no provider is configured. Discovered
+catalog rows cannot opt into these routes. No provider-specific client selector
+or separate gateway voice ownership system is introduced. Authorized callers see
+the resources their configured provider makes available.
+
+| Method | Path | Operation |
+| --- | --- | --- |
+| POST | `/v1/audio/voices` | Create a voice from a recording and consent ID |
+| DELETE | `/v1/audio/voices/{voice_id}` | Delete a voice |
+| POST / GET | `/v1/audio/voice_consents` | Create / list consent recordings |
+| GET / POST / DELETE | `/v1/audio/voice_consents/{consent_id}` | Retrieve / update metadata / delete consent |
+
+Use standard multipart `name`, `consent`, and `audio_sample` fields for voice
+creation; optional `type` must be `audio_sample`. Consent creation uses `name`,
+`language`, and `recording`. Reference transcription and encoding, when needed,
+are internal provider work. Callers do not supply an extra transcript or perform
+a preparation request. Returned and pre-existing voice IDs pass unchanged through
+standard selectors such as `voice={"id":"voice_example"}`.
+
+Consent listing accepts `after` and `limit` (1–100). Metadata updates accept a
+JSON `name`. Unknown fields and unsupported operations fail before provider
+contact. Prompt-based voice creation is outside this surface: OpenAI prompt-created
+voices are supported only in Live, not Speech or Realtime.
+
+Recordings are limited to 10 MiB, with a 60-second upload deadline and bounded
+upload concurrency. Provider operations have a five-minute deadline and one
+attempt; metadata responses are capped at 1 MiB. Creation or deletion can have an
+uncertain remote outcome after transport failure, so the gateway does not replay
+them. A successful deletion requires the provider's explicit confirmation. Voice
+deletion does not issue a second request to delete its separate consent resource.
+Providers own resource relationships, persistence, and asset cleanup.
+
+Resource evidence contains the operation, outcome, attribution, and timing. Names,
+recordings, descriptions, and provider error bodies do not enter routine evidence.
+The `audio_resource` usage surface retains unknown token counts and costs rather
+than treating resource operations as known free calls. Evidence finalization is
+bounded and best effort.
+
+Realtime sessions are a separate transport contract. This implementation does not
+yet expose them.
 
 See the [OpenAI Speech contract](https://developers.openai.com/api/reference/resources/audio/subresources/speech/methods/create)
 and [inference governance](inference-plane.md#2-invariants-load-bearing-rules).
+The [voice](https://developers.openai.com/api/reference/resources/audio/subresources/voices/)
+and [consent](https://developers.openai.com/api/reference/resources/audio/subresources/voice_consents/)
+contracts define the resource operations.

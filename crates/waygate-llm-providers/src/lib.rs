@@ -21,6 +21,7 @@
 //!   invocation pipeline's stages (invariant I1); this crate is the thing the
 //!   dispatch stage calls *after* enforcement has passed.
 
+pub mod audio_resources;
 pub mod speech;
 mod sse;
 

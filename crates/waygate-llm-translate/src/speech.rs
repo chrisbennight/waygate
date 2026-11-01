@@ -8,6 +8,10 @@ use crate::TranslateError;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpeechCapabilities {
+    /// Standard resource operations routed through this provider. Only one
+    /// configured speech model may own the routes that have no model field.
+    #[serde(default)]
+    pub resources: Vec<waygate_core::audio::AudioResourceOperation>,
     pub formats: Vec<SpeechFormat>,
     #[serde(default)]
     pub voices: Vec<String>,
