@@ -38,6 +38,7 @@ mod outbound;
 mod record;
 mod response;
 mod response_canonical;
+pub mod speech;
 mod stream;
 
 pub use canonical::{

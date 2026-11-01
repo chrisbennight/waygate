@@ -2,6 +2,10 @@
 
 ## Supported behavior
 
+- **Speech surface:** `POST /v1/audio/speech` serves explicitly configured
+  OpenAI-compatible speech providers through the shared model gates. Audio bytes
+  and speech SSE retain their separate delivery contracts; usage stays unknown
+  when no authoritative counts are reported. See [Speech API](audio-api.md).
 - Client surfaces: `POST /v1/chat/completions` and `POST /v1/responses` are both mounted
   today, **unary and streaming**. The Responses route parses to the same canonical
   `LlmRequest` and renders the response through the canonical response hub. For streaming, an
@@ -21,7 +25,7 @@
 - **Embeddings surface:** `POST /v1/embeddings` is also mounted (**unary only** — embeddings
   have no streaming form), routing an OpenAI-compatible embeddings model through the **same**
   governed pipeline (authorize / quota / budget / audit — I1) as the chat surfaces. It is a
-  second *operation* alongside chat (§4.7): its own canonical request, an input-token-only
+  distinct *operation* (§4.7): its own canonical request, an input-token-only
   usage/cost record, and an `LlmOperation` discriminator on the resolved model that the
   pipeline branches on — rejecting a surface/operation mismatch (an embeddings model on a chat
   route, or a chat model on `/v1/embeddings`) with a clean client error. Only the
@@ -436,13 +440,15 @@ machinery (§7), the unified pipeline gates (§5), `InferenceRecord`/usage, and 
   When input usage is reported, the usage ledger records zero completion tokens
   because embeddings generate no completion; their input can then be priced alone.
 - **Operation discriminator.** The resolved model carries
-  `LlmOperation { Chat, Embeddings, Images }`. Embeddings use env config
+  `LlmOperation` distinguishes chat, embeddings, images, and configured speech
+  capabilities. Embeddings use env config
   `kind: embeddings` and catalog `upstream_api = embeddings`; images use
   `kind: images` and `upstream_api = images`. The pipeline selects `invoke_llm`,
-  `invoke_embeddings`, or `invoke_images` and rejects a **surface/operation
+  `invoke_embeddings`, `invoke_images`, or `invoke_speech` and rejects a **surface/operation
   mismatch** before parsing or provider contact. Chat models use the chat and
   Responses routes, embeddings use `/v1/embeddings`, and image models use the
-  generation and edit routes described in [Images API](images-api.md).
+  generation and edit routes described in [Images API](images-api.md). Speech
+  uses `/v1/audio/speech`; see [Speech API](audio-api.md).
 - **Caching.** Embeddings participate in the per-principal exact-match cache (§9) on the same
   two-key arming as chat (`GATEWAY_LLM_CACHE_ENABLED` + the model's `cache_ttl`). Being
   unary-only, it is the simplest cache path: a hit replays the stored body verbatim (free, no
@@ -544,6 +550,8 @@ account (`PRIMARY`, `FAMILY`, …). The set of labels for a provider is its pool
   "expires_at": "2026-06-13T18:00:00Z" }
 // api-key providers (Anthropic, OpenRouter) — a bare key string
 "sk-ant-api03-…"   // Anthropic;  "sk-or-…" for OpenRouter
+// OpenAI API keys use an explicit envelope instead of a subscription blob
+{ "api_key": "…" }
 ```
 
 **In-process lifecycle (I4).** `waygate-llm-credentials` loads each `LLM_CRED_*` at startup

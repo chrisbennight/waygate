@@ -271,6 +271,9 @@ pub struct InvocationRequest {
     /// Images API operation; absent for chat, embeddings, and MCP calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images_surface: Option<ImagesSurface>,
+    /// Set by the Speech API ingress, never inferred from request arguments.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub speech_surface: bool,
     /// LLM fast-path only: `true` when the call arrived on the provider-native
     /// Anthropic Messages surface (`POST /v1/messages`). The request body is
     /// validated and forwarded without canonical translation, so it is only
@@ -333,6 +336,7 @@ impl InvocationRequest {
             responses_surface: false,
             embeddings_surface: false,
             images_surface: None,
+            speech_surface: false,
             native_messages_surface: false,
             input_responses: None,
             request_state: None,
@@ -771,17 +775,22 @@ impl InvocationError {
     }
 }
 
-/// The outcome of an [`InvocationService::invoke`] call: either a single
-/// unary result (every MCP tool call today) or a streamed sequence of chunks.
+/// The outcome of an [`InvocationService::invoke`] call: a complete result,
+/// incremental JSON or media, an upstream task, or a request for client input.
 ///
 /// Splitting the response here is the seam the inference plane fills (see
 /// `docs/inference-plane.md`): an LLM completion streams, while a tool call
-/// returns one `CallToolResult` — every MCP tool-call producer wraps its
-/// result as [`InvocationResponse::Unary`].
+/// normally returns one `CallToolResult` as [`InvocationResponse::Unary`].
+/// Speech returns [`InvocationResponse::Media`] without wrapping audio in JSON.
 /// Keeping the unary/stream split in the response type (rather than a second
 /// dispatch method) is what lets the authorize / quota / inspect / audit
 /// stages stay on one path for both shapes.
 pub enum InvocationResponse {
+    /// Incremental non-JSON media, with an admitted response content type.
+    Media {
+        media_type: &'static str,
+        body: BoxStream<'static, Result<bytes::Bytes, InvocationError>>,
+    },
     /// A complete result, available in one piece. Today's universal shape.
     Unary(CallToolResult),
     /// Durable task owned by an upstream service.
@@ -813,6 +822,10 @@ impl std::fmt::Debug for InvocationResponse {
     // type to be `Debug`, so the impl is part of the contract.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Media { media_type, .. } => f
+                .debug_struct("Media")
+                .field("media_type", media_type)
+                .finish_non_exhaustive(),
             Self::Task(task) => f.debug_tuple("Task").field(task).finish(),
             Self::Unary(result) => f.debug_tuple("Unary").field(result).finish(),
             Self::InputRequired(pause) => f.debug_tuple("InputRequired").field(pause).finish(),

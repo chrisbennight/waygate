@@ -5864,6 +5864,7 @@ name = "waygate-invocation"
 version = "2.0.1"
 dependencies = [
  "async-trait",
+ "bytes",
  "futures",
  "rmcp",
  "serde",
@@ -5928,6 +5929,7 @@ name = "waygate-llm-providers"
 version = "2.0.1"
 dependencies = [
  "axum",
+ "bytes",
  "futures",
  "reqwest",
  "serde_json",
@@ -5986,6 +5988,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "blake3",
+ "bytes",
  "futures",
  "http",
  "jsonschema",

@@ -29,6 +29,8 @@
 //!   - Codex (`~/.codex/auth.json`) — the same `tokens` object with the expiry in
 //!     the access-token JWT `exp` instead of a top-level `expires_at`.
 //! - **API-key providers** (Anthropic, OpenRouter) inject the bare key string.
+//! - **OpenAI API keys** use an explicit `{"api_key":"…"}` envelope, distinct
+//!   from subscription OAuth credentials. Unknown envelope fields are rejected.
 //!
 //! ## Refresh
 //!
@@ -521,8 +523,9 @@ fn parse_oauth_blob(value: &str) -> Option<OAuthState> {
 }
 
 /// Parse an injected value into credential material, validated against the
-/// provider's expected credential kind. An OAuth provider MUST present a valid
-/// token blob (one of the shapes [`parse_oauth_blob`] accepts) — a malformed
+/// provider's expected credential kind. OpenAI accepts an explicit API-key
+/// envelope; otherwise OAuth providers must present a valid token blob (one of
+/// the shapes [`parse_oauth_blob`] accepts). A malformed
 /// blob is rejected (`None`) rather than silently treated as a bearer API key,
 /// so a corrupt subscription secret is never sent upstream as a bearer token.
 ///
@@ -536,6 +539,20 @@ fn parse_oauth_blob(value: &str) -> Option<OAuthState> {
 /// fail closed at credential load instead of leaking token material upstream.
 fn parse_material(provider: LlmProvider, value: &str) -> Option<Material> {
     let value = value.trim();
+    // Explicit API-key envelopes cannot be confused with malformed subscription
+    // token blobs, which may contain refresh credentials and must stay private.
+    if provider == LlmProvider::OpenAi {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ApiKeyEnvelope {
+            api_key: String,
+        }
+        if let Ok(envelope) = serde_json::from_str::<ApiKeyEnvelope>(value) {
+            let key = envelope.api_key.trim();
+            return (!key.is_empty() && !key.starts_with('{'))
+                .then(|| Material::ApiKey(key.to_owned()));
+        }
+    }
     if provider.is_oauth() {
         parse_oauth_blob(value).map(Material::OAuth)
     } else if value.is_empty() || value.starts_with('{') {
@@ -1111,6 +1128,37 @@ mod tests {
         match parse_material(LlmProvider::Anthropic, "sk-ant-api03-xyz") {
             Some(Material::ApiKey(k)) => assert_eq!(k, "sk-ant-api03-xyz"),
             _ => panic!("expected ApiKey material for Anthropic"),
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_openai_api_key_envelope_is_usable_without_oauth_refresh() {
+        let store = LlmCredentialStore::from_vars([(
+            "LLM_CRED_OPENAI_SPEECH".into(),
+            r#"{"api_key":"fixture-provider-key"}"#.into(),
+        )]);
+        assert_eq!(
+            store.bearer(LlmProvider::OpenAi, "SPEECH").await.unwrap(),
+            "fixture-provider-key"
+        );
+        assert_eq!(
+            store
+                .credential_is_oauth(LlmProvider::OpenAi, "SPEECH")
+                .await,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn api_key_envelopes_never_accept_mixed_or_malformed_subscription_material() {
+        for value in [
+            r#"{"api_key":""}"#,
+            r#"{"api_key":"{subscription blob}"}"#,
+            r#"{"api_key":"fixture","refresh_token":"fixture-refresh"}"#,
+            r#"{"api_key":"fixture","tokens":{"refresh_token":"fixture-refresh"}}"#,
+            r#"{"tokens":{"refresh_token":"fixture-refresh"}}"#,
+        ] {
+            assert!(parse_material(LlmProvider::OpenAi, value).is_none());
         }
     }
 

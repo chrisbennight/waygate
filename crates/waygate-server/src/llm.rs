@@ -54,6 +54,7 @@ mod embedding_config;
 mod embedding_errors;
 mod images;
 mod messages;
+mod speech;
 
 /// Max inbound request body (bytes) for an LLM call.
 const MAX_BODY: usize = 8 * 1024 * 1024;
@@ -75,6 +76,9 @@ pub fn deps_as_dyn(deps: &LlmDeps) -> (LlmDispatcher, Arc<dyn LlmModelResolver>)
 /// One configured model. v1 is OpenAI-chat-compatible across all providers.
 #[derive(Debug, Clone, Deserialize)]
 struct ModelDef {
+    /// Explicit capabilities required for a configured speech model.
+    #[serde(default)]
+    speech: Option<waygate_llm_translate::speech::SpeechCapabilities>,
     /// Client-facing model name (the `model` field clients send).
     alias: String,
     /// Provider owning the credential: openai | anthropic | google | openrouter.
@@ -227,6 +231,12 @@ fn is_images(def: &ModelDef) -> bool {
         .is_some_and(|k| k.eq_ignore_ascii_case("images"))
 }
 
+fn is_speech(def: &ModelDef) -> bool {
+    def.kind
+        .as_deref()
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("speech"))
+}
+
 /// Whether this model serves the OpenAI-compatible embeddings operation.
 fn is_embeddings(def: &ModelDef) -> bool {
     def.kind
@@ -243,6 +253,9 @@ fn is_embeddings(def: &ModelDef) -> bool {
 /// [`routes_for_target`] resolves, so the catalog never disagrees with the live
 /// route (#395).
 fn upstream_api_for(def: &ModelDef) -> &'static str {
+    if is_speech(def) {
+        return "speech";
+    }
     if is_images(def) {
         return "images";
     }
@@ -495,6 +508,8 @@ fn build_from_defs(
         // call over to a chat endpoint).
         let is_emb = is_embeddings(&def);
         let is_img = is_images(&def);
+        let is_speech = is_speech(&def);
+        speech::validate_config(&def)?;
         let no_auth = embedding_config::no_auth(&def)?;
         if is_img
             && (!def.provider.eq_ignore_ascii_case("openai")
@@ -521,7 +536,9 @@ fn build_from_defs(
             def.credential_label.clone(),
             def.credential_labels.clone(),
             def.base_url.clone(),
-            if is_img {
+            if is_speech {
+                Some(def.path.clone().unwrap_or_else(|| "audio/speech".into()))
+            } else if is_img {
                 Some(def.path.clone().unwrap_or_else(|| "images".into()))
             } else {
                 def.path.clone()
@@ -557,7 +574,9 @@ fn build_from_defs(
             def.alias,
             ResolvedModel {
                 route,
-                operation: if is_img {
+                operation: if is_speech {
+                    LlmOperation::Speech(def.speech.clone().expect("validated speech capabilities"))
+                } else if is_img {
                     LlmOperation::Images
                 } else if is_emb {
                     LlmOperation::Embeddings
@@ -629,6 +648,11 @@ fn build_from_defs(
 /// malformed row that could never route); the loader logs and skips it rather
 /// than failing the whole load.
 fn resolved_from_catalog_row(row: &waygate_storage::LlmModelRow) -> Option<ResolvedModel> {
+    // Speech capabilities are explicit configuration; a catalog row cannot
+    // revive a removed pin by guessing what its provider supports.
+    if row.upstream_api.eq_ignore_ascii_case("speech") {
+        return None;
+    }
     let provider = parse_provider(&row.provider).ok()?;
     // `upstream_api` IS routing-determinative here (the one place a catalog row's
     // value drives routing): `embeddings` selects the embeddings operation,
@@ -747,7 +771,9 @@ fn model_def_to_upsert(def: &ModelDef) -> waygate_storage::LlmModelUpsert {
         // provider string doesn't parse (build_from_defs surfaces that as a hard
         // error).
         path: def.path.clone().unwrap_or_else(|| {
-            if is_images(def) {
+            if is_speech(def) {
+                "audio/speech".to_string()
+            } else if is_images(def) {
                 "images".to_string()
             } else if is_embeddings(def) {
                 "embeddings".to_string()
@@ -886,6 +912,7 @@ pub fn router(
         .route("/v1/messages", post(messages::messages))
         .route("/v1/images/generations", post(images::generations))
         .route("/v1/images/edits", post(images::edits))
+        .route("/v1/audio/speech", post(speech::create))
         .route("/v1/models", get(list_models))
         .with_state(LlmRouterState {
             invocation,
@@ -921,9 +948,12 @@ fn models_list_json(rows: Vec<waygate_storage::LlmModelRow>) -> Value {
 /// `embeddings` row is `text->embedding`; every chat-family surface
 /// (`chat_completions` / `responses` / `messages` / `generate_content`) is
 /// `text->text`. A non-standard OpenAI field (SDKs ignore unknown keys), it lets
-/// an embeddings-aware client tell the surfaces apart without calling each one;
-/// `GET /v1/models?type=embeddings|chat` filters on the same distinction.
+/// clients tell the surfaces apart without calling each one. Speech is
+/// `text->audio` and images are `text+image->image`; `?type=` filters by operation.
 fn model_modality(upstream_api: &str) -> &'static str {
+    if upstream_api.eq_ignore_ascii_case("speech") {
+        return "text->audio";
+    }
     if upstream_api.eq_ignore_ascii_case("images") {
         return "text+image->image";
     }
@@ -935,9 +965,10 @@ fn model_modality(upstream_api: &str) -> &'static str {
 }
 
 /// `?type=` filter for `GET /v1/models`: narrows the listing to one operation
-/// kind so a client can discover embeddings models as distinct from chat ones.
+/// kind: chat, embeddings, images, or speech.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ModelKindFilter {
+    Speech,
     Images,
     Embeddings,
     Chat,
@@ -951,6 +982,7 @@ impl ModelKindFilter {
         query.split('&').find_map(|pair| {
             let v = pair.strip_prefix("type=")?;
             match v.to_ascii_lowercase().as_str() {
+                "speech" => Some(Self::Speech),
                 "embeddings" | "embedding" => Some(Self::Embeddings),
                 "chat" => Some(Self::Chat),
                 "images" | "image" => Some(Self::Images),
@@ -963,9 +995,14 @@ impl ModelKindFilter {
     fn matches(self, upstream_api: &str) -> bool {
         let is_emb = upstream_api.eq_ignore_ascii_case("embeddings");
         match self {
+            Self::Speech => upstream_api.eq_ignore_ascii_case("speech"),
             Self::Images => upstream_api.eq_ignore_ascii_case("images"),
             Self::Embeddings => is_emb,
-            Self::Chat => !is_emb && !upstream_api.eq_ignore_ascii_case("images"),
+            Self::Chat => {
+                !is_emb
+                    && !upstream_api.eq_ignore_ascii_case("images")
+                    && !upstream_api.eq_ignore_ascii_case("speech")
+            }
         }
     }
 }
@@ -1097,7 +1134,8 @@ async fn chat_completions(State(state): State<LlmRouterState>, req: Request) -> 
         Ok(InvocationResponse::UnaryValue(body)) => (StatusCode::OK, Json(body)).into_response(),
         // An MCP CallToolResult (or MRTR pause — this surface declares no
         // input capabilities) on the LLM route is a wiring bug.
-        Ok(InvocationResponse::Unary(_))
+        Ok(InvocationResponse::Media { .. })
+        | Ok(InvocationResponse::Unary(_))
         | Ok(InvocationResponse::InputRequired(_))
         | Ok(InvocationResponse::Task(_)) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1166,7 +1204,8 @@ async fn responses(State(state): State<LlmRouterState>, req: Request) -> Respons
         // The body is already Responses-shaped — dispatch rendered the canonical
         // response to the Responses surface.
         Ok(InvocationResponse::UnaryValue(body)) => (StatusCode::OK, Json(body)).into_response(),
-        Ok(InvocationResponse::Unary(_))
+        Ok(InvocationResponse::Media { .. })
+        | Ok(InvocationResponse::Unary(_))
         | Ok(InvocationResponse::InputRequired(_))
         | Ok(InvocationResponse::Task(_)) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1203,7 +1242,8 @@ async fn embeddings(State(state): State<LlmRouterState>, req: Request) -> Respon
         Ok(InvocationResponse::UnaryValue(body)) => (StatusCode::OK, Json(body)).into_response(),
         // `invoke_embeddings` only ever returns a unary value or an error; an MCP
         // tool result or a stream on the embeddings route is a wiring bug.
-        Ok(InvocationResponse::Unary(_))
+        Ok(InvocationResponse::Media { .. })
+        | Ok(InvocationResponse::Unary(_))
         | Ok(InvocationResponse::Stream(_))
         | Ok(InvocationResponse::InputRequired(_))
         | Ok(InvocationResponse::Task(_)) => error_response(
@@ -1217,6 +1257,9 @@ async fn embeddings(State(state): State<LlmRouterState>, req: Request) -> Respon
 
 /// Map a pipeline error to an HTTP status + OpenAI-style error envelope.
 fn invocation_error_response(e: InvocationError) -> Response {
+    if let Some(response) = speech::error_response(&e) {
+        return response;
+    }
     if let Some(response) = embedding_errors::response(&e) {
         return response;
     }

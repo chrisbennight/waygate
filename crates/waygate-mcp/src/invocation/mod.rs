@@ -543,6 +543,7 @@ struct InvocationContext<'a> {
     /// surfaces and every MCP tool call.
     embeddings_surface: bool,
     images_surface: Option<waygate_invocation::ImagesSurface>,
+    speech_surface: bool,
     /// LLM fast-path only: the call arrived on the provider-native Anthropic
     /// Messages surface (`POST /v1/messages`). The fast-path branches to
     /// `invoke_native_messages`, which forwards the body untranslated and so
@@ -756,6 +757,7 @@ impl InvocationService for DefaultInvocationService {
             responses_surface: req.responses_surface,
             embeddings_surface: req.embeddings_surface,
             images_surface: req.images_surface,
+            speech_surface: req.speech_surface,
             native_messages_surface: req.native_messages_surface,
             acting_agent: req.acting_agent(),
             invocation_hierarchy: req.hierarchy,

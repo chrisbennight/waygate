@@ -781,7 +781,8 @@ pub(crate) async fn tools_try(
         // Streaming responses originate only from the inference plane, which
         // has its own client path — the dashboard try-it surface doesn't
         // render them.
-        Ok(waygate_mcp::InvocationResponse::Stream(_)) => TryResult::err(
+        Ok(waygate_mcp::InvocationResponse::Media { .. })
+        | Ok(waygate_mcp::InvocationResponse::Stream(_)) => TryResult::err(
             "Unsupported",
             "This tool returned a streaming response, which the dashboard \
              try-it surface does not render. Streaming is an inference-plane \

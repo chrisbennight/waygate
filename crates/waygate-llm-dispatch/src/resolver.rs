@@ -37,12 +37,13 @@ pub enum ModelRisk {
 /// model hit on `/v1/chat/completions`, or vice-versa, is a clean client error,
 /// not a mis-dispatch). `Images` serves generation and editing through the
 /// separate Images API parser and direct Codex transport. Defaults to `Chat`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum LlmOperation {
     #[default]
     Chat,
     Embeddings,
     Images,
+    Speech(waygate_llm_translate::speech::SpeechCapabilities),
 }
 
 /// A resolved model target: where to send it and how the gates should treat it.

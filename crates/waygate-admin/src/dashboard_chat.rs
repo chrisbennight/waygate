@@ -225,7 +225,7 @@ async fn chat_stream(
         Ok(InvocationResponse::UnaryValue(body)) => {
             sse_once(Event::default().data(body.to_string()))
         }
-        Ok(InvocationResponse::Unary(_)) => {
+        Ok(InvocationResponse::Media { .. }) | Ok(InvocationResponse::Unary(_)) => {
             sse_error("unexpected tool result on the inference route", None)
         }
         // The chat surface declares no input capabilities, so the pipeline

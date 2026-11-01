@@ -81,7 +81,7 @@ extending a crate.
 | `waygate-telemetry` | Leaf | OTel bootstrap: tracing subscriber, meters, span helpers | Domain types |
 | `waygate-policy` | Leaf | Durable versioned Cedar policy **bundles** (storage + history) | Policy evaluation (`waygate-authz`) |
 | `waygate-manifest-store` | Leaf | Durable versioned upstream-manifest bundles — the history/rollback ledger (stores YAML text) | Manifest parsing/types (`waygate-manifest-types`) |
-| `waygate-llm-providers` | Leaf | Outbound transport to LLM providers: POST a pre-rendered body, return the response or SSE stream | Translation, credentials, orchestration |
+| `waygate-llm-providers` | Leaf | Outbound transport to LLM providers: POST a pre-rendered body, return JSON, speech audio bytes, or an SSE stream | Translation, credentials, orchestration |
 | `waygate-llm-discovery` | Leaf | Fetching a provider's live model list | Catalog persistence (`waygate-storage`) |
 | `waygate-test-client` | Leaf | CLI test client for OAuth-protected MCP gateways (CIMD + loopback callback UX) and the independent streaming file-host proof | Production code paths; production file-transfer authority or storage |
 | `waygate-files-helper` | Leaf | The `mcp-files` CLI: holds the caller's transfer signing key, redeems a `gateway-files.prepare_*` grant over HTTPS, and streams the bytes | MCP protocol traffic; gateway login or any gateway credential; deciding whether a transfer is allowed |
@@ -369,6 +369,12 @@ overlay.
    `waygate-authz` Cedar engine;
    `EvidenceRecorder` ([`waygate-evidence/src/audit.rs`](../crates/waygate-evidence/src/audit.rs))
    → the `waygate-storage` audit sink.
+
+Speech uses the same inference model gates and a separate binary media response
+on the invocation seam. The speech pipeline owns bounded generation and delivery,
+with distinct evidence for provider completion and HTTP body consumption. The
+server owns only configuration, ingress, and HTTP framing; providers own voice
+assets and inference. See [Speech API](audio-api.md).
 
 Two adjacent planes:
 

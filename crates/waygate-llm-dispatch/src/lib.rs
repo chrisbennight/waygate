@@ -24,6 +24,7 @@
 
 mod images;
 mod resolver;
+mod speech;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -53,6 +54,7 @@ use waygate_llm_translate::{
 // Re-export the provider SSE types so consumers (the invocation pipeline's
 // streaming egress) can map a `DispatchOutcome::Stream` without a direct
 // dependency on `waygate-llm-providers`.
+pub use waygate_llm_providers::speech::{AudioStream, SpeechResponse, MAX_AUDIO_RESPONSE_BYTES};
 pub use waygate_llm_providers::{SseEvent, SseStream as ProviderSseStream};
 
 /// Where a resolved request is sent and how it authenticates. Produced by the

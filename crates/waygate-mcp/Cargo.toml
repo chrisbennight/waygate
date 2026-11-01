@@ -19,6 +19,7 @@ waygate-quota.workspace = true
 waygate-skills.workspace = true
 waygate-telemetry.workspace = true
 base64.workspace = true
+bytes.workspace = true
 futures.workspace = true
 http.workspace = true
 # JSON-schema validator for the InvocationService
@@ -59,7 +60,7 @@ rmcp = { workspace = true, features = [
 waygate-test-support.workspace = true
 axum = { workspace = true }
 waygate-llm-providers.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util"] }
 tower.workspace = true
 reqwest = { workspace = true }
 sha2.workspace = true
