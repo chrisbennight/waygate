@@ -36,7 +36,8 @@ pub(super) async fn messages(State(state): State<LlmRouterState>, req: Request) 
     match state.invocation.invoke(principal.as_ref(), request).await {
         // The provider's Messages body, returned verbatim.
         Ok(InvocationResponse::UnaryValue(body)) => (StatusCode::OK, Json(body)).into_response(),
-        Ok(InvocationResponse::Unary(_))
+        Ok(InvocationResponse::Media { .. })
+        | Ok(InvocationResponse::Unary(_))
         | Ok(InvocationResponse::InputRequired(_))
         | Ok(InvocationResponse::Task(_)) => {
             anthropic_error_envelope(error_response(

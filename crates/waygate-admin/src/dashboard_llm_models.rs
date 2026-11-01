@@ -74,6 +74,7 @@ struct ModelRow {
     is_embeddings: bool,
     /// Images use a distinct operation badge, independent of chat discovery.
     is_images: bool,
+    is_speech: bool,
     risk: String,
     enabled: bool,
     requires_approval: bool,
@@ -177,6 +178,7 @@ async fn load_llm_models(store: &SharedLlmModelCatalog, tenant: &str) -> LoadRes
 fn model_row(m: LlmModelRow) -> ModelRow {
     let is_embeddings = m.upstream_api.eq_ignore_ascii_case("embeddings");
     let is_images = m.upstream_api.eq_ignore_ascii_case("images");
+    let is_speech = m.upstream_api.eq_ignore_ascii_case("speech");
     ModelRow {
         alias: m.alias,
         provider: m.provider,
@@ -185,6 +187,7 @@ fn model_row(m: LlmModelRow) -> ModelRow {
         upstream_api: m.upstream_api,
         is_embeddings,
         is_images,
+        is_speech,
         risk: m.risk,
         enabled: m.enabled,
         requires_approval: m.requires_approval,

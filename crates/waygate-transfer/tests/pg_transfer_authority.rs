@@ -1001,6 +1001,7 @@ async fn dpop_credential_cannot_be_used_as_a_native_bearer() {
 
 #[tokio::test]
 async fn a_helper_redeems_by_file_uri_only_with_its_own_key_once() {
+    let _sweep_guard = TRANSFER_SWEEP_LOCK.lock().await;
     let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
         return;
     };

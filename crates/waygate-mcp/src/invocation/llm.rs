@@ -10,6 +10,7 @@ use super::*;
 
 mod images;
 mod native;
+mod speech;
 
 const COMPLETION_CACHE_WRITE_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
 
@@ -58,6 +59,20 @@ impl DefaultInvocationService {
         // `/v1/messages`. Without this
         // the embeddings parser would choke on a chat body (or vice-versa)
         // or the wrong body would be POSTed to the wrong upstream path.
+        if matches!(model.operation, LlmOperation::Speech(_)) || ctx.speech_surface {
+            if !matches!(model.operation, LlmOperation::Speech(_))
+                || !ctx.speech_surface
+                || ctx.images_surface.is_some()
+                || ctx.embeddings_surface
+                || ctx.responses_surface
+                || ctx.native_messages_surface
+            {
+                return Err(InvocationError::InvalidArguments(
+                    "speech models require POST /v1/audio/speech".into(),
+                ));
+            }
+            return self.invoke_speech(ctx, model, dispatcher).await;
+        }
         if model.operation == LlmOperation::Images || ctx.images_surface.is_some() {
             if model.operation != LlmOperation::Images
                 || ctx.images_surface.is_none()

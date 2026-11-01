@@ -3093,10 +3093,12 @@ fn tool_call_response(
         Ok(crate::InvocationResponse::InputRequired(pause)) => {
             Ok(CallToolResponse::InputRequired(pause))
         }
-        Ok(crate::InvocationResponse::Stream(_)) => Err(McpError::internal_error(
-            "streaming invocation response is not supported on the MCP tool-call path",
-            None,
-        )),
+        Ok(crate::InvocationResponse::Media { .. }) | Ok(crate::InvocationResponse::Stream(_)) => {
+            Err(McpError::internal_error(
+                "streaming invocation response is not supported on the MCP tool-call path",
+                None,
+            ))
+        }
         Ok(crate::InvocationResponse::UnaryValue(_)) => Err(McpError::internal_error(
             "raw-JSON (LLM) invocation response is not supported on the MCP tool-call path",
             None,
