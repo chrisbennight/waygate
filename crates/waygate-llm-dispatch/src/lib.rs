@@ -22,6 +22,7 @@
 //! [`DispatchError::UnsupportedProtocol`] variant remains for a future protocol
 //! added to the enum but not yet wired here.
 
+mod audio_resources;
 mod images;
 mod resolver;
 mod speech;

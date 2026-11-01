@@ -155,6 +155,7 @@ impl DefaultInvocationService {
             embeddings_surface: false,
             images_surface: None,
             speech_surface: false,
+            audio_resource: None,
             native_messages_surface: false,
             acting_agent: None,
             invocation_hierarchy: None,

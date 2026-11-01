@@ -10,6 +10,7 @@
 //! to be tenant-aware lives here so its consumers (catalog,
 //! SCIM/RBAC, audit, etc.) can refer to a single source of truth.
 
+pub mod audio;
 mod email_recipients;
 pub mod env;
 pub use email_recipients::EmailRecipients;

@@ -8,6 +8,7 @@ use super::stream::{
 };
 use super::*;
 
+mod audio_resources;
 mod images;
 mod native;
 mod speech;
@@ -52,6 +53,20 @@ impl DefaultInvocationService {
         model: ResolvedModel,
         dispatcher: &LlmDispatcher,
     ) -> Result<InvocationResponse, InvocationError> {
+        if ctx.audio_resource.is_some() {
+            if !matches!(model.operation, LlmOperation::Speech(_))
+                || ctx.speech_surface
+                || ctx.images_surface.is_some()
+                || ctx.embeddings_surface
+                || ctx.responses_surface
+                || ctx.native_messages_surface
+            {
+                return Err(InvocationError::InvalidArguments(
+                    "audio resources require their configured provider route".into(),
+                ));
+            }
+            return self.invoke_audio_resource(ctx, model, dispatcher).await;
+        }
         // Branch on the model's operation, and reject a surface/operation
         // mismatch with a clean client error BEFORE any gate or cost: an
         // embeddings model must arrive on `/v1/embeddings`, and a chat

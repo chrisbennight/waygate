@@ -6,6 +6,9 @@
   OpenAI-compatible speech providers through the shared model gates. Audio bytes
   and speech SSE retain their separate delivery contracts; usage stays unknown
   when no authoritative counts are reported. See [Speech API](audio-api.md).
+- Standard recording-based voice and consent resources use one explicitly
+  configured speech provider and the same model gates. Resource visibility and
+  persistence remain provider-owned; see [voice and consent resources](audio-api.md#voice-and-consent-resources).
 - Client surfaces: `POST /v1/chat/completions` and `POST /v1/responses` are both mounted
   today, **unary and streaming**. The Responses route parses to the same canonical
   `LlmRequest` and renders the response through the canonical response hub. For streaming, an

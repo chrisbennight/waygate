@@ -6,6 +6,7 @@ use waygate_llm_translate::speech::{SpeechCapabilities, SpeechFormat};
 
 fn capabilities() -> SpeechCapabilities {
     SpeechCapabilities {
+        resources: vec![],
         formats: vec![SpeechFormat::Pcm, SpeechFormat::Wav],
         voices: vec!["narrator".into()],
         custom_voices: true,

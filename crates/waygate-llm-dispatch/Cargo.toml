@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+waygate-core.workspace = true
 waygate-llm-credentials.workspace = true
 waygate-llm-providers.workspace = true
 waygate-llm-translate.workspace = true

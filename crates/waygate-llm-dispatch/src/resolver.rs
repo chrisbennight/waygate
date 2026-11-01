@@ -36,7 +36,8 @@ pub enum ModelRisk {
 /// path, and validates that the inbound client surface matches (an embeddings
 /// model hit on `/v1/chat/completions`, or vice-versa, is a clean client error,
 /// not a mis-dispatch). `Images` serves generation and editing through the
-/// separate Images API parser and direct Codex transport. Defaults to `Chat`.
+/// separate Images API parser and direct Codex transport. `Speech` carries
+/// configured generation and resource capabilities. Defaults to `Chat`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum LlmOperation {
     #[default]
@@ -51,7 +52,7 @@ pub enum LlmOperation {
 pub struct ResolvedModel {
     /// Primary transport + identity for dispatch — the first target tried.
     pub route: ResolvedRoute,
-    /// Which operation this model serves (chat, embeddings, or images) — selects the
+    /// Which operation this model serves — selects the
     /// pipeline's parse/dispatch path. Defaults to `Chat`.
     pub operation: LlmOperation,
     /// Ordered fallback routes, tried in order only when the primary (and each
@@ -81,6 +82,12 @@ pub struct ResolvedModel {
 /// the pair is not an LLM model (so the caller falls back to the MCP path).
 pub trait LlmModelResolver: Send + Sync + 'static {
     fn resolve(&self, server: &str, model: &str) -> Option<ResolvedModel>;
+
+    /// The explicitly configured provider for standard audio resources, which
+    /// have no client model selector. Absence and ambiguity both fail closed.
+    fn audio_resource_model(&self, _server: &str) -> Option<String> {
+        None
+    }
 
     /// Whether `server` is an LLM namespace this resolver owns (has at least one
     /// model under it). The pipeline uses this to reject an unknown model on an
@@ -121,6 +128,12 @@ impl StaticModelResolver {
 }
 
 impl LlmModelResolver for StaticModelResolver {
+    fn audio_resource_model(&self, server: &str) -> Option<String> {
+        let mut models = self.models.iter().filter(|((s, _), model)| s == server && matches!(&model.operation, LlmOperation::Speech(caps) if !caps.resources.is_empty()));
+        let ((_, alias), _) = models.next()?;
+        models.next().is_none().then(|| alias.clone())
+    }
+
     fn resolve(&self, server: &str, model: &str) -> Option<ResolvedModel> {
         // Borrow-friendly lookup without allocating the key tuple.
         self.models
@@ -211,6 +224,10 @@ impl DbModelResolver {
 }
 
 impl LlmModelResolver for DbModelResolver {
+    fn audio_resource_model(&self, server: &str) -> Option<String> {
+        self.pins.audio_resource_model(server)
+    }
+
     fn resolve(&self, server: &str, model: &str) -> Option<ResolvedModel> {
         // A pin wins; otherwise consult the discovered layer.
         if let Some(pinned) = self.pins.resolve(server, model) {

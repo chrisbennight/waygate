@@ -274,6 +274,10 @@ pub struct InvocationRequest {
     /// Set by the Speech API ingress, never inferred from request arguments.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub speech_surface: bool,
+    /// Standard voice/consent request admitted by HTTP ingress. Recording bytes
+    /// never enter serialized invocation envelopes or diagnostic output.
+    #[serde(skip)]
+    pub audio_resource: Option<waygate_core::audio::AudioResourceRequest>,
     /// LLM fast-path only: `true` when the call arrived on the provider-native
     /// Anthropic Messages surface (`POST /v1/messages`). The request body is
     /// validated and forwarded without canonical translation, so it is only
@@ -337,6 +341,7 @@ impl InvocationRequest {
             embeddings_surface: false,
             images_surface: None,
             speech_surface: false,
+            audio_resource: None,
             native_messages_surface: false,
             input_responses: None,
             request_state: None,
