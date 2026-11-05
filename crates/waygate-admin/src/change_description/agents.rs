@@ -48,7 +48,7 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
     let params = &request.params;
     match request.action_type.as_str() {
         "agent_config.create" => {
-            let Some(name) = param(params, "name") else {
+            let Some(name) = param(params, "name").map(str::trim) else {
                 return ChangeDescription::undescribed("agent_config.create");
             };
             let mut description = ChangeDescription::titled(
@@ -61,7 +61,7 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
                 if let Some(value) = params.get(*key) {
                     description
                         .changes
-                        .push(change(format!("{label}: {}", shown(value))));
+                        .push(change(format!("{label}: {}", shown(&stored(key, value)))));
                 }
             }
             description.changes.push(change(format!(
@@ -95,12 +95,12 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
             for (key, label) in SETTINGS {
                 let (now, next) = (
                     current.get(key).unwrap_or(&Value::Null),
-                    config.get(key).unwrap_or(&Value::Null),
+                    stored(key, config.get(key).unwrap_or(&Value::Null)),
                 );
-                if now != next {
+                if *now != next {
                     description
                         .changes
-                        .push(field_change(label, shown(now), shown(next)));
+                        .push(field_change(label, shown(now), shown(&next)));
                 }
             }
             description.changes.extend(list_changes(
@@ -172,6 +172,14 @@ async fn agent(state: &AdminState, request: &ChangeRequest) -> Lookup<AgentConfi
         None => None,
     };
     Lookup::from_read(action, "gateway agent", read)
+}
+
+/// A setting as the gateway stores it: the name and model are trimmed.
+fn stored(key: &str, value: &Value) -> Value {
+    match (key, value) {
+        ("name" | "model_alias", Value::String(text)) => Value::String(text.trim().to_owned()),
+        _ => value.clone(),
+    }
 }
 
 /// A setting value in words: text quoted, numbers as written, yes or no,
