@@ -91,22 +91,7 @@ impl ActionExecutor for RbacRoleUpdateExecutor {
         // replacement is refused.
         let p: RbacRoleUpdateParams = serde_json::from_value(params.clone())
             .map_err(|e| ExecError::BadParams(e.to_string()))?;
-        let Some(store) = state.identity.rbac.get() else {
-            return Ok(None);
-        };
-        let role = store
-            .get_role(tenant_id, p.id)
-            .await
-            .map_err(|e| ExecError::Store(format!("rbac get_role: {e}")))?;
-        Ok(role.map(|r| {
-            let mut scopes = r.scopes.clone();
-            scopes.sort();
-            etag_of(&serde_json::json!({
-                "name": r.name,
-                "description": r.description,
-                "scopes": scopes,
-            }))
-        }))
+        role_etag(state, tenant_id, p.id).await
     }
 
     async fn execute(
@@ -147,6 +132,32 @@ impl ActionExecutor for RbacRoleUpdateExecutor {
     }
 }
 
+/// Fingerprint of a role's CURRENT name, description, and sorted scopes.
+/// `None` (no store / role gone) mismatches a `Some` propose-time token,
+/// failing closed.
+async fn role_etag(
+    state: &Arc<AdminState>,
+    tenant_id: &str,
+    id: Uuid,
+) -> Result<Option<String>, ExecError> {
+    let Some(store) = state.identity.rbac.get() else {
+        return Ok(None);
+    };
+    let role = store
+        .get_role(tenant_id, id)
+        .await
+        .map_err(|e| ExecError::Store(format!("rbac get_role: {e}")))?;
+    Ok(role.map(|r| {
+        let mut scopes = r.scopes.clone();
+        scopes.sort();
+        etag_of(&serde_json::json!({
+            "name": r.name,
+            "description": r.description,
+            "scopes": scopes,
+        }))
+    }))
+}
+
 // ---- rbac.role.delete ----
 
 /// Params for `rbac.role.delete`: the target role id. Tenant-scoped through
@@ -164,6 +175,20 @@ pub(super) struct RbacRoleDeleteExecutor;
 impl ActionExecutor for RbacRoleDeleteExecutor {
     fn action_type(&self) -> &'static str {
         "rbac.role.delete"
+    }
+
+    async fn capture_etag(
+        &self,
+        state: &Arc<AdminState>,
+        tenant_id: &str,
+        _actor: &Principal,
+        params: &Value,
+    ) -> Result<Option<String>, ExecError> {
+        // A role renamed or re-scoped between propose and approve is not the
+        // one the approver reviewed, so the deletion is refused.
+        let p: RbacRoleDeleteParams = serde_json::from_value(params.clone())
+            .map_err(|e| ExecError::BadParams(e.to_string()))?;
+        role_etag(state, tenant_id, p.id).await
     }
 
     async fn execute(
