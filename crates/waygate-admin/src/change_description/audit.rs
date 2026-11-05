@@ -77,10 +77,8 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
                 .collect();
             let requested = params.get("delete_after_days").and_then(Value::as_i64);
             match retention_change(&rules, category, set.then_some(requested).flatten(), set) {
-                Some(change) => description.changes.push(change),
-                None => {
-                    description.note = Some("The proposed rule matches the current one.".into())
-                }
+                Ok(change) => description.changes.push(change),
+                Err(unchanged) => description.note = Some(unchanged),
             }
             description
         }
@@ -169,7 +167,7 @@ fn retention_change(
     category: &str,
     requested: Option<i64>,
     set: bool,
-) -> Option<DescribedChange> {
+) -> Result<DescribedChange, String> {
     let days = |name: &str| {
         rules
             .iter()
@@ -178,27 +176,35 @@ fn retention_change(
     };
     let fallback = (category != "*").then(|| days("*")).flatten();
     let own = days(category);
-    let current = own.or(fallback);
-    let proposed = if set { requested } else { fallback };
-    if current == proposed {
-        return None;
-    }
-    let shown = |days: Option<i64>, from_catch_all: bool| match days {
+    // Each side records whether the period comes from the catch-all rule,
+    // since moving between an own rule and the catch-all is a change even
+    // when the period is the same.
+    let current = (own.or(fallback), own.is_none() && fallback.is_some());
+    let proposed = if set {
+        (requested, false)
+    } else {
+        (fallback, fallback.is_some())
+    };
+    let shown = |(days, from_catch_all): (Option<i64>, bool)| match days {
         None => "never".to_owned(),
         Some(days) if from_catch_all => {
             format!("{}, by the tenant's catch-all rule", days_text(days))
         }
         Some(days) => days_text(days),
     };
-    Some(field_change(
-        if category == "*" {
-            "Delete records without their own rule older than"
-        } else {
-            "Delete records older than"
-        },
-        shown(current, own.is_none()),
-        shown(proposed, !set),
-    ))
+    let label = if category == "*" {
+        "Delete records without their own rule older than"
+    } else {
+        "Delete records older than"
+    };
+    if current == proposed {
+        return Err(format!(
+            "The rule is unchanged: {} {}.",
+            label.to_lowercase(),
+            shown(current)
+        ));
+    }
+    Ok(field_change(label, shown(current), shown(proposed)))
 }
 
 fn days_text(days: i64) -> String {
@@ -219,7 +225,7 @@ mod tests {
     #[test]
     fn retention_changes_account_for_the_catch_all_rule() {
         let with_catch_all = rules(&[("*", 30), ("invocation", 365)]);
-        let text = |change: Option<DescribedChange>| change.map(|change| change.text);
+        let text = |change: Result<DescribedChange, String>| change.ok().map(|change| change.text);
         // Clearing an override falls back to the catch-all, not to "never".
         assert_eq!(
             text(retention_change(&with_catch_all, "invocation", None, false)).as_deref(),
@@ -235,8 +241,29 @@ mod tests {
             text(retention_change(&with_catch_all, "*", None, false)).as_deref(),
             Some("Delete records without their own rule older than: 30 days → never")
         );
-        assert!(retention_change(&with_catch_all, "invocation", Some(365), true).is_none());
-        assert!(retention_change(&rules(&[]), "admin", None, false).is_none());
+        assert!(retention_change(&with_catch_all, "invocation", Some(365), true).is_err());
+        assert!(retention_change(&rules(&[]), "admin", None, false).is_err());
+        // An own rule equal to the catch-all is still a different rule.
+        let only_catch_all = rules(&[("*", 30)]);
+        assert_eq!(
+            text(retention_change(
+                &only_catch_all,
+                "invocation",
+                Some(30),
+                true
+            ))
+            .as_deref(),
+            Some("Delete records older than: 30 days, by the tenant's catch-all rule → 30 days")
+        );
+        let equal_override = rules(&[("*", 30), ("invocation", 30)]);
+        assert_eq!(
+            text(retention_change(&equal_override, "invocation", None, false)).as_deref(),
+            Some("Delete records older than: 30 days → 30 days, by the tenant's catch-all rule")
+        );
+        assert_eq!(
+            retention_change(&equal_override, "invocation", Some(30), true).unwrap_err(),
+            "The rule is unchanged: delete records older than 30 days."
+        );
     }
 
     #[test]
