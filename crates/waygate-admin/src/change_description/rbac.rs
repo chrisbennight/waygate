@@ -16,6 +16,20 @@ const ROLE_UPDATE_KEYS: &[&str] = &["id", "name", "description", "scopes"];
 const ID_KEYS: &[&str] = &["id"];
 const GRANT_KEYS: &[&str] = &["role_id", "subject_sub"];
 const MAPPING_KEYS: &[&str] = &["group_id", "role_id"];
+#[cfg(test)]
+pub(super) const DECLARED: &[(&str, &[&str])] = &[
+    ("rbac.role.create", ROLE_CREATE_KEYS),
+    ("rbac.role.update", ROLE_UPDATE_KEYS),
+    ("rbac.role.delete", ID_KEYS),
+    ("rbac.assignment.grant", GRANT_KEYS),
+    ("rbac.assignment.grant_privileged", GRANT_KEYS),
+    ("rbac.assignment.revoke", ID_KEYS),
+    ("rbac.assignment.revoke_privileged", ID_KEYS),
+    ("rbac.group_mapping.grant", MAPPING_KEYS),
+    ("rbac.group_mapping.grant_privileged", MAPPING_KEYS),
+    ("rbac.group_mapping.revoke", MAPPING_KEYS),
+    ("rbac.group_mapping.revoke_privileged", MAPPING_KEYS),
+];
 /// Holders named on a deletion card before the rest are counted.
 const NAMED_HOLDERS: usize = 5;
 
