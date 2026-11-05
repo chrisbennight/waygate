@@ -16,6 +16,7 @@ use waygate_changeset::{
 use waygate_dashboard_stores::agent_config::{
     AgentConfigFields, AgentConfigStore, AgentKind, InMemoryAgentConfigStore,
 };
+use waygate_federation::{FederatedPeersStore, NewFederatedPeer, PgFederatedPeersStore, TrustTier};
 use waygate_quota::{PgRateLimitPolicyStore, QuotaAction, QuotaScope, RateLimitPolicyStore};
 use waygate_rbac::{PgRbacStore, RbacStore};
 
@@ -71,6 +72,7 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
     let rbac = Arc::new(PgRbacStore::new(pool.clone()));
     let agents = Arc::new(InMemoryAgentConfigStore::new());
     let scopes = Arc::new(PgScopeStore::new(pool.clone()));
+    let peers = Arc::new(PgFederatedPeersStore::new(pool.clone()));
 
     let limit_name = format!("search-burst-{suffix}");
     // Scope and action are unique per tenant, so the principal is unique too.
@@ -133,6 +135,19 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
         .find(|scope| scope.name == scope_name)
         .expect("created scope");
 
+    let peer_name = format!("partner-{suffix}");
+    let issuer = format!("https://{suffix}.example.test");
+    let peer = peers
+        .insert(NewFederatedPeer {
+            tenant_id: "default",
+            peer_name: &peer_name,
+            issuer: &issuer,
+            jwks_url: &format!("{issuer}/jwks"),
+            trust_tier: TrustTier::Full,
+        })
+        .await
+        .unwrap();
+
     let delete_limit = changes
         .propose(request("rate_limit.delete", json!({"policy_id": limit.id})))
         .await
@@ -165,13 +180,22 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
     let update_agent = changes
         .propose(request(
             "agent_config.update",
-            json!({"agent_id": agent.id, "config": {"name": agent_name, "kind": "chat",
-                "model_alias": "large", "allowed_tools": ["docs.search", "docs.fetch"],
+            json!({"agent_id": agent.id, "config": {"name": format!(" {agent_name} "), "kind": "chat",
+                "model_alias": " large ", "allowed_tools": ["docs.search", "docs.fetch"],
                 "max_steps": 10, "max_tool_calls": 20, "enabled": true}}),
         ))
         .await
         .unwrap();
 
+    // The gateway trims the name, so only the issuer changes.
+    let update_peer = changes
+        .propose(request(
+            "peer.update",
+            json!({"id": peer.id, "peer_name": format!(" {peer_name} "),
+                "issuer": format!(" https://{suffix}-new.example.test ")}),
+        ))
+        .await
+        .unwrap();
     let delete_scope = changes
         .propose(request(
             "scope.delete_local",
@@ -204,7 +228,8 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
         .with_rate_limit_policy_store(Some(limits.clone()))
         .with_rbac_store(Some(rbac.clone()))
         .with_agent_configs(Some(agents.clone()))
-        .with_scope_store(Some(scopes.clone()));
+        .with_scope_store(Some(scopes.clone()))
+        .with_federated_peers_store(Some(peers.clone()));
     let app = dashboard_router(Arc::new(state), DashboardAuth::Disabled);
 
     // A deletion names its target and the settings that go with it.
@@ -264,6 +289,16 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
     )));
     assert!(text.contains("Description: “Read [U+0020]triage notes”"));
 
+    let html = card(&app, update_peer.id).await;
+    let text = summary(&html);
+    assert!(text.contains(&format!(
+        "<strong>Change peer gateway “{peer_name}”</strong>"
+    )));
+    assert!(text.contains(&format!(
+        "Issuer: “{issuer}” → “https://{suffix}-new.example.test”"
+    )));
+    assert!(!text.contains("Name:"));
+
     let html = card(&app, mint_token.id).await;
     let text = summary(&html);
     assert!(text.contains("<strong>Issue a break-glass token to “oncall@example.test”</strong>"));
@@ -285,5 +320,6 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
     )));
     assert!(text.contains("Model: “small” → “large”"));
     assert!(text.contains("Tools added: “docs.fetch”"));
+    assert!(!text.contains("Name:"));
     assert!(!text.contains("Step limit"));
 }
