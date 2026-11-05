@@ -18,13 +18,13 @@ pub(super) const DECLARED: &[(&str, &[&str])] = &[
 
 pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> ChangeDescription {
     let params = &request.params;
+    // The gateway trims each value before validating and storing it.
+    let value = |key| param(params, key).map(str::trim);
     match request.action_type.as_str() {
         "peer.create" => {
-            let (Some(name), Some(issuer), Some(keys)) = (
-                param(params, "peer_name"),
-                param(params, "issuer"),
-                param(params, "jwks_url"),
-            ) else {
+            let (Some(name), Some(issuer), Some(keys)) =
+                (value("peer_name"), value("issuer"), value("jwks_url"))
+            else {
                 return ChangeDescription::undescribed("peer.create");
             };
             let mut description = ChangeDescription::titled(
@@ -52,7 +52,7 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
                 ("issuer", "Issuer", &peer.issuer),
                 ("jwks_url", "Signing keys from", &peer.jwks_url),
             ] {
-                if let Some(proposed) = param(params, key).filter(|value| value != current) {
+                if let Some(proposed) = value(key).filter(|value| value != current) {
                     description.changes.push(field_change(
                         label,
                         quoted(current),
