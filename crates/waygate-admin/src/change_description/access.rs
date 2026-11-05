@@ -38,7 +38,7 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
             else {
                 return ChangeDescription::undescribed(action);
             };
-            ChangeDescription::titled(
+            let mut description = ChangeDescription::titled(
                 action,
                 format!(
                     "Revoke the consent of {} for client {}",
@@ -47,7 +47,38 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
                 ),
                 params,
                 CONSENT_KEYS,
-            )
+            );
+            let read = match state.identity.consent.get() {
+                Some(store) => store.find_active(&request.tenant_id, subject, client).await,
+                None => return description.cannot_read("consent"),
+            };
+            match read {
+                Ok(Some(grant)) => {
+                    description.changes = vec![
+                        change(format!("Scopes: {}", quoted_list(&grant.scopes))),
+                        change(format!(
+                            "Expires: {}",
+                            grant.expires_at.map_or_else(
+                                || "never".to_owned(),
+                                waygate_core::fmt::format_ts_abs
+                            )
+                        )),
+                    ];
+                }
+                // Revoking is idempotent, so a missing consent changes nothing.
+                Ok(None) => {
+                    description.note = Some(
+                        "No active consent exists for this user and client, so approval \
+                         changes nothing."
+                            .into(),
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "approval card could not read the consent");
+                    return description.cannot_read("consent");
+                }
+            }
+            description
         }
         "upstream_session.revoke" => {
             let (Some(subject), Some(issuer)) =
