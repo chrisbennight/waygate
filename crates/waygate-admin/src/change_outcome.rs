@@ -128,8 +128,7 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "audit.retention.clear" => (
             "Remove audit retention for a category",
-            "The category's records follow the tenant's catch-all retention rule if one exists, \
-             and are otherwise no longer deleted automatically.",
+            "The rule is removed and other categories keep their rules. Records in a category without its own rule follow the tenant's catch-all rule if one remains, and are otherwise no longer deleted automatically.",
         ),
         "audit.routing.set" => (
             "Set audit routing for an exporter",
