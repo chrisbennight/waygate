@@ -70,13 +70,11 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "rbac.role.update" => (
             "Change a role",
-            "Everyone who holds the role gets the new scope list in place of the old one within \
-             a minute. The role's name and description are also replaced.",
+            "Everyone who holds the role gets its new scope list within a minute, keeping any removed scopes they get elsewhere. The role's name and description are also replaced.",
         ),
         "rbac.role.delete" => (
             "Delete a role",
-            "The role is deleted with its user assignments and group mappings, and holders lose \
-             its scopes within a minute. Recreating the role does not restore the assignments.",
+            "The role is deleted with its user assignments and group mappings, and within a minute holders lose the scopes only it gave them. Recreating the role does not restore the assignments.",
         ),
         "rbac.assignment.grant" => (
             "Assign a role to a user",
@@ -90,13 +88,11 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "rbac.assignment.revoke" => (
             "Remove a role from a user",
-            "The user loses the role within a minute, unless another role or group gives them \
-             the same scopes.",
+            "The user loses the role within a minute, keeping any of its scopes they get elsewhere.",
         ),
         "rbac.assignment.revoke_privileged" => (
             "Remove a control-plane role from a user",
-            "The user loses the role, including its control-plane scopes, on their next request, \
-             unless another role or group gives them the same scopes.",
+            "The user loses the role, including its control-plane scopes, on their next request, keeping any of its scopes they get elsewhere.",
         ),
         "rbac.group_mapping.grant" => (
             "Give a group a role",
@@ -110,12 +106,11 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "rbac.group_mapping.revoke" => (
             "Remove a role from a group",
-            "Members of the group stop receiving the role through this group within a minute.",
+            "Members of the group stop receiving the role through this group within a minute, keeping any of its scopes they get elsewhere.",
         ),
         "rbac.group_mapping.revoke_privileged" => (
             "Remove a control-plane role from a group",
-            "Members of the group stop receiving the role, including its control-plane scopes, \
-             through this group on their next request.",
+            "Members of the group stop receiving the role, including its control-plane scopes, through this group on their next request, keeping any of its scopes they get elsewhere.",
         ),
         "tenant.update" => (
             "Rename the tenant",
