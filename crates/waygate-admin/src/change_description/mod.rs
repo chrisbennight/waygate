@@ -19,13 +19,22 @@ use waygate_oidc::Principal;
 
 use crate::state::AdminState;
 
-/// A name or value in quotes, with invisible characters, tabs, and line
-/// breaks revealed, since card text collapses whitespace. Values are never
-/// shortened: a description states each parameter completely.
+/// A name or value in quotes, with invisible characters, tabs, line breaks,
+/// and each space after the first in a run revealed, since card text
+/// collapses whitespace. Values are never shortened: a description states
+/// each parameter completely.
 pub(crate) fn quoted(text: &str) -> String {
-    let revealed = crate::review_diff::reveal(text)
-        .replace('\t', "[U+0009]")
-        .replace('\n', "[U+000A]");
+    let mut revealed = String::new();
+    let mut after_space = false;
+    for ch in crate::review_diff::reveal(text).chars() {
+        match ch {
+            '\t' => revealed.push_str("[U+0009]"),
+            '\n' => revealed.push_str("[U+000A]"),
+            ' ' if after_space => revealed.push_str("[U+0020]"),
+            other => revealed.push(other),
+        }
+        after_space = ch == ' ';
+    }
     format!("“{revealed}”")
 }
 
@@ -426,6 +435,8 @@ mod tests {
         assert_eq!(quoted("a\u{200B}b"), "“a[U+200B]b”");
         assert_eq!(quoted("ops\tadmins\n"), "“ops[U+0009]admins[U+000A]”");
         assert_ne!(quoted("ops admins"), quoted("ops\tadmins"));
+        assert_eq!(quoted("ops   admins"), "“ops [U+0020][U+0020]admins”");
+        assert_eq!(quoted(" ops "), "“ ops ”");
     }
 
     /// Every described action declares exactly the parameters its schema
