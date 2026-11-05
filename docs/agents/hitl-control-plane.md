@@ -879,7 +879,7 @@ phone push) means approval from wherever the operator is.
   opaque token, not a universal hash contract, and only the owning executor may
   interpret its value. Most mutable-target executors use a one-way sha256 of
   mutable fields:
-  `rate_limit.update`, `rbac.role.update`,
+  `rate_limit.update`, `rate_limit.delete`, `rbac.role.update`,
   `peer.update`, `tenant.update`, and the natural-key audit-config actions.
   The one-way tokens are safe to persist even when the hashed fields are
   sensitive. Creates, content-independent identity deletes, and ordinary
