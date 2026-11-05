@@ -1377,7 +1377,7 @@ fn render_sparkline(buckets: &[UsageBucket], since: OffsetDateTime) -> Response 
 /// * `N` followed by `m`/`h`/`d`/`w`/`y` ⇒ `Ok(Some(now + N units))`.
 ///
 /// No max cap — operator-trust model. Negative or non-numeric N ⇒ `Err`.
-fn parse_ttl(raw: &str) -> Result<Option<OffsetDateTime>, String> {
+pub(crate) fn parse_ttl(raw: &str) -> Result<Option<OffsetDateTime>, String> {
     let lower = raw.to_ascii_lowercase();
     let lower = lower.trim();
     if lower.is_empty() || matches!(lower, "never" | "none" | "unlimited" | "0") {
