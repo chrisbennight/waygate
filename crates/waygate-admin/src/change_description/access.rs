@@ -150,6 +150,16 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
                     listed.map(|tokens| tokens.into_iter().find(|token| token.id == id))
                 }),
             };
+            // Revoking is idempotent: an absent token makes approval a no-op.
+            if let Some(Ok(None)) = read {
+                return ChangeDescription::titled(
+                    action,
+                    "Revoke a break-glass token".to_owned(),
+                    params,
+                    REVOKE_KEYS,
+                )
+                .noted("The token no longer exists, so approval changes nothing.");
+            }
             let token = found!(Lookup::from_read(action, "break-glass token", read));
             let mut description = ChangeDescription::titled(
                 action,
