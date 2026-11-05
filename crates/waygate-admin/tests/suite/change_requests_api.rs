@@ -1611,6 +1611,45 @@ async fn approve_executes_rate_limit_delete() {
 }
 
 #[tokio::test]
+async fn approve_rate_limit_delete_of_a_retuned_policy_fails_closed() {
+    let policy_id = Uuid::from_u128(0x23);
+    let rl = Arc::new(FakeRateLimitStore::seeded(policy_id));
+    let app = api_router(
+        state_full(
+            Some(mem_store()),
+            Some(rl.clone() as Arc<dyn RateLimitPolicyStore>),
+        )
+        .await,
+    );
+    let body = json!({
+        "action_type": "rate_limit.delete",
+        "params": { "policy_id": policy_id },
+        "justification": "retire the seeded nightly policy"
+    });
+    let id = propose_as(&app, &body, "alice").await;
+    // An operator retunes the policy while the deletion is pending.
+    rl.update(
+        waygate_core::TenantId::default().as_str(),
+        policy_id,
+        Some(500),
+        None,
+    )
+    .await
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_empty(
+            &format!("/api/v1/admin/change_requests/{id}/approve"),
+            "bob",
+            &["mcp:admin"],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert!(rl.exists(policy_id), "the retuned policy is kept");
+}
+
+#[tokio::test]
 async fn approve_rate_limit_delete_missing_fails_precondition() {
     // The target policy doesn't exist (deleted between propose and approve):
     // delete_policy_core returns Ok(false) -> the executor raises a
