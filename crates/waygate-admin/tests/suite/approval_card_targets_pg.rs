@@ -71,12 +71,14 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
     let agents = Arc::new(InMemoryAgentConfigStore::new());
 
     let limit_name = format!("search-burst-{suffix}");
+    // Scope and action are unique per tenant, so the principal is unique too.
+    let principal = format!("alice-{suffix}");
     let limit = limits
         .create(
             "default",
             &limit_name,
             QuotaScope::Principal,
-            Some("alice"),
+            Some(&principal),
             60,
             1.0,
             QuotaAction::Call,
@@ -168,7 +170,9 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
     assert!(text.contains(&format!(
         "<strong>Delete rate limit “{limit_name}”</strong>"
     )));
-    assert!(text.contains("Applies to: Every call by principal “alice”"));
+    assert!(text.contains(&format!(
+        "Applies to: Every call by principal “{principal}”"
+    )));
     assert!(text.contains("Limit: capacity 60, refilling 1 per second"));
     assert!(
         !text.contains(&limit.id.to_string()),
