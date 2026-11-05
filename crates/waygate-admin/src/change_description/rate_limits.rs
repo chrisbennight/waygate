@@ -17,6 +17,12 @@ const CREATE_KEYS: &[&str] = &[
 ];
 const UPDATE_KEYS: &[&str] = &["policy_id", "bucket_capacity", "refill_per_second"];
 const DELETE_KEYS: &[&str] = &["policy_id"];
+#[cfg(test)]
+pub(super) const DECLARED: &[(&str, &[&str])] = &[
+    ("rate_limit.create", CREATE_KEYS),
+    ("rate_limit.update", UPDATE_KEYS),
+    ("rate_limit.delete", DELETE_KEYS),
+];
 
 pub(super) async fn describe(state: &AdminState, change: &ChangeRequest) -> ChangeDescription {
     let params = &change.params;

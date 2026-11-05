@@ -9,6 +9,12 @@ use crate::state::AdminState;
 const CREATE_KEYS: &[&str] = &["peer_name", "issuer", "jwks_url"];
 const UPDATE_KEYS: &[&str] = &["id", "peer_name", "issuer", "jwks_url"];
 const DELETE_KEYS: &[&str] = &["id"];
+#[cfg(test)]
+pub(super) const DECLARED: &[(&str, &[&str])] = &[
+    ("peer.create", CREATE_KEYS),
+    ("peer.update", UPDATE_KEYS),
+    ("peer.delete", DELETE_KEYS),
+];
 
 pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> ChangeDescription {
     let params = &request.params;

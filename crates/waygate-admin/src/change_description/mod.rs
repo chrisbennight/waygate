@@ -421,6 +421,48 @@ mod tests {
         assert_eq!(quoted("a\u{200B}b"), "“a[U+200B]b”");
     }
 
+    /// Every described action declares exactly the parameters its schema
+    /// accepts, so a new or renamed parameter fails here until the card
+    /// states it, checks it, or keeps the parameters open for it. At render
+    /// time, any captured key outside the stated set keeps them open.
+    #[test]
+    fn described_actions_declare_exactly_their_schema_parameters() {
+        let tables = [
+            tools::DECLARED,
+            rate_limits::DECLARED,
+            rbac::DECLARED,
+            api_keys::DECLARED,
+            peers::DECLARED,
+            agents::DECLARED,
+            audit::DECLARED,
+            access::DECLARED,
+            catalog::DECLARED,
+        ];
+        let registry = crate::change_executor::registry();
+        for action in registry.action_types() {
+            if family(action).is_none() {
+                continue;
+            }
+            let declared: std::collections::BTreeSet<&str> = tables
+                .iter()
+                .flat_map(|table| table.iter())
+                .filter(|(declared, _)| *declared == action)
+                .flat_map(|(_, keys)| keys.iter().copied())
+                .collect();
+            let schema = registry
+                .params_schema(action)
+                .expect("registered action has a schema");
+            let accepted: std::collections::BTreeSet<&str> = schema["properties"]
+                .as_object()
+                .map(|properties| properties.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            assert_eq!(
+                declared, accepted,
+                "{action}: the card's declared parameters must match its schema"
+            );
+        }
+    }
+
     #[test]
     fn every_action_is_described_or_recorded_as_open() {
         let registered = crate::change_executor::registry().action_types();

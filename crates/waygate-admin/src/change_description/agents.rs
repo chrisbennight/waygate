@@ -35,6 +35,14 @@ const CONFIG_KEYS: &[&str] = &[
 ];
 const UPDATE_KEYS: &[&str] = &["agent_id", "config"];
 const DELETE_KEYS: &[&str] = &["agent_id"];
+/// Creation also captures instructions, which keep the parameters open.
+#[cfg(test)]
+pub(super) const DECLARED: &[(&str, &[&str])] = &[
+    ("agent_config.create", CONFIG_KEYS),
+    ("agent_config.create", &["instructions"]),
+    ("agent_config.update", UPDATE_KEYS),
+    ("agent_config.delete", DELETE_KEYS),
+];
 
 pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> ChangeDescription {
     let params = &request.params;

@@ -34,6 +34,14 @@ const PROFILE_CREATE_KEYS: &[&str] = &[
     "requires_owner",
 ];
 const PROFILE_DELETE_KEYS: &[&str] = &["profile_id"];
+#[cfg(test)]
+pub(super) const DECLARED: &[(&str, &[&str])] = &[
+    ("api_key.mint", MINT_KEYS),
+    ("api_key.revoke", REVOKE_KEYS),
+    ("api_key.update_grants", GRANTS_KEYS),
+    ("api_key_profile.create", PROFILE_CREATE_KEYS),
+    ("api_key_profile.delete", PROFILE_DELETE_KEYS),
+];
 
 pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> ChangeDescription {
     match request.action_type.as_str() {
@@ -83,11 +91,15 @@ async fn mint(state: &AdminState, request: &ChangeRequest) -> ChangeDescription 
             (Some(profile_id), Some(store)) => store.get(&request.tenant_id, profile_id).await.ok(),
             _ => None,
         };
-        description.changes.push(change(match read {
-            Some(Some(profile)) => format!("Profile: {}", quoted(&profile.name)),
-            Some(None) => format!("Profile: {} not found", quoted(id)),
-            None => format!("Profile: {} cannot be read", quoted(id)),
-        }));
+        match read {
+            Some(Some(profile)) => description
+                .changes
+                .push(change(format!("Profile: {}", quoted(&profile.name)))),
+            // Minting enforces the profile's ceiling, so a missing profile
+            // fails execution.
+            Some(None) => return description.blocked(super::gone("API key profile")),
+            None => return description.cannot_read("API key profile"),
+        }
     }
     description
 }

@@ -12,6 +12,23 @@ use crate::tool_reviews::ToolReviewParams;
 /// Changes listed on a card before the rest are left to the linked evidence.
 /// Flagged changes are listed even beyond this limit.
 const CARD_CHANGES: usize = 8;
+/// The parameters a tool definition request captures. Server and tool are in
+/// the title; generation, observed hash, and manifest hash are checked against
+/// current state; risk is stated with whether approval uses it.
+#[cfg(test)]
+pub(super) const DECLARED: &[(&str, &[&str])] = &[
+    ("tool_contract.approve", TOOL_KEYS),
+    ("tool_contract.reject", TOOL_KEYS),
+];
+#[cfg(test)]
+const TOOL_KEYS: &[&str] = &[
+    "server",
+    "tool",
+    "generation",
+    "observed_hash",
+    "manifest_hash",
+    "risk",
+];
 
 pub(super) async fn tool_contract(
     state: &AdminState,

@@ -18,6 +18,22 @@ const SERVER_KEYS: &[&str] = &["server"];
 const RECONNECT_KEYS: &[&str] = &["server", "clear_quarantine"];
 const UNQUARANTINE_KEYS: &[&str] = &["server_id", "expected_name", "reason"];
 const RELOAD_KEYS: &[&str] = &["target"];
+#[cfg(test)]
+pub(super) const DECLARED: &[(&str, &[&str])] = &[
+    ("group.create_local", GROUP_CREATE_KEYS),
+    ("group.delete_local", GROUP_DELETE_KEYS),
+    ("scope.create_local", SCOPE_CREATE_KEYS),
+    ("scope.delete_local", SCOPE_DELETE_KEYS),
+    ("inspection_rule.delete", RULE_KEYS),
+    ("skill.approve", SKILL_KEYS),
+    ("skill.reject", SKILL_KEYS),
+    ("skill.quarantine", SKILL_KEYS),
+    ("upstream.reconnect", RECONNECT_KEYS),
+    ("upstream.refresh_catalog", SERVER_KEYS),
+    ("upstream.quarantine.clear", SERVER_KEYS),
+    ("catalog.server.unquarantine", UNQUARANTINE_KEYS),
+    ("config.reload", RELOAD_KEYS),
+];
 
 pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> ChangeDescription {
     let action = request.action_type.as_str();

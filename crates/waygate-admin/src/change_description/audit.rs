@@ -11,6 +11,14 @@ const RETENTION_SET_KEYS: &[&str] = &["category", "delete_after_days"];
 const RETENTION_CLEAR_KEYS: &[&str] = &["category"];
 const ROUTING_SET_KEYS: &[&str] = &["exporter_name", "enabled", "config"];
 const ROUTING_CLEAR_KEYS: &[&str] = &["exporter_name"];
+#[cfg(test)]
+pub(super) const DECLARED: &[(&str, &[&str])] = &[
+    ("tenant.update", TENANT_KEYS),
+    ("audit.retention.set", RETENTION_SET_KEYS),
+    ("audit.retention.clear", RETENTION_CLEAR_KEYS),
+    ("audit.routing.set", ROUTING_SET_KEYS),
+    ("audit.routing.clear", ROUTING_CLEAR_KEYS),
+];
 
 pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> ChangeDescription {
     let action = request.action_type.as_str();
@@ -126,10 +134,15 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
                 let proposed_config = params.get("config").unwrap_or(&empty);
                 let current_config = current.map_or(&empty, |rule| &rule.config);
                 if proposed_config != current_config {
-                    description.changes.push(change(
-                        "Exporter settings change; the new settings are in the exact parameters",
+                    let settings = |config: &Value| match config.as_object() {
+                        Some(map) if map.is_empty() => "none".to_owned(),
+                        _ => quoted(&config.to_string()),
+                    };
+                    description.changes.push(field_change(
+                        "Exporter settings",
+                        settings(current_config),
+                        settings(proposed_config),
                     ));
-                    description.covers_params = false;
                 }
             }
             if description.changes.is_empty() {
