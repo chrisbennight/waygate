@@ -19,10 +19,14 @@ use waygate_oidc::Principal;
 
 use crate::state::AdminState;
 
-/// A name or value in quotes, with invisible characters revealed. Values
-/// are never shortened: a description states each parameter completely.
+/// A name or value in quotes, with invisible characters, tabs, and line
+/// breaks revealed, since card text collapses whitespace. Values are never
+/// shortened: a description states each parameter completely.
 pub(crate) fn quoted(text: &str) -> String {
-    format!("“{}”", crate::review_diff::reveal(text))
+    let revealed = crate::review_diff::reveal(text)
+        .replace('\t', "[U+0009]")
+        .replace('\n', "[U+000A]");
+    format!("“{revealed}”")
 }
 
 mod access;
@@ -420,6 +424,8 @@ mod tests {
         let long = format!("{}-end", "a".repeat(200));
         assert_eq!(quoted(&long), format!("“{long}”"));
         assert_eq!(quoted("a\u{200B}b"), "“a[U+200B]b”");
+        assert_eq!(quoted("ops\tadmins\n"), "“ops[U+0009]admins[U+000A]”");
+        assert_ne!(quoted("ops admins"), quoted("ops\tadmins"));
     }
 
     /// Every described action declares exactly the parameters its schema

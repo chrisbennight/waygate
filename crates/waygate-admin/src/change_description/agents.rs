@@ -134,10 +134,27 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
                 params,
                 DELETE_KEYS,
             );
-            description.changes = vec![
-                change(format!("Model: {}", quoted(&agent.model_alias))),
-                change(format!("Tools: {}", quoted_list(&agent.allowed_tools))),
-            ];
+            // Deletion discards the whole configuration and no page keeps
+            // it, so the card lists every setting, instructions last.
+            let current = serde_json::to_value(&agent).unwrap_or(Value::Null);
+            for (key, label) in SETTINGS.iter().skip(1) {
+                let value = current.get(*key).unwrap_or(&Value::Null);
+                description
+                    .changes
+                    .push(change(format!("{label}: {}", shown(value))));
+            }
+            description.changes.push(change(format!(
+                "Tools: {}",
+                quoted_list(&agent.allowed_tools)
+            )));
+            description.changes.push(change(format!(
+                "Instructions: {}",
+                agent
+                    .instructions
+                    .as_deref()
+                    .filter(|text| !text.is_empty())
+                    .map_or_else(|| "none".to_owned(), quoted)
+            )));
             description
         }
         other => ChangeDescription::undescribed(other),
