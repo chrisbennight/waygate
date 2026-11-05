@@ -119,8 +119,10 @@ async fn revoke(state: &AdminState, request: &ChangeRequest) -> ChangeDescriptio
                 .map_or_else(|| "never".to_owned(), waygate_core::fmt::format_ts_abs)
         )),
     ];
+    // Revoking a revoked key is an idempotent no-op.
     if key.revoked_at.is_some() {
-        return description.blocked("This API key is already revoked.");
+        description.note =
+            Some("This API key is already revoked, so approval changes nothing.".into());
     }
     description
 }
