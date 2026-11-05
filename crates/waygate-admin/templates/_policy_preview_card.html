@@ -46,9 +46,9 @@
             <div class="callout callout--err">Blast-radius replay error: {{ e }}</div>
         {% when None %}
             <details class="policy-replay"{% if im.changed > 0 %} open{% endif %}>
-                <summary>{% if im.changed > 0 %}{{ im.changed }} recorded decision{% if im.changed != 1 %}s{% endif %} would change.{% else %}No recorded decision changes across {{ im.replayed }} replayed decision{% if im.replayed != 1 %}s{% endif %}.{% endif %}</summary>
+                <summary>{% if im.changed > 0 %}{{ im.changed }} recorded decision{% if im.changed != 1 %}s{% endif %} would change.{% else if im.replayed == 0 %}No recorded decision could be replayed.{% else %}No recorded decision changes across {{ im.replayed }} replayed decision{% if im.replayed != 1 %}s{% endif %}.{% endif %}</summary>
                 <p class="section-kicker">
-                    Replayed {{ im.replayed }} of {{ im.considered }} recent decision{% if im.considered != 1 %}s{% endif %}{% if im.not_replayable > 0 %}; {{ im.not_replayable }} kept too little input to replay{% endif %}.
+                    Replayed {{ im.replayed }} of {{ im.considered }} recent decision{% if im.considered != 1 %}s{% endif %}{% if im.not_replayable > 0 %}; {{ im.not_replayable }} could not be replayed{% endif %}.
                 </p>
                 {% if !im.deltas.is_empty() %}
                 <p class="chip-row">

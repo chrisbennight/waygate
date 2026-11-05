@@ -1553,6 +1553,30 @@ pub(crate) async fn changes_queue_policy_publish_shows_compile_tests_and_blast_r
     );
 }
 
+/// When no recorded decision can be replayed, the preview says so rather
+/// than presenting zero comparisons as zero changes, and does not guess why.
+#[tokio::test]
+pub(crate) async fn policy_replay_without_replayable_decisions_says_none_could_be_replayed() {
+    let draft = seeded_bundle(
+        DRAFT_ID,
+        9,
+        waygate_policy::PolicyStatus::Draft,
+        "permit(principal, action, resource);",
+        None,
+    );
+    let mut row = replayable_decision_row();
+    row.auth_method = None; // not captured ⇒ not replayable
+    let cr = Arc::new(waygate_changeset::InMemoryChangeRequestStore::new());
+    seed_publish_cr(&cr, DRAFT_ID.parse().unwrap()).await;
+    let state = replayable_decision_state(draft, vec![row], cr).await;
+    let (status, body) =
+        body_of(dashboard_router(state, DashboardAuth::Disabled), "/changes").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("No recorded decision could be replayed."));
+    assert!(!body.contains("No recorded decision changes across"));
+    assert!(body.contains("could not be replayed"));
+}
+
 #[tokio::test]
 pub(crate) async fn changes_queue_policy_publish_broken_cedar_shows_wont_compile() {
     // A draft whose Cedar does NOT parse: the approver sees "won't compile" and
