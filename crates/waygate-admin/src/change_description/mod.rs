@@ -21,8 +21,11 @@ use crate::state::AdminState;
 
 pub(crate) use crate::contract_summary::quoted;
 
+mod access;
 mod agents;
 mod api_keys;
+mod audit;
+mod catalog;
 mod peers;
 mod rate_limits;
 mod rbac;
@@ -257,6 +260,9 @@ enum Family {
     ApiKeys,
     Peers,
     Agents,
+    Audit,
+    Access,
+    Catalog,
 }
 
 /// Each described action, named exactly so a newly registered action is
@@ -283,45 +289,45 @@ fn family(action: &str) -> Option<Family> {
         | "api_key_profile.delete" => Family::ApiKeys,
         "peer.create" | "peer.update" | "peer.delete" => Family::Peers,
         "agent_config.create" | "agent_config.update" | "agent_config.delete" => Family::Agents,
+        "tenant.update"
+        | "audit.retention.set"
+        | "audit.retention.clear"
+        | "audit.routing.set"
+        | "audit.routing.clear" => Family::Audit,
+        "oauth_consent.revoke"
+        | "upstream_session.revoke"
+        | "break_glass.mint"
+        | "break_glass.revoke" => Family::Access,
+        "group.create_local"
+        | "group.delete_local"
+        | "scope.create_local"
+        | "scope.delete_local"
+        | "inspection_rule.delete"
+        | "skill.approve"
+        | "skill.reject"
+        | "skill.quarantine"
+        | "upstream.reconnect"
+        | "upstream.refresh_catalog"
+        | "upstream.quarantine.clear"
+        | "catalog.server.unquarantine"
+        | "config.reload" => Family::Catalog,
         _ => return None,
     })
 }
 
 /// Actions whose cards show the generic title and outcome with their exact
-/// parameters open, because the gateway does not describe their target.
-/// Policy and server-set actions show their effect preview instead.
+/// parameters open. Policy and server-set changes show their effect preview
+/// in place of a target description.
 #[cfg(test)]
 const UNDESCRIBED: &[&str] = &[
-    "audit.retention.clear",
-    "audit.retention.set",
-    "audit.routing.clear",
-    "audit.routing.set",
-    "break_glass.mint",
-    "break_glass.revoke",
-    "catalog.server.unquarantine",
-    "config.reload",
-    "group.create_local",
-    "group.delete_local",
-    "inspection_rule.delete",
     "manifest.publish",
     "manifest.remove_servers",
     "manifest.rollback",
     "manifest.stage_and_publish",
     "manifest.upsert_servers",
-    "oauth_consent.revoke",
     "policy.publish",
     "policy.rollback",
     "policy.upsert_fragment",
-    "scope.create_local",
-    "scope.delete_local",
-    "skill.approve",
-    "skill.quarantine",
-    "skill.reject",
-    "tenant.update",
-    "upstream.quarantine.clear",
-    "upstream.reconnect",
-    "upstream.refresh_catalog",
-    "upstream_session.revoke",
 ];
 
 /// Describe one pending change from current gateway state, as `viewer`
@@ -341,6 +347,9 @@ pub(crate) async fn describe(
         Some(Family::ApiKeys) => api_keys::describe(state, change).await,
         Some(Family::Peers) => peers::describe(state, change).await,
         Some(Family::Agents) => agents::describe(state, change).await,
+        Some(Family::Audit) => audit::describe(state, change).await,
+        Some(Family::Access) => access::describe(state, change).await,
+        Some(Family::Catalog) => catalog::describe(state, change).await,
         None => ChangeDescription::undescribed(action),
     };
     if description.blocked.is_none() {

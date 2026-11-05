@@ -157,6 +157,26 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
         .await
         .unwrap();
 
+    let mint_token = changes
+        .propose(request(
+            "break_glass.mint",
+            json!({"issued_to": "oncall@example.test", "reason": "Restore search",
+                "scope_pattern": "docs.*", "ttl_seconds": 7200}),
+        ))
+        .await
+        .unwrap();
+    let reload = changes
+        .propose(request("config.reload", json!({"target": "policy"})))
+        .await
+        .unwrap();
+    let reconnect_unknown = changes
+        .propose(request(
+            "upstream.reconnect",
+            json!({"server": format!("absent-{suffix}")}),
+        ))
+        .await
+        .unwrap();
+
     let state = crate::admin_state::base_admin_state()
         .with_change_request_store(Some(changes.clone()))
         .with_rate_limit_policy_store(Some(limits.clone()))
@@ -208,6 +228,20 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
     let text = summary(&html);
     assert!(text.contains(&format!("<strong>Delete role “{role_name}”</strong>")));
     assert!(text.contains(&format!("Assigned to: “{holder}”")));
+
+    let html = card(&app, mint_token.id).await;
+    let text = summary(&html);
+    assert!(text.contains("<strong>Issue a break-glass token to “oncall@example.test”</strong>"));
+    assert!(text.contains("Tool pattern: “docs.*”"));
+    assert!(text.contains("Valid for: 2 hours"));
+    assert!(text.contains("Recorded reason: “Restore search”"));
+    assert!(html.contains(r#"<details class="params-review">"#));
+
+    let html = card(&app, reload.id).await;
+    assert!(summary(&html).contains("<strong>Reload the published policy set</strong>"));
+
+    let html = card(&app, reconnect_unknown.id).await;
+    assert!(html.contains("Approval unavailable:</strong> The upstream server no longer exists."));
 
     let html = card(&app, update_agent.id).await;
     let text = summary(&html);
