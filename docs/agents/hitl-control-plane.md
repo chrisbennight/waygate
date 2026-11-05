@@ -648,8 +648,11 @@ authorizing, not just the `action_type` and a maker-written `justification`
 (a maker could otherwise propose one subject / scope / TTL
 while writing a benign justification). Both approval surfaces — the `/changes`
 pending table (a full-width detail row per change) and the `/decisions` queue
-(under each change-request item) — render the captured `params` as pretty JSON,
-always visible above the Approve button. Rendering is the raw stored `params`
+(under each change-request item) — render the captured `params` as pretty JSON
+above the Approve button, after the gateway's own description of the change
+(see [approval cards](dashboard-ui.md#approval-cards)). The parameters start
+expanded unless that description states or checks every captured parameter;
+collapsed or not, they remain in the page. Rendering is the raw stored `params`
 (askama auto-escapes, so it's injection-safe). The params are rendered in
 **full, never truncated** — a hidden field is exactly the blind-approval hole
 this closes, and there is no admin-reachable endpoint that re-serves the
@@ -796,7 +799,8 @@ friction proportional to risk, on a surface the agent cannot reach.**
   never looks routine.
 - **Who & why.** Requester is normally the propose-only agent identity; an
   admin proposal created in the dashboard may name the approver too.
-  Justification is required and non-empty. Trace link to the full audit.
+  The requester's reason is required, non-empty, and at most 500 characters.
+  Trace link to the full audit.
 - **The preview is the product**, server-rendered from the *captured
   intent*, never from agent prose (the agent can be prompt-injected — its
   self-description is untrusted). Per class:

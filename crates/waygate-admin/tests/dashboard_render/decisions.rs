@@ -234,10 +234,15 @@ pub(crate) async fn decisions_queue_merges_change_requests_and_break_glass() {
     // Both kinds present as chips.
     assert!(body.contains(">change request<"), "CR chip missing");
     assert!(body.contains(">break-glass<"), "break-glass chip missing");
-    // Plain-language summaries.
+    // A change request without a gateway description is titled by its
+    // action, with its requester beside the binding code.
     assert!(
-        body.contains("example-agent · api_key.mint"),
-        "CR summary missing"
+        body.contains(r#"<div class="attn-label">api_key.mint</div>"#),
+        "CR title missing"
+    );
+    assert!(
+        body.contains("Requested by example-agent ·"),
+        "CR requester missing"
     );
     assert!(
         body.contains("alice · example-messages.*"),
@@ -300,26 +305,85 @@ pub(crate) async fn changes_page_renders_captured_params_for_review() {
     let (status, body) = body_of(app, "/changes").await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        body.contains("Parameters being authorized"),
-        "the pending table must label the captured params",
-    );
-    assert!(
         body.contains("mcp:read") && body.contains("scopes"),
         "the pending table must render the captured params (scopes=[mcp:read])",
     );
-    // The params must render ABOVE the Approve control so the
-    // reviewer reads the intent before acting — not after the button.
-    let params_at = body
-        .find("Parameters being authorized")
-        .expect("params label present");
-    let approve_at = body
-        .find("/changes/")
-        .and_then(|_| body.find(">Approve<"))
-        .expect("approve button present");
+    // An action without a gateway description keeps its parameters open:
+    // nothing else on the card states them.
     assert!(
-        params_at < approve_at,
-        "captured params must render before the Approve button (params@{params_at} approve@{approve_at})",
+        body.contains(r#"<details class="params-review" open>"#),
+        "undescribed parameters must start expanded",
     );
+    // The card reads requester's reason → approval conditions → exact
+    // parameters → Approve, so the reviewer reads the intent before acting.
+    let reason_at = body
+        .find("Requester's reason")
+        .expect("reason label present");
+    let requirement_at = body
+        .find("Approval requirement:")
+        .expect("approval requirement present");
+    let params_at = body.find("Exact parameters").expect("params label present");
+    let approve_at = body.find(">Approve<").expect("approve button present");
+    assert!(
+        reason_at < requirement_at && requirement_at < params_at && params_at < approve_at,
+        "card order must be reason@{reason_at} → requirement@{requirement_at} → params@{params_at} → approve@{approve_at}",
+    );
+}
+
+/// A tool definition request is titled and explained by the gateway. Without
+/// review storage the card cannot check the request against the stored
+/// review, so approval is unavailable and the exact parameters stay expanded.
+#[tokio::test]
+pub(crate) async fn unverifiable_tool_definition_request_is_described_but_not_approvable() {
+    let cr = Arc::new(waygate_changeset::InMemoryChangeRequestStore::new());
+    cr.propose(waygate_changeset::NewChangeRequest {
+        tenant_id: "default".into(),
+        requested_by: "example-agent".into(),
+        client_id: None,
+        action_type: "tool_contract.approve".into(),
+        params: serde_json::json!({"server": "docs", "tool": "search", "generation": 2,
+            "observed_hash": "b", "manifest_hash": "m"}),
+        preview: None,
+        target_etag: None,
+        justification: "Accept the reviewed search definition.".into(),
+        requirement: waygate_changeset::ApprovalRequirement::single("dashboard-admins"),
+        expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(15),
+    })
+    .await
+    .unwrap();
+    let bg = Arc::new(FakeBreakGlassStore::default());
+    let app = dashboard_router(
+        state_with_decision_stores(cr, bg).await,
+        DashboardAuth::Disabled,
+    );
+    for path in ["/changes", "/decisions"] {
+        let (status, body) = body_of(app.clone(), path).await;
+        assert_eq!(status, StatusCode::OK, "{path} must render");
+        assert!(
+            body.contains("Accept the new definition of docs · search"),
+            "{path} must lead with the gateway's title"
+        );
+        assert!(
+            body.contains("If approved:</strong> Agents can discover and call search"),
+            "{path} must state the outcome"
+        );
+        assert!(
+            body.contains("Approval unavailable:</strong> Tool review storage is unavailable"),
+            "{path} must say why approval is unavailable"
+        );
+        assert!(
+            !body.contains(">Approve<"),
+            "{path} must not offer approval"
+        );
+        assert!(
+            body.contains(r#"<details class="params-review" open>"#),
+            "{path} must keep unverified parameters expanded"
+        );
+        assert!(
+            body.contains("servers/tool-changes?server=docs&#38;tool=search"),
+            "{path} must link the full comparison"
+        );
+    }
 }
 
 #[tokio::test]
@@ -344,11 +408,7 @@ pub(crate) async fn manifest_impact_summary_precedes_controls_on_both_approval_s
             .unwrap_or_else(|| {
                 panic!("{path} must retain replay as separately-labelled supporting evidence")
             });
-        let params_label = if path == "/changes" {
-            "Parameters being authorized"
-        } else {
-            "Captured parameters"
-        };
+        let params_label = "Exact parameters";
         let params_at = body
             .find(params_label)
             .unwrap_or_else(|| panic!("{path} must retain the captured parameters"));

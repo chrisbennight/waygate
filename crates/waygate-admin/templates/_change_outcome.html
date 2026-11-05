@@ -1,0 +1,2 @@
+{# What approval does, in one sentence. Expects `d` (a `ChangeDescription`). #}
+{% match d.outcome %}{% when Some with (outcome) %}<p class="change-outcome"><strong>If approved:</strong> {{ outcome }}</p>{% when None %}{% endmatch %}

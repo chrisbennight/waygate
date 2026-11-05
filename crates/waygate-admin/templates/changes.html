@@ -85,51 +85,38 @@
             <table class="data-table data-table--sm" role="table" aria-label="Pending change requests">
                 <thead>
                     <tr>
-                        <th>Action</th>
+                        <th>Change</th>
                         <th>Requested by</th>
-                        <th>Justification</th>
-                        <th>Binding</th>
-                        <th>Proposed</th>
+                        <th>Binding code</th>
                         <th>Expires</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for c in pending %}
                     <tr id="change-{{ c.id }}">
-                        <td class="mono">{% if bulk_available %}{% match c.bulk_choice %}{% when Some with (choice) %}<label><input type="checkbox" name="selected" value="{{ choice }}" form="bulk-changes" data-bulk-item data-approvable="true"> Select {{ c.binding_code }}</label>{% when None %}{% endmatch %}{% endif %}{{ c.action_type }}</td>
+                        <td>{% if bulk_available %}{% match c.bulk_choice %}{% when Some with (choice) %}<label><input type="checkbox" name="selected" value="{{ choice }}" form="bulk-changes" data-bulk-item data-approvable="true"> Select {{ c.binding_code }}</label>{% when None %}{% endmatch %}{% endif %}{% match c.description %}{% when Some with (d) %}<strong>{{ d.title }}</strong>{% when None %}<span class="mono">{{ c.action_type }}</span>{% endmatch %}</td>
                         <td>{{ c.requested_by }}</td>
-                        <td class="cell-narrative">{{ c.justification }}</td>
                         <td><span class="binding-chip">{{ c.binding_code }}</span></td>
-                        <td class="mono">{{ c.created_at_abs }}</td>
                         <td class="mono">{{ c.expires_at_abs }}</td>
                     </tr>
-                    {# The captured params are the maker's exact proposed intent —
-                       approval review is hollow without them, since a benign
-                       justification can hide a dangerous subject / scope / TTL.
-                       Render them ABOVE the Approve/Deny controls so the reviewer
-                       reads what they're authorizing BEFORE acting. #}
+                    {# Card order: what changes, what approval does, the
+                       requester's reason, the approval conditions, then the
+                       exact parameters, all above the controls. The complete
+                       parameters stay in the page; they start collapsed only
+                       when the gateway's description covers every one. #}
                     <tr class="params-review-row">
-                        <td colspan="6">
-                            {# Policy-aware EFFECT preview for a pending publish,
-                               rollback, or fragment upsert — compile status,
-                               attached-test results, and the blast radius —
-                               so the approver reviews what the publish DOES, not
-                               just the raw bundle_id / version in the params well
-                               below (which always stays, in full). Read-only. #}
+                        <td colspan="4">
+                            {% match c.description %}{% when Some with (d) %}{% include "_change_summary.html" %}{% when None %}{% endmatch %}
                             {% match c.policy_preview %}
                             {% when Some with (pv) %}{% include "_policy_preview_card.html" %}
                             {% when None %}{% endmatch %}
-
-                            {# Server-review parity: the manifest analogue, for a
-                               pending manifest.publish / manifest.rollback. Mutually
-                               exclusive with the policy preview above. #}
                             {% match c.manifest_preview %}
                             {% when Some with (pv) %}{% include "_manifest_preview_card.html" %}
                             {% when None %}{% endmatch %}
-
+                            {% match c.description %}{% when Some with (d) %}{% include "_change_outcome.html" %}{% when None %}{% endmatch %}
                             <div class="params-review">
-                                <span class="params-review__label">Parameters being authorized:</span>
-                                <pre class="mono params-review__pre" aria-label="Captured parameters for {{ c.binding_code }}">{{ c.params_pretty }}</pre>
+                                <span class="params-review__label">Requester's reason</span>
+                                <p class="change-reason">{{ c.justification }}</p>
                             </div>
                             <div class="params-review" aria-label="Approval requirement for {{ c.binding_code }}">
                                 <span class="params-review__label">Approval requirement:</span>
@@ -142,6 +129,10 @@
                                 <p><a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/changes") }}">Re-authenticate with the required assurance</a> before approving.</p>
                                 {% endif %}
                             </div>
+                            <details class="params-review"{% if !c.params_collapsed %} open{% endif %}>
+                                <summary class="params-review__label">Exact parameters for <code>{{ c.action_type }}</code></summary>
+                                <pre class="mono params-review__pre" aria-label="Captured parameters for {{ c.binding_code }}">{{ c.params_pretty }}</pre>
+                            </details>
                             <div class="row-actions">
                                 {% if c.approval_blocked %}
                                 <button type="button" class="btn btn-primary" disabled>Approval unavailable</button>
@@ -206,7 +197,7 @@
                     <tr>
                         <th>Action</th>
                         <th>Requested by</th>
-                        <th>Justification</th>
+                        <th>Requester's reason</th>
                         <th>Proposed</th>
                         <th>Expired at</th>
                         <th></th>

@@ -83,7 +83,7 @@ struct InboxItem {
     /// Decision-contract severity: `"warn"` (a pending change awaiting a
     /// decision) | `"critical"` (an active override bypassing policy).
     severity: &'static str,
-    /// e.g. `example-agent · example-compute.jobs.delete` (CR) or
+    /// The gateway's title for a change request, or an identifier such as
     /// `bgops@acme · mcp:invoke:high` (break-glass).
     summary: String,
     /// A short stable handle: CR binding code, or the short token id.
@@ -118,10 +118,23 @@ struct InboxItem {
     /// A missing or blocked mandatory preview makes approval fail closed;
     /// denial remains available so the queue can be cleared deliberately.
     approval_blocked: bool,
+    /// The gateway's description and the requester's words for a change
+    /// request. `None` for every other kind.
+    change: Option<InboxChange>,
     /// Sort key — newest first.
     content_review_rel: Option<String>,
     review_label: &'static str,
     created_unix: i64,
+}
+
+struct InboxChange {
+    description: crate::change_description::ChangeDescription,
+    requested_by: String,
+    justification: String,
+    action_type: String,
+    /// The description covers every captured parameter, so the exact
+    /// parameters start collapsed. They remain in the page either way.
+    params_collapsed: bool,
 }
 
 fn invocation_item(summary: String, url: String, created: time::OffsetDateTime) -> InboxItem {
@@ -143,6 +156,7 @@ fn invocation_item(summary: String, url: String, created: time::OffsetDateTime) 
         manifest_preview: None,
         effect_preview_acknowledgement_required: false,
         approval_blocked: false,
+        change: None,
         content_review_rel: Some(url),
         review_label: "Review invocation request",
         created_unix: created.unix_timestamp(),
@@ -288,12 +302,15 @@ async fn decisions_page(
                                 .manifest
                                 .as_ref()
                                 .is_some_and(|preview| preview.blocked.is_some());
+                        let description =
+                            crate::change_description::describe(&state, user_principal, &c).await;
+                        let approval_blocked = approval_blocked || description.blocked.is_some();
                         items.push(InboxItem {
                             kind: "change request",
                             skill_choice: None,
                             tool_choice: None,
                             severity: "warn",
-                            summary: format!("{} · {}", c.requested_by, c.action_type),
+                            summary: description.title.clone(),
                             handle: c.binding_code.clone(),
                             params_pretty: Some(crate::dashboard_changes::render_params(&c.params)),
                             approval_requirement: Some(approval_requirement),
@@ -306,6 +323,13 @@ async fn decisions_page(
                             manifest_preview: previews.manifest,
                             effect_preview_acknowledgement_required,
                             approval_blocked,
+                            change: Some(InboxChange {
+                                params_collapsed: description.covers_params,
+                                description,
+                                requested_by: c.requested_by.clone(),
+                                justification: c.justification.clone(),
+                                action_type: c.action_type.clone(),
+                            }),
                             content_review_rel: None,
                             review_label: "",
                             created_unix: c.created_at.unix_timestamp(),
@@ -347,6 +371,7 @@ async fn decisions_page(
                             manifest_preview: None,
                             effect_preview_acknowledgement_required: false,
                             approval_blocked: false,
+                            change: None,
                             content_review_rel: None,
                             review_label: "",
                             created_unix: t.created_at.unix_timestamp(),
@@ -379,6 +404,7 @@ async fn decisions_page(
                             manifest_preview: None,
                             effect_preview_acknowledgement_required: false,
                             approval_blocked: false,
+                            change: None,
                             content_review_rel: Some(crate::dashboard_skills::review_url(
                                 &review.skill_uri,
                             )),
@@ -417,6 +443,7 @@ async fn decisions_page(
                                 manifest_preview: None,
                                 effect_preview_acknowledgement_required: false,
                                 approval_blocked: false,
+                                change: None,
                                 content_review_rel: Some(
                                     crate::dashboard_tool_reviews::review_url(
                                         &review.server,

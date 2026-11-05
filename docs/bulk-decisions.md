@@ -83,8 +83,10 @@ request and execution at the owning store mutation, ends the waiting execution,
 and preserves completed prior effects. Issued grants remain separate lifecycle
 records.
 
-Administrative selections currently support `rate_limit.create` only. Select
-new policies with the same scope and action, and distinct scope targets. The
+Administrative selections currently support `rate_limit.create` only. The
+selection panel appears on Change requests only when a pending request on the
+page qualifies. Select new policies with the same scope and action, and
+distinct scope targets. The
 review presents complete captured parameters, requester, justification, binding
 code, freshness witness, expiry, and frozen approval requirements. Each item
 retains its own eligible role, distinct-administrator quorum, fresh session

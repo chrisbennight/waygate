@@ -329,6 +329,35 @@ properties when changing them:
   diff against nothing. A skill file that is added, removed, binary, or
   unavailable on either side is described, never compared as text.
 
+## Approval cards
+
+Change requests and Decisions render each pending change request in one order:
+the gateway's title, what changes, any mandatory policy or manifest effect
+preview, what approval does, the requester's reason, the approval conditions,
+the exact parameters, and the controls. `change_description::describe` computes
+the title, changes, outcome, and any condition that blocks approval from
+current gateway state, including the target freshness check that approval
+runs before execution. An action it does not describe shows its action name and
+keeps its parameters open. The exact parameters always stay in the page; they
+start collapsed only when the description covers every captured parameter.
+
+Write card text so an administrator can decide from the card alone:
+
+- Start the title with a verb and the specific object, such as "Accept the new
+  definition of `docs` · `search`".
+- Show only what changes, as current → proposed values. For lists, show what
+  is added and removed. Put changes that widen access or cannot be undone
+  first.
+- State the outcome in one sentence: what is affected, when, and whether it
+  can be undone. Claim only what the executor guarantees.
+- Do not use counts in place of the object, lead-ins that restate a count,
+  importance words without the fact behind them, reassurance, hedging, value
+  claims, or empty section labels.
+- Use emphasis only for a change that widens access or blocks approval.
+- Keep hashes, IDs, and request metadata with the exact parameters.
+- If deleting a sentence loses no name, value, or consequence the
+  administrator needs, delete it.
+
 ## Skills review
 
 The Skills destination (`/skills`) is a searchable tenant-scoped review catalog.

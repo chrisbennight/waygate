@@ -1547,9 +1547,15 @@ td.cell-url { word-break: break-all; max-width: 360px; }
 .attn-item__main { min-width: 0; }
 .attn-item--stacked .attn-item__main { flex: 1; }
 .attn-item--stacked .params-review__pre,
+.attn-item--stacked .change-review,
 .attn-item--stacked .row-actions {
     flex-basis: 100%;
 }
+.attn-item--stacked .change-review { min-width: 0; }
+/* The requester's reason is quoted text, set apart from the gateway's
+   description above it. */
+.change-reason { margin: 0; overflow-wrap: anywhere; }
+.change-outcome { margin: 8px 0; }
 .attn-item--stacked .row-actions { text-align: left; margin-top: 4px; }
 
 /* Manifest approvals lead with the projected service outcome, then retain
