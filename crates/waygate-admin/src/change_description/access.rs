@@ -18,6 +18,13 @@ const MINT_KEYS: &[&str] = &[
     "ttl_seconds",
 ];
 const REVOKE_KEYS: &[&str] = &["token_id"];
+#[cfg(test)]
+pub(super) const DECLARED: &[(&str, &[&str])] = &[
+    ("oauth_consent.revoke", CONSENT_KEYS),
+    ("upstream_session.revoke", SESSION_KEYS),
+    ("break_glass.mint", MINT_KEYS),
+    ("break_glass.revoke", REVOKE_KEYS),
+];
 /// Active tokens scanned to find a revocation's target; there is no lookup by id.
 const TOKEN_SCAN: u32 = 500;
 
