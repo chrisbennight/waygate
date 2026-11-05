@@ -139,6 +139,38 @@ struct InboxChange {
     params_collapsed: bool,
 }
 
+/// The exact review a pending tool definition request decides.
+struct RequestedTool {
+    server: String,
+    tool: String,
+    generation: i64,
+    observed_hash: String,
+}
+
+/// The review a tool definition request decides, when the card found the
+/// request current. Such a request carries the tool's comparison, so that
+/// exact review is not listed again.
+fn requested_tool(
+    change: &waygate_changeset::ChangeRequest,
+    description: &crate::change_description::ChangeDescription,
+) -> Option<RequestedTool> {
+    if description.blocked.is_some()
+        || !matches!(
+            change.action_type.as_str(),
+            "tool_contract.approve" | "tool_contract.reject"
+        )
+    {
+        return None;
+    }
+    let field = |key: &str| change.params.get(key)?.as_str().map(str::to_owned);
+    Some(RequestedTool {
+        server: field("server")?,
+        tool: field("tool")?,
+        generation: change.params.get("generation")?.as_i64()?,
+        observed_hash: field("observed_hash")?,
+    })
+}
+
 fn invocation_item(summary: String, url: String, created: time::OffsetDateTime) -> InboxItem {
     InboxItem {
         kind: "invocation",
@@ -242,6 +274,10 @@ async fn decisions_page(
         && state.hitl.codemode_executions.get().is_none();
 
     let mut items: Vec<InboxItem> = Vec::new();
+    // Exact tool reviews (server, tool, generation, observed definition) that
+    // a request which can still be approved targets. Each appears once, as
+    // that request's entry; a newer observation stays listed on its own.
+    let mut requested_tools: Vec<RequestedTool> = Vec::new();
     let mut changes_saturated = false;
     let mut break_glass_saturated = false;
     let mut load_error = false;
@@ -307,6 +343,7 @@ async fn decisions_page(
                         let description =
                             crate::change_description::describe(&state, user_principal, &c).await;
                         let approval_blocked = approval_blocked || description.blocked.is_some();
+                        requested_tools.extend(requested_tool(&c, &description));
                         items.push(InboxItem {
                             kind: "change request",
                             skill_choice: None,
@@ -426,6 +463,14 @@ async fn decisions_page(
                         tools_saturated = reviews.len() == 50;
                         let manifests = state.upstreams.manifests();
                         for review in reviews {
+                            if requested_tools.iter().any(|requested| {
+                                requested.server == review.server
+                                    && requested.tool == review.tool
+                                    && requested.generation == review.generation
+                                    && requested.observed_hash == review.observed_hash
+                            }) {
+                                continue;
+                            }
                             items.push(InboxItem {
                                 kind: "tool",
                                 skill_choice: None,
