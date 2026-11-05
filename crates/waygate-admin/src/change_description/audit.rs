@@ -39,10 +39,19 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
                 Some(store) => store.get(tenant).await.ok().flatten(),
                 None => None,
             };
-            description.changes.push(match current {
-                Some(current) => field_change("Name", quoted(&current.display_name), quoted(name)),
-                None => change(format!("Name: {}", quoted(name))),
-            });
+            match current {
+                Some(current) => description.changes.push(field_change(
+                    "Name",
+                    quoted(&current.display_name),
+                    quoted(name),
+                )),
+                None => {
+                    description
+                        .changes
+                        .push(change(format!("Name: {}", quoted(name))));
+                    return description.cannot_read("tenant");
+                }
+            }
             description
         }
         "audit.retention.set" | "audit.retention.clear" => {
@@ -125,11 +134,15 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
                     rule(proposed),
                 ));
             }
-            // Setting a rule replaces its exporter settings; an omitted
-            // setting object is empty.
-            if set {
+            // Setting a rule replaces its exporter settings, and an omitted
+            // setting object is empty; clearing deletes them with the rule.
+            {
                 let empty = Value::Object(serde_json::Map::new());
-                let proposed_config = params.get("config").unwrap_or(&empty);
+                let proposed_config = if set {
+                    params.get("config").unwrap_or(&empty)
+                } else {
+                    &empty
+                };
                 let current_config = current.map_or(&empty, |rule| &rule.config);
                 if proposed_config != current_config {
                     let settings = |config: &Value| match config.as_object() {

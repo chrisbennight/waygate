@@ -112,6 +112,12 @@ async fn revoke(state: &AdminState, request: &ChangeRequest) -> ChangeDescriptio
     description.changes = vec![
         change(format!("Belongs to: {}", quoted(&key.sub))),
         change(format!("Scopes: {}", quoted_list(&key.scopes))),
+        change(format!("Groups: {}", quoted_list(&key.groups))),
+        change(format!(
+            "Expires: {}",
+            key.expires_at
+                .map_or_else(|| "never".to_owned(), waygate_core::fmt::format_ts_abs)
+        )),
     ];
     if key.revoked_at.is_some() {
         return description.blocked("This API key is already revoked.");
@@ -198,6 +204,7 @@ async fn profile_delete(state: &AdminState, request: &ChangeRequest) -> ChangeDe
         &request.params,
         PROFILE_DELETE_KEYS,
     );
+    // Deletion discards the profile's description with its limits.
     description.changes = profile_limits(
         &profile.allowed_scopes,
         i64::from(profile.max_ttl_seconds),
@@ -206,6 +213,15 @@ async fn profile_delete(state: &AdminState, request: &ChangeRequest) -> ChangeDe
         profile.requires_owner,
         profile.requires_reason,
     );
+    if let Some(text) = profile
+        .description
+        .as_deref()
+        .filter(|text| !text.is_empty())
+    {
+        description
+            .changes
+            .push(change(format!("Description: {}", quoted(text))));
+    }
     description
 }
 

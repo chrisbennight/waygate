@@ -123,6 +123,11 @@ async fn role_delete(state: &AdminState, request: &ChangeRequest) -> ChangeDescr
     description
         .changes
         .push(change(format!("Scopes: {}", quoted_list(&role.scopes))));
+    if let Some(text) = role.description.as_deref().filter(|text| !text.is_empty()) {
+        description
+            .changes
+            .push(change(format!("Description: {}", quoted(text))));
+    }
     let Some(store) = state.identity.rbac.get() else {
         return description;
     };
