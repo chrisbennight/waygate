@@ -148,6 +148,10 @@ async fn skill(state: &AdminState, request: &ChangeRequest) -> ChangeDescription
                  review page.",
             )
         }
+        // The decision core refuses a skill that left the configured source.
+        Err(crate::error::ApiError::NotFound(_)) => {
+            return description.blocked("The skill is no longer in the configured source.")
+        }
         Err(error) => {
             description.covers_params = false;
             description.note = Some(format!(

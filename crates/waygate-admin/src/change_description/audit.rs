@@ -3,13 +3,13 @@
 use serde_json::Value;
 use waygate_changeset::ChangeRequest;
 
-use super::{change, field_change, param, quoted, unreadable, ChangeDescription};
+use super::{change, field_change, param, quoted, ChangeDescription, DescribedChange};
 use crate::state::AdminState;
 
 const TENANT_KEYS: &[&str] = &["display_name"];
 const RETENTION_SET_KEYS: &[&str] = &["category", "delete_after_days"];
 const RETENTION_CLEAR_KEYS: &[&str] = &["category"];
-const ROUTING_SET_KEYS: &[&str] = &["exporter_name", "enabled"];
+const ROUTING_SET_KEYS: &[&str] = &["exporter_name", "enabled", "config"];
 const ROUTING_CLEAR_KEYS: &[&str] = &["exporter_name"];
 
 pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> ChangeDescription {
@@ -56,29 +56,23 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
                     RETENTION_CLEAR_KEYS
                 },
             );
-            let current = match state.observability.retention.get() {
-                Some(store) => store.list(Some(tenant)).await.map(|rules| {
-                    rules
-                        .into_iter()
-                        .find(|rule| rule.category == category)
-                        .map(|rule| rule.delete_after_days)
-                }),
-                None => return description.noted(unreadable("retention rule")),
+            let rules = match state.observability.retention.get() {
+                Some(store) => store.list(Some(tenant)).await,
+                None => return description.cannot_read("retention rule"),
             };
-            let Ok(current) = current else {
-                return description.noted(unreadable("retention rule"));
+            let Ok(rules) = rules else {
+                return description.cannot_read("retention rule");
             };
-            let proposed = set
-                .then(|| params.get("delete_after_days").and_then(Value::as_i64))
-                .flatten();
-            if current.map(i64::from) == proposed {
-                description.note = Some("The proposed rule matches the current one.".into());
-            } else {
-                description.changes.push(field_change(
-                    "Delete records older than",
-                    current.map_or_else(|| "never".to_owned(), |days| days_text(i64::from(days))),
-                    proposed.map_or_else(|| "never".to_owned(), days_text),
-                ));
+            let rules: Vec<(String, i64)> = rules
+                .into_iter()
+                .map(|rule| (rule.category, i64::from(rule.delete_after_days)))
+                .collect();
+            let requested = params.get("delete_after_days").and_then(Value::as_i64);
+            match retention_change(&rules, category, set.then_some(requested).flatten(), set) {
+                Some(change) => description.changes.push(change),
+                None => {
+                    description.note = Some("The proposed rule matches the current one.".into())
+                }
             }
             description
         }
@@ -103,15 +97,12 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
             );
             let rules = match state.observability.routing.get() {
                 Some(store) => store.list(Some(tenant)).await,
-                None => return description.noted(unreadable("routing rule")),
+                None => return description.cannot_read("routing rule"),
             };
             let Ok(rules) = rules else {
-                return description.noted(unreadable("routing rule"));
+                return description.cannot_read("routing rule");
             };
-            let current = rules
-                .iter()
-                .find(|rule| rule.exporter_name == exporter)
-                .map(|rule| rule.enabled);
+            let current = rules.iter().find(|rule| rule.exporter_name == exporter);
             let proposed = set
                 .then(|| params.get("enabled").and_then(Value::as_bool))
                 .flatten();
@@ -120,12 +111,29 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
                 Some(false) => "disabled",
                 None => "no rule",
             };
-            if current == proposed {
+            let current_enabled = current.map(|rule| rule.enabled);
+            if current_enabled != proposed {
+                description.changes.push(field_change(
+                    "Rule",
+                    rule(current_enabled),
+                    rule(proposed),
+                ));
+            }
+            // Setting a rule replaces its exporter settings; an omitted
+            // setting object is empty.
+            if set {
+                let empty = Value::Object(serde_json::Map::new());
+                let proposed_config = params.get("config").unwrap_or(&empty);
+                let current_config = current.map_or(&empty, |rule| &rule.config);
+                if proposed_config != current_config {
+                    description.changes.push(change(
+                        "Exporter settings change; the new settings are in the exact parameters",
+                    ));
+                    description.covers_params = false;
+                }
+            }
+            if description.changes.is_empty() {
                 description.note = Some("The proposed rule matches the current one.".into());
-            } else {
-                description
-                    .changes
-                    .push(field_change("Rule", rule(current), rule(proposed)));
             }
             if set && rules.is_empty() {
                 description.changes.push(change(
@@ -139,6 +147,47 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
     }
 }
 
+/// How long a category's records are kept before and after the change,
+/// or `None` when that does not change. A category without its own rule
+/// follows the tenant's catch-all rule (`*`); the catch-all itself has
+/// nothing to fall back to.
+fn retention_change(
+    rules: &[(String, i64)],
+    category: &str,
+    requested: Option<i64>,
+    set: bool,
+) -> Option<DescribedChange> {
+    let days = |name: &str| {
+        rules
+            .iter()
+            .find(|(rule, _)| rule == name)
+            .map(|(_, days)| *days)
+    };
+    let fallback = (category != "*").then(|| days("*")).flatten();
+    let own = days(category);
+    let current = own.or(fallback);
+    let proposed = if set { requested } else { fallback };
+    if current == proposed {
+        return None;
+    }
+    let shown = |days: Option<i64>, from_catch_all: bool| match days {
+        None => "never".to_owned(),
+        Some(days) if from_catch_all => {
+            format!("{}, by the tenant's catch-all rule", days_text(days))
+        }
+        Some(days) => days_text(days),
+    };
+    Some(field_change(
+        if category == "*" {
+            "Delete records without their own rule older than"
+        } else {
+            "Delete records older than"
+        },
+        shown(current, own.is_none()),
+        shown(proposed, !set),
+    ))
+}
+
 fn days_text(days: i64) -> String {
     format!("{days} day{}", if days == 1 { "" } else { "s" })
 }
@@ -146,6 +195,36 @@ fn days_text(days: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rules(pairs: &[(&str, i64)]) -> Vec<(String, i64)> {
+        pairs
+            .iter()
+            .map(|(name, days)| ((*name).to_owned(), *days))
+            .collect()
+    }
+
+    #[test]
+    fn retention_changes_account_for_the_catch_all_rule() {
+        let with_catch_all = rules(&[("*", 30), ("invocation", 365)]);
+        let text = |change: Option<DescribedChange>| change.map(|change| change.text);
+        // Clearing an override falls back to the catch-all, not to "never".
+        assert_eq!(
+            text(retention_change(&with_catch_all, "invocation", None, false)).as_deref(),
+            Some("Delete records older than: 365 days → 30 days, by the tenant's catch-all rule")
+        );
+        // A category without its own rule starts from the catch-all.
+        assert_eq!(
+            text(retention_change(&with_catch_all, "admin", Some(7), true)).as_deref(),
+            Some("Delete records older than: 30 days, by the tenant's catch-all rule → 7 days")
+        );
+        // Clearing the catch-all leaves categories without a rule kept forever.
+        assert_eq!(
+            text(retention_change(&with_catch_all, "*", None, false)).as_deref(),
+            Some("Delete records without their own rule older than: 30 days → never")
+        );
+        assert!(retention_change(&with_catch_all, "invocation", Some(365), true).is_none());
+        assert!(retention_change(&rules(&[]), "admin", None, false).is_none());
+    }
 
     #[test]
     fn retention_periods_read_as_days() {

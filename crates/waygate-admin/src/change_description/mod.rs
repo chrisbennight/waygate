@@ -19,7 +19,11 @@ use waygate_oidc::Principal;
 
 use crate::state::AdminState;
 
-pub(crate) use crate::contract_summary::quoted;
+/// A name or value in quotes, with invisible characters revealed. Values
+/// are never shortened: a description states each parameter completely.
+pub(crate) fn quoted(text: &str) -> String {
+    format!("“{}”", crate::review_diff::reveal(text))
+}
 
 mod access;
 mod agents;
@@ -107,6 +111,13 @@ impl ChangeDescription {
     fn noted(mut self, note: impl Into<String>) -> Self {
         self.note = Some(note.into());
         self
+    }
+
+    /// Current state could not be read, so the card cannot state what
+    /// changes; the exact parameters stay open.
+    fn cannot_read(mut self, what: &str) -> Self {
+        self.covers_params = false;
+        self.noted(unreadable(what))
     }
 
     /// The approval confirmation: the title as a question, what approval
@@ -402,6 +413,13 @@ async fn stale_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quoted_values_are_complete_and_reveal_invisible_characters() {
+        let long = format!("{}-end", "a".repeat(200));
+        assert_eq!(quoted(&long), format!("“{long}”"));
+        assert_eq!(quoted("a\u{200B}b"), "“a[U+200B]b”");
+    }
 
     #[test]
     fn every_action_is_described_or_recorded_as_open() {
