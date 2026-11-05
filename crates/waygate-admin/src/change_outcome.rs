@@ -18,28 +18,23 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
     let (title, outcome) = match action_type {
         "tool_contract.approve" => (
             "Accept a new tool definition",
-            "The tool becomes callable with this exact definition, subject to access policies. \
-             A later definition change is blocked for review again.",
+            "The tool becomes callable with this exact definition, subject to access policies. A later definition change is held for review when the gateway's drift settings require it.",
         ),
         "tool_contract.reject" => (
             "Keep a changed tool blocked",
-            "The tool stays hidden and its calls stay blocked. A later definition change opens \
-             a new review.",
+            "The tool stays hidden and its calls stay blocked until a later decision.",
         ),
         "rate_limit.create" => (
             "Create a rate limit",
-            "Matching calls are limited by the new rate limit from the next call. Deleting the \
-             limit removes it.",
+            "Requests matching the limit's scope and action are limited from the next request, if the gateway enforces that combination. Deleting the limit removes it.",
         ),
         "rate_limit.update" => (
             "Change a rate limit",
-            "The rate limit uses the new capacity and refill rate from the next call. Its scope \
-             and action do not change.",
+            "The rate limit uses the new capacity and refill rate from the next request. Its scope and action do not change.",
         ),
         "rate_limit.delete" => (
             "Delete a rate limit",
-            "Calls the rate limit governed are no longer limited by it from the next call. \
-             Restoring it requires creating a new limit.",
+            "Requests the rate limit governed are no longer limited by it from the next request. Restoring it requires creating a new limit.",
         ),
         "inspection_rule.delete" => (
             "Delete a stored inspection rule",
@@ -148,13 +143,11 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "upstream_session.revoke" => (
             "Delete a user's upstream sign-in",
-            "The user's stored sign-in with the upstream issuer is deleted. Tools that call \
-             upstream services as that user fail until the user signs in again.",
+            "The user's stored sign-in with the upstream issuer is deleted. Upstream servers that require a stored sign-in refuse that user's calls until the user signs in again.",
         ),
         "break_glass.mint" => (
             "Issue a break-glass token",
-            "The user can make one call that policy would otherwise deny, to a tool matching the \
-             pattern, until the token expires. Revoking the token before then cancels it.",
+            "The user can make one call that policy would otherwise deny, to a tool matching the pattern, if they meet the token's sign-in requirements before it expires. Revoking the token before then cancels it.",
         ),
         "break_glass.revoke" => (
             "Revoke a break-glass token",
@@ -187,13 +180,11 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "policy.publish" => (
             "Publish an access policy draft",
-            "The draft replaces the whole live access policy set, and gateways apply it on the \
-             reload this triggers. Rolling back restores the previous version.",
+            "The draft becomes the tenant's published access policy set, and gateways apply it on the reload this triggers. Rolling back restores the previous version.",
         ),
         "policy.rollback" => (
             "Roll back the access policy set",
-            "The selected version's content is published as a new version and replaces the live \
-             access policy set on the reload this triggers.",
+            "The selected version's content is published as a new version, and gateways apply it on the reload this triggers.",
         ),
         "policy.upsert_fragment" => (
             "Add or replace an access policy",
@@ -202,13 +193,13 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "manifest.publish" => (
             "Publish an upstream server set draft",
-            "The draft replaces the whole live upstream server set, and gateways apply it on the \
-             reload this triggers. Rolling back restores the previous set.",
+            "The draft becomes the published upstream server set; in the default tenant, \
+             gateways apply it on the reload this triggers. Rolling back restores the previous set.",
         ),
         "manifest.rollback" => (
             "Roll back the upstream server set",
-            "The selected version's content is published as a new version and replaces the live \
-             upstream server set on the reload this triggers.",
+            "The selected version's content is published as a new version; in the default \
+             tenant, gateways apply it on the reload this triggers.",
         ),
         "manifest.stage_and_publish" => (
             "Replace the upstream server set",
@@ -229,8 +220,8 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
             "Reconnect an upstream server",
             "The gateway instance that processes the approval reconnects to the server if it is \
              disconnected or its circuit breaker is open, and leaves a healthy connection as is. \
-             If the request also clears quarantine, tools that instance blocked after a \
-             definition change are released.",
+             If the request also clears quarantine, that instance releases tools it blocked \
+             after a definition change, except tools awaiting a contract review.",
         ),
         "upstream.refresh_catalog" => (
             "Refresh an upstream server's tools",
@@ -245,8 +236,8 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "catalog.server.unquarantine" => (
             "Restore a quarantined server",
-            "The server goes from quarantined to live in the catalog, and its tools can be \
-             discovered and called again. Quarantining it reverses this.",
+            "The server goes from quarantined to live in the catalog, which removes the \
+             catalog's block on its tools. Quarantining it reverses this.",
         ),
         "config.reload" => (
             "Reload published configuration",
@@ -287,13 +278,12 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "skill.approve" => (
             "Approve a skill version",
-            "Agents in the tenant receive this exact version from their next request, in place \
-             of any earlier approved version. Quarantining the skill withdraws it.",
+            "Agents in the tenant can receive this exact version from their next request, in place of any earlier approved version. Quarantining the skill withdraws it.",
         ),
         "skill.reject" => (
             "Reject a skill version",
-            "This version is not distributed, and any previously approved version stays \
-             available. It can still be approved later.",
+            "This version is not distributed, and the skill's distribution otherwise does not \
+             change. It can still be approved later.",
         ),
         "skill.quarantine" => (
             "Withdraw a skill",
