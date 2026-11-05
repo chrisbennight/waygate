@@ -79,44 +79,56 @@
             <li{% if i.params_pretty.is_some() %} class="attn-item--stacked"{% endif %}>
                 <span class="attn-chip attn-chip--{{ i.severity }}">{{ i.kind }}</span>
                 <div class="attn-item__main">
-                    <div class="attn-label mono">{{ i.summary }}</div>
+                    {% match i.change %}{% when Some with (ch) %}<div class="attn-label">{{ ch.description.title }}</div>{% when None %}<div class="attn-label mono">{{ i.summary }}</div>{% endmatch %}
                     {% if bulk_tools_available %}{% match i.tool_choice %}{% when Some with (choice) %}{% let selection_name = i.summary %}{% include "_bulk_tool_choice.html" %}{% when None %}{% endmatch %}{% endif %}
                     {% if bulk_skills_available %}{% match i.skill_choice %}{% when Some with (choice) %}{% let selection_name = i.summary %}{% include "_bulk_skill_choice.html" %}{% when None %}{% endmatch %}{% endif %}
                     <div class="attn-hint">
-                        <code>{{ i.handle }}</code> ·
+                        {% match i.change %}{% when Some with (ch) %}Requested by {{ ch.requested_by }} · {% when None %}{% endmatch %}<code>{{ i.handle }}</code> ·
                         <span title="{{ i.age_abs }}">{{ i.age_rel }}</span>
                     </div>
                 </div>
-                {# EFFECT preview for a pending policy / manifest change — the
-                   blast-radius the approver reviews BEFORE approving, so this
-                   inbox is not a blind approval path for a change the /changes
-                   queue would preview (the server-review gate must hold on EVERY
-                   approval surface). At most one is Some; both None for
-                   break-glass and non-previewable actions. Read-only. #}
-                {% match i.policy_preview %}
-                {% when Some with (pv) %}{% include "_policy_preview_card.html" %}
-                {% when None %}{% endmatch %}
-                {% match i.manifest_preview %}
-                {% when Some with (pv) %}{% include "_manifest_preview_card.html" %}
-                {% when None %}{% endmatch %}
-                {# Captured params — the maker's exact proposed intent, full-width
-                   and ABOVE the action controls so the approver
-                   reads what they authorize BEFORE acting. Change requests only;
-                   break-glass rows have no proposed params. #}
-                {% match i.params_pretty %}{% when Some with (p) %}
-                <pre class="mono params-review__pre" aria-label="Captured parameters for {{ i.handle }}">{{ p }}</pre>
-                {% when None %}{% endmatch %}
-                {% match i.approval_requirement %}{% when Some with (requirement) %}
-                <div class="params-review" aria-label="Approval requirement for {{ i.handle }}">
-                    <span class="params-review__label">Approval requirement:</span>
-                    <p class="mono">{{ requirement.summary }}</p>
-                    {% match requirement.cooldown_until_abs %}
-                    {% when Some with (not_before) %}
-                    <p class="muted">Approval is available at {{ not_before }}. Denial remains available now.</p>
+                {# A change request reads in the same order as on /changes: what
+                   changes (including any mandatory policy or manifest effect
+                   preview), what approval does, the requester's reason, the
+                   approval conditions, then the exact parameters, all above the
+                   controls. The complete parameters stay in the page; they
+                   start collapsed only when the gateway's description covers
+                   every one. #}
+                {% match i.change %}
+                {% when Some with (ch) %}
+                <div class="change-review">
+                    {% let d = ch.description %}
+                    {% include "_change_summary.html" %}
+                    {% match i.policy_preview %}
+                    {% when Some with (pv) %}{% include "_policy_preview_card.html" %}
                     {% when None %}{% endmatch %}
-                    {% if requirement.step_up_required %}
-                    <p><a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/decisions") }}">Re-authenticate with the required assurance</a> before approving.</p>
-                    {% endif %}
+                    {% match i.manifest_preview %}
+                    {% when Some with (pv) %}{% include "_manifest_preview_card.html" %}
+                    {% when None %}{% endmatch %}
+                    {% include "_change_outcome.html" %}
+                    <div class="params-review">
+                        <span class="params-review__label">Requester's reason</span>
+                        <p class="change-reason">{{ ch.justification }}</p>
+                    </div>
+                    {% match i.approval_requirement %}{% when Some with (requirement) %}
+                    <div class="params-review" aria-label="Approval requirement for {{ i.handle }}">
+                        <span class="params-review__label">Approval requirement:</span>
+                        <p class="mono">{{ requirement.summary }}</p>
+                        {% match requirement.cooldown_until_abs %}
+                        {% when Some with (not_before) %}
+                        <p class="muted">Approval is available at {{ not_before }}. Denial remains available now.</p>
+                        {% when None %}{% endmatch %}
+                        {% if requirement.step_up_required %}
+                        <p><a href="/admin/login?step_up_scope=mcp:admin&amp;next={{ self.chrome.nav_url("/decisions") }}">Re-authenticate with the required assurance</a> before approving.</p>
+                        {% endif %}
+                    </div>
+                    {% when None %}{% endmatch %}
+                    {% match i.params_pretty %}{% when Some with (p) %}
+                    <details class="params-review"{% if !ch.params_collapsed %} open{% endif %}>
+                        <summary class="params-review__label">Exact parameters for <code>{{ ch.action_type }}</code></summary>
+                        <pre class="mono params-review__pre" aria-label="Captured parameters for {{ i.handle }}">{{ p }}</pre>
+                    </details>
+                    {% when None %}{% endmatch %}
                 </div>
                 {% when None %}{% endmatch %}
                 <div class="row-actions">

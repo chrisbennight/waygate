@@ -1689,3 +1689,205 @@ async fn an_oversized_comparison_shows_the_complete_text_and_says_why() {
     assert!(html.contains("new line 2999"));
     assert!(!html.contains("diff-table"));
 }
+
+#[tokio::test]
+async fn tool_definition_requests_show_the_stored_comparison_on_the_approval_card() {
+    use waygate_changeset::{
+        ApprovalRequirement, ChangeRequestStore, NewChangeRequest, PgChangeRequestStore,
+    };
+    let Some(db) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let server = format!("card-{}", uuid::Uuid::new_v4());
+    ManifestImporter::new(db.clone())
+        .import_atomic(
+            "default",
+            &[ImportServer {
+                tenant_id: "default".into(),
+                name: server.clone(),
+                transport: "http".into(),
+                runtime_target: json!({"url":"http://example.test/mcp"}),
+                classification_mode: "manifest".into(),
+                // "fetch" is advertised but not configured, so its first
+                // definition has no accepted baseline.
+                tools: vec![ImportTool {
+                    name: "search".into(),
+                    approved_behavior_hash: None,
+                    risk: "low".into(),
+                    side_effects: false,
+                    pii: false,
+                    discriminator: None,
+                    operations: vec![],
+                }],
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    let store = Arc::new(PgCatalogStore::new(db.clone()));
+    store
+        .observe(
+            "default",
+            &server,
+            "search",
+            "accepted-search-hash",
+            &json!({"description": "Search documentation.", "inputSchema": {"type": "object",
+                "properties": {"query": {"type": "string"}}}}),
+            true,
+        )
+        .await
+        .unwrap();
+    store
+        .observe(
+            "default",
+            &server,
+            "search",
+            "observed-search-hash",
+            &json!({"description": "Search all documentation.", "inputSchema": {"type": "object",
+                "required": ["context"],
+                "properties": {"query": {"type": "string"}, "context": {"type": "string"}}}}),
+            true,
+        )
+        .await
+        .unwrap();
+    store
+        .observe_against_approval(
+            "default",
+            &server,
+            "fetch",
+            "first-fetch-hash",
+            &json!({"description": "Fetch a page."}),
+            true,
+            Some(""),
+        )
+        .await
+        .unwrap();
+    let search = store
+        .get("default", &server, "search")
+        .await
+        .unwrap()
+        .unwrap();
+    let fetch = store
+        .get("default", &server, "fetch")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(fetch.approved_hash.is_empty());
+
+    let changes = Arc::new(PgChangeRequestStore::new(db.clone()));
+    let propose = |params: serde_json::Value| NewChangeRequest {
+        tenant_id: "default".into(),
+        requested_by: "propose-only-agent".into(),
+        client_id: None,
+        action_type: "tool_contract.approve".into(),
+        params,
+        preview: None,
+        target_etag: None,
+        justification: "Accept the reviewed search definition.".into(),
+        requirement: ApprovalRequirement::single("dashboard-admins"),
+        expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+    };
+    let current = changes
+        .propose(propose(json!({"server": server, "tool": "search",
+            "generation": search.generation, "observed_hash": search.observed_hash,
+            "manifest_hash": "m"})))
+        .await
+        .unwrap();
+    let stale = changes
+        .propose(propose(json!({"server": server, "tool": "search",
+            "generation": search.generation - 1, "observed_hash": search.observed_hash,
+            "manifest_hash": "m"})))
+        .await
+        .unwrap();
+    let first = changes
+        .propose(propose(json!({"server": server, "tool": "fetch",
+            "generation": fetch.generation, "observed_hash": fetch.observed_hash,
+            "manifest_hash": "m", "risk": "high"})))
+        .await
+        .unwrap();
+
+    let pool = UpstreamPool::connect(BTreeMap::new())
+        .await
+        .with_tool_reviews(store.clone())
+        .await;
+    let state = crate::admin_state::base_admin_state_with_pool(Arc::new(pool))
+        .with_change_request_store(Some(changes.clone()));
+    let app = dashboard_router(Arc::new(state), DashboardAuth::Disabled);
+    let card = |id: uuid::Uuid| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/t/default/changes?pending_id={id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            String::from_utf8(
+                to_bytes(response.into_body(), 2 * 1024 * 1024)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap()
+        }
+    };
+
+    let html = card(current.id).await;
+    let title = format!("<strong>Accept the new definition of {server} · search</strong>");
+    let title_at = html.find(&title).expect("gateway title");
+    let flagged_at = html
+        .find("Input parameter “context” added")
+        .expect("flagged change");
+    let plain_at = html.find("Description changed").expect("plain change");
+    let outcome_at = html
+        .find("If approved:</strong> Agents can discover and call search")
+        .expect("outcome");
+    let reason_at = html.find("Requester's reason").expect("reason");
+    let params_at = html.find("Exact parameters").expect("parameters");
+    let approve_at = html.find(">Approve<").expect("approval offered");
+    assert!(
+        title_at < flagged_at
+            && flagged_at < plain_at
+            && plain_at < outcome_at
+            && outcome_at < reason_at
+            && reason_at < params_at
+            && params_at < approve_at,
+        "card must read title, flagged change, other change, outcome, reason, parameters, Approve"
+    );
+    assert!(html.contains(&format!(
+        "/admin/t/default/servers/tool-changes?server={server}&#38;tool=search"
+    )));
+    assert!(
+        html.contains(r#"<details class="params-review">"#),
+        "verified parameters start collapsed"
+    );
+    assert_eq!(search.observed_hash, "observed-search-hash");
+    let hash_at = html
+        .find("observed-search-hash")
+        .expect("the exact parameters stay in the page");
+    assert!(
+        hash_at > params_at,
+        "hashes appear only with the exact parameters"
+    );
+    assert!(!html.contains("Approval unavailable"));
+    assert!(!html.contains("Selected rate-limit policy creations"));
+
+    let html = card(stale.id).await;
+    assert!(html.contains(
+        "Approval unavailable:</strong> The tool definition changed after this request."
+    ));
+    assert!(!html.contains(">Approve<"));
+    assert!(!html.contains("Input parameter “context” added"));
+
+    let html = card(first.id).await;
+    assert!(html.contains(&format!(
+        "<strong>Accept the new definition of {server} · fetch</strong>"
+    )));
+    assert!(html.contains("Sets the gateway risk classification to high"));
+    assert!(html.contains("first definition, so there is nothing to compare."));
+    assert!(html.contains(">Approve<"));
+}

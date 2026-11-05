@@ -913,8 +913,9 @@ fn propose_schema() -> Arc<JsonObject> {
             },
             "justification": {
                 "type": "string",
-                "description": "Why the change is needed — shown to the human approver and \
-                    recorded in the audit log.",
+                "maxLength": waygate_admin::change_requests::MAX_JUSTIFICATION_CHARS,
+                "description": "Why the change is needed, in one or two sentences, for the \
+                    approver.",
             },
             "ttl_seconds": {
                 "type": "integer",

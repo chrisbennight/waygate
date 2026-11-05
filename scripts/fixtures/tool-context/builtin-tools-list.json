@@ -3530,7 +3530,8 @@
             },
             "justification": {
               "type": "string",
-              "description": "Why the change is needed — shown to the human approver and recorded in the audit log."
+              "maxLength": 500,
+              "description": "Why the change is needed, in one or two sentences, for the approver."
             },
             "ttl_seconds": {
               "type": "integer",

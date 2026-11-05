@@ -139,6 +139,10 @@ pub fn admin_router(state: Arc<AdminState>) -> Router<()> {
         .with_state(state)
 }
 
+/// Longest accepted requester reason. Approval cards lead with what changes;
+/// the reason adds only why it is needed.
+pub const MAX_JUSTIFICATION_CHARS: usize = 500;
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ProposeRequest {
     /// Registry key for the action, e.g. `api_key.mint`.
@@ -148,8 +152,10 @@ pub struct ProposeRequest {
     /// JSON Schema at propose time (see [`validate_propose`]).
     #[schema(value_type = Object)]
     pub params: Value,
-    /// Why this change is needed. Required, non-empty — surfaced to the
-    /// human approver and audited.
+    /// Why this change is needed, in one or two sentences. Required,
+    /// non-empty, and at most [`MAX_JUSTIFICATION_CHARS`] characters. Shown to
+    /// the human approver and audited.
+    #[schema(max_length = 500)]
     pub justification: String,
     /// TTL in seconds; defaults to 900 (15m), capped at 86400 (24h).
     #[serde(default)]
@@ -654,6 +660,12 @@ fn validate_propose(req: &ProposeRequest) -> Result<(), ApiError> {
         return Err(ApiError::BadRequest(
             "justification must be non-empty".into(),
         ));
+    }
+    if req.justification.chars().count() > MAX_JUSTIFICATION_CHARS {
+        return Err(ApiError::BadRequest(format!(
+            "justification must be at most {MAX_JUSTIFICATION_CHARS} characters; state why the \
+             change is needed in one or two sentences"
+        )));
     }
     // Bound each row at the source so the review UI can render the COMPLETE
     // params without truncation. The approval surfaces separately paginate to
@@ -1755,6 +1767,29 @@ mod tests {
         ));
 
         assert!(validate_propose(&base()).is_ok());
+    }
+
+    #[test]
+    fn validate_propose_limits_the_reason_by_characters() {
+        let request = |justification: String| ProposeRequest {
+            action_type: "rate_limit.update".into(),
+            params: serde_json::json!({
+                "policy_id": "00000000-0000-0000-0000-000000000000",
+                "bucket_capacity": 10,
+            }),
+            justification,
+            ttl_seconds: None,
+        };
+        // Multi-byte characters count once, so the limit matches what the
+        // requester and the approver read.
+        assert!(validate_propose(&request("é".repeat(MAX_JUSTIFICATION_CHARS))).is_ok());
+        let Err(ApiError::BadRequest(message)) =
+            validate_propose(&request("é".repeat(MAX_JUSTIFICATION_CHARS + 1)))
+        else {
+            panic!("an over-long reason must be refused");
+        };
+        assert!(message.contains("at most 500 characters"));
+        assert!(message.contains("one or two sentences"));
     }
 
     #[test]

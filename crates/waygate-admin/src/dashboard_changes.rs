@@ -81,6 +81,7 @@ struct ChangesPage {
     /// non-admin SSO session can't read proposed-change detail by
     /// browsing instead of curling.
     insufficient_scope: bool,
+    /// Bulk decisions are configured and a pending row on this page qualifies.
     bulk_available: bool,
     pending: Vec<ChangeRow>,
     pending_prev_rel: Option<String>,
@@ -152,6 +153,12 @@ struct ChangeRow {
     /// The effect preview is missing or found a fail-closed condition, so the
     /// dashboard keeps Deny available but does not offer approval.
     approval_blocked: bool,
+    /// The gateway's description of a pending change, shown before the
+    /// requester's reason. `None` for expired and decided rows.
+    description: Option<crate::change_description::ChangeDescription>,
+    /// The description covers every captured parameter, so the exact
+    /// parameters start collapsed. They remain in the page either way.
+    params_collapsed: bool,
 }
 
 struct ManifestExecutionOutcomeView {
@@ -837,7 +844,8 @@ async fn changes_page(
         bulk_available: state.hitl.decision_batches.get().is_some()
             && tenant_ctx
                 .as_ref()
-                .is_none_or(|ctx| ctx.slug == read_tenant),
+                .is_none_or(|ctx| ctx.slug == read_tenant)
+            && load.pending.iter().any(|row| row.bulk_choice.is_some()),
         chrome: PageChrome::build(
             &state,
             "Change requests",
@@ -1399,13 +1407,16 @@ async fn load_changes(
                 .manifest
                 .as_ref()
                 .is_some_and(|preview| preview.blocked.is_some());
+        let description = crate::change_description::describe(state, &c).await;
         let bulk_choice = crate::dashboard_bulk_changes::choice(&c);
         let mut row = change_row(c, true);
         row.bulk_choice = bulk_choice;
         row.policy_preview = previews.policy;
         row.manifest_preview = previews.manifest;
         row.effect_preview_acknowledgement_required = effect_preview_acknowledgement_required;
-        row.approval_blocked = approval_blocked;
+        row.approval_blocked = approval_blocked || description.blocked.is_some();
+        row.params_collapsed = description.covers_params;
+        row.description = Some(description);
         pending_rows.push(row);
     }
 
@@ -1573,6 +1584,8 @@ fn change_row(c: impl Into<ChangeRowSource>, pending: bool) -> ChangeRow {
         manifest_preview: None,
         effect_preview_acknowledgement_required: false,
         approval_blocked: false,
+        description: None,
+        params_collapsed: false,
     }
 }
 

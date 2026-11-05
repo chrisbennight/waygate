@@ -424,3 +424,61 @@ async fn selected_changes_preserve_conditions_exact_intent_and_independent_execu
     .unwrap();
     assert_eq!(count, 1);
 }
+
+#[tokio::test]
+async fn the_selection_panel_appears_only_beside_a_qualifying_request() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let changes = Arc::new(PgChangeRequestStore::new(pool.clone()));
+    let propose = |action_type: &str, params: serde_json::Value| NewChangeRequest {
+        tenant_id: "default".into(),
+        requested_by: "propose-only-agent".into(),
+        client_id: None,
+        action_type: action_type.into(),
+        params,
+        preview: None,
+        target_etag: None,
+        justification: "Quota maintenance".into(),
+        requirement: ApprovalRequirement::single("dashboard-admins"),
+        expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+    };
+    let value = format!("bulk-panel-{}", uuid::Uuid::new_v4());
+    let eligible = changes
+        .propose(propose(
+            "rate_limit.create",
+            serde_json::json!({"name": value, "scope": "principal", "scope_value": value,
+                "action": "call", "bucket_capacity": 10, "refill_per_second": 1.0}),
+        ))
+        .await
+        .unwrap();
+    let ineligible = changes
+        .propose(propose(
+            "rate_limit.delete",
+            serde_json::json!({"policy_id": uuid::Uuid::new_v4()}),
+        ))
+        .await
+        .unwrap();
+    let state = crate::admin_state::base_admin_state()
+        .with_change_request_store(Some(changes.clone()))
+        .with_decision_batches(Some(Arc::new(
+            waygate_dashboard_stores::decision_batches::PgDecisionBatchStore::new(pool.clone()),
+        )));
+    let app = dashboard_router(Arc::new(state), DashboardAuth::Disabled);
+    let (status, page) = get(
+        app.clone(),
+        &format!("/t/default/changes?pending_id={}", ineligible.id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!page.contains("Selected rate-limit policy creations"));
+    assert!(!page.contains("data-bulk-selection"));
+    let (status, page) = get(
+        app,
+        &format!("/t/default/changes?pending_id={}", eligible.id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("Selected rate-limit policy creations"));
+    assert!(tokens(&page).contains_key(&eligible.id));
+}

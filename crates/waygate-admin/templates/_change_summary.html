@@ -1,0 +1,7 @@
+{# The gateway's description of a pending change: why approval is unavailable,
+   what changes, and a link to the complete evidence. Expects `d` (a
+   `ChangeDescription`) bound by the caller's `{% match … %}`. #}
+{% match d.blocked %}{% when Some with (reason) %}<div class="callout callout--err"><strong>Approval unavailable:</strong> {{ reason }}</div>{% when None %}{% endmatch %}
+{% if !d.changes.is_empty() %}<ul class="change-list" aria-label="What changes">{% for change in d.changes %}<li class="change-item">{% match change.flag %}{% when Some with (reason) %}<span class="chip chip--warn">Flagged</span> {{ change.text }}<span class="change-item__reason">{{ reason }}</span>{% when None %}{{ change.text }}{% endmatch %}</li>{% endfor %}</ul>{% endif %}
+{% match d.note %}{% when Some with (note) %}<p class="diff-note">{{ note }}</p>{% when None %}{% endmatch %}
+{% match d.evidence %}{% when Some with (link) %}<p><a href="{{ self.chrome.nav_url(link.path.as_str()) }}">{{ link.label }}</a></p>{% when None %}{% endmatch %}

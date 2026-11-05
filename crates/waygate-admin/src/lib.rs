@@ -45,6 +45,7 @@ mod bulk_tool_reviews;
 pub mod capability;
 pub mod catalog;
 pub mod change_context;
+mod change_description;
 pub mod change_effect_preview;
 pub mod change_executor;
 pub mod change_notify;
