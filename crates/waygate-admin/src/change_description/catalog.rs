@@ -231,6 +231,11 @@ async fn server_operation(state: &AdminState, request: &ChangeRequest) -> Change
             .get("clear_quarantine")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
+    if action == "upstream.reconnect" && releases {
+        description
+            .changes
+            .push(change("Also clears quarantine for this server's tools"));
+    }
     if releases {
         let blocked = state
             .upstreams

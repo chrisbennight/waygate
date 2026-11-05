@@ -67,11 +67,8 @@ async fn mint(state: &AdminState, request: &ChangeRequest) -> ChangeDescription 
         MINT_KEYS,
     );
     let changes = &mut description.changes;
-    changes.push(change(format!(
-        "Scopes: {}",
-        quoted_list(&param_list(params, "scopes"))
-    )));
-    let groups = param_list(params, "groups");
+    changes.push(change(format!("Scopes: {}", quoted_list(&scopes(params)))));
+    let groups = groups(params);
     if !groups.is_empty() {
         changes.push(change(format!("Groups: {}", quoted_list(&groups))));
     }
@@ -132,16 +129,12 @@ async fn update_grants(state: &AdminState, request: &ChangeRequest) -> ChangeDes
         GRANTS_KEYS,
     );
     // Both lists replace the key's current ones; an omitted list is empty.
-    description.changes.extend(list_changes(
-        "Scopes",
-        &key.scopes,
-        &param_list(params, "scopes"),
-    ));
-    description.changes.extend(list_changes(
-        "Groups",
-        &key.groups,
-        &param_list(params, "groups"),
-    ));
+    description
+        .changes
+        .extend(list_changes("Scopes", &key.scopes, &scopes(params)));
+    description
+        .changes
+        .extend(list_changes("Groups", &key.groups, &groups(params)));
     if key.revoked_at.is_some() {
         return description.blocked("This API key is revoked.");
     }
@@ -268,6 +261,27 @@ async fn key(state: &AdminState, request: &ChangeRequest) -> Lookup<ApiKeyRow> {
     Lookup::from_read(action, "API key", read)
 }
 
+/// Requested scopes as minting and grant updates store them: each entry
+/// split on whitespace.
+fn scopes(params: &Value) -> Vec<String> {
+    param_list(params, "scopes")
+        .iter()
+        .flat_map(|scope| scope.split_whitespace())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Requested groups as minting and grant updates store them: trimmed, with
+/// blank entries dropped.
+fn groups(params: &Value) -> Vec<String> {
+    param_list(params, "groups")
+        .iter()
+        .map(|group| group.trim())
+        .filter(|group| !group.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// A whole number of days, hours, or minutes when one fits exactly.
 fn duration(seconds: i64) -> String {
     let unit = |count: i64, singular: &str| {
@@ -323,6 +337,13 @@ mod tests {
         assert!(texts.contains(&"Servers: any server, no restriction"));
         assert!(texts.contains(&"Tools: any tool, no restriction"));
         assert!(!texts.iter().any(|text| text.ends_with(": none")));
+    }
+
+    #[test]
+    fn requested_grants_are_normalized_like_the_executor() {
+        let params = json!({"scopes": ["mcp:read mcp:invoke", " "], "groups": [" ops ", ""]});
+        assert_eq!(scopes(&params), ["mcp:read", "mcp:invoke"]);
+        assert_eq!(groups(&params), ["ops"]);
     }
 
     #[test]

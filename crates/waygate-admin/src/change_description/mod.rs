@@ -36,6 +36,7 @@ mod rbac;
 mod tools;
 
 /// One fact in a change list.
+#[derive(Debug)]
 pub(crate) struct DescribedChange {
     pub text: String,
     /// Why the change can widen what the target does or receives.
