@@ -117,6 +117,13 @@ async fn tool_contract(
         blocked: None,
         covers_params: true,
     };
+    let manifest = state
+        .upstreams
+        .manifests()
+        .into_iter()
+        .find(|manifest| manifest.name == params.server);
+    let (risk, risk_blocks) = risk_effect(manifest.as_ref(), &params, accept);
+    description.changes.extend(risk);
     let review = match current_review(state, &change.tenant_id, &params).await {
         Ok(review) => review,
         Err(reason) => {
@@ -125,15 +132,9 @@ async fn tool_contract(
             return description;
         }
     };
-    if let Some(reason) = decision_unavailable(&review, &params, accept) {
+    if let Some(reason) = decision_unavailable(&review, &params, accept).or(risk_blocks) {
         description.blocked = Some(reason.to_owned());
         return description;
-    }
-    if let Some(risk) = params.risk {
-        description.changes.push(DescribedChange {
-            text: format!("Sets the gateway risk classification to {}", risk.as_str()),
-            flag: None,
-        });
     }
     if review.approved_hash.is_empty() {
         description.note =
@@ -155,6 +156,52 @@ async fn tool_contract(
         description.note = note;
     }
     description
+}
+
+/// What the request's risk classification does. Approval applies it only
+/// when it creates the first classification of a tool on a server that
+/// classifies tools by their annotations, and that approval requires one.
+/// Elsewhere the decision cores ignore it, and the card says so.
+fn risk_effect(
+    manifest: Option<&waygate_upstream::UpstreamManifest>,
+    params: &ToolReviewParams,
+    accept: bool,
+) -> (Option<DescribedChange>, Option<&'static str>) {
+    let classifies_first = accept
+        && manifest.is_some_and(|manifest| {
+            matches!(
+                manifest.classification_mode,
+                waygate_upstream::ClassificationMode::McpAnnotations
+            ) && !manifest.tools.iter().any(|tool| tool.name == params.tool)
+        });
+    match (params.risk, classifies_first) {
+        (Some(risk), true) => (
+            Some(DescribedChange {
+                text: format!("Sets the gateway risk classification to {}", risk.as_str()),
+                flag: None,
+            }),
+            None,
+        ),
+        (Some(risk), false) => (
+            Some(DescribedChange {
+                text: format!(
+                    "The requested risk classification ({}) is not used; the tool's \
+                     classification does not change",
+                    risk.as_str()
+                ),
+                flag: None,
+            }),
+            None,
+        ),
+        (None, true) => (
+            None,
+            Some(
+                "Approving this tool's first definition needs a gateway risk classification, \
+                 and this request has none.",
+            ),
+        ),
+        (None, false) => (None, None),
+    }
 }
 
 const REVIEW_UNAVAILABLE: &str =
@@ -330,6 +377,60 @@ mod tests {
             text: text.into(),
             flag: flagged.then(|| "widens input".into()),
         }
+    }
+
+    fn manifest(annotations: bool) -> waygate_upstream::UpstreamManifest {
+        let mut manifest = waygate_upstream::parse_manifest_set(
+            "- name: docs\n  transport: http\n  trust: internal\n  url: https://docs.example/mcp\n  tools:\n    - name: search\n      risk: low\n",
+        )
+        .unwrap()
+        .remove("docs")
+        .unwrap();
+        if annotations {
+            manifest.classification_mode = waygate_upstream::ClassificationMode::McpAnnotations;
+        }
+        manifest
+    }
+
+    #[test]
+    fn risk_is_described_as_applied_only_where_approval_applies_it() {
+        let annotations = manifest(true);
+        let classified = manifest(false);
+        let mut first = params(1, "b");
+        first.tool = "fetch".into();
+        first.risk = Some(waygate_core::RiskTier::High);
+        let (change, blocks) = risk_effect(Some(&annotations), &first, true);
+        assert_eq!(
+            change.unwrap().text,
+            "Sets the gateway risk classification to high"
+        );
+        assert_eq!(blocks, None);
+        // Rejection, a manifest-classified server, and an unconfigured server
+        // all ignore the requested value.
+        for (manifest, accept) in [
+            (Some(&annotations), false),
+            (Some(&classified), true),
+            (None, true),
+        ] {
+            let (change, blocks) = risk_effect(manifest, &first, accept);
+            assert!(change.unwrap().text.contains("(high) is not used"));
+            assert_eq!(blocks, None);
+        }
+        // An already classified tool keeps its classification.
+        let mut search = params(1, "b");
+        search.risk = Some(waygate_core::RiskTier::Low);
+        let (change, _) = risk_effect(Some(&annotations), &search, true);
+        assert!(change.unwrap().text.contains("(low) is not used"));
+        search.risk = None;
+        let (change, blocks) = risk_effect(Some(&annotations), &search, true);
+        assert!(change.is_none() && blocks.is_none());
+        // A first annotation classification cannot be approved without one.
+        first.risk = None;
+        let (change, blocks) = risk_effect(Some(&annotations), &first, true);
+        assert!(change.is_none());
+        assert!(blocks
+            .unwrap()
+            .contains("needs a gateway risk classification"));
     }
 
     #[test]

@@ -1796,7 +1796,7 @@ async fn tool_definition_requests_show_the_stored_comparison_on_the_approval_car
     let stale = changes
         .propose(propose(json!({"server": server, "tool": "search",
             "generation": search.generation - 1, "observed_hash": search.observed_hash,
-            "manifest_hash": "m"})))
+            "manifest_hash": "m", "risk": "low"})))
         .await
         .unwrap();
     let first = changes
@@ -1806,10 +1806,21 @@ async fn tool_definition_requests_show_the_stored_comparison_on_the_approval_car
         .await
         .unwrap();
 
-    let pool = UpstreamPool::connect(BTreeMap::new())
-        .await
-        .with_tool_reviews(store.clone())
-        .await;
+    // The server classifies tools by their annotations; only "search" has a
+    // classification, so approving "fetch" sets its first one.
+    let mut manifest = crate::admin_state::example_messages_manifest();
+    manifest.name = server.clone();
+    manifest.classification_mode = waygate_upstream::ClassificationMode::McpAnnotations;
+    manifest.tools = vec![waygate_manifest_types::ToolClassification::new(
+        "search",
+        waygate_core::RiskTier::Low,
+        false,
+        false,
+    )];
+    let pool =
+        UpstreamPool::from_manifests_disconnected(BTreeMap::from([(server.clone(), manifest)]))
+            .with_tool_reviews(store.clone())
+            .await;
     let state = crate::admin_state::base_admin_state_with_pool(Arc::new(pool))
         .with_change_request_store(Some(changes.clone()));
     let app = dashboard_router(Arc::new(state), DashboardAuth::Disabled);
@@ -1874,6 +1885,7 @@ async fn tool_definition_requests_show_the_stored_comparison_on_the_approval_car
         "hashes appear only with the exact parameters"
     );
     assert!(!html.contains("Approval unavailable"));
+    assert!(!html.contains("risk classification"));
     assert!(!html.contains("Selected rate-limit policy creations"));
 
     let html = card(stale.id).await;
@@ -1882,6 +1894,8 @@ async fn tool_definition_requests_show_the_stored_comparison_on_the_approval_car
     ));
     assert!(!html.contains(">Approve<"));
     assert!(!html.contains("Input parameter “context” added"));
+    // A stale card still accounts for every captured intent parameter.
+    assert!(html.contains("The requested risk classification (low) is not used"));
 
     let html = card(first.id).await;
     assert!(html.contains(&format!(
