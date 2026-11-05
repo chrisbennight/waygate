@@ -106,7 +106,46 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
                 .push(change(format!("{label}: {}", quoted(text))));
         }
     }
+    if action == "scope.delete_local" {
+        return with_scope_description(state, request, description).await;
+    }
     description
+}
+
+/// Deleting a local scope also removes its stored description, which the
+/// parameters do not carry.
+async fn with_scope_description(
+    state: &AdminState,
+    request: &ChangeRequest,
+    mut description: ChangeDescription,
+) -> ChangeDescription {
+    let (Some(store), Some(id)) = (
+        state.identity.scopes.get(),
+        param_id(&request.params, "scope_id"),
+    ) else {
+        return description.cannot_read("local scope");
+    };
+    match store.list_with_usage(&request.tenant_id).await {
+        Ok(scopes) => {
+            // A scope that no longer exists fails the freshness check, which
+            // blocks approval with its own reason.
+            let text = scopes
+                .into_iter()
+                .find(|scope| scope.id == id)
+                .and_then(|scope| scope.description)
+                .filter(|text| !text.is_empty());
+            if let Some(text) = text {
+                description
+                    .changes
+                    .push(change(format!("Description: {}", quoted(&text))));
+            }
+            description
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "approval card could not read the local scope");
+            description.cannot_read("local scope")
+        }
+    }
 }
 
 async fn inspection_rule(state: &AdminState, request: &ChangeRequest) -> ChangeDescription {

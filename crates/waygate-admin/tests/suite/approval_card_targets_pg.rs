@@ -9,6 +9,7 @@ use serde_json::json;
 use std::sync::Arc;
 use tower::ServiceExt;
 use waygate_admin::{dashboard_router, DashboardAuth};
+use waygate_apikeys::{PgScopeStore, ScopeStore};
 use waygate_changeset::{
     ApprovalRequirement, ChangeRequestStore, NewChangeRequest, PgChangeRequestStore,
 };
@@ -69,6 +70,7 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
     let limits = Arc::new(PgRateLimitPolicyStore::new(pool.clone()));
     let rbac = Arc::new(PgRbacStore::new(pool.clone()));
     let agents = Arc::new(InMemoryAgentConfigStore::new());
+    let scopes = Arc::new(PgScopeStore::new(pool.clone()));
 
     let limit_name = format!("search-burst-{suffix}");
     // Scope and action are unique per tenant, so the principal is unique too.
@@ -118,6 +120,19 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
         .await
         .unwrap();
 
+    let scope_name = format!("triage-{suffix}");
+    scopes
+        .create_local("default", &scope_name, Some("Read  triage notes"))
+        .await
+        .unwrap();
+    let scope = scopes
+        .list_with_usage("default")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|scope| scope.name == scope_name)
+        .expect("created scope");
+
     let delete_limit = changes
         .propose(request("rate_limit.delete", json!({"policy_id": limit.id})))
         .await
@@ -157,6 +172,13 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
         .await
         .unwrap();
 
+    let delete_scope = changes
+        .propose(request(
+            "scope.delete_local",
+            json!({"scope_id": scope.id, "name": scope_name}),
+        ))
+        .await
+        .unwrap();
     let mint_token = changes
         .propose(request(
             "break_glass.mint",
@@ -181,7 +203,8 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
         .with_change_request_store(Some(changes.clone()))
         .with_rate_limit_policy_store(Some(limits.clone()))
         .with_rbac_store(Some(rbac.clone()))
-        .with_agent_configs(Some(agents.clone()));
+        .with_agent_configs(Some(agents.clone()))
+        .with_scope_store(Some(scopes.clone()));
     let app = dashboard_router(Arc::new(state), DashboardAuth::Disabled);
 
     // A deletion names its target and the settings that go with it.
@@ -231,6 +254,15 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
     let text = summary(&html);
     assert!(text.contains(&format!("<strong>Delete role “{role_name}”</strong>")));
     assert!(text.contains(&format!("Assigned to: “{holder}”")));
+
+    // A deletion shows stored settings the parameters do not carry, with
+    // repeated spaces revealed.
+    let html = card(&app, delete_scope.id).await;
+    let text = summary(&html);
+    assert!(text.contains(&format!(
+        "<strong>Delete local scope “{scope_name}”</strong>"
+    )));
+    assert!(text.contains("Description: “Read [U+0020]triage notes”"));
 
     let html = card(&app, mint_token.id).await;
     let text = summary(&html);
