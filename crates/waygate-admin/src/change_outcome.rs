@@ -30,7 +30,7 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "rate_limit.update" => (
             "Change a rate limit",
-            "The rate limit uses the new capacity and refill rate from the next request. Its scope and action do not change.",
+            "The rate limit uses the new capacity and refill rate from the next request, and another update can restore the old values. Its scope and action do not change.",
         ),
         "rate_limit.delete" => (
             "Delete a rate limit",
@@ -55,8 +55,7 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "peer.update" => (
             "Change a peer gateway",
-            "The peer's tokens are checked against the new issuer and signing keys once the keys \
-             are next fetched.",
+            "The peer's tokens are checked against the new issuer and signing keys once the keys are next fetched. Another update can restore the old values.",
         ),
         "peer.delete" => (
             "Remove a peer gateway",
@@ -70,13 +69,11 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "rbac.role.update" => (
             "Change a role",
-            "Everyone who holds the role gets the new scope list in place of the old one within \
-             a minute. The role's name and description are also replaced.",
+            "Everyone who holds the role gets its new scope list within a minute, keeping any removed scopes they get elsewhere. The role's name and description are also replaced, and another update can restore them.",
         ),
         "rbac.role.delete" => (
             "Delete a role",
-            "The role is deleted with its user assignments and group mappings, and holders lose \
-             its scopes within a minute. Recreating the role does not restore the assignments.",
+            "The role is deleted with its user assignments and group mappings, and within a minute holders lose the scopes only it gave them. Recreating the role does not restore the assignments.",
         ),
         "rbac.assignment.grant" => (
             "Assign a role to a user",
@@ -90,13 +87,11 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "rbac.assignment.revoke" => (
             "Remove a role from a user",
-            "The user loses the role within a minute, unless another role or group gives them \
-             the same scopes.",
+            "The user loses the role within a minute, keeping any of its scopes they get elsewhere.",
         ),
         "rbac.assignment.revoke_privileged" => (
             "Remove a control-plane role from a user",
-            "The user loses the role, including its control-plane scopes, on their next request, \
-             unless another role or group gives them the same scopes.",
+            "The user loses the role, including its control-plane scopes, on their next request, keeping any of its scopes they get elsewhere.",
         ),
         "rbac.group_mapping.grant" => (
             "Give a group a role",
@@ -110,12 +105,11 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "rbac.group_mapping.revoke" => (
             "Remove a role from a group",
-            "Members of the group stop receiving the role through this group within a minute.",
+            "Members of the group stop receiving the role through this group within a minute, keeping any of its scopes they get elsewhere.",
         ),
         "rbac.group_mapping.revoke_privileged" => (
             "Remove a control-plane role from a group",
-            "Members of the group stop receiving the role, including its control-plane scopes, \
-             through this group on their next request.",
+            "Members of the group stop receiving the role, including its control-plane scopes, through this group on their next request, keeping any of its scopes they get elsewhere.",
         ),
         "tenant.update" => (
             "Rename the tenant",
@@ -132,8 +126,7 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "audit.routing.set" => (
             "Set audit routing for an exporter",
-            "From the next audit event, the tenant's events go only to exporters with an enabled \
-             routing rule, and this rule sets whether the exporter is one of them.",
+            "From the next audit event, the tenant's events go only to exporters with an enabled routing rule, and this rule sets whether the exporter is one of them. Changing or removing the rule reverses this.",
         ),
         "audit.routing.clear" => (
             "Remove audit routing for an exporter",
@@ -165,8 +158,7 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "api_key.update_grants" => (
             "Change an API key's scopes and groups",
-            "The listed scopes and groups replace the key's current ones once the gateway's key \
-             cache expires, one minute by default. Its secret and expiry do not change.",
+            "The listed scopes and groups replace the key's current ones once the gateway's key cache expires, one minute by default. Its secret and expiry do not change, and another update can restore the old grants.",
         ),
         "api_key_profile.create" => (
             "Create an API key profile",
@@ -192,28 +184,23 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "manifest.publish" => (
             "Publish an upstream server set draft",
-            "The draft becomes the published upstream server set; in the default tenant, \
-             gateways apply it on the reload this triggers. Rolling back restores the previous set.",
+            "The draft becomes the published upstream server set; in the default tenant, gateways apply it on the reload this triggers unless the preview says a restart is required. Rolling back restores the previous set.",
         ),
         "manifest.rollback" => (
             "Roll back the upstream server set",
-            "The selected version's content is published as a new version; in the default \
-             tenant, gateways apply it on the reload this triggers.",
+            "The selected version's content is published as a new version; in the default tenant, gateways apply it on the reload this triggers unless the preview says a restart is required.",
         ),
         "manifest.stage_and_publish" => (
             "Replace the upstream server set",
-            "The submitted set replaces the live upstream server set, and servers it leaves out \
-             are removed on the reload this triggers. Rolling back restores the previous set.",
+            "The submitted set replaces the live upstream server set, and gateways apply it on the reload this triggers unless the preview says a restart is required. Rolling back restores the previous set.",
         ),
         "manifest.upsert_servers" => (
             "Add or replace upstream servers",
-            "The listed servers are added to or replaced in the live server set, other servers \
-             are unchanged, and gateways apply it on the reload this triggers.",
+            "The listed servers are added to or replaced in the live server set, other servers are unchanged, and gateways apply it on the reload this triggers unless the preview says a restart is required.",
         ),
         "manifest.remove_servers" => (
             "Remove upstream servers",
-            "The listed servers are removed from the live server set, and their tools become \
-             unavailable on the reload this triggers. Rolling back restores them.",
+            "The listed servers are removed from the live server set, and their tools become unavailable on the reload this triggers unless the preview says a restart is required. Rolling back restores them.",
         ),
         "upstream.reconnect" => (
             "Reconnect an upstream server",
@@ -250,8 +237,7 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "agent_config.update" => (
             "Change a gateway agent",
-            "The agent's whole configuration, including its tool allowlist, is replaced. Runs \
-             started afterwards use it.",
+            "The agent's whole configuration, including its tool allowlist, is replaced, and runs started afterwards use it. Another update can restore the old configuration.",
         ),
         "agent_config.delete" => (
             "Delete a gateway agent",

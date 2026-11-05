@@ -104,12 +104,27 @@ async fn inspection_rule(state: &AdminState, request: &ChangeRequest) -> ChangeD
         (None, Some(_)) => None,
     };
     let rule = found!(Lookup::from_read(action, "stored inspection rule", read));
-    ChangeDescription::titled(
+    let mut description = ChangeDescription::titled(
         action,
         format!("Delete stored inspection rule {}", quoted(&rule.name)),
         &request.params,
         RULE_KEYS,
-    )
+    );
+    // Names repeat across inspectors, so the card names the inspector and
+    // shows the stored settings that the deletion removes.
+    description.changes = vec![
+        change(format!("Inspector: {}", quoted(rule.inspector.as_str()))),
+        change(format!(
+            "Enabled: {}",
+            if rule.enabled { "yes" } else { "no" }
+        )),
+        change(format!("Settings: {}", quoted(&rule.config.to_string()))),
+        change(format!(
+            "Applies to: {}",
+            quoted(&rule.applies_to.to_string())
+        )),
+    ];
+    description
 }
 
 async fn skill(state: &AdminState, request: &ChangeRequest) -> ChangeDescription {
