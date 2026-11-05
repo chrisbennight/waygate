@@ -415,13 +415,8 @@ pub(crate) async fn manifest_impact_summary_precedes_controls_on_both_approval_s
             .find("Expands the configured capability surface")
             .unwrap_or_else(|| panic!("{path} must lead with the effective capability outcome"));
         let prospective_at = body
-            .find("Prospective authorization sample")
+            .find("<summary>Sampled access for")
             .unwrap_or_else(|| panic!("{path} must show candidate access evidence"));
-        let evidence_at = body
-            .find("Recent authorization evidence")
-            .unwrap_or_else(|| {
-                panic!("{path} must retain replay as separately-labelled supporting evidence")
-            });
         let params_label = "Exact parameters";
         let params_at = body
             .find(params_label)
@@ -430,22 +425,19 @@ pub(crate) async fn manifest_impact_summary_precedes_controls_on_both_approval_s
             .find(">Approve<")
             .unwrap_or_else(|| panic!("{path} must retain the approval control"));
         assert!(
-            outcome_at < prospective_at
-                && prospective_at < evidence_at
-                && evidence_at < params_at
-                && params_at < approve_at,
-            "{path} must read service outcome → prospective sample → replay evidence → captured params → approval control"
+            outcome_at < prospective_at && prospective_at < params_at && params_at < approve_at,
+            "{path} must read service outcome → prospective sample → captured params → approval control"
         );
         assert!(
-            body.contains("10 added · 0 removed · 0 reclassified"),
-            "{path} must distinguish configured additions from reclassifications"
+            body.contains("Tools: 10 added") && !body.contains("0 removed"),
+            "{path} must name configured additions without zero counts"
         );
         assert!(
-            body.contains("Not applicable: this candidate changes capability membership"),
+            !body.contains("recorded decision"),
             "{path} must not present zero replay rows as evidence of zero service impact"
         );
         assert!(
-            body.contains("10 context-target pair(s) were indeterminate")
+            body.contains("10 indeterminate")
                 && body.contains("runtime side-effect and sensitivity facts derive from reviewed MCP annotations"),
             "{path} must identify annotation-native targets as indeterminate rather than inventing manifest facts"
         );
@@ -535,7 +527,7 @@ pub(crate) async fn manifest_operation_fallback_discloses_unbounded_policy_input
         let (status, body) = body_of(app.clone(), path).await;
         assert_eq!(status, StatusCode::OK, "{path} must render");
         assert!(
-            body.contains("10 context-target pair(s) were indeterminate"),
+            body.contains("10 indeterminate"),
             "{path} must count operation-aware fallback pairs as indeterminate"
         );
         assert!(
@@ -1524,16 +1516,25 @@ pub(crate) async fn changes_queue_policy_publish_shows_compile_tests_and_blast_r
     let (status, body) = body_of(app, "/changes").await;
     assert_eq!(status, StatusCode::OK);
 
-    // The policy-aware preview: the human-legible action, the compile badge,
-    // the passing-tests badge, and the blast-radius panel — so the approver
-    // reviews the EFFECT, not just the bundle_id.
+    // The card is titled by the exact version, states the attached tests,
+    // and keeps the decision replay one click away — so the approver reviews
+    // the EFFECT, not just the bundle_id.
     assert!(
-        body.contains("Publish draft as v9"),
-        "kind label missing from the preview"
+        body.contains("<strong>Publish access policy draft v9</strong>"),
+        "the card title must name the version"
     );
-    assert!(body.contains("compiles"), "compile badge missing");
-    assert!(body.contains("tests 1/1"), "passing-tests badge missing");
-    assert!(body.contains("Replaying"), "blast-radius panel missing");
+    assert!(
+        body.contains("Attached tests: 1 of 1 pass."),
+        "passing tests missing"
+    );
+    assert!(
+        body.contains("No recorded decision changes across"),
+        "decision replay missing"
+    );
+    assert!(
+        !body.contains("chip--ok\">compiles"),
+        "status chips are gone"
+    );
     // The raw params well still carries the captured bundle_id in full.
     assert!(
         body.contains(DRAFT_ID),
@@ -1561,11 +1562,11 @@ pub(crate) async fn changes_queue_policy_publish_broken_cedar_shows_wont_compile
     let (status, body) = body_of(app, "/changes").await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        body.contains("won't compile"),
-        "compile-error badge missing"
+        body.contains("Won't compile — approving would publish a policy that can't load"),
+        "compile error missing"
     );
     assert!(
-        !body.contains("Replaying"),
+        !body.contains("recorded decision"),
         "a non-parsing draft must NOT show a blast radius"
     );
 }

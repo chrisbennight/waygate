@@ -347,7 +347,11 @@ unreadable store falls back to the generic text. An action without a target
 description shows the plain title and outcome from
 `change_outcome::action_text` and keeps its parameters open; every registered
 action must have that text, and must be either described or listed in
-`change_description::UNDESCRIBED`. A request that needs more
+`change_description::UNDESCRIBED`. Policy and server-set changes are titled by
+their effect preview, which names the version or policy; the preview states
+blocking conditions and changes without zero counts, and keeps access sampling
+and decision replay as one-line evidence with the detail collapsed, open when a
+recorded decision would change. A request that needs more
 than one approval says when it runs. The approval confirmation repeats the
 title as a question with the outcome, read from an escaped `data-confirm`
 attribute so card text never becomes script. The exact parameters always stay

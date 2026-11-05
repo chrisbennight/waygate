@@ -6,11 +6,6 @@
    `ManifestChangePreviewView`) bound by the caller's
    `{% match … %}`. Read-only. #}
 <div class="card">
-    <p class="manifest-preview__title">
-        <strong>{{ pv.kind_label }}</strong>
-        {% match pv.blocked %}{% when Some with (b) %}<span class="chip chip--bad">approval blocked</span>{% when None %}{% endmatch %}
-    </p>
-
     {# A required part of the current effect could not be computed, or the
        executor would refuse the captured change. #}
     {% match pv.blocked %}
@@ -20,11 +15,10 @@
 
     {% match pv.effective %}
     {% when Some with (effect) %}
-        <section class="manifest-impact" aria-label="Expected service impact">
-            <p class="section-kicker">Expected service impact</p>
+        <section class="manifest-impact" aria-label="Service impact">
             <h3 class="manifest-impact__outcome manifest-impact__outcome--{{ effect.outcome_tone }}">{{ effect.outcome }}</h3>
-            <p class="manifest-impact__delta mono">{{ effect.tool_delta }}</p>
-            <p class="manifest-impact__delta mono">{{ effect.resource_delta }}</p>
+            {% match effect.tool_delta %}{% when Some with (delta) %}<p class="manifest-impact__delta">{{ delta }}</p>{% when None %}{% endmatch %}
+            {% match effect.resource_delta %}{% when Some with (delta) %}<p class="manifest-impact__delta">{{ delta }}</p>{% when None %}{% endmatch %}
             {% match effect.added_tool_posture %}
             {% when Some with (posture) %}<p class="manifest-impact__posture">{{ posture }}</p>
             {% when None %}{% endmatch %}
@@ -46,7 +40,7 @@
 
             {% if !effect.follow_ups.is_empty() %}
             <div class="manifest-impact__follow-ups">
-                <p class="section-kicker">What remains after publication</p>
+                <p class="section-kicker">After publication</p>
                 <ul>{% for action in effect.follow_ups %}<li>{{ action }}</li>{% endfor %}</ul>
             </div>
             {% endif %}
@@ -71,12 +65,14 @@
         {% endmatch %}
     {% when None %}{% endmatch %}
 
+    {# Sampling and replay are supporting evidence: one line each, with the
+       detail one click away. Replay starts open when a recorded decision
+       would change. #}
     {% match pv.prospective_summary %}
     {% when Some with (summary) %}
-        <section class="manifest-prospective" aria-label="Prospective authorization sample">
-            <p class="section-kicker">Prospective authorization sample</p>
-            <p class="manifest-replay__summary">{{ summary }}</p>
-            {% if pv.show_prospective_details %}
+        {% if pv.show_prospective_details %}
+        <details class="manifest-prospective">
+            <summary>{{ summary }}</summary>
                 {% match pv.impact %}
                 {% when Some with (im) %}
                     <ul class="manifest-prospective__tools" aria-label="Prospective Cedar verdicts by access target">
@@ -110,20 +106,23 @@
                         {% if im.prospective_access.targets_omitted > 0 %}{{ im.prospective_access.targets_omitted }} additional candidate access targets were omitted.{% endif %}
                     </p>
                 {% when None %}{% endmatch %}
-            {% endif %}
-        </section>
+        </details>
+        {% else %}
+        <p class="manifest-prospective">{{ summary }}</p>
+        {% endif %}
     {% when None %}{% endmatch %}
 
     {% match pv.replay_summary %}
     {% when Some with (summary) %}
-        <section class="manifest-replay" aria-label="Recent authorization evidence">
-            <p class="section-kicker">Recent authorization evidence</p>
-            <p class="manifest-replay__summary">{{ summary }}</p>
-            {% if pv.show_replay_details %}
-                {% match pv.impact %}
-                {% when Some with (im) %}{% include "_manifest_impact_stats.html" %}
-                {% when None %}{% endmatch %}
-            {% endif %}
-        </section>
+        {% if pv.show_replay_details %}
+        <details class="manifest-replay"{% if pv.replay_changed %} open{% endif %}>
+            <summary>{{ summary }}</summary>
+            {% match pv.impact %}
+            {% when Some with (im) %}{% include "_manifest_impact_stats.html" %}
+            {% when None %}{% endmatch %}
+        </details>
+        {% else %}
+        <p class="manifest-replay">{{ summary }}</p>
+        {% endif %}
     {% when None %}{% endmatch %}
 </div>
