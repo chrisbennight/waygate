@@ -10,8 +10,11 @@
 //! the object, show only what changes, state the outcome in one sentence, and
 //! keep identifiers with the exact parameters.
 
+use std::sync::Arc;
+
 use waygate_catalog::tool_reviews::ToolReview;
 use waygate_changeset::ChangeRequest;
+use waygate_oidc::Principal;
 
 use crate::contract_summary::{self, ContractSummary};
 use crate::state::AdminState;
@@ -92,13 +95,21 @@ impl ChangeDescription {
     }
 }
 
-/// Describe one pending change from current gateway state.
-pub(crate) async fn describe(state: &AdminState, change: &ChangeRequest) -> ChangeDescription {
+/// Describe one pending change from current gateway state, as `viewer`
+/// would approve it.
+pub(crate) async fn describe(
+    state: &Arc<AdminState>,
+    viewer: Option<&Principal>,
+    change: &ChangeRequest,
+) -> ChangeDescription {
     let mut description = match change.action_type.as_str() {
         "tool_contract.approve" => tool_contract(state, change, true).await,
         "tool_contract.reject" => tool_contract(state, change, false).await,
         other => ChangeDescription::undescribed(other),
     };
+    if description.blocked.is_none() {
+        description.blocked = stale_target(state, viewer, change).await;
+    }
     description.quorum = quorum(change.required_approvals);
     description
 }
@@ -110,6 +121,37 @@ fn quorum(required_approvals: i32) -> Option<String> {
              Each approval is recorded until then."
         )
     })
+}
+
+/// Why approval would fail the freshness check that runs before execution:
+/// the action's target, as captured at proposal, no longer matches current
+/// state. Approval re-runs the same capture, so the card can say so first.
+async fn stale_target(
+    state: &Arc<AdminState>,
+    viewer: Option<&Principal>,
+    change: &ChangeRequest,
+) -> Option<String> {
+    let proposed = change.target_etag.as_deref()?;
+    let viewer = viewer?;
+    let executor = crate::change_executor::registry().get(&change.action_type)?;
+    match executor
+        .capture_etag(state, &change.tenant_id, viewer, &change.params)
+        .await
+    {
+        Ok(Some(current)) if current == proposed => None,
+        Ok(_) => Some(
+            "The target changed after this request, so approval would fail. A new request \
+             against the current state is needed."
+                .to_owned(),
+        ),
+        Err(crate::change_executor::ExecError::Precondition(reason)) => Some(format!(
+            "The target changed after this request, so approval would fail: {reason}"
+        )),
+        Err(error) => Some(format!(
+            "The target cannot be checked, so approval would fail: {}",
+            error.message()
+        )),
+    }
 }
 
 async fn tool_contract(
@@ -168,6 +210,9 @@ async fn tool_contract(
     if let Some(reason) = decision_unavailable(&review, &params, accept).or(risk_blocks) {
         description.blocked = Some(reason.to_owned());
         return description;
+    }
+    if let Some(reversal) = kept_blocked_reversal(&review, accept) {
+        description.changes.insert(0, reversal);
     }
     if review.approved_hash.is_empty() {
         description.note =
@@ -288,6 +333,19 @@ fn decision_unavailable(
         return Some("This definition is already kept blocked.");
     }
     None
+}
+
+/// Accepting a definition an administrator kept blocked reverses that
+/// decision; the card says so before the definition's own changes.
+fn kept_blocked_reversal(review: &ToolReview, accept: bool) -> Option<DescribedChange> {
+    let decided_at = review.decided_at.filter(|_| accept && review.quarantined)?;
+    Some(DescribedChange {
+        text: "Reverses the decision to keep this definition blocked".to_owned(),
+        flag: Some(format!(
+            "An administrator kept it blocked on {}.",
+            waygate_core::fmt::format_ts_abs(decided_at)
+        )),
+    })
 }
 
 /// Order a contract summary for a card: every flagged change first, then
@@ -423,6 +481,22 @@ mod tests {
             manifest.classification_mode = waygate_upstream::ClassificationMode::McpAnnotations;
         }
         manifest
+    }
+
+    #[test]
+    fn accepting_a_kept_blocked_definition_names_the_reversal() {
+        let reversal = kept_blocked_reversal(&review(true, true), true).unwrap();
+        assert_eq!(
+            reversal.text,
+            "Reverses the decision to keep this definition blocked"
+        );
+        assert!(reversal
+            .flag
+            .unwrap()
+            .starts_with("An administrator kept it blocked on"));
+        assert!(kept_blocked_reversal(&review(true, false), true).is_none());
+        assert!(kept_blocked_reversal(&review(true, true), false).is_none());
+        assert!(kept_blocked_reversal(&review(false, true), true).is_none());
     }
 
     #[test]

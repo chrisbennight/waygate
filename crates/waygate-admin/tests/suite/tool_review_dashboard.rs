@@ -1775,14 +1775,22 @@ async fn tool_definition_requests_show_the_stored_comparison_on_the_approval_car
     assert!(fetch.approved_hash.is_empty());
 
     let changes = Arc::new(PgChangeRequestStore::new(db.clone()));
+    // The freshness witness approval re-captures: generation, observed hash,
+    // and the live manifest-set hash, which is empty without a manifest
+    // directory.
     let propose = |params: serde_json::Value| NewChangeRequest {
         tenant_id: "default".into(),
         requested_by: "propose-only-agent".into(),
         client_id: None,
         action_type: "tool_contract.approve".into(),
+        target_etag: Some(format!(
+            "{}:{}:{}",
+            params["generation"],
+            params["observed_hash"].as_str().unwrap(),
+            params["manifest_hash"].as_str().unwrap()
+        )),
         params,
         preview: None,
-        target_etag: None,
         justification: "Accept the reviewed search definition.".into(),
         requirement: ApprovalRequirement::single("dashboard-admins"),
         expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
@@ -1790,19 +1798,25 @@ async fn tool_definition_requests_show_the_stored_comparison_on_the_approval_car
     let current = changes
         .propose(propose(json!({"server": server, "tool": "search",
             "generation": search.generation, "observed_hash": search.observed_hash,
-            "manifest_hash": "m"})))
+            "manifest_hash": ""})))
         .await
         .unwrap();
     let stale = changes
         .propose(propose(json!({"server": server, "tool": "search",
             "generation": search.generation - 1, "observed_hash": search.observed_hash,
-            "manifest_hash": "m", "risk": "low"})))
+            "manifest_hash": "", "risk": "low"})))
         .await
         .unwrap();
     let first = changes
         .propose(propose(json!({"server": server, "tool": "fetch",
             "generation": fetch.generation, "observed_hash": fetch.observed_hash,
-            "manifest_hash": "m", "risk": "high"})))
+            "manifest_hash": "", "risk": "high"})))
+        .await
+        .unwrap();
+    let moved = changes
+        .propose(propose(json!({"server": server, "tool": "search",
+            "generation": search.generation, "observed_hash": search.observed_hash,
+            "manifest_hash": "an-earlier-manifest-set"})))
         .await
         .unwrap();
 
@@ -1896,6 +1910,12 @@ async fn tool_definition_requests_show_the_stored_comparison_on_the_approval_car
     assert!(!html.contains("Input parameter “context” added"));
     // A stale card still accounts for every captured intent parameter.
     assert!(html.contains("The requested risk classification (low) is not used"));
+
+    // A manifest edit after the request fails approval's freshness check, so
+    // the card says so before the administrator acts.
+    let html = card(moved.id).await;
+    assert!(html.contains("Approval unavailable:</strong> The target changed after this request"));
+    assert!(!html.contains(">Approve<"));
 
     let html = card(first.id).await;
     assert!(html.contains(&format!(

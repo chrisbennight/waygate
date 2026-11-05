@@ -839,7 +839,14 @@ async fn changes_page(
     let load = if insufficient_scope {
         LoadResult::default()
     } else {
-        load_changes(&state, &read_tenant, q.pending_offset, q.pending_id).await
+        load_changes(
+            &state,
+            &read_tenant,
+            user_principal,
+            q.pending_offset,
+            q.pending_id,
+        )
+        .await
     };
 
     let page = ChangesPage {
@@ -1275,6 +1282,7 @@ struct LoadResult {
 async fn load_changes(
     state: &Arc<AdminState>,
     tenant: &str,
+    viewer: Option<&Principal>,
     pending_offset: u32,
     pending_id: Option<Uuid>,
 ) -> LoadResult {
@@ -1409,7 +1417,7 @@ async fn load_changes(
                 .manifest
                 .as_ref()
                 .is_some_and(|preview| preview.blocked.is_some());
-        let description = crate::change_description::describe(state, &c).await;
+        let description = crate::change_description::describe(state, viewer, &c).await;
         let bulk_choice = crate::dashboard_bulk_changes::choice(&c);
         let mut row = change_row(c, true);
         row.bulk_choice = bulk_choice;
