@@ -31,26 +31,12 @@ impl ActionExecutor for RateLimitUpdateExecutor {
         _actor: &Principal,
         params: &Value,
     ) -> Result<Option<String>, ExecError> {
-        // Fingerprint the target policy's CURRENT mutable fields (the only ones
-        // `update_policy_core` can change). If an operator retunes the policy
-        // between propose and approve, this token shifts and the approved write
-        // is refused rather than clobbering their change. `None` (no store /
-        // policy gone) → mismatches a Some propose-time token, failing closed.
+        // If an operator retunes the policy between propose and approve, this
+        // token shifts and the approved write is refused rather than
+        // clobbering their change.
         let p: RateLimitUpdateParams = serde_json::from_value(params.clone())
             .map_err(|e| ExecError::BadParams(e.to_string()))?;
-        let Some(store) = state.policy.rate_limit_policies.get() else {
-            return Ok(None);
-        };
-        let policy = store
-            .get(tenant_id, p.policy_id)
-            .await
-            .map_err(|e| ExecError::Store(format!("rate_limit get: {e}")))?;
-        Ok(policy.map(|pol| {
-            etag_of(&serde_json::json!({
-                "bucket_capacity": pol.bucket_capacity,
-                "refill_per_second": pol.refill_per_second,
-            }))
-        }))
+        policy_etag(state, tenant_id, p.policy_id).await
     }
 
     async fn execute(
@@ -101,6 +87,29 @@ impl ActionExecutor for RateLimitUpdateExecutor {
             "refill_per_second": updated.refill_per_second,
         })))
     }
+}
+
+/// Fingerprint of a policy's CURRENT mutable fields (the only ones
+/// `update_policy_core` can change). `None` (no store / policy gone)
+/// mismatches a `Some` propose-time token, failing closed.
+async fn policy_etag(
+    state: &Arc<AdminState>,
+    tenant_id: &str,
+    policy_id: Uuid,
+) -> Result<Option<String>, ExecError> {
+    let Some(store) = state.policy.rate_limit_policies.get() else {
+        return Ok(None);
+    };
+    let policy = store
+        .get(tenant_id, policy_id)
+        .await
+        .map_err(|e| ExecError::Store(format!("rate_limit get: {e}")))?;
+    Ok(policy.map(|pol| {
+        etag_of(&serde_json::json!({
+            "bucket_capacity": pol.bucket_capacity,
+            "refill_per_second": pol.refill_per_second,
+        }))
+    }))
 }
 
 // ---- api_key.mint ----
@@ -159,6 +168,20 @@ pub(super) struct RateLimitDeleteExecutor;
 impl ActionExecutor for RateLimitDeleteExecutor {
     fn action_type(&self) -> &'static str {
         "rate_limit.delete"
+    }
+
+    async fn capture_etag(
+        &self,
+        state: &Arc<AdminState>,
+        tenant_id: &str,
+        _actor: &Principal,
+        params: &Value,
+    ) -> Result<Option<String>, ExecError> {
+        // A policy retuned between propose and approve is not the one the
+        // approver reviewed, so the deletion is refused.
+        let p: RateLimitDeleteParams = serde_json::from_value(params.clone())
+            .map_err(|e| ExecError::BadParams(e.to_string()))?;
+        policy_etag(state, tenant_id, p.policy_id).await
     }
 
     async fn execute(

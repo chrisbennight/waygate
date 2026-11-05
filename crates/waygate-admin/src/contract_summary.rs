@@ -93,7 +93,7 @@ fn shown(text: &str) -> String {
     }
 }
 
-fn quoted(name: &str) -> String {
+pub(crate) fn quoted(name: &str) -> String {
     format!("“{}”", shown(name))
 }
 

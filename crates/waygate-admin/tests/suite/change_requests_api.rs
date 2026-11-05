@@ -1611,6 +1611,45 @@ async fn approve_executes_rate_limit_delete() {
 }
 
 #[tokio::test]
+async fn approve_rate_limit_delete_of_a_retuned_policy_fails_closed() {
+    let policy_id = Uuid::from_u128(0x23);
+    let rl = Arc::new(FakeRateLimitStore::seeded(policy_id));
+    let app = api_router(
+        state_full(
+            Some(mem_store()),
+            Some(rl.clone() as Arc<dyn RateLimitPolicyStore>),
+        )
+        .await,
+    );
+    let body = json!({
+        "action_type": "rate_limit.delete",
+        "params": { "policy_id": policy_id },
+        "justification": "retire the seeded nightly policy"
+    });
+    let id = propose_as(&app, &body, "alice").await;
+    // An operator retunes the policy while the deletion is pending.
+    rl.update(
+        waygate_core::TenantId::default().as_str(),
+        policy_id,
+        Some(500),
+        None,
+    )
+    .await
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_empty(
+            &format!("/api/v1/admin/change_requests/{id}/approve"),
+            "bob",
+            &["mcp:admin"],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert!(rl.exists(policy_id), "the retuned policy is kept");
+}
+
+#[tokio::test]
 async fn approve_rate_limit_delete_missing_fails_precondition() {
     // The target policy doesn't exist (deleted between propose and approve):
     // delete_policy_core returns Ok(false) -> the executor raises a
@@ -2379,6 +2418,135 @@ async fn approve_executes_peer_delete() {
     let v = approve_as(&app, &id, "bob").await;
     assert_eq!(v["status"].as_str().unwrap(), "executed");
     assert_eq!(peers.count(), 0, "peer removed from the store");
+}
+
+/// Approves a pending change and expects the freshness guard to refuse it.
+async fn approve_expecting_conflict(app: &axum::Router, id: &str) {
+    let resp = app
+        .clone()
+        .oneshot(post_empty(
+            &format!("/api/v1/admin/change_requests/{id}/approve"),
+            "bob",
+            &["mcp:admin"],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn deletions_of_targets_edited_after_proposal_fail_closed() {
+    let tenant = waygate_core::TenantId::default();
+    let tenant = tenant.as_str();
+    let now = OffsetDateTime::now_utc();
+
+    // Role: an operator adds a scope while the deletion is pending.
+    let role_id = Uuid::from_u128(0x9101);
+    let rbac = Arc::new(FakeRbacStore::seeded(Role {
+        id: role_id,
+        tenant_id: tenant.to_owned(),
+        name: "triage".into(),
+        description: None,
+        scopes: vec!["mcp:read".into()],
+        created_at: now,
+        updated_at: now,
+    }));
+    let app =
+        api_router(state_with_rbac(Some(mem_store()), rbac.clone() as Arc<dyn RbacStore>).await);
+    let body = json!({
+        "action_type": "rbac.role.delete",
+        "params": { "id": role_id },
+        "justification": "retire triage"
+    });
+    let id = propose_as(&app, &body, "alice").await;
+    rbac.update_role(
+        tenant,
+        role_id,
+        "triage",
+        None,
+        &["mcp:read".to_string(), "mcp:invoke".to_string()],
+    )
+    .await
+    .unwrap();
+    approve_expecting_conflict(&app, &id).await;
+    assert!(rbac.get_by_id(role_id).is_some(), "the edited role is kept");
+
+    // Peer: an operator changes the issuer while the deletion is pending.
+    let peer_id = Uuid::from_u128(0x9102);
+    let peers = Arc::new(FakeFederatedPeersStore::seeded(seed_peer(
+        peer_id, "north-gw",
+    )));
+    let app = api_router(
+        state_with_peers(
+            Some(mem_store()),
+            peers.clone() as waygate_federation::SharedPeersStore,
+        )
+        .await,
+    );
+    let body = json!({
+        "action_type": "peer.delete",
+        "params": { "id": peer_id },
+        "justification": "decommission north-gw"
+    });
+    let id = propose_as(&app, &body, "alice").await;
+    peers
+        .update(
+            tenant,
+            peer_id,
+            PeerUpdate {
+                peer_name: None,
+                issuer: Some("https://north.example"),
+                jwks_url: None,
+                trust_tier: None,
+            },
+        )
+        .await
+        .unwrap();
+    approve_expecting_conflict(&app, &id).await;
+    assert_eq!(peers.count(), 1, "the edited peer is kept");
+
+    // Inspection rule: an operator re-enables the rule while the deletion is
+    // pending.
+    let rule_id = Uuid::from_u128(0x9103);
+    let rules = Arc::new(FakeInspectionRulesStore::seeded(InspectionRule {
+        id: rule_id,
+        tenant_id: tenant.to_owned(),
+        inspector: InspectorKind::Pii,
+        name: "mask-ssn".into(),
+        config: json!({}),
+        applies_to: json!({}),
+        enabled: false,
+        created_at: now,
+        updated_at: now,
+    }));
+    let app = api_router(
+        state_with_rules(
+            Some(mem_store()),
+            rules.clone() as waygate_dashboard_stores::inspection_rules::SharedRulesStore,
+        )
+        .await,
+    );
+    let body = json!({
+        "action_type": "inspection_rule.delete",
+        "params": { "id": rule_id },
+        "justification": "retire the SSN-masking rule"
+    });
+    let id = propose_as(&app, &body, "alice").await;
+    rules
+        .update(
+            tenant,
+            rule_id,
+            RuleUpdate {
+                name: None,
+                config: None,
+                applies_to: None,
+                enabled: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+    approve_expecting_conflict(&app, &id).await;
+    assert_eq!(rules.count(), 1, "the edited rule is kept");
 }
 
 #[tokio::test]

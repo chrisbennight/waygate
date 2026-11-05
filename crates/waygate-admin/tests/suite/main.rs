@@ -50,3 +50,5 @@ mod skill_reviews_pg;
 mod tool_review_dashboard;
 
 mod bulk_changes_pg;
+
+mod approval_card_targets_pg;

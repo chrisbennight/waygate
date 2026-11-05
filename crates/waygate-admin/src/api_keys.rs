@@ -1376,8 +1376,9 @@ fn render_sparkline(buckets: &[UsageBucket], since: OffsetDateTime) -> Response 
 /// * `""` / `"never"` / `"none"` / `"unlimited"` ⇒ `Ok(None)` — no expiry.
 /// * `N` followed by `m`/`h`/`d`/`w`/`y` ⇒ `Ok(Some(now + N units))`.
 ///
-/// No max cap — operator-trust model. Negative or non-numeric N ⇒ `Err`.
-fn parse_ttl(raw: &str) -> Result<Option<OffsetDateTime>, String> {
+/// No max cap — operator-trust model. Negative or non-numeric N, or an
+/// expiry beyond the representable date range ⇒ `Err`.
+pub(crate) fn parse_ttl(raw: &str) -> Result<Option<OffsetDateTime>, String> {
     let lower = raw.to_ascii_lowercase();
     let lower = lower.trim();
     if lower.is_empty() || matches!(lower, "never" | "none" | "unlimited" | "0") {
@@ -1394,21 +1395,24 @@ fn parse_ttl(raw: &str) -> Result<Option<OffsetDateTime>, String> {
     if n < 0 {
         return Err(format!("TTL `{raw}` must be non-negative"));
     }
-    let secs: i64 = match unit.trim() {
-        "m" => n.saturating_mul(60),
-        "h" => n.saturating_mul(3600),
-        "d" => n.saturating_mul(86_400),
-        "w" => n.saturating_mul(7 * 86_400),
-        "y" => n.saturating_mul(365 * 86_400),
+    let unit_secs: i64 = match unit.trim() {
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        "w" => 7 * 86_400,
+        "y" => 365 * 86_400,
         other => {
             return Err(format!(
                 "TTL `{raw}`: unknown unit `{other}` (try m/h/d/w/y)"
             ))
         }
     };
-    Ok(Some(
-        OffsetDateTime::now_utc() + time::Duration::seconds(secs),
-    ))
+    // Checked arithmetic: an unchecked date addition panics past the
+    // representable range.
+    n.checked_mul(unit_secs)
+        .and_then(|secs| OffsetDateTime::now_utc().checked_add(time::Duration::seconds(secs)))
+        .map(Some)
+        .ok_or_else(|| format!("TTL `{raw}` is too long"))
 }
 
 fn split_csv(s: &str) -> Vec<String> {
@@ -1584,6 +1588,13 @@ mod tests {
     #[test]
     fn parse_ttl_rejects_garbage() {
         for v in ["abc", "10x", "-5d", "30"] {
+            assert!(parse_ttl(v).is_err(), "{v} should be rejected");
+        }
+    }
+
+    #[test]
+    fn parse_ttl_rejects_an_expiry_past_the_date_range() {
+        for v in ["999999999999999999d", "9223372036854775807m", "300000y"] {
             assert!(parse_ttl(v).is_err(), "{v} should be rejected");
         }
     }
