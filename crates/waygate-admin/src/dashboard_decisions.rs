@@ -129,6 +129,8 @@ struct InboxItem {
 
 struct InboxChange {
     description: crate::change_description::ChangeDescription,
+    /// Text of the approval confirmation.
+    confirm_message: String,
     requested_by: String,
     justification: String,
     action_type: String,
@@ -324,6 +326,7 @@ async fn decisions_page(
                             approval_blocked,
                             change: Some(InboxChange {
                                 params_collapsed: description.covers_params,
+                                confirm_message: description.confirmation(),
                                 description,
                                 requested_by: c.requested_by.clone(),
                                 justification: c.justification.clone(),

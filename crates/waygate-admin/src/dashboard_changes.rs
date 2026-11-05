@@ -159,6 +159,8 @@ struct ChangeRow {
     /// The description covers every captured parameter, so the exact
     /// parameters start collapsed. They remain in the page either way.
     params_collapsed: bool,
+    /// Text of the approval confirmation for a pending row.
+    confirm_message: String,
 }
 
 struct ManifestExecutionOutcomeView {
@@ -1416,6 +1418,7 @@ async fn load_changes(
         row.effect_preview_acknowledgement_required = effect_preview_acknowledgement_required;
         row.approval_blocked = approval_blocked || description.blocked.is_some();
         row.params_collapsed = description.covers_params;
+        row.confirm_message = description.confirmation();
         row.description = Some(description);
         pending_rows.push(row);
     }
@@ -1586,6 +1589,7 @@ fn change_row(c: impl Into<ChangeRowSource>, pending: bool) -> ChangeRow {
         approval_blocked: false,
         description: None,
         params_collapsed: false,
+        confirm_message: String::new(),
     }
 }
 

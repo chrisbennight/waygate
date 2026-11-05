@@ -139,7 +139,8 @@
                                 {% else %}
                                 <form method="post"
                                       action="{{ self.chrome.nav_url(c.approve_rel.as_str()) }}"
-                                      onsubmit="return confirm('Approve this change? It runs server-side once it has the required approvals — for a single-approver change that is immediately; a multi-approver change records your approval and runs only when enough distinct approvers have signed off.');">
+                                      data-confirm="{{ c.confirm_message }}"
+                                      onsubmit="return confirm(this.dataset.confirm);">
                                     <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">
                                     {% if c.effect_preview_acknowledgement_required %}
                                     <label class="effect-preview-ack">
