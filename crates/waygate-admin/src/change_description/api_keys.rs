@@ -418,6 +418,18 @@ mod tests {
     }
 
     #[test]
+    fn an_out_of_range_lifetime_is_shown_as_requested() {
+        // Rendering must not panic on a lifetime past the date range.
+        let description =
+            requested_key(&json!({"name": "ci", "sub": "alice", "ttl": "999999999999999999d"}))
+                .expect("described");
+        assert!(description
+            .changes
+            .iter()
+            .any(|c| c.text == "Requested lifetime: “999999999999999999d”"));
+    }
+
+    #[test]
     fn keys_sharing_a_name_are_told_apart_by_prefix_and_subject() {
         let row = |prefix: &str, sub: &str| ApiKeyRow {
             id: uuid::Uuid::nil(),
