@@ -136,6 +136,18 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
                     waygate_core::fmt::format_ts_abs(token.expires_at)
                 )),
             ];
+            if !token.requires_amr.is_empty() {
+                description.changes.push(change(format!(
+                    "Requires sign-in with: {}",
+                    quoted_list(&token.requires_amr)
+                )));
+            }
+            if !token.reason.is_empty() {
+                description.changes.push(change(format!(
+                    "Recorded reason: {}",
+                    quoted(&token.reason)
+                )));
+            }
             if token.used_at.is_some() {
                 description.note = Some("The token was already used.".into());
             }

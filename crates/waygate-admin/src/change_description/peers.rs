@@ -73,7 +73,10 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
                 params,
                 DELETE_KEYS,
             );
-            description.changes = vec![change(format!("Issuer: {}", quoted(&peer.issuer)))];
+            description.changes = vec![
+                change(format!("Issuer: {}", quoted(&peer.issuer))),
+                change(format!("Signing keys from: {}", quoted(&peer.jwks_url))),
+            ];
             description
         }
         other => ChangeDescription::undescribed(other),
