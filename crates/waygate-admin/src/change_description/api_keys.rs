@@ -105,12 +105,11 @@ async fn revoke(state: &AdminState, request: &ChangeRequest) -> ChangeDescriptio
     let key = found!(key(state, request).await);
     let mut description = ChangeDescription::titled(
         &request.action_type,
-        format!("Revoke API key {}", quoted(&key.name)),
+        format!("Revoke API key {}", key_label(&key)),
         &request.params,
         REVOKE_KEYS,
     );
     description.changes = vec![
-        change(format!("Belongs to: {}", quoted(&key.sub))),
         change(format!("Scopes: {}", quoted_list(&key.scopes))),
         change(format!("Groups: {}", quoted_list(&key.groups))),
         change(format!(
@@ -132,7 +131,7 @@ async fn update_grants(state: &AdminState, request: &ChangeRequest) -> ChangeDes
     let key = found!(key(state, request).await);
     let mut description = ChangeDescription::titled(
         &request.action_type,
-        format!("Change API key {}", quoted(&key.name)),
+        format!("Change API key {}", key_label(&key)),
         params,
         GRANTS_KEYS,
     );
@@ -150,6 +149,17 @@ async fn update_grants(state: &AdminState, request: &ChangeRequest) -> ChangeDes
         description.note = Some("The proposed scopes and groups match the current ones.".into());
     }
     description
+}
+
+/// A key's name, prefix, and subject. Names are not unique, so the prefix
+/// and subject tell apart keys that share one.
+fn key_label(key: &ApiKeyRow) -> String {
+    format!(
+        "{} ({}…) for {}",
+        quoted(&key.name),
+        key.key_prefix,
+        quoted(&key.sub)
+    )
 }
 
 fn profile_create(params: &Value) -> ChangeDescription {
@@ -362,6 +372,38 @@ mod tests {
         let params = json!({"scopes": ["mcp:read mcp:invoke", " "], "groups": [" ops ", ""]});
         assert_eq!(scopes(&params), ["mcp:read", "mcp:invoke"]);
         assert_eq!(groups(&params), ["ops"]);
+    }
+
+    #[test]
+    fn keys_sharing_a_name_are_told_apart_by_prefix_and_subject() {
+        let row = |prefix: &str, sub: &str| ApiKeyRow {
+            id: uuid::Uuid::nil(),
+            key_prefix: prefix.into(),
+            key_hash: String::new(),
+            name: "ci-runner".into(),
+            sub: sub.into(),
+            tenant_id: "default".into(),
+            email: None,
+            groups: Vec::new(),
+            scopes: Vec::new(),
+            created_by: String::new(),
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            last_used_at: None,
+            expires_at: None,
+            revoked_at: None,
+            profile_id: None,
+            owner: None,
+            reason: None,
+            rotation_due_at: None,
+        };
+        assert_eq!(
+            key_label(&row("mcpgw_AB", "alice")),
+            "“ci-runner” (mcpgw_AB…) for “alice”"
+        );
+        assert_ne!(
+            key_label(&row("mcpgw_AB", "alice")),
+            key_label(&row("mcpgw_CD", "bob"))
+        );
     }
 
     #[test]

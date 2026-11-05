@@ -207,6 +207,9 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
     assert!(text.contains(&format!(
         "<strong>Change rate limit “{limit_name}”</strong>"
     )));
+    assert!(text.contains(&format!(
+        "Applies to: Every call by principal “{principal}”"
+    )));
     assert!(text.contains("Capacity: 60 → 120"));
     assert!(!text.contains("Refill per second"));
 

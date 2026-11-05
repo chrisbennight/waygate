@@ -71,13 +71,24 @@ async fn update(state: &AdminState, request: &ChangeRequest) -> ChangeDescriptio
         params,
         UPDATE_KEYS,
     );
+    // Names are not unique, so the card also states which calls the limit covers.
+    description.changes.push(change(format!(
+        "Applies to: {}",
+        applies_to(
+            current.action.as_str(),
+            current.scope.as_str(),
+            current.scope_value.as_deref()
+        )
+    )));
     if let Some(reason) = current.inactive_reason() {
         return description.blocked(format!(
             "This rate limit is inactive, so it cannot be changed: {reason}"
         ));
     }
+    let mut unchanged = true;
     if let Some(capacity) = params.get("bucket_capacity").and_then(Value::as_i64) {
         if capacity != i64::from(current.bucket_capacity) {
+            unchanged = false;
             description
                 .changes
                 .push(field_change("Capacity", current.bucket_capacity, capacity));
@@ -85,6 +96,7 @@ async fn update(state: &AdminState, request: &ChangeRequest) -> ChangeDescriptio
     }
     if let Some(refill) = params.get("refill_per_second").and_then(Value::as_f64) {
         if refill != current.refill_per_second {
+            unchanged = false;
             description.changes.push(field_change(
                 "Refill per second",
                 rate(current.refill_per_second),
@@ -92,7 +104,7 @@ async fn update(state: &AdminState, request: &ChangeRequest) -> ChangeDescriptio
             ));
         }
     }
-    if description.changes.is_empty() {
+    if unchanged {
         description.note = Some("The proposed values match the current ones.".into());
     }
     description
