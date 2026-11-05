@@ -174,13 +174,13 @@ async fn tool_contract(
         outcome: Some(if accept {
             format!(
                 "Agents can discover and call {} with this definition, subject to access \
-                 policies. A later definition change is blocked for review again.",
+                 policies. A later definition change is held for review when the gateway's drift \
+                 settings require it.",
                 params.tool
             )
         } else {
             format!(
-                "{} stays hidden and its calls stay blocked. A later definition change opens \
-                 a new review.",
+                "{} stays hidden and its calls stay blocked until a later decision.",
                 params.tool
             )
         }),
