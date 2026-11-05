@@ -49,6 +49,7 @@ mod change_description;
 pub mod change_effect_preview;
 pub mod change_executor;
 pub mod change_notify;
+mod change_outcome;
 pub mod change_policy_preview;
 pub mod change_requests;
 pub mod chrome;

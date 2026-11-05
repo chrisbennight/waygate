@@ -234,12 +234,26 @@ pub(crate) async fn decisions_queue_merges_change_requests_and_break_glass() {
     // Both kinds present as chips.
     assert!(body.contains(">change request<"), "CR chip missing");
     assert!(body.contains(">break-glass<"), "break-glass chip missing");
-    // A change request without a gateway description is titled by its
-    // action, with its requester beside the binding code.
+    // A change request without a target description has its action's plain
+    // title and outcome, with its requester beside the binding code.
     assert!(
-        body.contains(r#"<div class="attn-label">api_key.mint</div>"#),
+        body.contains(r#"<div class="attn-label">Create an API key</div>"#),
         "CR title missing"
     );
+    assert!(
+        body.contains("If approved:</strong> A key with the listed scopes is created"),
+        "CR outcome missing"
+    );
+    // The confirmation names the action and its outcome, and reads its text
+    // from an escaped attribute rather than a script string.
+    assert!(
+        body.contains(
+            r#"data-confirm="Create an API key? A key with the listed scopes is created"#
+        ),
+        "CR confirmation missing"
+    );
+    assert!(body.contains("onsubmit=\"return confirm(this.dataset.confirm);\""));
+    assert!(!body.contains("Approve this change?"));
     assert!(
         body.contains("Requested by example-agent ·"),
         "CR requester missing"

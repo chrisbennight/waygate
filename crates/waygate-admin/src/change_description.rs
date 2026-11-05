@@ -50,6 +50,9 @@ pub(crate) struct ChangeDescription {
     pub evidence: Option<EvidenceLink>,
     /// Why approval is unavailable now. Denial remains available.
     pub blocked: Option<String>,
+    /// When the change runs, for a request that needs more than one
+    /// approval.
+    pub quorum: Option<String>,
     /// The title and changes state every captured intent parameter, and the
     /// gateway checked every captured identity against current state. Only
     /// then do the exact parameters start collapsed; they always remain in the
@@ -59,18 +62,36 @@ pub(crate) struct ChangeDescription {
 }
 
 impl ChangeDescription {
-    /// An action without a gateway description keeps its registered name as
-    /// the title and its captured parameters open.
+    /// An action without a target description keeps its generic title and
+    /// outcome, and its captured parameters open.
     fn undescribed(action_type: &str) -> Self {
+        let text = crate::change_outcome::action_text(action_type);
         Self {
-            title: action_type.to_owned(),
+            title: text
+                .as_ref()
+                .map_or_else(|| action_type.to_owned(), |text| text.title.to_owned()),
             changes: Vec::new(),
             note: None,
-            outcome: None,
+            outcome: text.map(|text| text.outcome.to_owned()),
             evidence: None,
             blocked: None,
+            quorum: None,
             covers_params: false,
         }
+    }
+
+    /// The approval confirmation: the title as a question, what approval
+    /// does, and when a multi-approver change runs.
+    pub(crate) fn confirmation(&self) -> String {
+        [
+            Some(format!("{}?", self.title)),
+            self.outcome.clone(),
+            self.quorum.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
     }
 }
 
@@ -89,7 +110,17 @@ pub(crate) async fn describe(
     if description.blocked.is_none() {
         description.blocked = stale_target(state, viewer, change).await;
     }
+    description.quorum = quorum(change.required_approvals);
     description
+}
+
+fn quorum(required_approvals: i32) -> Option<String> {
+    (required_approvals > 1).then(|| {
+        format!(
+            "The change runs once {required_approvals} different administrators approve it. \
+             Each approval is recorded until then."
+        )
+    })
 }
 
 /// Why approval would fail the freshness check that runs before execution:
@@ -143,13 +174,13 @@ async fn tool_contract(
         outcome: Some(if accept {
             format!(
                 "Agents can discover and call {} with this definition, subject to access \
-                 policies. A later definition change is blocked for review again.",
+                 policies. A later definition change is held for review when the gateway's drift \
+                 settings require it.",
                 params.tool
             )
         } else {
             format!(
-                "{} stays hidden and its calls stay blocked. A later definition change opens \
-                 a new review.",
+                "{} stays hidden and its calls stay blocked until a later decision.",
                 params.tool
             )
         }),
@@ -158,6 +189,7 @@ async fn tool_contract(
             path: crate::dashboard_tool_reviews::review_url(&params.server, &params.tool),
         }),
         blocked: None,
+        quorum: None,
         covers_params: true,
     };
     let manifest = state
@@ -506,6 +538,30 @@ mod tests {
         assert!(blocks
             .unwrap()
             .contains("needs a gateway risk classification"));
+    }
+
+    #[test]
+    fn confirmation_asks_with_the_title_and_states_the_outcome_and_quorum() {
+        let mut description = ChangeDescription::undescribed("rate_limit.delete");
+        assert_eq!(description.title, "Delete a rate limit");
+        assert!(!description.covers_params);
+        assert_eq!(
+            description.confirmation(),
+            format!(
+                "Delete a rate limit? {}",
+                crate::change_outcome::action_text("rate_limit.delete")
+                    .unwrap()
+                    .outcome
+            )
+        );
+        description.quorum = quorum(2);
+        assert!(description
+            .confirmation()
+            .ends_with("The change runs once 2 different administrators approve it. Each approval is recorded until then."));
+        assert_eq!(quorum(1), None);
+        let unknown = ChangeDescription::undescribed("not.registered");
+        assert_eq!(unknown.title, "not.registered");
+        assert_eq!(unknown.confirmation(), "not.registered?");
     }
 
     #[test]
