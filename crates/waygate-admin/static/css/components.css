@@ -1558,13 +1558,14 @@ td.cell-url { word-break: break-all; max-width: 360px; }
 .change-outcome { margin: 8px 0; }
 .attn-item--stacked .row-actions { text-align: left; margin-top: 4px; }
 
-/* Manifest approvals lead with the projected service outcome, then retain
-   replay as supporting evidence. Rules separate the review sections without
-   turning each fact into another nested card. */
-.manifest-preview__title { margin: 0; }
+/* Manifest approvals lead with the projected service outcome, then keep
+   sampling and replay as one-line supporting evidence with the detail one
+   click away. Rules separate the review sections without turning each fact
+   into another nested card. */
 .manifest-impact,
 .manifest-prospective,
-.manifest-replay {
+.manifest-replay,
+.policy-replay {
     margin-top: 14px;
     padding-top: 12px;
     border-top: 1px solid var(--rule);
@@ -1577,8 +1578,11 @@ td.cell-url { word-break: break-all; max-width: 360px; }
 .manifest-impact__outcome--blocked { color: var(--err); }
 .manifest-impact__outcome--attention { color: var(--flag); }
 .manifest-impact__outcome--settled { color: var(--ok); }
-.manifest-replay__summary {
-    margin: 0 0 8px;
+.manifest-prospective > summary,
+.manifest-replay > summary,
+.policy-replay > summary,
+p.manifest-prospective,
+p.manifest-replay {
     font-size: 13px;
     color: var(--ink-muted);
 }

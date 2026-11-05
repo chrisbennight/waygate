@@ -340,8 +340,20 @@ async fn decisions_page(
                                 .manifest
                                 .as_ref()
                                 .is_some_and(|preview| preview.blocked.is_some());
-                        let description =
+                        let mut description =
                             crate::change_description::describe(&state, user_principal, &c).await;
+                        // An effect preview names the exact version or policy.
+                        if let Some(title) = previews
+                            .policy
+                            .as_ref()
+                            .map(|preview| &preview.kind_label)
+                            .or(previews
+                                .manifest
+                                .as_ref()
+                                .map(|preview| &preview.kind_label))
+                        {
+                            description.title = title.clone();
+                        }
                         let approval_blocked = approval_blocked || description.blocked.is_some();
                         requested_tools.extend(requested_tool(&c, &description));
                         items.push(InboxItem {

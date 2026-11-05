@@ -348,9 +348,10 @@ disk-already-current → bad-params; a mirror failure → loud store error).
 authoring twin: an agent proposes the full manifest-set YAML, the approver
 reviews its expected service impact (`manifest_change_preview` projects configured
 tool additions/removals, post-publication catalog/runtime/drift barriers, and
-remaining operator actions). Historical decision replay is supporting evidence,
-and the console labels it not applicable when a candidate adds or removes tools
-without reclassifying an existing tool. On approval the shared core validates →
+remaining operator actions). Access sampling and historical decision replay
+are one-line supporting evidence with their detail collapsed; replay starts open
+when a recorded decision would change, and is left out when a candidate adds or
+removes tools without reclassifying an existing tool. On approval the shared core validates →
 stages a draft → publishes it — so an agent authors a manifest change through the
 HITL flow instead of editing `servers/*.yaml` on the NFS volume directly
 (which leaves the ledger stale). It enters the same locked publish body as the

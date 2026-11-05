@@ -225,12 +225,10 @@ fn approval_requirement_view_fields(
 /// public) so the template renders the same test/impact shapes the policy-bundles
 /// pane does, plus a flattened compile state the template can switch on.
 pub(crate) struct PolicyChangePreviewView {
-    /// Human-legible action ("Publish draft as v3" / "Roll back to v2").
+    /// The card title: verb first, naming the version or policy.
     pub(crate) kind_label: String,
-    /// `"ok"` (parses), `"error"` (won't compile — can't land), or `"unknown"`
-    /// (content couldn't be loaded; see `note`).
-    pub(crate) compile_state: &'static str,
-    /// The parse error when `compile_state == "error"`.
+    /// The parse error when the candidate won't compile. A candidate whose
+    /// content couldn't be loaded has no error and explains why in `note`.
     pub(crate) compile_error: Option<String>,
     /// Attached-test report (publish only, when the draft carries tests).
     pub(crate) tests: Option<crate::policy_tests::PolicyTestReport>,
@@ -250,28 +248,27 @@ impl PolicyChangePreviewView {
         use crate::change_policy_preview::{CompileStatus, PolicyChangeKind};
         let kind_label = match p.kind {
             PolicyChangeKind::Publish { version } if version > 0 => {
-                format!("Publish draft as v{version}")
+                format!("Publish access policy draft v{version}")
             }
-            PolicyChangeKind::Publish { .. } => "Publish draft".to_owned(),
+            PolicyChangeKind::Publish { .. } => "Publish an access policy draft".to_owned(),
             PolicyChangeKind::Rollback { version } if version > 0 => {
-                format!("Roll back to v{version}")
+                format!("Roll back access policies to v{version}")
             }
-            PolicyChangeKind::Rollback { .. } => "Roll back".to_owned(),
+            PolicyChangeKind::Rollback { .. } => "Roll back access policies".to_owned(),
             PolicyChangeKind::UpsertFragment {
                 policy_id: Some(policy_id),
-            } => format!("Upsert and publish policy @id={policy_id}"),
-            PolicyChangeKind::UpsertFragment { .. } => {
-                "Upsert and publish policy fragment".to_owned()
-            }
+            } => format!(
+                "Add or replace access policy {}",
+                crate::change_description::quoted(&policy_id)
+            ),
+            PolicyChangeKind::UpsertFragment { .. } => "Add or replace an access policy".to_owned(),
         };
-        let (compile_state, compile_error) = match p.compile {
-            CompileStatus::Ok => ("ok", None),
-            CompileStatus::Error(e) => ("error", Some(e)),
-            CompileStatus::Unknown => ("unknown", None),
+        let compile_error = match p.compile {
+            CompileStatus::Error(e) => Some(e),
+            CompileStatus::Ok | CompileStatus::Unknown => None,
         };
         Self {
             kind_label,
-            compile_state,
             compile_error,
             tests: p.tests,
             impact: p.impact,
@@ -287,7 +284,7 @@ impl PolicyChangePreviewView {
 /// `compile_state`/`tests`: a manifest's validity (does it parse?) is carried
 /// inside the report's own `error`, and there is no attached-test gate.
 pub(crate) struct ManifestChangePreviewView {
-    /// Human-legible action ("Publish manifest draft as v3" / "Roll back to v2").
+    /// The card title: verb first, naming the version.
     pub(crate) kind_label: String,
     /// Blast-radius replay of the candidate's classification change.
     pub(crate) impact: Option<crate::manifest_impact::ManifestImpactReport>,
@@ -305,6 +302,8 @@ pub(crate) struct ManifestChangePreviewView {
     pub(crate) show_prospective_details: bool,
     /// Whether the replay accounting table is meaningful for this candidate.
     pub(crate) show_replay_details: bool,
+    /// A recorded decision would change, so the replay evidence starts open.
+    pub(crate) replay_changed: bool,
     /// Why a piece is absent (missing bundle, unwired store, malformed params).
     pub(crate) note: Option<String>,
     /// Why approval is unavailable: an execution precondition failed or a
@@ -319,27 +318,37 @@ impl ManifestChangePreviewView {
         let blocked = p.mandatory_approval_blocker();
         let kind_label = match p.kind {
             ManifestChangeKind::Publish { version } if version > 0 => {
-                format!("Publish manifest draft as v{version}")
+                format!("Publish upstream server set draft v{version}")
             }
-            ManifestChangeKind::Publish { .. } => "Publish manifest draft".to_owned(),
+            ManifestChangeKind::Publish { .. } => "Publish an upstream server set draft".to_owned(),
             ManifestChangeKind::Rollback { version } if version > 0 => {
-                format!("Roll back manifests to v{version}")
+                format!("Roll back the upstream server set to v{version}")
             }
-            ManifestChangeKind::Rollback { .. } => "Roll back manifests".to_owned(),
-            ManifestChangeKind::StageAndPublish => "Publish manifest set".to_owned(),
-            ManifestChangeKind::UpsertServers => "Upsert manifest servers".to_owned(),
-            ManifestChangeKind::RemoveServers => "Remove manifest servers".to_owned(),
+            ManifestChangeKind::Rollback { .. } => "Roll back the upstream server set".to_owned(),
+            // Inline server-set changes name the servers the effect preview
+            // found changed.
+            ManifestChangeKind::StageAndPublish => {
+                named_title("Replace the upstream server set", ", changing", &p)
+            }
+            ManifestChangeKind::UpsertServers => {
+                named_title("Add or replace upstream servers", "", &p)
+            }
+            ManifestChangeKind::RemoveServers => named_title("Remove upstream servers", "", &p),
         };
-        let replay_summary = p.impact.as_ref().map(replay_summary).or_else(|| {
-            p.effective.as_ref().map(|_| {
-                "Historical authorization replay is unavailable for this preview.".to_owned()
-            })
+        let replay_summary = p.impact.as_ref().map(replay_summary).unwrap_or_else(|| {
+            p.effective
+                .as_ref()
+                .map(|_| "Recorded decisions could not be replayed for this preview.".to_owned())
         });
-        let prospective_summary = p.impact.as_ref().map(prospective_summary).or_else(|| {
-            p.effective.as_ref().map(|_| {
-                "Prospective authorization sampling is unavailable for this preview.".to_owned()
-            })
-        });
+        let prospective_summary = p
+            .impact
+            .as_ref()
+            .map(prospective_summary)
+            .unwrap_or_else(|| {
+                p.effective
+                    .as_ref()
+                    .map(|_| "Access could not be sampled for this preview.".to_owned())
+            });
         Self {
             kind_label,
             effective: p.effective.map(ManifestEffectiveImpactView::from_impact),
@@ -350,6 +359,7 @@ impl ManifestChangePreviewView {
                 .as_ref()
                 .is_some_and(show_manifest_prospective_details),
             show_replay_details: p.impact.as_ref().is_some_and(show_manifest_replay_details),
+            replay_changed: p.impact.as_ref().is_some_and(|report| report.changed > 0),
             impact: p.impact,
             note: p.note,
             blocked,
@@ -363,8 +373,10 @@ impl ManifestChangePreviewView {
 pub(crate) struct ManifestEffectiveImpactView {
     pub(crate) outcome: String,
     pub(crate) outcome_tone: &'static str,
-    pub(crate) tool_delta: String,
-    pub(crate) resource_delta: String,
+    /// Tool membership changes, leaving out zero counts; `None` when none.
+    pub(crate) tool_delta: Option<String>,
+    /// Resource prefix changes, leaving out zero counts; `None` when none.
+    pub(crate) resource_delta: Option<String>,
     pub(crate) added_tool_posture: Option<String>,
     pub(crate) approval_posture: Option<String>,
     pub(crate) servers: Vec<ManifestServerImpactView>,
@@ -391,13 +403,17 @@ impl ManifestEffectiveImpactView {
             | ActivationReadiness::NoRuntimeChange => "neutral",
         };
         let outcome = effective_outcome(&impact);
-        let tool_delta = format!(
-            "{} added · {} removed · {} reclassified",
-            impact.tools.added, impact.tools.removed, impact.tools.reclassified
+        let tool_delta = membership_delta(
+            "Tools",
+            impact.tools.added,
+            impact.tools.removed,
+            impact.tools.reclassified,
         );
-        let resource_delta = format!(
-            "{} resource prefixes added · {} removed · {} reclassified",
-            impact.resources.added, impact.resources.removed, impact.resources.reclassified
+        let resource_delta = membership_delta(
+            "Resource prefixes",
+            impact.resources.added,
+            impact.resources.removed,
+            impact.resources.reclassified,
         );
         let approval_posture = match (
             impact.tools.approval_relaxed_servers,
@@ -484,6 +500,62 @@ impl ManifestEffectiveImpactView {
             ),
         }
     }
+}
+
+/// Servers named in a title before the rest are counted.
+const TITLE_SERVERS: usize = 3;
+
+/// `base` followed by the changed servers' names, or `base` alone when the
+/// effect preview is unavailable or names none.
+fn named_title(
+    base: &str,
+    joiner: &str,
+    preview: &crate::manifest_change_preview::ManifestChangePreview,
+) -> String {
+    let names: Vec<String> = preview
+        .effective
+        .as_ref()
+        .map(|effect| {
+            effect
+                .servers
+                .iter()
+                .map(|server| crate::change_description::quoted(&server.server))
+                .collect()
+        })
+        .unwrap_or_default();
+    if names.is_empty() {
+        return base.to_owned();
+    }
+    let shown = names
+        .iter()
+        .take(TITLE_SERVERS)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    match names.len().saturating_sub(TITLE_SERVERS) {
+        0 => format!("{base}{joiner} {shown}"),
+        more => format!("{base}{joiner} {shown} and {more} more"),
+    }
+}
+
+/// `Tools: 10 added, 1 removed`, leaving out zero counts; `None` when
+/// nothing changes.
+fn membership_delta(
+    label: &str,
+    added: usize,
+    removed: usize,
+    reclassified: usize,
+) -> Option<String> {
+    let parts: Vec<String> = [
+        (added, "added"),
+        (removed, "removed"),
+        (reclassified, "reclassified"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, what)| format!("{count} {what}"))
+    .collect();
+    (!parts.is_empty()).then(|| format!("{label}: {}", parts.join(", ")))
 }
 
 fn effective_outcome(impact: &crate::manifest_effect::ManifestEffectiveImpact) -> String {
@@ -598,88 +670,91 @@ fn plural_count(count: usize, singular: &str, plural: &str) -> String {
     }
 }
 
-fn replay_summary(report: &crate::manifest_impact::ManifestImpactReport) -> String {
+/// One line on the historical replay, or `None` when replay does not apply
+/// to this candidate.
+fn replay_summary(report: &crate::manifest_impact::ManifestImpactReport) -> Option<String> {
     use crate::manifest_impact::ManifestReplayApplicability;
-    match report.replay_applicability {
+    Some(match report.replay_applicability {
         ManifestReplayApplicability::Replayed => {
             if report.changed == 0 {
                 format!(
-                    "Recent authorization replay found no changed decisions across {} replayed call{}.",
+                    "No recorded decision changes across {} replayed call{}.",
                     report.replayed,
                     if report.replayed == 1 { "" } else { "s" }
                 )
             } else {
                 format!(
-                    "Recent authorization replay found {} decision{} that would change.",
+                    "{} recorded decision{} would change.",
                     report.changed,
                     if report.changed == 1 { "" } else { "s" }
                 )
             }
         }
-        ManifestReplayApplicability::NoReclassifiedTools => {
-            if report.tools_added > 0
-                || report.tools_removed > 0
-                || report.resources_added > 0
-                || report.resources_removed > 0
-            {
-                "Not applicable: this candidate changes capability membership, but does not reclassify an existing tool or resource prefix.".to_owned()
-            } else {
-                "Not applicable: this candidate does not reclassify an existing tool or resource prefix."
-                    .to_owned()
-            }
-        }
+        ManifestReplayApplicability::NoReclassifiedTools
+        | ManifestReplayApplicability::LedgerOnlyNoActivation => return None,
         ManifestReplayApplicability::NoMatchingHistory => {
-            "No matching history: existing tools or resource prefixes are reclassified, but no recent captured decision used them.".to_owned()
-        }
-        ManifestReplayApplicability::NoReplayableHistory => {
-            "No replayable history: matching decisions did not retain the inputs needed for comparison.".to_owned()
-        }
-        ManifestReplayApplicability::Unavailable => {
-            "Historical authorization replay is unavailable for this preview.".to_owned()
-        }
-        ManifestReplayApplicability::LedgerOnlyNoActivation => {
-            "Not applicable: this tenant-local ledger change does not activate the gateway-wide manifest."
+            "No recent recorded decision used the reclassified tools or resource prefixes."
                 .to_owned()
         }
-    }
+        ManifestReplayApplicability::NoReplayableHistory => {
+            "Recorded decisions for the reclassified targets kept too little input to replay."
+                .to_owned()
+        }
+        ManifestReplayApplicability::Unavailable => {
+            "Recorded decisions could not be replayed for this preview.".to_owned()
+        }
+    })
 }
 
-fn prospective_summary(report: &crate::manifest_impact::ManifestImpactReport) -> String {
+/// One line on the prospective sample, or `None` when sampling does not
+/// apply to this candidate.
+fn prospective_summary(report: &crate::manifest_impact::ManifestImpactReport) -> Option<String> {
     use crate::manifest_impact::ManifestProspectiveApplicability;
     let sample = &report.prospective_access;
-    match sample.applicability {
-        ManifestProspectiveApplicability::Evaluated => format!(
-            "Across {} distinct recent caller context{} and {} added or reclassified access target{}, the preview produced {} allow, {} deny, {} step-up, and {} approval-required verdicts.{}",
-            sample.caller_contexts_considered,
-            if sample.caller_contexts_considered == 1 { "" } else { "s" },
-            sample.targets_considered,
-            if sample.targets_considered == 1 { "" } else { "s" },
-            sample.allow,
-            sample.deny,
-            sample.step_up,
-            sample.approval_required,
-            if sample.indeterminate == 0 {
-                String::new()
-            } else {
-                format!(" {} context-target pair(s) were indeterminate.", sample.indeterminate)
-            }
-        ),
-        ManifestProspectiveApplicability::NoCandidateTools => {
-            "Not applicable: no manifest-declared added or reclassified access targets are available for prospective evaluation.".to_owned()
+    Some(match sample.applicability {
+        ManifestProspectiveApplicability::Evaluated => {
+            let verdicts: Vec<String> = [
+                (sample.allow, "allow"),
+                (sample.deny, "deny"),
+                (sample.step_up, "step-up"),
+                (sample.approval_required, "approval-required"),
+                (sample.indeterminate, "indeterminate"),
+            ]
+            .into_iter()
+            .filter(|(count, _)| *count > 0)
+            .map(|(count, verdict)| format!("{count} {verdict}"))
+            .collect();
+            format!(
+                "Sampled access for {} recent caller{}: {}.",
+                sample.caller_contexts_considered,
+                if sample.caller_contexts_considered == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+                if verdicts.is_empty() {
+                    "no verdicts".to_owned()
+                } else {
+                    verdicts.join(", ")
+                }
+            )
         }
+        ManifestProspectiveApplicability::NoCandidateTools
+        | ManifestProspectiveApplicability::LedgerOnlyNoActivation => return None,
         ManifestProspectiveApplicability::NoConcreteResourceHistory => {
-            "No prospective resource sample: changed URI prefixes had no exact resource URI in the recent audit window, and the preview does not invent one.".to_owned()
+            "No recent request used an exact URI under the changed resource prefixes, so access \
+             was not sampled."
+                .to_owned()
         }
         ManifestProspectiveApplicability::NoRecentCallerContexts => {
-            "No prospective caller sample: no recent reconstructable caller contexts were available. This is not evidence that the candidate tools are inaccessible.".to_owned()
+            "No recent callers were available to sample access; this does not mean the tools are \
+             inaccessible."
+                .to_owned()
         }
         ManifestProspectiveApplicability::Unavailable => {
-            "Prospective authorization sampling is unavailable for this preview.".to_owned()
+            "Access could not be sampled for this preview.".to_owned()
         }
-        ManifestProspectiveApplicability::LedgerOnlyNoActivation => {
-            "Not applicable: this tenant-local ledger change does not activate the gateway-wide manifest.".to_owned()
-        }
-    }
+    })
 }
 
 fn show_manifest_prospective_details(
@@ -735,8 +810,7 @@ pub(crate) async fn preview_pending_change(
         if action_type == "policy.upsert_fragment" {
             return PendingPreviews {
                 policy: Some(PolicyChangePreviewView {
-                    kind_label: "Upsert and publish policy fragment".to_owned(),
-                    compile_state: "unknown",
+                    kind_label: "Add or replace an access policy".to_owned(),
                     compile_error: None,
                     tests: None,
                     impact: None,
@@ -1417,7 +1491,19 @@ async fn load_changes(
                 .manifest
                 .as_ref()
                 .is_some_and(|preview| preview.blocked.is_some());
-        let description = crate::change_description::describe(state, viewer, &c).await;
+        let mut description = crate::change_description::describe(state, viewer, &c).await;
+        // An effect preview names the exact version or policy; it titles the card.
+        if let Some(title) = previews
+            .policy
+            .as_ref()
+            .map(|preview| &preview.kind_label)
+            .or(previews
+                .manifest
+                .as_ref()
+                .map(|preview| &preview.kind_label))
+        {
+            description.title = title.clone();
+        }
         let bulk_choice = crate::dashboard_bulk_changes::choice(&c);
         let mut row = change_row(c, true);
         row.bulk_choice = bulk_choice;
@@ -1892,8 +1978,7 @@ mod tests {
             note: None,
             blocked: None,
         });
-        assert_eq!(v.kind_label, "Publish draft as v3");
-        assert_eq!(v.compile_state, "ok");
+        assert_eq!(v.kind_label, "Publish access policy draft v3");
         assert!(v.compile_error.is_none());
         assert!(v.note.is_none());
         assert!(v.blocked.is_none());
@@ -1909,8 +1994,7 @@ mod tests {
             note: Some("heads up".into()),
             blocked: Some("version 2 is a draft, not a published version".into()),
         });
-        assert_eq!(v.kind_label, "Roll back to v2");
-        assert_eq!(v.compile_state, "error");
+        assert_eq!(v.kind_label, "Roll back access policies to v2");
         assert_eq!(v.compile_error.as_deref(), Some("parse boom"));
         // note + blocked pass through verbatim.
         assert_eq!(v.note.as_deref(), Some("heads up"));
@@ -1923,7 +2007,7 @@ mod tests {
     #[test]
     fn from_preview_unknown_compile_uses_degraded_labels() {
         // version 0 ⇒ the version couldn't be resolved (degraded) ⇒ the bare
-        // "Publish draft" / "Roll back" label, and compile reads "unknown".
+        // generic label, and an unknown compile result carries no error.
         let pub0 = PolicyChangePreviewView::from_preview(PolicyChangePreview {
             kind: PolicyChangeKind::Publish { version: 0 },
             compile: CompileStatus::Unknown,
@@ -1932,8 +2016,7 @@ mod tests {
             note: Some("x".into()),
             blocked: None,
         });
-        assert_eq!(pub0.kind_label, "Publish draft");
-        assert_eq!(pub0.compile_state, "unknown");
+        assert_eq!(pub0.kind_label, "Publish an access policy draft");
         assert!(pub0.compile_error.is_none());
 
         let rb0 = PolicyChangePreviewView::from_preview(PolicyChangePreview {
@@ -1944,7 +2027,7 @@ mod tests {
             note: None,
             blocked: None,
         });
-        assert_eq!(rb0.kind_label, "Roll back");
+        assert_eq!(rb0.kind_label, "Roll back access policies");
     }
 
     // ---- ManifestChangePreviewView projection ----------------------------
@@ -2075,7 +2158,7 @@ mod tests {
             blocked: None,
             observed: Vec::new(),
         });
-        assert_eq!(v.kind_label, "Publish manifest draft as v3");
+        assert_eq!(v.kind_label, "Publish upstream server set draft v3");
         assert_eq!(v.impact.as_ref().map(|im| im.changed), Some(1));
         assert!(v.note.is_none());
         assert!(v
@@ -2085,11 +2168,22 @@ mod tests {
     }
 
     #[test]
+    fn membership_deltas_leave_out_zero_counts() {
+        assert_eq!(membership_delta("Tools", 0, 0, 0), None);
+        assert_eq!(
+            membership_delta("Resource prefixes", 1, 0, 2).as_deref(),
+            Some("Resource prefixes: 1 added, 2 reclassified")
+        );
+    }
+
+    #[test]
     fn ledger_only_manifest_effect_reports_no_fleet_activation() {
         let impact = crate::manifest_impact::ManifestImpactReport::ledger_only(
             "- name: tenant-local\n  transport: http\n  trust: internal\n  url: http://tenant-local/mcp\n",
         );
-        assert!(replay_summary(&impact).contains("does not activate"));
+        // The effect says no runtime change happens; replay adds nothing.
+        assert_eq!(replay_summary(&impact), None);
+        assert_eq!(prospective_summary(&impact), None);
 
         let effect = ManifestEffectiveImpactView::from_impact(
             crate::manifest_effect::ManifestEffectiveImpact::ledger_only(),
@@ -2125,7 +2219,8 @@ mod tests {
             .outcome
             .contains("Expands the configured capability surface"));
         assert!(effect.outcome.contains("remain unavailable"));
-        assert_eq!(effect.tool_delta, "10 added · 0 removed · 0 reclassified");
+        assert_eq!(effect.tool_delta.as_deref(), Some("Tools: 10 added"));
+        assert_eq!(effect.resource_delta, None);
         assert_eq!(
             effect.added_tool_posture.as_deref(),
             Some("4 added tools may have side effects")
@@ -2155,12 +2250,9 @@ mod tests {
                 .any(|action| action.contains("gateway fleet")),
             "fleet convergence must remain distinct from publication"
         );
-        assert_eq!(
-            v.replay_summary.as_deref(),
-            Some(
-                "Not applicable: this candidate changes capability membership, but does not reclassify an existing tool or resource prefix."
-            )
-        );
+        // Added tools leave nothing to replay; the card says nothing rather
+        // than presenting zero replayed rows as zero impact.
+        assert_eq!(v.replay_summary.as_deref(), None::<&str>);
         assert!(
             !v.show_replay_details,
             "zero reclassified tools must not render replay accounting as a no-impact status"
@@ -2255,7 +2347,7 @@ mod tests {
             blocked: Some("target is no longer a draft".into()),
             observed: Vec::new(),
         });
-        assert_eq!(v.kind_label, "Roll back manifests to v2");
+        assert_eq!(v.kind_label, "Roll back the upstream server set to v2");
         assert!(v.impact.is_none());
         // note + blocked pass through verbatim.
         assert_eq!(v.note.as_deref(), Some("heads up"));
@@ -2265,7 +2357,7 @@ mod tests {
     #[test]
     fn manifest_from_preview_unknown_version_uses_degraded_labels() {
         // version 0 ⇒ the version couldn't be resolved (degraded) ⇒ the bare
-        // "Publish manifest draft" / "Roll back manifests" label.
+        // "Publish an upstream server set draft" / "Roll back the upstream server set" label.
         let pub0 = ManifestChangePreviewView::from_preview(ManifestChangePreview {
             kind: ManifestChangeKind::Publish { version: 0 },
             impact: None,
@@ -2274,7 +2366,7 @@ mod tests {
             blocked: None,
             observed: Vec::new(),
         });
-        assert_eq!(pub0.kind_label, "Publish manifest draft");
+        assert_eq!(pub0.kind_label, "Publish an upstream server set draft");
 
         let rb0 = ManifestChangePreviewView::from_preview(ManifestChangePreview {
             kind: ManifestChangeKind::Rollback { version: 0 },
@@ -2284,7 +2376,7 @@ mod tests {
             blocked: None,
             observed: Vec::new(),
         });
-        assert_eq!(rb0.kind_label, "Roll back manifests");
+        assert_eq!(rb0.kind_label, "Roll back the upstream server set");
     }
 
     // ---- shared preview_pending_change enrichment (used by BOTH the
