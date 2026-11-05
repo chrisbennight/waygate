@@ -196,6 +196,13 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
         ))
         .await
         .unwrap();
+    let create_scope = changes
+        .propose(request(
+            "scope.create_local",
+            json!({"name": format!(" new-{scope_name} "), "description": "  "}),
+        ))
+        .await
+        .unwrap();
     let delete_scope = changes
         .propose(request(
             "scope.delete_local",
@@ -298,6 +305,14 @@ async fn cards_name_targets_and_show_current_and_proposed_values() {
         "Issuer: “{issuer}” → “https://{suffix}-new.example.test”"
     )));
     assert!(!text.contains("Name:"));
+
+    // Creation trims the name and does not store a blank description.
+    let html = card(&app, create_scope.id).await;
+    let text = summary(&html);
+    assert!(text.contains(&format!(
+        "<strong>Create local scope “new-{scope_name}”</strong>"
+    )));
+    assert!(!text.contains("Description:"));
 
     let html = card(&app, mint_token.id).await;
     let text = summary(&html);

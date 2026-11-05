@@ -44,7 +44,7 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
     let (title, keys) = match action {
         "group.create_local" => match param(params, "display_name") {
             Some(name) => (
-                format!("Create local group {}", quoted(name)),
+                format!("Create local group {}", quoted(name.trim())),
                 GROUP_CREATE_KEYS,
             ),
             None => return ChangeDescription::undescribed(action),
@@ -58,7 +58,7 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
         },
         "scope.create_local" => match param(params, "name") {
             Some(name) => (
-                format!("Create local scope {}", quoted(name)),
+                format!("Create local scope {}", quoted(name.trim())),
                 SCOPE_CREATE_KEYS,
             ),
             None => return ChangeDescription::undescribed(action),
@@ -96,11 +96,16 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
         other => return ChangeDescription::undescribed(other),
     };
     let mut description = ChangeDescription::titled(action, title, params, keys);
+    // Creation and restoration trim these before storing them, and do not
+    // store a blank description.
     for (key, label) in [
         ("description", "Description"),
         ("reason", "Recorded reason"),
     ] {
-        if let Some(text) = param(params, key).filter(|text| !text.is_empty()) {
+        if let Some(text) = param(params, key)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
             description
                 .changes
                 .push(change(format!("{label}: {}", quoted(text))));
