@@ -139,6 +139,25 @@ struct InboxChange {
     params_collapsed: bool,
 }
 
+/// The tool a pending tool definition request decides, when the card found
+/// the request current. Such a request carries the tool's comparison, so the
+/// separate tool review entry is left out.
+fn requested_tool(
+    change: &waygate_changeset::ChangeRequest,
+    description: &crate::change_description::ChangeDescription,
+) -> Option<(String, String)> {
+    if description.blocked.is_some()
+        || !matches!(
+            change.action_type.as_str(),
+            "tool_contract.approve" | "tool_contract.reject"
+        )
+    {
+        return None;
+    }
+    let field = |key: &str| change.params.get(key)?.as_str().map(str::to_owned);
+    Some((field("server")?, field("tool")?))
+}
+
 fn invocation_item(summary: String, url: String, created: time::OffsetDateTime) -> InboxItem {
     InboxItem {
         kind: "invocation",
@@ -242,6 +261,9 @@ async fn decisions_page(
         && state.hitl.codemode_executions.get().is_none();
 
     let mut items: Vec<InboxItem> = Vec::new();
+    // Tools whose pending review is the target of a request that can still
+    // be approved. Each appears once, as that request's entry.
+    let mut requested_tools: Vec<(String, String)> = Vec::new();
     let mut changes_saturated = false;
     let mut break_glass_saturated = false;
     let mut load_error = false;
@@ -307,6 +329,7 @@ async fn decisions_page(
                         let description =
                             crate::change_description::describe(&state, user_principal, &c).await;
                         let approval_blocked = approval_blocked || description.blocked.is_some();
+                        requested_tools.extend(requested_tool(&c, &description));
                         items.push(InboxItem {
                             kind: "change request",
                             skill_choice: None,
@@ -426,6 +449,11 @@ async fn decisions_page(
                         tools_saturated = reviews.len() == 50;
                         let manifests = state.upstreams.manifests();
                         for review in reviews {
+                            if requested_tools.iter().any(|(server, tool)| {
+                                *server == review.server && *tool == review.tool
+                            }) {
+                                continue;
+                            }
                             items.push(InboxItem {
                                 kind: "tool",
                                 skill_choice: None,

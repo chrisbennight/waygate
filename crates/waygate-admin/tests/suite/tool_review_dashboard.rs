@@ -1925,3 +1925,112 @@ async fn tool_definition_requests_show_the_stored_comparison_on_the_approval_car
     assert!(html.contains("first definition, so there is nothing to compare."));
     assert!(html.contains(">Approve<"));
 }
+
+#[tokio::test]
+async fn a_current_tool_request_and_its_review_share_one_decisions_entry() {
+    use waygate_changeset::{
+        ApprovalRequirement, ChangeRequestStore, InMemoryChangeRequestStore, NewChangeRequest,
+    };
+    let Some(db) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let server = format!("inbox-{}", uuid::Uuid::new_v4());
+    let tool = |name: &str| ImportTool {
+        name: name.into(),
+        approved_behavior_hash: None,
+        risk: "low".into(),
+        side_effects: false,
+        pii: false,
+        discriminator: None,
+        operations: vec![],
+    };
+    ManifestImporter::new(db.clone())
+        .import_atomic(
+            "default",
+            &[ImportServer {
+                tenant_id: "default".into(),
+                name: server.clone(),
+                transport: "http".into(),
+                runtime_target: json!({"url":"http://example.test/mcp"}),
+                classification_mode: "manifest".into(),
+                tools: vec![tool("search"), tool("fetch")],
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    let store = Arc::new(PgCatalogStore::new(db));
+    for name in ["search", "fetch"] {
+        for (hash, text) in [("accepted", "Find pages."), ("observed", "Find all pages.")] {
+            store
+                .observe(
+                    "default",
+                    &server,
+                    name,
+                    &format!("{name}-{hash}"),
+                    &json!({"description": text}),
+                    true,
+                )
+                .await
+                .unwrap();
+        }
+    }
+    let review = |name: &'static str| {
+        let store = store.clone();
+        let server = server.clone();
+        async move { store.get("default", &server, name).await.unwrap().unwrap() }
+    };
+    let (search, fetch) = (review("search").await, review("fetch").await);
+    let changes = Arc::new(InMemoryChangeRequestStore::new());
+    for (review, generation) in [(&search, search.generation), (&fetch, fetch.generation - 1)] {
+        changes
+            .propose(NewChangeRequest {
+                tenant_id: "default".into(),
+                requested_by: "propose-only-agent".into(),
+                client_id: None,
+                action_type: "tool_contract.approve".into(),
+                params: json!({"server": server, "tool": review.tool, "generation": generation,
+                    "observed_hash": review.observed_hash, "manifest_hash": ""}),
+                preview: None,
+                target_etag: None,
+                justification: "Accept the reviewed definition.".into(),
+                requirement: ApprovalRequirement::single("dashboard-admins"),
+                expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+            })
+            .await
+            .unwrap();
+    }
+    let pool = UpstreamPool::connect(BTreeMap::new())
+        .await
+        .with_tool_reviews(store.clone())
+        .await;
+    let state = crate::admin_state::base_admin_state_with_pool(Arc::new(pool))
+        .with_change_request_store(Some(changes));
+    let app = dashboard_router(Arc::new(state), DashboardAuth::Disabled);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/t/default/decisions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    // The current request carries the tool's comparison; its review is not
+    // listed again.
+    let search_heading =
+        format!(r#"<div class="attn-label">Accept the new definition of {server} · search</div>"#);
+    assert_eq!(html.matches(&search_heading).count(), 1);
+    assert!(!html.contains(&format!(">{server} · search</div>")));
+    // A request that no longer matches stands alone, and the review stays.
+    assert!(html.contains(&format!(">{server} · fetch</div>")));
+    assert!(html.contains("The tool definition changed after this request."));
+}

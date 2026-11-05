@@ -239,7 +239,10 @@ the chrome moved.
   approve the exact replacement or record that it stays blocked. Both decisions
   clear its pending notification; a later definition change reopens review.
   The comparison page also lists definitions kept blocked, so completed refusal
-  decisions remain discoverable and can later be approved explicitly.
+  decisions remain discoverable and can later be approved explicitly. A pending
+  tool review targeted by a current tool definition request appears once, as
+  that request's entry; the sidebar badge still counts both, because its counts
+  never read captured parameters.
   The inbox
   renders at most eight pending changes because it shows every captured param
   in full; when saturated it links to the paginated Change requests queue.
