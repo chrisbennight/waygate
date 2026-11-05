@@ -337,9 +337,14 @@ preview, what approval does, the requester's reason, the approval conditions,
 the exact parameters, and the controls. `change_description::describe` computes
 the title, changes, outcome, and any condition that blocks approval from
 current gateway state, including the target freshness check that approval
-runs before execution. An action without a target description shows the plain
-title and outcome from `change_outcome::action_text` and keeps its parameters
-open; every registered action must have that text. A request that needs more
+runs before execution. Each action family has a module under
+`change_description/` that names the target and shows current → proposed
+values from the live stores; a missing target blocks approval, and an
+unreadable store falls back to the generic text. An action without a target
+description shows the plain title and outcome from
+`change_outcome::action_text` and keeps its parameters open; every registered
+action must have that text, and must be either described or listed in
+`change_description::UNDESCRIBED`. A request that needs more
 than one approval says when it runs. The approval confirmation repeats the
 title as a question with the outcome, read from an escaped `data-confirm`
 attribute so card text never becomes script. The exact parameters always stay
