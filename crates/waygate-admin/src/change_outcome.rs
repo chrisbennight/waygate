@@ -168,12 +168,13 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "api_key.revoke" => (
             "Revoke an API key",
-            "The key is permanently revoked, and requests using it are refused within a minute.",
+            "The key is permanently revoked, and requests using it are refused once the \
+             gateway's key cache expires, one minute by default.",
         ),
         "api_key.update_grants" => (
             "Change an API key's scopes and groups",
-            "The listed scopes and groups replace the key's current ones within a minute. Its \
-             secret and expiry do not change.",
+            "The listed scopes and groups replace the key's current ones once the gateway's key \
+             cache expires, one minute by default. Its secret and expiry do not change.",
         ),
         "api_key_profile.create" => (
             "Create an API key profile",
@@ -226,9 +227,10 @@ pub(crate) fn action_text(action_type: &str) -> Option<ActionText> {
         ),
         "upstream.reconnect" => (
             "Reconnect an upstream server",
-            "If the server is disconnected or its circuit breaker is open, the gateway instance \
-             that processes the approval connects to it again. A healthy connection is left as \
-             is.",
+            "The gateway instance that processes the approval reconnects to the server if it is \
+             disconnected or its circuit breaker is open, and leaves a healthy connection as is. \
+             If the request also clears quarantine, tools that instance blocked after a \
+             definition change are released.",
         ),
         "upstream.refresh_catalog" => (
             "Refresh an upstream server's tools",
