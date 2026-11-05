@@ -259,7 +259,7 @@ impl PolicyChangePreviewView {
                 policy_id: Some(policy_id),
             } => format!(
                 "Add or replace access policy {}",
-                crate::contract_summary::quoted(&policy_id)
+                crate::change_description::quoted(&policy_id)
             ),
             PolicyChangeKind::UpsertFragment { .. } => "Add or replace an access policy".to_owned(),
         };
