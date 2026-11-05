@@ -202,10 +202,14 @@ async fn server_operation(state: &AdminState, request: &ChangeRequest) -> Change
             .quarantined_tools(server)
             .await
             .unwrap_or_default();
+        // Tools awaiting a contract review stay blocked; the outcome says so.
         description.changes.push(change(if blocked.is_empty() {
             "No tools are blocked after a definition change".to_owned()
         } else {
-            format!("Releases tools: {}", quoted_list(&blocked))
+            format!(
+                "Blocked after a definition change: {}",
+                quoted_list(&blocked)
+            )
         }));
     }
     description
