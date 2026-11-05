@@ -91,21 +91,7 @@ impl ActionExecutor for PeerUpdateExecutor {
         // approved update is refused rather than clobbering it.
         let p: PeerUpdateParams = serde_json::from_value(params.clone())
             .map_err(|e| ExecError::BadParams(e.to_string()))?;
-        let Some(store) = state.federation.federated_peers.get() else {
-            return Ok(None);
-        };
-        let peer = store
-            .get(tenant_id, p.id)
-            .await
-            .map_err(|e| ExecError::Store(format!("peer get: {e}")))?;
-        Ok(peer.map(|pe| {
-            etag_of(&serde_json::json!({
-                "peer_name": pe.peer_name,
-                "issuer": pe.issuer,
-                "jwks_url": pe.jwks_url,
-                "trust_tier": pe.trust_tier,
-            }))
-        }))
+        peer_etag(state, tenant_id, p.id).await
     }
 
     async fn execute(
@@ -149,6 +135,30 @@ impl ActionExecutor for PeerUpdateExecutor {
     }
 }
 
+/// One-way fingerprint of a peer's CURRENT mutable fields. `None` (no store /
+/// peer gone) mismatches a `Some` propose-time token, failing closed.
+async fn peer_etag(
+    state: &Arc<AdminState>,
+    tenant_id: &str,
+    id: Uuid,
+) -> Result<Option<String>, ExecError> {
+    let Some(store) = state.federation.federated_peers.get() else {
+        return Ok(None);
+    };
+    let peer = store
+        .get(tenant_id, id)
+        .await
+        .map_err(|e| ExecError::Store(format!("peer get: {e}")))?;
+    Ok(peer.map(|pe| {
+        etag_of(&serde_json::json!({
+            "peer_name": pe.peer_name,
+            "issuer": pe.issuer,
+            "jwks_url": pe.jwks_url,
+            "trust_tier": pe.trust_tier,
+        }))
+    }))
+}
+
 // ---- peer.delete ----
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -162,6 +172,20 @@ pub(super) struct PeerDeleteExecutor;
 impl ActionExecutor for PeerDeleteExecutor {
     fn action_type(&self) -> &'static str {
         "peer.delete"
+    }
+
+    async fn capture_etag(
+        &self,
+        state: &Arc<AdminState>,
+        tenant_id: &str,
+        _actor: &Principal,
+        params: &Value,
+    ) -> Result<Option<String>, ExecError> {
+        // A peer edited between propose and approve is not the one the
+        // approver reviewed, so the deletion is refused.
+        let p: PeerDeleteParams = serde_json::from_value(params.clone())
+            .map_err(|e| ExecError::BadParams(e.to_string()))?;
+        peer_etag(state, tenant_id, p.id).await
     }
 
     async fn execute(

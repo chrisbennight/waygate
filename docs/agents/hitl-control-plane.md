@@ -880,7 +880,8 @@ phone push) means approval from wherever the operator is.
   interpret its value. Most mutable-target executors use a one-way sha256 of
   mutable fields:
   `rate_limit.update`, `rate_limit.delete`, `rbac.role.update`,
-  `peer.update`, `tenant.update`, and the natural-key audit-config actions.
+  `rbac.role.delete`, `peer.update`, `peer.delete`, `inspection_rule.delete`,
+  `tenant.update`, and the natural-key audit-config actions.
   The one-way tokens are safe to persist even when the hashed fields are
   sensitive. Creates, content-independent identity deletes, and ordinary
   policy/manifest publish turnstiles otherwise opt out or use their own CAS.
