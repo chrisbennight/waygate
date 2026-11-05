@@ -55,34 +55,10 @@ pub(super) async fn describe(state: &AdminState, request: &ChangeRequest) -> Cha
 }
 
 async fn mint(state: &AdminState, request: &ChangeRequest) -> ChangeDescription {
-    let action = "api_key.mint";
     let params = &request.params;
-    let (Some(name), Some(subject)) = (param(params, "name"), param(params, "sub")) else {
-        return ChangeDescription::undescribed(action);
+    let Some(mut description) = requested_key(params) else {
+        return ChangeDescription::undescribed("api_key.mint");
     };
-    let mut description = ChangeDescription::titled(
-        action,
-        format!("Create API key {} for {}", quoted(name), quoted(subject)),
-        params,
-        MINT_KEYS,
-    );
-    let changes = &mut description.changes;
-    changes.push(change(format!("Scopes: {}", quoted_list(&scopes(params)))));
-    let groups = groups(params);
-    if !groups.is_empty() {
-        changes.push(change(format!("Groups: {}", quoted_list(&groups))));
-    }
-    changes.push(change(match param(params, "ttl").map(str::trim) {
-        None | Some("" | "never" | "none" | "unlimited") => {
-            "Requested lifetime: no expiry".to_owned()
-        }
-        Some(ttl) => format!("Requested lifetime: {}", quoted(ttl)),
-    }));
-    for (key, label) in [("owner", "Owner"), ("email", "Email"), ("reason", "Reason")] {
-        if let Some(value) = param(params, key).filter(|value| !value.is_empty()) {
-            changes.push(change(format!("{label}: {}", quoted(value))));
-        }
-    }
     if let Some(id) = param(params, "profile_id") {
         let read = match (id.parse().ok(), state.identity.api_key_profiles.get()) {
             (Some(profile_id), Some(store)) => store.get(&request.tenant_id, profile_id).await.ok(),
@@ -99,6 +75,46 @@ async fn mint(state: &AdminState, request: &ChangeRequest) -> ChangeDescription 
         }
     }
     description
+}
+
+/// The key a mint request asks for, as minting will store it.
+fn requested_key(params: &Value) -> Option<ChangeDescription> {
+    let (name, subject) = (param(params, "name")?, param(params, "sub")?);
+    // Minting trims the name, subject, owner, and reason before storing them.
+    let mut description = ChangeDescription::titled(
+        "api_key.mint",
+        format!(
+            "Create API key {} for {}",
+            quoted(name.trim()),
+            quoted(subject.trim())
+        ),
+        params,
+        MINT_KEYS,
+    );
+    let changes = &mut description.changes;
+    changes.push(change(format!("Scopes: {}", quoted_list(&scopes(params)))));
+    let groups = groups(params);
+    if !groups.is_empty() {
+        changes.push(change(format!("Groups: {}", quoted_list(&groups))));
+    }
+    let ttl = param(params, "ttl").map(str::trim).unwrap_or_default();
+    changes.push(change(match crate::api_keys::parse_ttl(ttl) {
+        Ok(None) => "Requested lifetime: no expiry".to_owned(),
+        _ => format!("Requested lifetime: {}", quoted(ttl)),
+    }));
+    for (key, label) in [("owner", "Owner"), ("reason", "Reason")] {
+        if let Some(value) = param(params, key)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            changes.push(change(format!("{label}: {}", quoted(value))));
+        }
+    }
+    // Email is stored as given unless it is blank.
+    if let Some(email) = param(params, "email").filter(|email| !email.trim().is_empty()) {
+        changes.push(change(format!("Email: {}", quoted(email))));
+    }
+    Some(description)
 }
 
 async fn revoke(state: &AdminState, request: &ChangeRequest) -> ChangeDescription {
@@ -372,6 +388,33 @@ mod tests {
         let params = json!({"scopes": ["mcp:read mcp:invoke", " "], "groups": [" ops ", ""]});
         assert_eq!(scopes(&params), ["mcp:read", "mcp:invoke"]);
         assert_eq!(groups(&params), ["ops"]);
+    }
+
+    #[test]
+    fn a_requested_key_reads_as_minting_stores_it() {
+        let description = requested_key(&json!({"name": " ci ", "sub": " alice ",
+            "scopes": ["mcp:read"], "ttl": "0", "owner": " ops ", "reason": " "}))
+        .expect("described");
+        assert_eq!(description.title, "Create API key “ci” for “alice”");
+        let texts: Vec<_> = description
+            .changes
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Scopes: “mcp:read”",
+                "Requested lifetime: no expiry",
+                "Owner: “ops”"
+            ]
+        );
+        let description = requested_key(&json!({"name": "ci", "sub": "alice", "ttl": " 30d "}))
+            .expect("described");
+        assert!(description
+            .changes
+            .iter()
+            .any(|c| c.text == "Requested lifetime: “30d”"));
     }
 
     #[test]
