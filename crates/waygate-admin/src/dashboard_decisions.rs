@@ -302,7 +302,8 @@ async fn decisions_page(
                                 .manifest
                                 .as_ref()
                                 .is_some_and(|preview| preview.blocked.is_some());
-                        let description = crate::change_description::describe(&state, &c).await;
+                        let description =
+                            crate::change_description::describe(&state, user_principal, &c).await;
                         let approval_blocked = approval_blocked || description.blocked.is_some();
                         items.push(InboxItem {
                             kind: "change request",
