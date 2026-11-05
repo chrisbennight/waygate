@@ -6,7 +6,7 @@ use waygate_changeset::ChangeRequest;
 
 use super::{
     change, found, list_changes, param, param_id, param_list, quoted, quoted_list,
-    ChangeDescription, Lookup,
+    ChangeDescription, DescribedChange, Lookup,
 };
 use crate::state::AdminState;
 
@@ -153,34 +153,23 @@ fn profile_create(params: &Value) -> ChangeDescription {
         params,
         PROFILE_CREATE_KEYS,
     );
-    let changes = &mut description.changes;
-    changes.push(change(format!(
-        "Allowed scopes: {}",
-        quoted_list(&param_list(params, "allowed_scopes"))
-    )));
-    changes.push(change(format!(
-        "Longest key lifetime: {}",
-        duration(max_ttl)
-    )));
-    for (key, label) in [("allowed_servers", "Servers"), ("allowed_tools", "Tools")] {
-        if params.get(key).is_some_and(|value| !value.is_null()) {
-            changes.push(change(format!(
-                "{label}: {}",
-                quoted_list(&param_list(params, key))
-            )));
-        }
-    }
+    let list = |key: &str| {
+        params
+            .get(key)
+            .filter(|value| value.is_array())
+            .map(|_| param_list(params, key))
+    };
     // Both requirements default to on when omitted.
     let required = |key: &str| params.get(key).and_then(Value::as_bool).unwrap_or(true);
-    changes.push(change(format!(
-        "Keys must name: {}",
-        match (required("requires_owner"), required("requires_reason")) {
-            (true, true) => "an owner and a reason",
-            (true, false) => "an owner",
-            (false, true) => "a reason",
-            (false, false) => "nothing extra",
-        }
-    )));
+    description.changes = profile_limits(
+        &param_list(params, "allowed_scopes"),
+        max_ttl,
+        list("allowed_servers").as_deref(),
+        list("allowed_tools").as_deref(),
+        required("requires_owner"),
+        required("requires_reason"),
+    );
+    let changes = &mut description.changes;
     if let Some(text) = param(params, "description").filter(|text| !text.is_empty()) {
         changes.push(change(format!("Description: {}", quoted(text))));
     }
@@ -204,11 +193,49 @@ async fn profile_delete(state: &AdminState, request: &ChangeRequest) -> ChangeDe
         &request.params,
         PROFILE_DELETE_KEYS,
     );
-    description.changes.push(change(format!(
-        "Allowed scopes: {}",
-        quoted_list(&profile.allowed_scopes)
-    )));
+    description.changes = profile_limits(
+        &profile.allowed_scopes,
+        i64::from(profile.max_ttl_seconds),
+        profile.allowed_servers.as_deref(),
+        profile.allowed_tools.as_deref(),
+        profile.requires_owner,
+        profile.requires_reason,
+    );
     description
+}
+
+/// The limits a profile places on keys minted with it. An absent or empty
+/// server or tool list places no restriction, as invocation enforces it.
+fn profile_limits(
+    scopes: &[String],
+    max_ttl_seconds: i64,
+    servers: Option<&[String]>,
+    tools: Option<&[String]>,
+    requires_owner: bool,
+    requires_reason: bool,
+) -> Vec<DescribedChange> {
+    let restriction = |values: Option<&[String]>, what: &str| match values {
+        Some(values) if !values.is_empty() => quoted_list(values),
+        _ => format!("any {what}, no restriction"),
+    };
+    vec![
+        change(format!("Allowed scopes: {}", quoted_list(scopes))),
+        change(format!(
+            "Longest key lifetime: {}",
+            duration(max_ttl_seconds)
+        )),
+        change(format!("Servers: {}", restriction(servers, "server"))),
+        change(format!("Tools: {}", restriction(tools, "tool"))),
+        change(format!(
+            "Keys must name: {}",
+            match (requires_owner, requires_reason) {
+                (true, true) => "an owner and a reason",
+                (true, false) => "an owner",
+                (false, true) => "a reason",
+                (false, false) => "nothing extra",
+            }
+        )),
+    ]
 }
 
 /// The key a revocation or grant change targets, within the request's tenant.
@@ -263,11 +290,27 @@ mod tests {
             [
                 "Allowed scopes: “mcp:read”",
                 "Longest key lifetime: 90 days",
+                "Servers: any server, no restriction",
                 "Tools: “docs.search”",
                 "Keys must name: an owner"
             ]
         );
         assert!(description.covers_params);
+    }
+
+    #[test]
+    fn an_empty_allowlist_reads_as_no_restriction() {
+        // Invocation skips an empty server or tool list, so it restricts nothing.
+        let description = profile_create(&json!({"name": "open", "max_ttl_seconds": 3600,
+            "allowed_scopes": ["mcp:read"], "allowed_servers": [], "allowed_tools": []}));
+        let texts: Vec<_> = description
+            .changes
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert!(texts.contains(&"Servers: any server, no restriction"));
+        assert!(texts.contains(&"Tools: any tool, no restriction"));
+        assert!(!texts.iter().any(|text| text.ends_with(": none")));
     }
 
     #[test]
