@@ -432,6 +432,17 @@ pub(crate) async fn manifest_impact_summary_precedes_controls_on_both_approval_s
             body.contains("Tools: 10 added") && !body.contains("0 removed"),
             "{path} must name configured additions without zero counts"
         );
+        let title_at = body
+            .find("Add or replace upstream servers “grounded-docs”")
+            .unwrap_or_else(|| panic!("{path} must name the changed server in the title"));
+        let counts_at = body.find("Tools: 10 added").unwrap();
+        let server_at = body
+            .find(r#"<strong class="mono">grounded-docs</strong>"#)
+            .unwrap_or_else(|| panic!("{path} must list the changed server"));
+        assert!(
+            title_at < server_at && server_at < counts_at,
+            "{path} must name the server before the counts"
+        );
         assert!(
             !body.contains("recorded decision"),
             "{path} must not present zero replay rows as evidence of zero service impact"

@@ -325,9 +325,15 @@ impl ManifestChangePreviewView {
                 format!("Roll back the upstream server set to v{version}")
             }
             ManifestChangeKind::Rollback { .. } => "Roll back the upstream server set".to_owned(),
-            ManifestChangeKind::StageAndPublish => "Replace the upstream server set".to_owned(),
-            ManifestChangeKind::UpsertServers => "Add or replace upstream servers".to_owned(),
-            ManifestChangeKind::RemoveServers => "Remove upstream servers".to_owned(),
+            // Inline server-set changes name the servers the effect preview
+            // found changed.
+            ManifestChangeKind::StageAndPublish => {
+                named_title("Replace the upstream server set", ", changing", &p)
+            }
+            ManifestChangeKind::UpsertServers => {
+                named_title("Add or replace upstream servers", "", &p)
+            }
+            ManifestChangeKind::RemoveServers => named_title("Remove upstream servers", "", &p),
         };
         let replay_summary = p.impact.as_ref().map(replay_summary).unwrap_or_else(|| {
             p.effective
@@ -493,6 +499,42 @@ impl ManifestEffectiveImpactView {
                 "If this change executes, publication and fleet activation are separate: activation converges asynchronously across the gateway fleet.",
             ),
         }
+    }
+}
+
+/// Servers named in a title before the rest are counted.
+const TITLE_SERVERS: usize = 3;
+
+/// `base` followed by the changed servers' names, or `base` alone when the
+/// effect preview is unavailable or names none.
+fn named_title(
+    base: &str,
+    joiner: &str,
+    preview: &crate::manifest_change_preview::ManifestChangePreview,
+) -> String {
+    let names: Vec<String> = preview
+        .effective
+        .as_ref()
+        .map(|effect| {
+            effect
+                .servers
+                .iter()
+                .map(|server| crate::change_description::quoted(&server.server))
+                .collect()
+        })
+        .unwrap_or_default();
+    if names.is_empty() {
+        return base.to_owned();
+    }
+    let shown = names
+        .iter()
+        .take(TITLE_SERVERS)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    match names.len().saturating_sub(TITLE_SERVERS) {
+        0 => format!("{base}{joiner} {shown}"),
+        more => format!("{base}{joiner} {shown} and {more} more"),
     }
 }
 
