@@ -109,6 +109,15 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
     assert!(list.contains("U+200B"));
     assert!(!list.contains('\u{200B}'));
     let url = format!("/t/default/invocation-requests?request={id}");
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(response.headers()["cache-control"]
+        .to_str()
+        .unwrap()
+        .contains("no-store"));
     let (status, review) = get(app.clone(), &url).await;
     assert_eq!(status, StatusCode::OK);
     // The card shows each submitted value, escaped, with credentials hidden

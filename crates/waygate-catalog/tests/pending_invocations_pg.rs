@@ -178,6 +178,24 @@ async fn argument_values_are_kept_only_while_a_request_is_pending() {
         })
     );
 
+    // A field name containing U+0000 is never rewritten, which could merge
+    // two fields; the values are not kept.
+    request.argument_hash = "nul-key-request".into();
+    request.argument_values = json!({"a\u{0}b": 1, "a[U+0000]b": 2})
+        .as_object()
+        .unwrap()
+        .clone();
+    let nul_key = store.retain(&request).await.unwrap();
+    assert_eq!(
+        store
+            .get(&tenant, nul_key)
+            .await
+            .unwrap()
+            .unwrap()
+            .argument_values,
+        Some(ArgumentValues::Unstorable)
+    );
+
     // A decided request cannot hold values.
     let refused = sqlx::query("UPDATE pending_invocation_requests SET argument_values='{}'::jsonb WHERE tenant_id=$1 AND id=$2")
         .bind(&tenant)

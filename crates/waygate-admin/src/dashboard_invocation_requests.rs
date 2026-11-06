@@ -149,6 +149,14 @@ fn values_view(values: Option<ArgumentValues>, pending: bool) -> ValuesView {
                 MAX_ARGUMENT_VALUES_BYTES / 1024
             ))
         }
+        Some(ArgumentValues::Unstorable) => {
+            return unavailable(
+                "A field name in these arguments contains a character the gateway cannot \
+                 store, so the values were not kept. Confirm them with the requester through \
+                 a trusted channel before approving."
+                    .to_owned(),
+            )
+        }
         None if pending => {
             return unavailable(
                 "Argument values were not kept for this request. Confirm them with the \
@@ -356,7 +364,7 @@ async fn page(
             }
         }
     }
-    Ok(render(&RequestsPage {
+    let mut response = render(&RequestsPage {
         chrome: PageChrome::build(
             &state,
             "Pending invocation requests",
@@ -371,7 +379,11 @@ async fn page(
         bulk_available: state.hitl.decision_batches.get().is_some(),
         codemode,
         note,
-    }))
+    });
+    // Argument values are private review material; no cached copy may outlive
+    // the request.
+    crate::api_keys::no_store(&mut response);
+    Ok(response)
 }
 
 #[derive(Deserialize)]

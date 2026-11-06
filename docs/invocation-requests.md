@@ -70,8 +70,9 @@ See [bulk decisions](bulk-decisions.md) for selection and review limits.
   a completed decision is a new request requiring a new administrator decision.
 - Argument values are kept only while a request is pending. Deciding a request
   deletes them, an expired request stops showing them at once, and a cleanup that
-  runs every minute deletes them from storage. Values whose redacted form exceeds
-  64 KiB are not kept; the review says so.
+  runs every minute deletes them from storage. Values are not kept when their
+  redacted form exceeds 64 KiB or a field name contains U+0000; the review says
+  so. Pages that show values tell browsers not to store them.
 - The queue permits at most one hundred pending requests per requester, one
   thousand per tenant, and ten thousand retained records per tenant. The listing
   shows the oldest pending requests first, in a bounded page. Resolve those

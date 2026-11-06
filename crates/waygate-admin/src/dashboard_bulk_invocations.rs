@@ -326,7 +326,7 @@ pub(crate) async fn page(
             guidance,
         });
     }
-    Ok(render(&ReviewPage {
+    let mut response = render(&ReviewPage {
         chrome: PageChrome::build(
             state,
             "Bulk invocation decisions",
@@ -342,7 +342,10 @@ pub(crate) async fn page(
         confirmable: !started && note.is_none(),
         confirm_url: format!("/decisions/bulk/{}/confirm", batch.id),
         note,
-    }))
+    });
+    // The review shows argument values; no cached copy may outlive the requests.
+    crate::api_keys::no_store(&mut response);
+    Ok(response)
 }
 pub(crate) async fn confirm(
     state: &Arc<AdminState>,

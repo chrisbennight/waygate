@@ -40,6 +40,9 @@ pub enum ArgumentValues {
     /// The redacted arguments exceeded [`MAX_ARGUMENT_VALUES_BYTES`] and were
     /// not kept.
     TooLarge,
+    /// A field name contains U+0000, which the store cannot hold, so the
+    /// values were not kept.
+    Unstorable,
 }
 
 #[derive(Debug, Clone)]
@@ -189,24 +192,26 @@ macro_rules! request_columns {
     () => { "SELECT r.*,CASE WHEN r.status='pending' AND r.expires_at<=clock_timestamp() THEN 'expired' ELSE r.status END AS effective_status,CASE WHEN r.status='pending' AND r.expires_at>clock_timestamp() THEN r.argument_values END AS visible_argument_values FROM pending_invocation_requests r" };
 }
 
-/// PostgreSQL JSONB cannot hold U+0000, even escaped, so the stored review
-/// view marks it visibly instead. Approval binds the original arguments by
-/// hash, so the view's spelling never changes what is approved.
-fn without_nul(value: serde_json::Value) -> serde_json::Value {
-    const MARKER: &str = "[U+0000]";
-    match value {
-        serde_json::Value::String(text) => serde_json::Value::String(text.replace('\0', MARKER)),
+/// PostgreSQL JSONB cannot hold U+0000, even escaped. In a text value the
+/// stored review view marks it visibly; approval binds the original arguments
+/// by hash, so the view's spelling never changes what is approved. A field
+/// name containing it returns `None`: rewriting names could merge two fields.
+fn without_nul(value: serde_json::Value) -> Option<serde_json::Value> {
+    Some(match value {
+        serde_json::Value::String(text) => {
+            serde_json::Value::String(text.replace('\0', "[U+0000]"))
+        }
         serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.into_iter().map(without_nul).collect())
+            serde_json::Value::Array(items.into_iter().map(without_nul).collect::<Option<_>>()?)
         }
         serde_json::Value::Object(fields) => serde_json::Value::Object(
             fields
                 .into_iter()
-                .map(|(key, value)| (key.replace('\0', MARKER), without_nul(value)))
-                .collect(),
+                .map(|(key, value)| (!key.contains('\0')).then_some(key).zip(without_nul(value)))
+                .collect::<Option<_>>()?,
         ),
         other => other,
-    }
+    })
 }
 
 #[async_trait]
@@ -236,12 +241,14 @@ impl PendingInvocationStore for PgPendingInvocationStore {
             values: request.argument_values.clone(),
             undisclosed_fields: request.undisclosed_fields,
         };
-        let argument_values = serde_json::to_value(&shown)
-            .map(without_nul)
-            .ok()
-            .filter(|values| values.to_string().len() <= MAX_ARGUMENT_VALUES_BYTES)
-            .map_or_else(|| serde_json::to_value(ArgumentValues::TooLarge), Ok)
+        let encoded = serde_json::to_value(&shown)
             .map_err(|_| RequestError::Invalid("argument value encoding failed"))?;
+        let argument_values = match without_nul(encoded) {
+            Some(values) if values.to_string().len() <= MAX_ARGUMENT_VALUES_BYTES => Ok(values),
+            Some(_) => serde_json::to_value(ArgumentValues::TooLarge),
+            None => serde_json::to_value(ArgumentValues::Unstorable),
+        }
+        .map_err(|_| RequestError::Invalid("argument value encoding failed"))?;
         let mut tx = self.pool.begin().await?;
         let tenant =
             sqlx::query("SELECT id FROM tenants WHERE id=$1 AND status='active' FOR UPDATE")
