@@ -83,6 +83,8 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
             "note": "<b>bold</b>",
             "apiKey": waygate_mcp::approval_arguments::SENSITIVE_FIELD,
             "payload": "y\n".repeat(125),
+            "cc": null,
+            "subject": "null",
         })
         .as_object()
         .unwrap()
@@ -111,7 +113,10 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
     assert_eq!(status, StatusCode::OK);
     // The card shows each submitted value, escaped, with credentials hidden
     // and long values shortened.
-    assert!(review.contains("ops@example.test"));
+    assert!(review.contains("“ops@example.test”"));
+    // A string never reads as another JSON type.
+    assert!(review.contains(r#"<dd class="argument-value">null</dd>"#));
+    assert!(review.contains(r#"<dd class="argument-value">“null”</dd>"#));
     assert!(
         review.contains("&#60;b&#62;bold&#60;/b&#62;")
             || review.contains("&lt;b&gt;bold&lt;/b&gt;")
@@ -122,10 +127,10 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
         review.contains("Approval covers the exact submitted arguments, including hidden values.")
     );
     assert!(review.contains(&format!(
-        "<details><summary>{}…</summary>",
+        "<details><summary>“{}…</summary>",
         "y\n".repeat(100)
     )));
-    assert!(review.contains(&"y\n".repeat(125)));
+    assert!(review.contains(&format!("“{}”", "y\n".repeat(125))));
     assert!(review.contains(r#"<dd class="argument-value">"#));
     assert!(review.contains("If approved:"));
     assert!(review.contains("<summary>Exact identity</summary>"));

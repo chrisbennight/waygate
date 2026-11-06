@@ -22,7 +22,8 @@ tool, states what approval allows, and shows the admitted description and each
 submitted argument as field → value. Recognized credential material and fields
 whose names mark credentials are hidden. For a tool whose reviewed input
 classification is sensitive, only the submitted schema field names appear, with
-a count of any other submitted fields. Values keep their line breaks and spacing.
+a count of any other submitted fields. Text values are quoted and keep their line
+breaks and spacing; other values appear as JSON.
 Approval still binds the complete submitted arguments, including hidden values.
 Values longer than 200 characters are shortened, with the full value one click
 away. The exact behavior and argument identities are in a collapsed section.

@@ -157,6 +157,27 @@ async fn argument_values_are_kept_only_while_a_request_is_pending() {
         Some(ArgumentValues::TooLarge)
     );
 
+    // PostgreSQL cannot store U+0000; the view marks it rather than losing
+    // the request.
+    request.argument_hash = "nul-request".into();
+    request.argument_values = json!({"payload": "a\u{0}b"}).as_object().unwrap().clone();
+    let nul = store.retain(&request).await.unwrap();
+    assert_eq!(
+        store
+            .get(&tenant, nul)
+            .await
+            .unwrap()
+            .unwrap()
+            .argument_values,
+        Some(ArgumentValues::Shown {
+            values: json!({"payload": "a[U+0000]b"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            undisclosed_fields: 1,
+        })
+    );
+
     // A decided request cannot hold values.
     let refused = sqlx::query("UPDATE pending_invocation_requests SET argument_values='{}'::jsonb WHERE tenant_id=$1 AND id=$2")
         .bind(&tenant)

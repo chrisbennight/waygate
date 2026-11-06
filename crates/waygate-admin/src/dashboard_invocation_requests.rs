@@ -181,27 +181,32 @@ fn values_view(values: Option<ArgumentValues>, pending: bool) -> ValuesView {
     let rows = values
         .into_iter()
         .map(|(name, value)| {
-            let text = match value {
+            // Strings are quoted, so a string never reads as a number, null,
+            // or JSON; other values are shown as JSON.
+            let (text, open, close) = match value {
                 serde_json::Value::String(text) => match text.as_str() {
                     waygate_mcp::approval_arguments::SENSITIVE_FIELD => {
-                        "Hidden: credential field".to_owned()
+                        ("Hidden: credential field".to_owned(), "", "")
                     }
-                    waygate_mcp::approval_arguments::SENSITIVE_INPUT => {
-                        "Hidden: the tool marks its input sensitive".to_owned()
-                    }
-                    _ => text,
+                    waygate_mcp::approval_arguments::SENSITIVE_INPUT => (
+                        "Hidden: the tool marks its input sensitive".to_owned(),
+                        "",
+                        "",
+                    ),
+                    _ => (text, "“", "”"),
                 },
-                other => other.to_string(),
+                other => (other.to_string(), "", ""),
             };
             hidden |= text.starts_with("Hidden: ") || text.contains("[REDACTED");
             let shortened = text
                 .char_indices()
                 .nth(SHOWN_VALUE_CHARS)
-                .map(|(end, _)| format!("{}…", &text[..end]));
+                .map(|(end, _)| format!("{open}{}…", &text[..end]));
+            let full = format!("{open}{text}{close}");
             ArgumentRow {
                 name: review_diff::text_segments(&name),
-                value: review_diff::text_segments(shortened.as_deref().unwrap_or(&text)),
-                full: shortened.map(|_| review_diff::text_segments(&text)),
+                value: review_diff::text_segments(shortened.as_deref().unwrap_or(&full)),
+                full: shortened.map(|_| review_diff::text_segments(&full)),
             }
         })
         .collect();

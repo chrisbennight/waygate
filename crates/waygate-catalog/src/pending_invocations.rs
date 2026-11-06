@@ -189,6 +189,26 @@ macro_rules! request_columns {
     () => { "SELECT r.*,CASE WHEN r.status='pending' AND r.expires_at<=clock_timestamp() THEN 'expired' ELSE r.status END AS effective_status,CASE WHEN r.status='pending' AND r.expires_at>clock_timestamp() THEN r.argument_values END AS visible_argument_values FROM pending_invocation_requests r" };
 }
 
+/// PostgreSQL JSONB cannot hold U+0000, even escaped, so the stored review
+/// view marks it visibly instead. Approval binds the original arguments by
+/// hash, so the view's spelling never changes what is approved.
+fn without_nul(value: serde_json::Value) -> serde_json::Value {
+    const MARKER: &str = "[U+0000]";
+    match value {
+        serde_json::Value::String(text) => serde_json::Value::String(text.replace('\0', MARKER)),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(without_nul).collect())
+        }
+        serde_json::Value::Object(fields) => serde_json::Value::Object(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key.replace('\0', MARKER), without_nul(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 #[async_trait]
 impl PendingInvocationStore for PgPendingInvocationStore {
     async fn retain(&self, request: &NewInvocationRequest) -> Result<Uuid, RequestError> {
@@ -217,6 +237,7 @@ impl PendingInvocationStore for PgPendingInvocationStore {
             undisclosed_fields: request.undisclosed_fields,
         };
         let argument_values = serde_json::to_value(&shown)
+            .map(without_nul)
             .ok()
             .filter(|values| values.to_string().len() <= MAX_ARGUMENT_VALUES_BYTES)
             .map_or_else(|| serde_json::to_value(ArgumentValues::TooLarge), Ok)
