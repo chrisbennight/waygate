@@ -63,6 +63,7 @@ async fn fixture(pool: &sqlx::PgPool) -> NewInvocationRequest {
             .as_object()
             .unwrap()
             .clone(),
+        undisclosed_fields: 1,
     }
 }
 
@@ -88,6 +89,7 @@ async fn argument_values_are_kept_only_while_a_request_is_pending() {
     let store = PgPendingInvocationStore::new(pool.clone());
     let shown = Some(ArgumentValues::Shown {
         values: request.argument_values.clone(),
+        undisclosed_fields: 1,
     });
 
     // Deciding a request clears its values.

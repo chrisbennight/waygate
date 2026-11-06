@@ -33,6 +33,28 @@ pub fn approval_view<'a>(
     )
 }
 
+/// How many submitted fields [`approval_view`] leaves out: for sensitive
+/// input, the fields the schema does not declare. Their names are
+/// caller-controlled, so the view does not show them.
+pub fn undisclosed_fields<'a>(
+    arguments: &Value,
+    sensitive_input: bool,
+    schema_fields: impl IntoIterator<Item = &'a str>,
+) -> u32 {
+    let Some(arguments) = arguments.as_object() else {
+        return 0;
+    };
+    if !sensitive_input {
+        return 0;
+    }
+    let declared: Vec<&str> = schema_fields.into_iter().collect();
+    let undeclared = arguments
+        .keys()
+        .filter(|key| !declared.contains(&key.as_str()))
+        .count();
+    u32::try_from(undeclared).unwrap_or(u32::MAX)
+}
+
 /// Every argument value with recognized credential material and sensitive
 /// field names replaced by labeled markers.
 pub fn redacted_arguments(arguments: &Value) -> Value {
@@ -147,6 +169,9 @@ mod tests {
             view,
             json!({"selector": SENSITIVE_INPUT, "contents": SENSITIVE_INPUT})
         );
+        let arguments = json!({"selector": "#id", "extra": 1, "other": 2});
+        assert_eq!(undisclosed_fields(&arguments, true, ["selector"]), 2);
+        assert_eq!(undisclosed_fields(&arguments, false, ["selector"]), 0);
     }
 
     #[test]

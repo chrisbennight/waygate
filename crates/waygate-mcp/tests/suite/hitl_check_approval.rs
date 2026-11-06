@@ -1330,16 +1330,19 @@ async fn direct_approval_summary_uses_admitted_description_and_schema_fields_wit
 
 #[tokio::test]
 async fn held_calls_retain_redacted_values_and_only_field_names_for_sensitive_input() {
-    for (sensitive_input, expected) in [
+    for (sensitive_input, expected, undisclosed) in [
         (
             false,
             serde_json::json!({"selector": "synthetic-target",
                 "apiKey": waygate_mcp::approval_arguments::SENSITIVE_FIELD,
                 "user-controlled-field-name": "opaque"}),
+            0,
         ),
+        // Undeclared fields are counted, not named.
         (
             true,
             serde_json::json!({"selector": waygate_mcp::approval_arguments::SENSITIVE_INPUT}),
+            2,
         ),
     ] {
         let requests = Arc::new(RecordingRequests::default());
@@ -1381,6 +1384,7 @@ async fn held_calls_retain_redacted_values_and_only_field_names_for_sensitive_in
             serde_json::Value::Object(captured.argument_values),
             expected
         );
+        assert_eq!(captured.undisclosed_fields, undisclosed);
         // The approval still binds the complete original arguments.
         assert_eq!(
             captured.argument_hash,

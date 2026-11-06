@@ -33,6 +33,9 @@ pub enum ArgumentValues {
     /// The submitted arguments, with credentials redacted.
     Shown {
         values: serde_json::Map<String, serde_json::Value>,
+        /// Submitted fields left out of `values`, because the tool marks its
+        /// input sensitive and does not declare them.
+        undisclosed_fields: u32,
     },
     /// The redacted arguments exceeded [`MAX_ARGUMENT_VALUES_BYTES`] and were
     /// not kept.
@@ -52,6 +55,8 @@ pub struct NewInvocationRequest {
     pub summary: InvocationSummary,
     /// The approver's view of the submitted arguments, already redacted.
     pub argument_values: serde_json::Map<String, serde_json::Value>,
+    /// Submitted fields left out of `argument_values`.
+    pub undisclosed_fields: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -209,6 +214,7 @@ impl PendingInvocationStore for PgPendingInvocationStore {
         let summary = (summary.to_string().len() <= 64 * 1024).then_some(summary);
         let shown = ArgumentValues::Shown {
             values: request.argument_values.clone(),
+            undisclosed_fields: request.undisclosed_fields,
         };
         let argument_values = serde_json::to_value(&shown)
             .ok()

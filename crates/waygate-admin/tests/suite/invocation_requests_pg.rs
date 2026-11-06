@@ -82,11 +82,12 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
             "recipient": "ops@example.test",
             "note": "<b>bold</b>",
             "apiKey": waygate_mcp::approval_arguments::SENSITIVE_FIELD,
-            "payload": "y".repeat(250),
+            "payload": "y\n".repeat(125),
         })
         .as_object()
         .unwrap()
         .clone(),
+        undisclosed_fields: 0,
     };
     let requests = catalog.pending_invocations().unwrap();
     let id = requests.retain(&draft).await.unwrap();
@@ -120,8 +121,12 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
     assert!(
         review.contains("Approval covers the exact submitted arguments, including hidden values.")
     );
-    assert!(review.contains(&format!("<details><summary>{}…</summary>", "y".repeat(200))));
-    assert!(review.contains(&"y".repeat(250)));
+    assert!(review.contains(&format!(
+        "<details><summary>{}…</summary>",
+        "y\n".repeat(100)
+    )));
+    assert!(review.contains(&"y\n".repeat(125)));
+    assert!(review.contains(r#"<dd class="argument-value">"#));
     assert!(review.contains("If approved:"));
     assert!(review.contains("<summary>Exact identity</summary>"));
     assert!(review.contains("Approve this invocation request"));
@@ -161,6 +166,22 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
     let decided = requests.get("default", id).await.unwrap().unwrap();
     assert_eq!(decided.status, "approved");
     assert!(decided.grant_id.is_some());
+    // Fields a sensitive tool does not declare are counted, never shown as
+    // an absence of arguments.
+    let mut undeclared = draft.clone();
+    undeclared.argument_hash = "undeclared-argument-digest".into();
+    undeclared.argument_values = serde_json::Map::new();
+    undeclared.undisclosed_fields = 2;
+    let undeclared = requests.retain(&undeclared).await.unwrap();
+    let (_, review) = get(
+        app.clone(),
+        &format!("/t/default/invocation-requests?request={undeclared}"),
+    )
+    .await;
+    assert!(
+        review.contains("2 other submitted fields are hidden: the tool marks its input sensitive.")
+    );
+    assert!(!review.contains("No arguments."));
     // A decided request no longer holds its values.
     let (_, review) = get(app.clone(), &url).await;
     assert!(!review.contains("ops@example.test"));

@@ -287,6 +287,11 @@ impl DefaultInvocationService {
                             .unwrap_or_default();
                         let arguments =
                             serde_json::Value::Object(ctx.arguments.clone().unwrap_or_default());
+                        let undisclosed_fields = crate::approval_arguments::undisclosed_fields(
+                            &arguments,
+                            snapshot.sensitive_input(),
+                            schema_fields.iter().copied(),
+                        );
                         let argument_values = match crate::approval_arguments::approval_view(
                             &arguments,
                             snapshot.sensitive_input(),
@@ -309,6 +314,7 @@ impl DefaultInvocationService {
                                 affected_fields: event.summary.affected_fields.clone(),
                             },
                             argument_values,
+                            undisclosed_fields,
                         };
                         match requests.retain(&request).await {
                                     Ok(id) => event.pending_request_id = Some(id),

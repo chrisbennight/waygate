@@ -137,8 +137,11 @@ fn values_view(values: Option<ArgumentValues>, pending: bool) -> ValuesView {
         note: Some(note),
         show_fields: true,
     };
-    let values = match values {
-        Some(ArgumentValues::Shown { values }) => values,
+    let (values, undisclosed) = match values {
+        Some(ArgumentValues::Shown {
+            values,
+            undisclosed_fields,
+        }) => (values, undisclosed_fields),
         Some(ArgumentValues::TooLarge) => {
             return unavailable(format!(
                 "The argument values exceed the {} KiB review limit and were not kept. \
@@ -159,15 +162,22 @@ fn values_view(values: Option<ArgumentValues>, pending: bool) -> ValuesView {
             )
         }
     };
+    let undisclosed_note = (undisclosed > 0).then(|| {
+        format!(
+            "{undisclosed} other submitted field{} hidden: the tool marks its input sensitive.",
+            if undisclosed == 1 { " is" } else { "s are" }
+        )
+    });
     if values.is_empty() {
+        let hidden = undisclosed_note.is_some();
         return ValuesView {
             rows: Vec::new(),
-            hidden: false,
-            note: Some("No arguments.".to_owned()),
+            hidden,
+            note: Some(undisclosed_note.unwrap_or_else(|| "No arguments.".to_owned())),
             show_fields: false,
         };
     }
-    let mut hidden = false;
+    let mut hidden = undisclosed > 0;
     let rows = values
         .into_iter()
         .map(|(name, value)| {
@@ -198,7 +208,7 @@ fn values_view(values: Option<ArgumentValues>, pending: bool) -> ValuesView {
     ValuesView {
         rows,
         hidden,
-        note: None,
+        note: undisclosed_note,
         show_fields: false,
     }
 }
