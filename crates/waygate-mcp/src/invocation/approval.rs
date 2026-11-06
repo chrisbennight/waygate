@@ -271,11 +271,35 @@ impl DefaultInvocationService {
                     argument_hash: arg_hash.clone(),
                     behavior_hash: tool_behavior_hash.to_owned(),
                 };
-                // Code Mode already retains its exact request in the execution
-                // journal. Direct calls retain only an approval reference and
-                // value-free context; neither path queues tool execution here.
+                // Historical approval-bound Code Mode executions keep their
+                // exact request in the execution journal. Every other held
+                // call retains an approval reference with the approver's
+                // redacted view of its arguments; neither path queues tool
+                // execution here.
                 if ctx.approval_binding.is_none() {
                     if let Some(requests) = catalog_store.pending_invocations() {
+                        let snapshot = ctx.tool_snapshot();
+                        let schema_fields = snapshot
+                            .input_schema()
+                            .and_then(|schema| schema.get("properties"))
+                            .and_then(serde_json::Value::as_object)
+                            .map(|fields| fields.keys().map(String::as_str).collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        let arguments =
+                            serde_json::Value::Object(ctx.arguments.clone().unwrap_or_default());
+                        let undisclosed_fields = crate::approval_arguments::undisclosed_fields(
+                            &arguments,
+                            snapshot.sensitive_input(),
+                            schema_fields.iter().copied(),
+                        );
+                        let argument_values = match crate::approval_arguments::approval_view(
+                            &arguments,
+                            snapshot.sensitive_input(),
+                            schema_fields,
+                        ) {
+                            serde_json::Value::Object(values) => values,
+                            _ => serde_json::Map::new(),
+                        };
                         let request = waygate_catalog::pending_invocations::NewInvocationRequest {
                             tenant: tenant.into(),
                             principal_issuer: principal.issuer.clone(),
@@ -289,6 +313,8 @@ impl DefaultInvocationService {
                                 description: event.summary.description.clone(),
                                 affected_fields: event.summary.affected_fields.clone(),
                             },
+                            argument_values,
+                            undisclosed_fields,
                         };
                         match requests.retain(&request).await {
                                     Ok(id) => event.pending_request_id = Some(id),

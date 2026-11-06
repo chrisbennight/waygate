@@ -2273,6 +2273,24 @@ async fn gateway_main() -> anyhow::Result<()> {
         _ => None,
     };
 
+    // Clears the argument values of held-call requests that expired
+    // undecided. Always on with a catalog store: stored values are review
+    // material that must not outlive their request, so operators cannot
+    // disable it the way they can the grant sweeper.
+    let _invocation_value_sweeper_task = catalog_store
+        .as_ref()
+        .and_then(|catalog| catalog.pending_invocations())
+        .map(|requests| {
+            let shutdown = ct.clone();
+            tokio::spawn(async move {
+                waygate_catalog::pending_invocations::run_value_sweeper(
+                    requests,
+                    shutdown.cancelled_owned(),
+                )
+                .await
+            })
+        });
+
     // Retention policy storage + the
     // sweep mechanics that consume those policies. Operators
     // configure policies via /api/v1/audit/retention; the sweep

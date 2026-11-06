@@ -78,6 +78,18 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
             description: Some("Replace <script>untrusted()</script> configura\u{200B}tion".into()),
             affected_fields: vec!["payload".into()],
         },
+        argument_values: serde_json::json!({
+            "recipient": "ops@example.test",
+            "note": "<b>bold</b>",
+            "apiKey": waygate_mcp::approval_arguments::SENSITIVE_FIELD,
+            "payload": "y\n".repeat(125),
+            "cc": null,
+            "subject": "null",
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+        undisclosed_fields: 0,
     };
     let requests = catalog.pending_invocations().unwrap();
     let id = requests.retain(&draft).await.unwrap();
@@ -97,9 +109,40 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
     assert!(list.contains("U+200B"));
     assert!(!list.contains('\u{200B}'));
     let url = format!("/t/default/invocation-requests?request={id}");
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(response.headers()["cache-control"]
+        .to_str()
+        .unwrap()
+        .contains("no-store"));
     let (status, review) = get(app.clone(), &url).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(review.contains("Argument values are not stored"));
+    // The card shows each submitted value, escaped, with credentials hidden
+    // and long values shortened.
+    assert!(review.contains("“ops@example.test”"));
+    // A string never reads as another JSON type.
+    assert!(review.contains(r#"<dd class="argument-value">null</dd>"#));
+    assert!(review.contains(r#"<dd class="argument-value">“null”</dd>"#));
+    assert!(
+        review.contains("&#60;b&#62;bold&#60;/b&#62;")
+            || review.contains("&lt;b&gt;bold&lt;/b&gt;")
+    );
+    assert!(!review.contains("<b>bold</b>"));
+    assert!(review.contains("Hidden: credential field"));
+    assert!(
+        review.contains("Approval covers the exact submitted arguments, including hidden values.")
+    );
+    assert!(review.contains(&format!(
+        "<details><summary>“{}…</summary>",
+        "y\n".repeat(100)
+    )));
+    assert!(review.contains(&format!("“{}”", "y\n".repeat(125))));
+    assert!(review.contains(r#"<dd class="argument-value">"#));
+    assert!(review.contains("If approved:"));
+    assert!(review.contains("<summary>Exact identity</summary>"));
     assert!(review.contains("Approve this invocation request"));
     assert_eq!(
         get(
@@ -137,6 +180,26 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
     let decided = requests.get("default", id).await.unwrap().unwrap();
     assert_eq!(decided.status, "approved");
     assert!(decided.grant_id.is_some());
+    // Fields a sensitive tool does not declare are counted, never shown as
+    // an absence of arguments.
+    let mut undeclared = draft.clone();
+    undeclared.argument_hash = "undeclared-argument-digest".into();
+    undeclared.argument_values = serde_json::Map::new();
+    undeclared.undisclosed_fields = 2;
+    let undeclared = requests.retain(&undeclared).await.unwrap();
+    let (_, review) = get(
+        app.clone(),
+        &format!("/t/default/invocation-requests?request={undeclared}"),
+    )
+    .await;
+    assert!(
+        review.contains("2 other submitted fields are hidden: the tool marks its input sensitive.")
+    );
+    assert!(!review.contains("No arguments."));
+    // A decided request no longer holds its values.
+    let (_, review) = get(app.clone(), &url).await;
+    assert!(!review.contains("ops@example.test"));
+    assert!(review.contains("Argument values are deleted once a request is decided or expires."));
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM approval_grants WHERE tenant_id='default' AND tool_id=$1",
     )

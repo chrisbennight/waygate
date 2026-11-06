@@ -1,7 +1,11 @@
-//! Durable references to denied direct calls. No arguments or executable work
-//! are retained; callers retry through the ordinary invocation boundary.
+//! Durable references to calls held for human approval. No executable work is
+//! retained; callers retry through the ordinary invocation boundary. The
+//! administrator's view of the submitted arguments, with credentials redacted,
+//! is kept only while a request is pending.
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -17,6 +21,30 @@ pub struct InvocationSummary {
     pub affected_fields: Vec<String>,
 }
 
+/// Largest serialized argument view kept for review.
+pub const MAX_ARGUMENT_VALUES_BYTES: usize = 64 * 1024;
+/// How often argument values of requests that expired undecided are cleared.
+pub const VALUE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Argument values kept for review while a request is pending.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ArgumentValues {
+    /// The submitted arguments, with credentials redacted.
+    Shown {
+        values: serde_json::Map<String, serde_json::Value>,
+        /// Submitted fields left out of `values`, because the tool marks its
+        /// input sensitive and does not declare them.
+        undisclosed_fields: u32,
+    },
+    /// The redacted arguments exceeded [`MAX_ARGUMENT_VALUES_BYTES`] and were
+    /// not kept.
+    TooLarge,
+    /// A field name contains U+0000, which the store cannot hold, so the
+    /// values were not kept.
+    Unstorable,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewInvocationRequest {
     pub tenant: String,
@@ -28,6 +56,10 @@ pub struct NewInvocationRequest {
     pub behavior_hash: String,
     pub argument_hash: String,
     pub summary: InvocationSummary,
+    /// The approver's view of the submitted arguments, already redacted.
+    pub argument_values: serde_json::Map<String, serde_json::Value>,
+    /// Submitted fields left out of `argument_values`.
+    pub undisclosed_fields: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +74,8 @@ pub struct InvocationRequest {
     pub behavior_hash: String,
     pub argument_hash: String,
     pub summary: Option<InvocationSummary>,
+    /// Present only while the request is pending and its values were kept.
+    pub argument_values: Option<ArgumentValues>,
     pub created_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
     pub status: String,
@@ -83,10 +117,39 @@ pub trait PendingInvocationStore: Send + Sync {
     }
     /// Decide once and, for approval, commit a single-use grant in the same
     /// transaction. A second decision cannot mint another usable grant.
+    /// Deciding clears the request's argument values.
     async fn decide(
         &self,
         decision: InvocationDecision<'_>,
     ) -> Result<InvocationRequest, RequestError>;
+    /// Clear the argument values of requests that expired undecided, across
+    /// tenants. Returns the number of requests cleared.
+    async fn clear_expired_values(&self) -> Result<u64, RequestError>;
+}
+
+/// Clear expired argument values every [`VALUE_SWEEP_INTERVAL`] until
+/// `shutdown` fires. Reads never return values of an expired request; this
+/// removes them from storage.
+pub async fn run_value_sweeper(
+    store: SharedPendingInvocationStore,
+    shutdown: impl Future<Output = ()>,
+) {
+    tokio::pin!(shutdown);
+    let mut ticker = tokio::time::interval(VALUE_SWEEP_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return,
+            _ = ticker.tick() => match store.clear_expired_values().await {
+                Ok(0) => {}
+                Ok(cleared) => tracing::debug!(cleared, "cleared expired invocation argument values"),
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    "clearing expired invocation argument values failed; retrying next minute",
+                ),
+            },
+        }
+    }
 }
 
 pub struct PgPendingInvocationStore {
@@ -100,6 +163,7 @@ impl PgPendingInvocationStore {
 
 fn from_row(row: sqlx::postgres::PgRow) -> Result<InvocationRequest, RequestError> {
     let summary: Option<serde_json::Value> = row.try_get("summary")?;
+    let argument_values: Option<serde_json::Value> = row.try_get("visible_argument_values")?;
     Ok(InvocationRequest {
         id: row.try_get("id")?,
         tenant: row.try_get("tenant_id")?,
@@ -114,6 +178,10 @@ fn from_row(row: sqlx::postgres::PgRow) -> Result<InvocationRequest, RequestErro
             .map(serde_json::from_value)
             .transpose()
             .map_err(|_| RequestError::Invalid("stored summary is invalid"))?,
+        argument_values: argument_values
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| RequestError::Invalid("stored argument values are invalid"))?,
         created_at: row.try_get("created_at")?,
         expires_at: row.try_get("expires_at")?,
         status: row.try_get("effective_status")?,
@@ -121,7 +189,29 @@ fn from_row(row: sqlx::postgres::PgRow) -> Result<InvocationRequest, RequestErro
     })
 }
 macro_rules! request_columns {
-    () => { "SELECT r.*,CASE WHEN r.status='pending' AND r.expires_at<=clock_timestamp() THEN 'expired' ELSE r.status END AS effective_status FROM pending_invocation_requests r" };
+    () => { "SELECT r.*,CASE WHEN r.status='pending' AND r.expires_at<=clock_timestamp() THEN 'expired' ELSE r.status END AS effective_status,CASE WHEN r.status='pending' AND r.expires_at>clock_timestamp() THEN r.argument_values END AS visible_argument_values FROM pending_invocation_requests r" };
+}
+
+/// PostgreSQL JSONB cannot hold U+0000, even escaped. In a text value the
+/// stored review view marks it visibly; approval binds the original arguments
+/// by hash, so the view's spelling never changes what is approved. A field
+/// name containing it returns `None`: rewriting names could merge two fields.
+fn without_nul(value: serde_json::Value) -> Option<serde_json::Value> {
+    Some(match value {
+        serde_json::Value::String(text) => {
+            serde_json::Value::String(text.replace('\0', "[U+0000]"))
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(without_nul).collect::<Option<_>>()?)
+        }
+        serde_json::Value::Object(fields) => serde_json::Value::Object(
+            fields
+                .into_iter()
+                .map(|(key, value)| (!key.contains('\0')).then_some(key).zip(without_nul(value)))
+                .collect::<Option<_>>()?,
+        ),
+        other => other,
+    })
 }
 
 #[async_trait]
@@ -147,6 +237,18 @@ impl PendingInvocationStore for PgPendingInvocationStore {
         let summary = serde_json::to_value(&request.summary)
             .map_err(|_| RequestError::Invalid("summary encoding failed"))?;
         let summary = (summary.to_string().len() <= 64 * 1024).then_some(summary);
+        let shown = ArgumentValues::Shown {
+            values: request.argument_values.clone(),
+            undisclosed_fields: request.undisclosed_fields,
+        };
+        let encoded = serde_json::to_value(&shown)
+            .map_err(|_| RequestError::Invalid("argument value encoding failed"))?;
+        let argument_values = match without_nul(encoded) {
+            Some(values) if values.to_string().len() <= MAX_ARGUMENT_VALUES_BYTES => Ok(values),
+            Some(_) => serde_json::to_value(ArgumentValues::TooLarge),
+            None => serde_json::to_value(ArgumentValues::Unstorable),
+        }
+        .map_err(|_| RequestError::Invalid("argument value encoding failed"))?;
         let mut tx = self.pool.begin().await?;
         let tenant =
             sqlx::query("SELECT id FROM tenants WHERE id=$1 AND status='active' FOR UPDATE")
@@ -157,7 +259,7 @@ impl PendingInvocationStore for PgPendingInvocationStore {
             return Err(RequestError::Invalid("an active tenant is required"));
         }
         sqlx::query("DELETE FROM pending_invocation_requests WHERE tenant_id=$1 AND created_at<clock_timestamp()-INTERVAL '7 days'").bind(&request.tenant).execute(&mut *tx).await?;
-        sqlx::query("UPDATE pending_invocation_requests SET status='expired' WHERE tenant_id=$1 AND status='pending' AND expires_at<=clock_timestamp()")
+        sqlx::query("UPDATE pending_invocation_requests SET status='expired',argument_values=NULL WHERE tenant_id=$1 AND status='pending' AND expires_at<=clock_timestamp()")
             .bind(&request.tenant).execute(&mut *tx).await?;
         if let Some(id)=sqlx::query_scalar("SELECT id FROM pending_invocation_requests WHERE tenant_id=$1 AND principal_issuer=$2 AND principal_sub=$3 AND tool_id=$4 AND behavior_hash=$5 AND argument_hash=$6 AND status='pending'")
             .bind(&request.tenant).bind(&request.principal_issuer).bind(&request.principal_sub).bind(request.tool_id).bind(&request.behavior_hash).bind(&request.argument_hash).fetch_optional(&mut *tx).await? {
@@ -170,8 +272,8 @@ impl PendingInvocationStore for PgPendingInvocationStore {
             return Err(RequestError::Capacity);
         }
         let id = Uuid::now_v7();
-        sqlx::query("INSERT INTO pending_invocation_requests(tenant_id,id,principal_issuer,principal_sub,tool_id,server_name,tool_name,behavior_hash,argument_hash,summary) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
-            .bind(&request.tenant).bind(id).bind(&request.principal_issuer).bind(&request.principal_sub).bind(request.tool_id).bind(&request.server).bind(&request.tool).bind(&request.behavior_hash).bind(&request.argument_hash).bind(summary).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO pending_invocation_requests(tenant_id,id,principal_issuer,principal_sub,tool_id,server_name,tool_name,behavior_hash,argument_hash,summary,argument_values) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+            .bind(&request.tenant).bind(id).bind(&request.principal_issuer).bind(&request.principal_sub).bind(request.tool_id).bind(&request.server).bind(&request.tool).bind(&request.behavior_hash).bind(&request.argument_hash).bind(summary).bind(argument_values).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(id)
     }
@@ -234,12 +336,16 @@ impl PendingInvocationStore for PgPendingInvocationStore {
         } else {
             None
         };
-        let row=sqlx::query("UPDATE pending_invocation_requests SET status=$3,decided_at=clock_timestamp(),decided_by_issuer=$4,decided_by_sub=$5,reason=$6,grant_id=$7
-            WHERE tenant_id=$1 AND id=$2 AND status='pending' AND expires_at>clock_timestamp() RETURNING *,status AS effective_status")
+        let row=sqlx::query("UPDATE pending_invocation_requests SET status=$3,decided_at=clock_timestamp(),decided_by_issuer=$4,decided_by_sub=$5,reason=$6,grant_id=$7,argument_values=NULL
+            WHERE tenant_id=$1 AND id=$2 AND status='pending' AND expires_at>clock_timestamp() RETURNING *,status AS effective_status,NULL::jsonb AS visible_argument_values")
             .bind(decision.tenant).bind(decision.id).bind(if decision.approve {"approved"} else {"denied"}).bind(decision.approver_issuer).bind(decision.approver_sub).bind(decision.reason).bind(grant_id)
             .fetch_optional(&mut *tx).await?.ok_or(RequestError::Changed)?;
         let result = from_row(row)?;
         tx.commit().await?;
         Ok(result)
+    }
+    async fn clear_expired_values(&self) -> Result<u64, RequestError> {
+        Ok(sqlx::query("UPDATE pending_invocation_requests SET argument_values=NULL WHERE argument_values IS NOT NULL AND expires_at<=clock_timestamp()")
+            .execute(&self.pool).await?.rows_affected())
     }
 }

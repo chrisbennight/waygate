@@ -785,7 +785,9 @@ impl UpstreamPool {
                     published.input_schema.take(),
                 )
             };
+            let sensitive_input = sensitive_input(&snapshot);
             snapshot
+                .with_sensitive_input(sensitive_input)
                 .with_inline_response_threshold_bytes(inline_response_threshold_bytes)
                 .with_operation_classifications(manifest_discriminator.clone(), operations)
                 .with_published_definition_and_task_support(definition, published.native_tasks)
@@ -974,8 +976,10 @@ impl UpstreamPool {
                         action_metadata,
                     )
                 };
+                let sensitive_input = sensitive_input(&snapshot);
                 ResolvedInvocationTool::Ready(
                     snapshot
+                        .with_sensitive_input(sensitive_input)
                         .with_inline_response_threshold_bytes(inline_response_threshold_bytes)
                         .with_operation_classifications(def.discriminator, operations)
                         .with_published_definition_and_task_support(
@@ -1145,6 +1149,19 @@ fn claims_facts(
     facts.pii = claims.protected_data();
     facts.requires_approval = claims.requires_approval(approval_mode);
     Ok((facts, claims.output_sensitive))
+}
+
+/// Whether the reviewed input classification marks the arguments sensitive,
+/// for approval displays. Metadata that cannot be read counts as sensitive;
+/// a contract without security metadata has no classification.
+fn sensitive_input(snapshot: &InvocationToolSnapshot) -> bool {
+    match (snapshot.tool_annotations(), snapshot.action_metadata()) {
+        (Some(annotations), Some(action_metadata)) => {
+            crate::security_metadata::behavior_claims(annotations, action_metadata)
+                .map_or(true, |claims| claims.input_sensitive)
+        }
+        _ => false,
+    }
 }
 
 pub(super) struct SessionToolsReadError {

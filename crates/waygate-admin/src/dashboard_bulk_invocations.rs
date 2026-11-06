@@ -107,7 +107,7 @@ pub(crate) async fn view(
             }
             let can_approve = row.summary.is_some()
                 && (row.principal_issuer != actor.issuer || row.principal_sub != actor.sub);
-            let context=serde_json::to_string_pretty(&serde_json::json!({"requester":{"issuer":row.principal_issuer,"subject":row.principal_sub},"behavior":row.behavior_hash,"argument_identity":row.argument_hash,"expires":row.expires_at.to_string(),"review_context":row.summary})).expect("request context serializes");
+            let context=serde_json::to_string_pretty(&serde_json::json!({"requester":{"issuer":row.principal_issuer,"subject":row.principal_sub},"behavior":row.behavior_hash,"argument_identity":row.argument_hash,"expires":row.expires_at.to_string(),"review_context":row.summary,"argument_values":row.argument_values})).expect("request context serializes");
             (
                 format!("{} · {}", row.server, row.tool),
                 direct::review_url(*id),
@@ -326,7 +326,7 @@ pub(crate) async fn page(
             guidance,
         });
     }
-    Ok(render(&ReviewPage {
+    let mut response = render(&ReviewPage {
         chrome: PageChrome::build(
             state,
             "Bulk invocation decisions",
@@ -342,7 +342,10 @@ pub(crate) async fn page(
         confirmable: !started && note.is_none(),
         confirm_url: format!("/decisions/bulk/{}/confirm", batch.id),
         note,
-    }))
+    });
+    // The review shows argument values; no cached copy may outlive the requests.
+    crate::api_keys::no_store(&mut response);
+    Ok(response)
 }
 pub(crate) async fn confirm(
     state: &Arc<AdminState>,

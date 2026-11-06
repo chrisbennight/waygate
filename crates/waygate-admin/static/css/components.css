@@ -976,6 +976,9 @@ td.cell-url { word-break: break-all; max-width: 360px; }
 }
 .cfg-dl dt { color: var(--ink-muted); }
 .cfg-dl dd { margin: 0; word-break: break-word; }
+/* Submitted values keep their line breaks and spacing, so different values
+   never read the same. */
+.argument-value { white-space: pre-wrap; overflow-wrap: anywhere; }
 .cfg-actions { display: flex; gap: 8px; }
 .cfg-class-table { width: auto; min-width: 360px; }
 .cfg-class-table th, .cfg-class-table td { padding: 6px 12px; }

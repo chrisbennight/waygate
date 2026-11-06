@@ -68,8 +68,9 @@ remains an individual operation.
 Invocation selections are limited to fifty requests and two MiB of complete
 serialized review context. Current Code Mode calls use the ordinary direct
 channel and the same per-call request queue as direct tool calls. Review includes
-value-free context, full requester identity, and exact behavior and argument
-identities; review argument values with the requester through a trusted channel.
+each pending request's redacted argument values, full requester identity, and
+exact behavior and argument identities. Where no values were kept, review them
+with the requester through a trusted channel.
 Approval permits only that matching call. It does not execute a tool, restart a
 program, or authorize replay of prior effects. The caller retries only the
 reviewed call through the ordinary invocation boundary.

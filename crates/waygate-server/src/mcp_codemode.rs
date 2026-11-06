@@ -5614,7 +5614,7 @@ fn mutation_approval_request(
         operation: admitted.tool.clone(),
         argument_hash: waygate_catalog::argument_hash(arguments.as_object()),
         arguments_preview: admitted.approval_context.as_ref().map_or_else(
-            || approval_arguments_preview(arguments),
+            || waygate_mcp::approval_arguments::redacted_arguments(arguments),
             |context| context.arguments_preview(arguments),
         ),
         description: admitted
@@ -5684,105 +5684,11 @@ impl ApprovalContext {
     }
 
     fn arguments_preview(&self, arguments: &Value) -> Value {
-        if !self.sensitive_input {
-            return approval_arguments_preview(arguments);
-        }
-        // Use schema-owned names, not arbitrary user-controlled object keys.
-        Value::Object(
-            self.input_fields
-                .iter()
-                .filter(|name| arguments.get(name.as_str()).is_some())
-                .map(|name| {
-                    (
-                        name.clone(),
-                        Value::String("[REDACTED:SENSITIVE_INPUT]".to_owned()),
-                    )
-                })
-                .collect(),
+        waygate_mcp::approval_arguments::approval_view(
+            arguments,
+            self.sensitive_input,
+            self.input_fields.iter().map(String::as_str),
         )
-    }
-}
-
-/// Produce the complete approval argument view with explicit credential redaction.
-fn approval_arguments_preview(arguments: &Value) -> Value {
-    // The approver must see effect destinations and payload content to make
-    // the decision — including PII-shaped values, since an unintended
-    // recipient or an exfiltrated value is exactly what a human review
-    // exists to catch. Every value the approval hash covers is shown in
-    // full; only recognized credential material and sensitive key names are
-    // replaced, and each replacement is an explicit labeled marker, never a
-    // silent omission. Oversized arguments never reach preview generation —
-    // they are refused at admission by `limits().request_bytes`.
-    let (without_secrets, _) = waygate_mcp::inspection::secrets::redact_json_value(arguments);
-    redact_sensitive_argument_keys(without_secrets)
-}
-
-/// Normalize a field name to lower snake_case before sensitive-marker
-/// matching, so `clientSecret`, `client-secret`, `client.secret`, and
-/// `client_secret` all reach the same comparison form. Camel boundaries
-/// (a lowercase letter or digit followed by an uppercase letter) become
-/// underscores; consecutive capitals collapse (`APIKey` → `apikey`).
-fn normalize_argument_key(key: &str) -> String {
-    let mut normalized = String::with_capacity(key.len() + 4);
-    let mut previous_lower_or_digit = false;
-    for ch in key.chars() {
-        if ch == '-' || ch == '.' {
-            normalized.push('_');
-            previous_lower_or_digit = false;
-            continue;
-        }
-        if ch.is_ascii_uppercase() && previous_lower_or_digit {
-            normalized.push('_');
-        }
-        previous_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
-        normalized.push(ch.to_ascii_lowercase());
-    }
-    normalized
-}
-
-fn redact_sensitive_argument_keys(value: Value) -> Value {
-    match value {
-        Value::Array(values) => Value::Array(
-            values
-                .into_iter()
-                .map(redact_sensitive_argument_keys)
-                .collect(),
-        ),
-        Value::Object(values) => Value::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| {
-                    // Match markers as whole underscore-delimited segments
-                    // anywhere in the key, so `aws_secret_access_key` and
-                    // `secretAccessKey` redact the same as `secret` — a
-                    // credential-bearing word buried mid-key must not slip
-                    // past an exact/suffix comparison.
-                    let padded = format!("_{}_", normalize_argument_key(&key));
-                    let sensitive = [
-                        "authorization",
-                        "password",
-                        "passwd",
-                        "secret",
-                        "token",
-                        "api_key",
-                        "apikey",
-                        "credential",
-                        "private_key",
-                    ]
-                    .iter()
-                    .any(|marker| padded.contains(&format!("_{marker}_")));
-                    (
-                        key,
-                        if sensitive {
-                            Value::String("[REDACTED:SENSITIVE_FIELD]".to_owned())
-                        } else {
-                            redact_sensitive_argument_keys(value)
-                        },
-                    )
-                })
-                .collect(),
-        ),
-        other => other,
     }
 }
 

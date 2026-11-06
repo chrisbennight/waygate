@@ -23,7 +23,8 @@ use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 use waygate_catalog::pending_invocations::{
-    InvocationDecision, InvocationRequest, RequestError, SharedPendingInvocationStore,
+    ArgumentValues, InvocationDecision, InvocationRequest, RequestError,
+    SharedPendingInvocationStore, MAX_ARGUMENT_VALUES_BYTES,
 };
 use waygate_oidc::Principal;
 
@@ -106,6 +107,125 @@ pub(crate) async fn decide_core(
     Ok(request)
 }
 
+/// Longest argument value shown in full on a card; a longer value is
+/// shortened, with the full value one click away.
+const SHOWN_VALUE_CHARS: usize = 200;
+
+/// What the card shows of a request's arguments.
+struct ValuesView {
+    /// Field → value rows, when values were kept.
+    rows: Vec<ArgumentRow>,
+    /// Some shown value is hidden; approval still covers it.
+    hidden: bool,
+    /// Why no values are shown, when none are.
+    note: Option<String>,
+    /// Values are not shown, so the submitted field names are.
+    show_fields: bool,
+}
+
+struct ArgumentRow {
+    name: Vec<Segment>,
+    value: Vec<Segment>,
+    /// The complete value, when `value` is shortened.
+    full: Option<Vec<Segment>>,
+}
+
+fn values_view(values: Option<ArgumentValues>, pending: bool) -> ValuesView {
+    let unavailable = |note: String| ValuesView {
+        rows: Vec::new(),
+        hidden: false,
+        note: Some(note),
+        show_fields: true,
+    };
+    let (values, undisclosed) = match values {
+        Some(ArgumentValues::Shown {
+            values,
+            undisclosed_fields,
+        }) => (values, undisclosed_fields),
+        Some(ArgumentValues::TooLarge) => {
+            return unavailable(format!(
+                "The argument values exceed the {} KiB review limit and were not kept. \
+                 Confirm them with the requester through a trusted channel before approving.",
+                MAX_ARGUMENT_VALUES_BYTES / 1024
+            ))
+        }
+        Some(ArgumentValues::Unstorable) => {
+            return unavailable(
+                "A field name in these arguments contains a character the gateway cannot \
+                 store, so the values were not kept. Confirm them with the requester through \
+                 a trusted channel before approving."
+                    .to_owned(),
+            )
+        }
+        None if pending => {
+            return unavailable(
+                "Argument values were not kept for this request. Confirm them with the \
+                 requester through a trusted channel before approving."
+                    .to_owned(),
+            )
+        }
+        None => {
+            return unavailable(
+                "Argument values are deleted once a request is decided or expires.".to_owned(),
+            )
+        }
+    };
+    let undisclosed_note = (undisclosed > 0).then(|| {
+        format!(
+            "{undisclosed} other submitted field{} hidden: the tool marks its input sensitive.",
+            if undisclosed == 1 { " is" } else { "s are" }
+        )
+    });
+    if values.is_empty() {
+        let hidden = undisclosed_note.is_some();
+        return ValuesView {
+            rows: Vec::new(),
+            hidden,
+            note: Some(undisclosed_note.unwrap_or_else(|| "No arguments.".to_owned())),
+            show_fields: false,
+        };
+    }
+    let mut hidden = undisclosed > 0;
+    let rows = values
+        .into_iter()
+        .map(|(name, value)| {
+            // Strings are quoted, so a string never reads as a number, null,
+            // or JSON; other values are shown as JSON.
+            let (text, open, close) = match value {
+                serde_json::Value::String(text) => match text.as_str() {
+                    waygate_mcp::approval_arguments::SENSITIVE_FIELD => {
+                        ("Hidden: credential field".to_owned(), "", "")
+                    }
+                    waygate_mcp::approval_arguments::SENSITIVE_INPUT => (
+                        "Hidden: the tool marks its input sensitive".to_owned(),
+                        "",
+                        "",
+                    ),
+                    _ => (text, "“", "”"),
+                },
+                other => (other.to_string(), "", ""),
+            };
+            hidden |= text.starts_with("Hidden: ") || text.contains("[REDACTED");
+            let shortened = text
+                .char_indices()
+                .nth(SHOWN_VALUE_CHARS)
+                .map(|(end, _)| format!("{open}{}…", &text[..end]));
+            let full = format!("{open}{text}{close}");
+            ArgumentRow {
+                name: review_diff::text_segments(&name),
+                value: review_diff::text_segments(shortened.as_deref().unwrap_or(&full)),
+                full: shortened.map(|_| review_diff::text_segments(&full)),
+            }
+        })
+        .collect();
+    ValuesView {
+        rows,
+        hidden,
+        note: undisclosed_note,
+        show_fields: false,
+    }
+}
+
 struct RequestRow {
     choice: String,
     decide_url: String,
@@ -120,6 +240,7 @@ struct RequestRow {
     arguments: String,
     description: Option<Vec<Segment>>,
     fields: Vec<Vec<Segment>>,
+    values: ValuesView,
     context_available: bool,
     can_approve: bool,
     can_deny: bool,
@@ -187,6 +308,7 @@ async fn page(
                 && row.summary.is_some()
                 && (row.principal_issuer != actor.issuer || row.principal_sub != actor.sub);
             let context_available = row.summary.is_some();
+            let values = values_view(row.argument_values, can_deny);
             let (description, fields) = row
                 .summary
                 .map(|summary| (summary.description, summary.affected_fields))
@@ -208,6 +330,7 @@ async fn page(
                     .into_iter()
                     .map(|text| review_diff::text_segments(&text))
                     .collect(),
+                values,
                 context_available,
                 can_approve,
                 can_deny,
@@ -241,7 +364,7 @@ async fn page(
             }
         }
     }
-    Ok(render(&RequestsPage {
+    let mut response = render(&RequestsPage {
         chrome: PageChrome::build(
             &state,
             "Pending invocation requests",
@@ -256,7 +379,11 @@ async fn page(
         bulk_available: state.hitl.decision_batches.get().is_some(),
         codemode,
         note,
-    }))
+    });
+    // Argument values are private review material; no cached copy may outlive
+    // the request.
+    crate::api_keys::no_store(&mut response);
+    Ok(response)
 }
 
 #[derive(Deserialize)]
