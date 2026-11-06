@@ -18,9 +18,14 @@ the **Approvals** page.
 ## Review and decide
 
 The review identifies the requester by tenant, issuer, and subject, names the
-tool, and shows the admitted description, submitted schema field names, and exact
-behavior and argument identities. Argument values are not copied into this queue.
-Review the exact requested values and effects with the requester through a
+tool, states what approval allows, and shows the admitted description and each
+submitted argument as field → value. Recognized credential material and fields
+whose names mark credentials are hidden. For a tool whose reviewed input
+classification is sensitive, only the submitted schema field names appear.
+Approval still binds the complete submitted arguments, including hidden values.
+Values longer than 200 characters are shortened, with the full value one click
+away. The exact behavior and argument identities are in a collapsed section.
+When a request has no kept values, review them with the requester through a
 trusted channel before confirming approval. Oversized review context is marked
 unavailable rather than truncated and cannot be approved from this surface.
 
@@ -61,6 +66,10 @@ See [bulk decisions](bulk-decisions.md) for selection and review limits.
   original expiry. It is consumed once by a matching retry.
 - Retained request records are available for seven days. A later refusal after
   a completed decision is a new request requiring a new administrator decision.
+- Argument values are kept only while a request is pending. Deciding a request
+  deletes them, an expired request stops showing them at once, and a cleanup that
+  runs every minute deletes them from storage. Values whose redacted form exceeds
+  64 KiB are not kept; the review says so.
 - The queue permits at most one hundred pending requests per requester, one
   thousand per tenant, and ten thousand retained records per tenant. The listing
   shows the oldest pending requests first, in a bounded page. Resolve those

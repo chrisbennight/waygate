@@ -12,11 +12,14 @@
 <p class="skills-source">Requested by {{ row.requester }} · issuer {{ row.issuer }}</p>
 <p>Status: <strong>{{ row.status }}</strong> · Request expires {{ row.expires }}</p>
 {% match row.description %}{% when Some with (description) %}<p class="skills-source">{% let segs = description %}{% include "_diff_segments.html" %}</p>{% when None %}<p>No tool description is available.</p>{% endmatch %}
-{% if !row.fields.is_empty() %}<p class="skills-source">Submitted fields: {% for field in row.fields %}<code>{% let segs = field %}{% include "_diff_segments.html" %}</code>{% if !loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+{% if !row.values.rows.is_empty() %}<dl class="cfg-dl" aria-label="Submitted arguments">{% for arg in row.values.rows %}<dt><code>{% let segs = arg.name %}{% include "_diff_segments.html" %}</code></dt><dd>{% match arg.full %}{% when Some with (full) %}<details><summary>{% let segs = arg.value %}{% include "_diff_segments.html" %}</summary>{% let segs = full %}{% include "_diff_segments.html" %}</details>{% when None %}{% let segs = arg.value %}{% include "_diff_segments.html" %}{% endmatch %}</dd>{% endfor %}</dl>{% endif %}
+{% if row.values.hidden %}<p class="skills-source">Approval covers the exact submitted arguments, including hidden values.</p>{% endif %}
+{% match row.values.note %}{% when Some with (note) %}<p>{{ note }}</p>{% when None %}{% endmatch %}
+{% if row.values.show_fields && !row.fields.is_empty() %}<p class="skills-source">Submitted fields: {% for field in row.fields %}<code>{% let segs = field %}{% include "_diff_segments.html" %}</code>{% if !loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
 {% if !row.context_available %}<p class="callout callout--err">Complete review context is unavailable here. Approval requires individual request evidence.</p>{% endif %}
 {% if detail %}
-<p class="skills-source">Reviewed behavior: <code>{{ row.behavior }}</code></p><p class="skills-source">Exact argument identity: <code>{{ row.arguments }}</code></p>
-<p>Argument values are not stored in this queue. Review the exact requested values and effects with the requester using a trusted channel before approving.</p>
+{% if row.can_deny %}<p><strong>If approved:</strong> the requester can make this exact call once, within five minutes and before the request expires.</p>{% endif %}
+<details class="params-review"><summary>Exact identity</summary><p class="skills-source">Reviewed behavior: <code>{{ row.behavior }}</code></p><p class="skills-source">Exact argument identity: <code>{{ row.arguments }}</code></p></details>
 {% match row.grant %}{% when Some with (id) %}<p class="skills-source">Single-use grant: {{ id }}. Current grant lifecycle appears in Issued grants.</p>{% when None %}{% endmatch %}
 {% if row.can_deny %}<form method="post" action="{{ self.chrome.nav_url(row.decide_url) }}">
 <input type="hidden" name="csrf" value="{{ chrome.csrf_token }}">

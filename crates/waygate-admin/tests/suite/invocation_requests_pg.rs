@@ -78,6 +78,15 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
             description: Some("Replace <script>untrusted()</script> configura\u{200B}tion".into()),
             affected_fields: vec!["payload".into()],
         },
+        argument_values: serde_json::json!({
+            "recipient": "ops@example.test",
+            "note": "<b>bold</b>",
+            "apiKey": waygate_mcp::approval_arguments::SENSITIVE_FIELD,
+            "payload": "y".repeat(250),
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
     };
     let requests = catalog.pending_invocations().unwrap();
     let id = requests.retain(&draft).await.unwrap();
@@ -99,7 +108,22 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
     let url = format!("/t/default/invocation-requests?request={id}");
     let (status, review) = get(app.clone(), &url).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(review.contains("Argument values are not stored"));
+    // The card shows each submitted value, escaped, with credentials hidden
+    // and long values shortened.
+    assert!(review.contains("ops@example.test"));
+    assert!(
+        review.contains("&#60;b&#62;bold&#60;/b&#62;")
+            || review.contains("&lt;b&gt;bold&lt;/b&gt;")
+    );
+    assert!(!review.contains("<b>bold</b>"));
+    assert!(review.contains("Hidden: credential field"));
+    assert!(
+        review.contains("Approval covers the exact submitted arguments, including hidden values.")
+    );
+    assert!(review.contains(&format!("<details><summary>{}…</summary>", "y".repeat(200))));
+    assert!(review.contains(&"y".repeat(250)));
+    assert!(review.contains("If approved:"));
+    assert!(review.contains("<summary>Exact identity</summary>"));
     assert!(review.contains("Approve this invocation request"));
     assert_eq!(
         get(
@@ -137,6 +161,10 @@ async fn direct_requests_are_reviewable_and_issue_only_one_grant_with_required_e
     let decided = requests.get("default", id).await.unwrap().unwrap();
     assert_eq!(decided.status, "approved");
     assert!(decided.grant_id.is_some());
+    // A decided request no longer holds its values.
+    let (_, review) = get(app.clone(), &url).await;
+    assert!(!review.contains("ops@example.test"));
+    assert!(review.contains("Argument values are deleted once a request is decided or expires."));
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM approval_grants WHERE tenant_id='default' AND tool_id=$1",
     )

@@ -23,7 +23,8 @@ use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 use waygate_catalog::pending_invocations::{
-    InvocationDecision, InvocationRequest, RequestError, SharedPendingInvocationStore,
+    ArgumentValues, InvocationDecision, InvocationRequest, RequestError,
+    SharedPendingInvocationStore, MAX_ARGUMENT_VALUES_BYTES,
 };
 use waygate_oidc::Principal;
 
@@ -106,6 +107,102 @@ pub(crate) async fn decide_core(
     Ok(request)
 }
 
+/// Longest argument value shown in full on a card; a longer value is
+/// shortened, with the full value one click away.
+const SHOWN_VALUE_CHARS: usize = 200;
+
+/// What the card shows of a request's arguments.
+struct ValuesView {
+    /// Field → value rows, when values were kept.
+    rows: Vec<ArgumentRow>,
+    /// Some shown value is hidden; approval still covers it.
+    hidden: bool,
+    /// Why no values are shown, when none are.
+    note: Option<String>,
+    /// Values are not shown, so the submitted field names are.
+    show_fields: bool,
+}
+
+struct ArgumentRow {
+    name: Vec<Segment>,
+    value: Vec<Segment>,
+    /// The complete value, when `value` is shortened.
+    full: Option<Vec<Segment>>,
+}
+
+fn values_view(values: Option<ArgumentValues>, pending: bool) -> ValuesView {
+    let unavailable = |note: String| ValuesView {
+        rows: Vec::new(),
+        hidden: false,
+        note: Some(note),
+        show_fields: true,
+    };
+    let values = match values {
+        Some(ArgumentValues::Shown { values }) => values,
+        Some(ArgumentValues::TooLarge) => {
+            return unavailable(format!(
+                "The argument values exceed the {} KiB review limit and were not kept. \
+                 Confirm them with the requester through a trusted channel before approving.",
+                MAX_ARGUMENT_VALUES_BYTES / 1024
+            ))
+        }
+        None if pending => {
+            return unavailable(
+                "Argument values were not kept for this request. Confirm them with the \
+                 requester through a trusted channel before approving."
+                    .to_owned(),
+            )
+        }
+        None => {
+            return unavailable(
+                "Argument values are deleted once a request is decided or expires.".to_owned(),
+            )
+        }
+    };
+    if values.is_empty() {
+        return ValuesView {
+            rows: Vec::new(),
+            hidden: false,
+            note: Some("No arguments.".to_owned()),
+            show_fields: false,
+        };
+    }
+    let mut hidden = false;
+    let rows = values
+        .into_iter()
+        .map(|(name, value)| {
+            let text = match value {
+                serde_json::Value::String(text) => match text.as_str() {
+                    waygate_mcp::approval_arguments::SENSITIVE_FIELD => {
+                        "Hidden: credential field".to_owned()
+                    }
+                    waygate_mcp::approval_arguments::SENSITIVE_INPUT => {
+                        "Hidden: the tool marks its input sensitive".to_owned()
+                    }
+                    _ => text,
+                },
+                other => other.to_string(),
+            };
+            hidden |= text.starts_with("Hidden: ") || text.contains("[REDACTED");
+            let shortened = text
+                .char_indices()
+                .nth(SHOWN_VALUE_CHARS)
+                .map(|(end, _)| format!("{}…", &text[..end]));
+            ArgumentRow {
+                name: review_diff::text_segments(&name),
+                value: review_diff::text_segments(shortened.as_deref().unwrap_or(&text)),
+                full: shortened.map(|_| review_diff::text_segments(&text)),
+            }
+        })
+        .collect();
+    ValuesView {
+        rows,
+        hidden,
+        note: None,
+        show_fields: false,
+    }
+}
+
 struct RequestRow {
     choice: String,
     decide_url: String,
@@ -120,6 +217,7 @@ struct RequestRow {
     arguments: String,
     description: Option<Vec<Segment>>,
     fields: Vec<Vec<Segment>>,
+    values: ValuesView,
     context_available: bool,
     can_approve: bool,
     can_deny: bool,
@@ -187,6 +285,7 @@ async fn page(
                 && row.summary.is_some()
                 && (row.principal_issuer != actor.issuer || row.principal_sub != actor.sub);
             let context_available = row.summary.is_some();
+            let values = values_view(row.argument_values, can_deny);
             let (description, fields) = row
                 .summary
                 .map(|summary| (summary.description, summary.affected_fields))
@@ -208,6 +307,7 @@ async fn page(
                     .into_iter()
                     .map(|text| review_diff::text_segments(&text))
                     .collect(),
+                values,
                 context_available,
                 can_approve,
                 can_deny,

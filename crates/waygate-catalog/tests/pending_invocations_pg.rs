@@ -1,8 +1,8 @@
 use serde_json::json;
 use uuid::Uuid;
 use waygate_catalog::pending_invocations::{
-    InvocationDecision, InvocationSummary, NewInvocationRequest, PendingInvocationStore,
-    PgPendingInvocationStore, RequestError,
+    ArgumentValues, InvocationDecision, InvocationSummary, NewInvocationRequest,
+    PendingInvocationStore, PgPendingInvocationStore, RequestError, MAX_ARGUMENT_VALUES_BYTES,
 };
 use waygate_catalog::{
     CatalogStore, GrantLookup, ImportServer, ImportTool, ManifestImporter, PgCatalogStore,
@@ -59,7 +59,114 @@ async fn fixture(pool: &sqlx::PgPool) -> NewInvocationRequest {
             description: Some("Replace fixture configuration.".into()),
             affected_fields: vec!["payload".into()],
         },
+        argument_values: json!({"payload":"synthetic-input-value"})
+            .as_object()
+            .unwrap()
+            .clone(),
     }
+}
+
+/// The stored column, which reads never expose for a decided or expired request.
+async fn stored_values(pool: &sqlx::PgPool, tenant: &str, id: Uuid) -> Option<serde_json::Value> {
+    sqlx::query_scalar(
+        "SELECT argument_values FROM pending_invocation_requests WHERE tenant_id=$1 AND id=$2",
+    )
+    .bind(tenant)
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn argument_values_are_kept_only_while_a_request_is_pending() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let mut request = fixture(&pool).await;
+    let tenant = request.tenant.clone();
+    let store = PgPendingInvocationStore::new(pool.clone());
+    let shown = Some(ArgumentValues::Shown {
+        values: request.argument_values.clone(),
+    });
+
+    // Deciding a request clears its values.
+    let decided = store.retain(&request).await.unwrap();
+    assert_eq!(
+        store
+            .get(&tenant, decided)
+            .await
+            .unwrap()
+            .unwrap()
+            .argument_values,
+        shown
+    );
+    assert_eq!(
+        store.pending(&tenant).await.unwrap()[0].argument_values,
+        shown
+    );
+    let denied = store
+        .decide(InvocationDecision {
+            tenant: &tenant,
+            id: decided,
+            approver_issuer: "https://admin.fixture",
+            approver_sub: "admin",
+            reason: "Not this recipient",
+            approve: false,
+        })
+        .await
+        .unwrap();
+    assert!(denied.argument_values.is_none());
+    assert!(store
+        .get(&tenant, decided)
+        .await
+        .unwrap()
+        .unwrap()
+        .argument_values
+        .is_none());
+    assert!(stored_values(&pool, &tenant, decided).await.is_none());
+
+    // An expired request stops showing its values at once; the sweep then
+    // removes them from storage.
+    request.argument_hash = "expiring-request".into();
+    let expired = store.retain(&request).await.unwrap();
+    sqlx::query("UPDATE pending_invocation_requests SET expires_at=clock_timestamp()-INTERVAL '1 second' WHERE tenant_id=$1 AND id=$2").bind(&tenant).bind(expired).execute(&pool).await.unwrap();
+    let row = store.get(&tenant, expired).await.unwrap().unwrap();
+    assert_eq!(row.status, "expired");
+    assert!(row.argument_values.is_none());
+    assert!(stored_values(&pool, &tenant, expired).await.is_some());
+    assert!(store.clear_expired_values().await.unwrap() >= 1);
+    assert!(stored_values(&pool, &tenant, expired).await.is_none());
+
+    // Values over the limit are replaced by a marker, never truncated.
+    request.argument_hash = "oversized-request".into();
+    request.argument_values = json!({"payload": "x".repeat(MAX_ARGUMENT_VALUES_BYTES)})
+        .as_object()
+        .unwrap()
+        .clone();
+    let oversized = store.retain(&request).await.unwrap();
+    assert_eq!(
+        store
+            .get(&tenant, oversized)
+            .await
+            .unwrap()
+            .unwrap()
+            .argument_values,
+        Some(ArgumentValues::TooLarge)
+    );
+
+    // A decided request cannot hold values.
+    let refused = sqlx::query("UPDATE pending_invocation_requests SET argument_values='{}'::jsonb WHERE tenant_id=$1 AND id=$2")
+        .bind(&tenant)
+        .bind(decided)
+        .execute(&pool)
+        .await;
+    assert!(refused.is_err());
+    sqlx::query("DELETE FROM tenants WHERE id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

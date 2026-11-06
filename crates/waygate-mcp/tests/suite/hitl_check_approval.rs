@@ -231,6 +231,8 @@ struct FakeUpstream {
     requires_approval_known: bool,
     dispatched: Arc<std::sync::atomic::AtomicBool>,
     approval_gated_seen: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// The reviewed input classification marks the arguments sensitive.
+    sensitive_input: bool,
 }
 
 #[async_trait]
@@ -302,7 +304,7 @@ impl UpstreamCatalog for FakeUpstream {
         } else {
             InvocationToolSnapshot::manifest_fallback(facts, false)
         };
-        ResolvedInvocationTool::Ready(snapshot.with_published_definition(Some(rmcp::model::Tool::new(
+        ResolvedInvocationTool::Ready(snapshot.with_sensitive_input(self.sensitive_input).with_published_definition(Some(rmcp::model::Tool::new(
             tool_name.to_owned(),
             "Replace desired configuration. Upstream may retain submitted values. Deploy separately.",
             Arc::new(input.as_object().unwrap().clone()),
@@ -402,6 +404,7 @@ fn service_with_gate(
         requires_approval_known: true,
         dispatched,
         approval_gated_seen: Some(Arc::clone(&approval_gated_seen)),
+        sensitive_input: false,
     });
     let catalog_store: SharedCatalogStore = Arc::new(FakeCatalog {
         pending: None,
@@ -433,6 +436,7 @@ fn service_with_observer_and_evidence(
         requires_approval_known,
         dispatched,
         approval_gated_seen: None,
+        sensitive_input: false,
     });
     let catalog_store: SharedCatalogStore = Arc::new(FakeCatalog {
         pending: None,
@@ -660,6 +664,7 @@ async fn check_approval_fails_closed_when_required_but_store_is_unwired() {
             requires_approval_known: true,
             dispatched: dispatched.clone(),
             approval_gated_seen: None,
+            sensitive_input: false,
         }),
         Arc::new(AllowAllGate),
         Arc::new(NullSink),
@@ -1124,6 +1129,7 @@ async fn grant_claim_carries_the_callers_issuer() {
         requires_approval_known: true,
         dispatched: dispatched.clone(),
         approval_gated_seen: None,
+        sensitive_input: false,
     });
     let catalog_store = Arc::new(FakeCatalog {
         pending: None,
@@ -1195,6 +1201,11 @@ impl waygate_catalog::pending_invocations::PendingInvocationStore for RecordingR
     > {
         unreachable!("capture never authorizes an invocation")
     }
+    async fn clear_expired_values(
+        &self,
+    ) -> Result<u64, waygate_catalog::pending_invocations::RequestError> {
+        unreachable!("capture does not sweep stored values")
+    }
 }
 
 impl waygate_invocation::HitlNotifier for SummaryNotifier {
@@ -1212,6 +1223,7 @@ async fn direct_approval_summary_uses_admitted_description_and_schema_fields_wit
         requires_approval_known: true,
         dispatched: dispatched.clone(),
         approval_gated_seen: None,
+        sensitive_input: false,
     });
     let catalog_store: SharedCatalogStore = Arc::new(FakeCatalog {
         pending: Some(requests.clone()),
@@ -1270,6 +1282,9 @@ async fn direct_approval_summary_uses_admitted_description_and_schema_fields_wit
         let mut fields = events[0].summary.affected_fields.clone();
         fields.sort_unstable();
         assert_eq!(fields, ["contents", "selector"]);
+        // The retained request keeps the approver's view of the values; the
+        // notification summary does not carry them.
+        assert_eq!(captured.argument_values, arguments);
         let rendered = serde_json::to_string(&events[0].summary).unwrap();
         for forbidden in [
             "synthetic-secret",
@@ -1311,4 +1326,65 @@ async fn direct_approval_summary_uses_admitted_description_and_schema_fields_wit
         "Code Mode uses its own durable request journal"
     );
     assert!(notifier.0.lock().unwrap()[1].pending_request_id.is_none());
+}
+
+#[tokio::test]
+async fn held_calls_retain_redacted_values_and_only_field_names_for_sensitive_input() {
+    for (sensitive_input, expected) in [
+        (
+            false,
+            serde_json::json!({"selector": "synthetic-target",
+                "apiKey": waygate_mcp::approval_arguments::SENSITIVE_FIELD,
+                "user-controlled-field-name": "opaque"}),
+        ),
+        (
+            true,
+            serde_json::json!({"selector": waygate_mcp::approval_arguments::SENSITIVE_INPUT}),
+        ),
+    ] {
+        let requests = Arc::new(RecordingRequests::default());
+        let upstream = Arc::new(FakeUpstream {
+            requires_approval: true,
+            requires_approval_known: true,
+            dispatched: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            approval_gated_seen: None,
+            sensitive_input,
+        });
+        let catalog_store: SharedCatalogStore = Arc::new(FakeCatalog {
+            pending: Some(requests.clone()),
+            tool_id: Uuid::from_u128(1),
+            server_id: Uuid::from_u128(2),
+            claim_outcome: ClaimOutcome::NotFound,
+            seen_issuer: Mutex::new(None),
+        });
+        let service =
+            DefaultInvocationService::new(upstream, Arc::new(AllowAllGate), Arc::new(NullSink))
+                .with_catalog_store(Some(catalog_store));
+        let arguments = serde_json::json!({"selector": "synthetic-target",
+            "apiKey": "synthetic-credential", "user-controlled-field-name": "opaque"})
+        .as_object()
+        .unwrap()
+        .clone();
+        let result = service
+            .invoke(
+                Some(&principal("fixture-reader")),
+                InvocationRequest::new("example-messages", "send")
+                    .with_arguments(Some(arguments.clone())),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(InvocationError::ApprovalRequired { .. })
+        ));
+        let captured = requests.0.lock().unwrap()[0].clone();
+        assert_eq!(
+            serde_json::Value::Object(captured.argument_values),
+            expected
+        );
+        // The approval still binds the complete original arguments.
+        assert_eq!(
+            captured.argument_hash,
+            waygate_catalog::argument_hash(Some(&arguments))
+        );
+    }
 }

@@ -735,6 +735,11 @@ pub struct InvocationToolSnapshot {
     /// fact, which also covers protected input. Always false outside
     /// annotation mode (result trust is only enforced there).
     anticipated_sensitive_output: bool,
+    /// Whether the reviewed INPUT classification marks the arguments
+    /// sensitive. Approval displays then show submitted field names only.
+    /// Set where the reviewed contract is bound; false when no reviewed
+    /// classification exists.
+    sensitive_input: bool,
     output_validator: Option<Arc<jsonschema::Validator>>,
     /// Argument field whose value selects the operation, when the tool is
     /// classified per operation. Resolution needs the call's arguments, which
@@ -1003,6 +1008,7 @@ impl InvocationToolSnapshot {
             annotation_claims_enforced,
             anticipated_sensitive_output,
             output_validator: None,
+            sensitive_input: false,
             discriminator: None,
             operations: Arc::from([]),
         }
@@ -1122,6 +1128,7 @@ impl InvocationToolSnapshot {
             annotation_claims_enforced,
             anticipated_sensitive_output,
             output_validator: None,
+            sensitive_input: false,
             discriminator: None,
             operations: Arc::from([]),
         }
@@ -1147,6 +1154,7 @@ impl InvocationToolSnapshot {
             annotation_claims_enforced: false,
             anticipated_sensitive_output: false,
             output_validator: None,
+            sensitive_input: false,
             discriminator: None,
             operations: Arc::from([]),
         }
@@ -1438,6 +1446,20 @@ impl InvocationToolSnapshot {
     /// result only when this is true.
     pub fn anticipated_sensitive_output(&self) -> bool {
         self.anticipated_sensitive_output
+    }
+
+    /// Record whether the reviewed input classification marks the arguments
+    /// sensitive.
+    #[must_use]
+    pub fn with_sensitive_input(mut self, sensitive_input: bool) -> Self {
+        self.sensitive_input = sensitive_input;
+        self
+    }
+
+    /// Whether the reviewed input classification marks the arguments
+    /// sensitive, so approval displays show field names without values.
+    pub fn sensitive_input(&self) -> bool {
+        self.sensitive_input
     }
 
     /// Stable identity of every contract field that can affect validation,

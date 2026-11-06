@@ -12,6 +12,7 @@
 // as `protocol::RiskTier`.
 pub use waygate_evidence::{audit, budget, cache, usage};
 
+pub mod approval_arguments;
 pub mod authz;
 pub mod builtin;
 pub mod call_tasks;

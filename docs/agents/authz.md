@@ -149,7 +149,8 @@ Direct calls without a matching grant also retain a bounded pending request in
 the PostgreSQL catalog. The administrator queue and notification link refer to
 that same request. Approval records a single-use grant and the decision together;
 it neither dispatches a tool nor relaxes the requester's next invocation checks.
-Argument values are not retained in the queue. See
+The queue keeps the approver's redacted view of the argument values only while
+a request is pending. See
 [pending invocation requests](../invocation-requests.md) for review, expiry,
 retention, and recovery.
 
