@@ -914,14 +914,18 @@ tools:
   deliver larger files, and a lower value tightens the bound for a less
   trusted server. The gateway still enforces any smaller size a file declares.
   A file that would take a result past the limit fails with
-  `quota_exhausted`, and the result's staged files are discarded. A retained response body is read into memory under a fixed
-  16 MiB ceiling, so only a value below that ceiling changes it. The gateway
-  downloads file bytes over its own HTTP client, so every transport accepts
-  the field. The upload limit stays gateway-wide, because it is checked before
-  the gateway knows which server will receive the file. Staged files are kept
-  for the [file retention](../file-transfer.md#gateway-settings) period and
-  no setting bounds their total, so size the storage volume for this server's
-  largest results.
+  `quota_exhausted`, and the result's staged files are discarded. When a
+  retained response is delivered as a gateway file, its body is read into
+  memory under a fixed 16 MiB ceiling, so only a value below that ceiling
+  changes it. Code Mode materialization of a retained response is not file
+  staging and keeps its separate limits, as it does under the gateway-wide
+  setting. The gateway downloads file bytes over its own HTTP client, so every
+  transport accepts the field. The upload limit stays gateway-wide, because it
+  is checked before the gateway knows which server will receive the file.
+  Staged files are kept for the
+  [file retention](../file-transfer.md#gateway-settings) period and no setting
+  bounds their total, so size the storage volume for this server's largest
+  results.
 - `resource_file_preparation_seconds` replaces
   `GATEWAY_RESOURCE_FILE_PREPARATION_SECONDS` (default 30) for this server:
   the time the gateway allows for downloading every file that one
