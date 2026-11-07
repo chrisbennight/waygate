@@ -367,11 +367,15 @@ pub(crate) struct OutboundFileProcessor {
     #[cfg(test)]
     additional_root_certificates: Vec<reqwest::Certificate>,
     retention: FileRetention,
-    /// Retention for files whose authorization declared them secret-class.
+    /// Gateway-wide limit on the file bytes staged from one result. A
+    /// server's `limits.file_max_bytes` replaces it; see [`Self::max_bytes_for`].
     max_bytes: Option<u64>,
     admission: FileTransferAdmission,
     native_https: bool,
     response_settings: Arc<waygate_dashboard_stores::response_settings::ResponseSettingsService>,
+    /// Gateway-wide deadline for staging every file of one resource read. A
+    /// server's `limits.resource_file_preparation_seconds` replaces it; see
+    /// [`Self::resource_preparation_timeout_for`].
     resource_preparation_timeout: Duration,
 }
 
@@ -446,11 +450,32 @@ impl OutboundFileProcessor {
         }
     }
 
+    /// The limit on file bytes staged from one result of `server`: its
+    /// manifest's `limits.file_max_bytes` when set, otherwise the gateway-wide
+    /// limit. Read once per result, so every file in it shares one budget.
+    fn max_bytes_for(&self, server: &str) -> Option<u64> {
+        self.catalog
+            .upstream_file_limits(server)
+            .max_bytes
+            .or(self.max_bytes)
+    }
+
+    /// The deadline for staging every file of one resource read of `server`:
+    /// its manifest's `limits.resource_file_preparation_seconds` when set,
+    /// otherwise the gateway-wide deadline.
+    fn resource_preparation_timeout_for(&self, server: &str) -> Duration {
+        self.catalog
+            .upstream_file_limits(server)
+            .resource_preparation
+            .unwrap_or(self.resource_preparation_timeout)
+    }
+
     async fn prepare_retained_file_references(
         &self,
         context: &FileOutputContext,
         principal: &Principal,
         batch_id: uuid::Uuid,
+        max_bytes: Option<u64>,
         body: &mut waygate_mcp::files::RetainedFileBody,
     ) -> Result<(usize, Option<u64>), McpError> {
         let media_type = body
@@ -463,7 +488,7 @@ impl OutboundFileProcessor {
         if media_type != "application/json"
             && !(media_type.starts_with("application/") && media_type.ends_with("+json"))
         {
-            return Ok((0, self.max_bytes));
+            return Ok((0, max_bytes));
         }
         let mut value: Value = serde_json::from_slice(&body.bytes).map_err(|_| {
             file_transfer_failure(
@@ -473,7 +498,7 @@ impl OutboundFileProcessor {
         })?;
         let files = collect_file_values(&value)?;
         if files.is_empty() {
-            return Ok((0, self.max_bytes));
+            return Ok((0, max_bytes));
         }
         if files.len() >= limits().file_count {
             return Err(invalid_file_request(
@@ -484,10 +509,7 @@ impl OutboundFileProcessor {
                 ),
             ));
         }
-        if self
-            .max_bytes
-            .is_some_and(|limit| body.bytes.len() as u64 > limit)
-        {
+        if max_bytes.is_some_and(|limit| body.bytes.len() as u64 > limit) {
             return Err(invalid_file_request(
                 FileTransferReason::QuotaExhausted,
                 "retained response exceeded the configured size limit",
@@ -496,9 +518,7 @@ impl OutboundFileProcessor {
         let file_count = files.len();
         let mut file_bytes = 0u64;
         let mut active_file_id = None;
-        let mut budget = self
-            .max_bytes
-            .map(|limit| limit.saturating_sub(body.bytes.len() as u64));
+        let mut budget = max_bytes.map(|limit| limit.saturating_sub(body.bytes.len() as u64));
         for (path, file) in files {
             let (replacement, stored_file_id, bytes) = self
                 .stage_file_with_batch_heartbeat(
@@ -523,7 +543,7 @@ impl OutboundFileProcessor {
         })?;
         Ok((
             file_count,
-            self.max_bytes.map(|limit| limit.saturating_sub(file_bytes)),
+            max_bytes.map(|limit| limit.saturating_sub(file_bytes)),
         ))
     }
 
@@ -1415,8 +1435,9 @@ impl FileOutputProcessor for OutboundFileProcessor {
             })
     }
 
-    fn retained_response_max_bytes(&self) -> Option<usize> {
-        self.max_bytes.and_then(|bytes| usize::try_from(bytes).ok())
+    fn retained_response_max_bytes(&self, server: &str) -> Option<usize> {
+        self.max_bytes_for(server)
+            .and_then(|bytes| usize::try_from(bytes).ok())
     }
 
     async fn prepare_retained(
@@ -1442,8 +1463,9 @@ impl FileOutputProcessor for OutboundFileProcessor {
                 "file retention is too large",
             )
         })?;
+        let max_bytes = self.max_bytes_for(&context.server);
         let (nested_files, remaining_budget) = match self
-            .prepare_retained_file_references(&context, principal, batch_id, &mut body)
+            .prepare_retained_file_references(&context, principal, batch_id, max_bytes, &mut body)
             .await
         {
             Ok(prepared) => prepared,
@@ -1571,7 +1593,7 @@ impl FileOutputProcessor for OutboundFileProcessor {
         // carrying many references would otherwise pass a per-file check while
         // its total still filled the volume, so each file is admitted against
         // what the earlier ones left rather than against the full limit.
-        let mut budget = self.max_bytes;
+        let mut budget = self.max_bytes_for(&context.server);
         for (path, file) in files {
             match self
                 .stage_file_with_batch_heartbeat(
@@ -1635,8 +1657,9 @@ impl FileOutputProcessor for OutboundFileProcessor {
         let batch_id = uuid::Uuid::new_v4();
         let mut replacements = Vec::with_capacity(files.len());
         let mut active_file_id = None;
-        let mut budget = self.max_bytes;
-        let deadline = tokio::time::Instant::now() + self.resource_preparation_timeout;
+        let mut budget = self.max_bytes_for(&context.server);
+        let deadline =
+            tokio::time::Instant::now() + self.resource_preparation_timeout_for(&context.server);
         for (index, file) in files {
             let staged = tokio::time::timeout_at(
                 deadline,
@@ -4002,12 +4025,20 @@ mod tests {
         address: std::net::SocketAddr,
         isolation: &str,
     ) -> Arc<UpstreamPool> {
+        connect_printable_with_limits(address, isolation, None).await
+    }
+
+    async fn connect_printable_with_limits(
+        address: std::net::SocketAddr,
+        isolation: &str,
+        limits: Option<waygate_upstream::UpstreamLimits>,
+    ) -> Arc<UpstreamPool> {
         let manifest = UpstreamManifest {
             classification_mode: Default::default(),
             approval_mode: Default::default(),
             inline_response_threshold_bytes: None,
             long_running_tools: Vec::new(),
-            limits: None,
+            limits,
             name: "printable".to_owned(),
             transport: Transport::Http,
             protocol: Default::default(),
@@ -4031,6 +4062,280 @@ mod tests {
             session: Some(serde_json::from_value(json!({"isolation": isolation})).unwrap()),
         };
         Arc::new(UpstreamPool::connect(BTreeMap::from([("printable".to_owned(), manifest)])).await)
+    }
+
+    /// Serve `body` at `/file` over loopback HTTP after `delay`, and describe
+    /// it as the printable fixture's one downloadable file.
+    async fn serve_printable_file(
+        body: &'static str,
+        delay: Duration,
+    ) -> (FileValue, AuthorizeDownloadResult) {
+        let app = axum::Router::new().route(
+            "/file",
+            axum::routing::get(move || async move {
+                tokio::time::sleep(delay).await;
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                    body,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind file endpoint");
+        let address = listener.local_addr().expect("file endpoint address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve file endpoint");
+        });
+        let file = FileValue {
+            uri: "mcp-file://printable/output".to_owned(),
+            name: Some("output.bin".to_owned()),
+            mime_type: Some("application/octet-stream".to_owned()),
+            size: Some(body.len() as u64),
+            digest: Some(FileDigest {
+                algorithm: "sha-256".to_owned(),
+                value: URL_SAFE_NO_PAD.encode(Sha256::digest(body.as_bytes())),
+            }),
+        };
+        let authorization = AuthorizeDownloadResult {
+            file: file.clone(),
+            sensitivity: None,
+            download: FileTransferDescriptor {
+                transport: TransferScheme::Http.transport(),
+                method: TransferMethod::GET,
+                url: format!("http://{address}/file"),
+                headers: BTreeMap::new(),
+                multipart: None,
+                expires_at: Some(format_ts_rfc3339(
+                    OffsetDateTime::now_utc() + time::Duration::minutes(5),
+                )),
+            },
+        };
+        (file, authorization)
+    }
+
+    async fn seed_tenant(pool: &sqlx::PgPool, prefix: &str) -> String {
+        let tenant = format!("{prefix}-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query("INSERT INTO tenants (id, display_name) VALUES ($1, $1)")
+            .bind(&tenant)
+            .execute(pool)
+            .await
+            .expect("seed tenant");
+        tenant
+    }
+
+    /// A server's `limits.file_max_bytes` replaces the gateway-wide limit for
+    /// the files that server returns, whether it is higher or lower, and a
+    /// server that sets none stays bounded by the gateway-wide limit.
+    #[tokio::test]
+    async fn a_server_file_limit_replaces_the_gateway_limit_for_its_results() {
+        let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+            return;
+        };
+        let tenant = seed_tenant(&pool, "server-file-limit").await;
+        let root = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            GatewayFileStorage::new(pool.clone(), root.path())
+                .await
+                .unwrap(),
+        );
+        let body = "synthetic upstream file bytes";
+        let size = body.len() as u64;
+        let (file, authorization) = serve_printable_file(body, Duration::ZERO).await;
+        let (upstream, ..) = spawn_printable_upstream(vec![authorization], None).await;
+        let mut actor = profile_principal(None, None);
+        actor.tenant = waygate_core::TenantId::parse(&tenant).unwrap();
+
+        for (gateway_limit, server_limit, admitted) in [
+            (size - 1, None, false),
+            (size - 1, Some(size), true),
+            (size, Some(size - 1), false),
+        ] {
+            let case = format!("gateway {gateway_limit}, server {server_limit:?}");
+            let catalog = connect_printable_with_limits(
+                upstream,
+                "per_call",
+                server_limit.map(|bytes| waygate_upstream::UpstreamLimits {
+                    file_max_bytes: Some(bytes),
+                    ..Default::default()
+                }),
+            )
+            .await;
+            let processor = OutboundFileProcessor::new(
+                catalog,
+                storage.clone(),
+                Arc::new(waygate_mcp::audit::InMemorySink::new()),
+                FileRetention::DEFAULT,
+                Some(gateway_limit),
+                FileTransferAdmission::new(2),
+                false,
+            )
+            .unwrap();
+            let effective = server_limit.unwrap_or(gateway_limit);
+            assert_eq!(
+                processor.retained_response_max_bytes("printable"),
+                usize::try_from(effective).ok(),
+                "{case}: a retained response is bounded by the same limit"
+            );
+            assert_eq!(
+                processor.retained_response_max_bytes("another-server"),
+                usize::try_from(gateway_limit).ok(),
+                "{case}: other servers keep the gateway-wide limit"
+            );
+
+            let invocation_id = uuid::Uuid::new_v4().to_string();
+            let mut result = CallToolResult::success(vec![ContentBlock::text("output is ready")]);
+            result.structured_content = Some(json!({"files": [file.clone()]}));
+            let prepared = FileOutputProcessor::prepare(
+                &processor,
+                FileOutputContext {
+                    principal: Some(actor.clone()),
+                    server: "printable".to_owned(),
+                    tool: "render".to_owned(),
+                    invocation_id: invocation_id.clone(),
+                },
+                result,
+            )
+            .await;
+            if admitted {
+                let prepared = prepared.unwrap_or_else(|error| panic!("{case}: {error:?}"));
+                assert_eq!(prepared.file_count, 1, "{case}");
+                let batch_id = prepared.batch_id.expect("staged batch");
+                processor.publish(&batch_id, 1).await.unwrap();
+                let rewritten = prepared.result.structured_content.unwrap();
+                let uri = rewritten["files"][0]["uri"].as_str().unwrap();
+                let stored = storage
+                    .find_ready(
+                        &owner_from_principal(&actor),
+                        parse_gateway_file_uri(uri).unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .expect("published file");
+                assert_eq!(stored.size, size, "{case}");
+                assert_eq!(
+                    tokio::fs::read(storage.path_for(&stored)).await.unwrap(),
+                    body.as_bytes(),
+                    "{case}"
+                );
+            } else {
+                let error = prepared.err().unwrap_or_else(|| panic!("{case}: admitted"));
+                assert_eq!(
+                    error.data.as_ref().unwrap()["error"],
+                    "quota_exhausted",
+                    "{case}: {error:?}"
+                );
+                let staged: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM gateway_files WHERE invocation_id = $1",
+                )
+                .bind(&invocation_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(staged, 0, "{case}: a refused result keeps no file");
+            }
+        }
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// A server's `limits.resource_file_preparation_seconds` replaces the
+    /// gateway-wide deadline for staging the files of its resource reads.
+    #[tokio::test]
+    async fn a_server_resource_deadline_replaces_the_gateway_deadline() {
+        let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+            return;
+        };
+        let tenant = seed_tenant(&pool, "server-resource-deadline").await;
+        let root = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            GatewayFileStorage::new(pool.clone(), root.path())
+                .await
+                .unwrap(),
+        );
+        // The file arrives well after the gateway-wide deadline below and
+        // well within the server's own.
+        let gateway_deadline = Duration::from_millis(250);
+        let (file, authorization) =
+            serve_printable_file("synthetic slow resource file", Duration::from_secs(1)).await;
+        let (upstream, ..) = spawn_printable_upstream(vec![authorization], None).await;
+        let mut actor = profile_principal(None, None);
+        actor.tenant = waygate_core::TenantId::parse(&tenant).unwrap();
+
+        for (server_deadline, admitted) in [(None, false), (Some(30), true)] {
+            let catalog = connect_printable_with_limits(
+                upstream,
+                "per_call",
+                server_deadline.map(|seconds| waygate_upstream::UpstreamLimits {
+                    resource_file_preparation_seconds: Some(seconds),
+                    ..Default::default()
+                }),
+            )
+            .await;
+            let processor = OutboundFileProcessor {
+                resource_preparation_timeout: gateway_deadline,
+                ..OutboundFileProcessor::new(
+                    catalog,
+                    storage.clone(),
+                    Arc::new(waygate_mcp::audit::InMemorySink::new()),
+                    FileRetention::DEFAULT,
+                    Some(1024),
+                    FileTransferAdmission::new(2),
+                    false,
+                )
+                .unwrap()
+            };
+            let mut resource = ReadResourceResult::new(vec![ResourceContents::text(
+                "file-backed resource",
+                "printable://reports/latest",
+            )]);
+            let ResourceContents::TextResourceContents { meta, .. } = &mut resource.contents[0]
+            else {
+                panic!("test resource must be text-backed");
+            };
+            meta.get_or_insert_with(Default::default).insert(
+                waygate_mcp::files::FILE_RESOURCE_CONTENT_META_KEY.to_owned(),
+                serde_json::to_value(&file).unwrap(),
+            );
+            let prepared = FileOutputProcessor::prepare_resource(
+                &processor,
+                FileOutputContext {
+                    principal: Some(actor.clone()),
+                    server: "printable".to_owned(),
+                    tool: "resources/read".to_owned(),
+                    invocation_id: uuid::Uuid::new_v4().to_string(),
+                },
+                resource,
+            )
+            .await;
+            if admitted {
+                let prepared = prepared.unwrap_or_else(|error| {
+                    panic!("the server's deadline admits the read: {error:?}")
+                });
+                assert_eq!(prepared.file_count, 1);
+                processor
+                    .discard(&prepared.batch_id.expect("staged batch"))
+                    .await;
+            } else {
+                let error = prepared
+                    .err()
+                    .expect("the gateway-wide deadline applies when the server sets none");
+                assert!(
+                    error.message.contains("exceeded its overall deadline"),
+                    "{error:?}"
+                );
+            }
+        }
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

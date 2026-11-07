@@ -297,6 +297,13 @@ pub trait UpstreamCatalog: Send + Sync + 'static {
         false
     }
 
+    /// File-transfer bounds the operator set for this upstream, read from its
+    /// current manifest. Catalogs without per-server settings keep the
+    /// default, which leaves every gateway-wide file setting in force.
+    fn upstream_file_limits(&self, _server: &str) -> crate::files::UpstreamFileLimits {
+        crate::files::UpstreamFileLimits::default()
+    }
+
     /// Dispatch a lifecycle request on the originating upstream under its tool contract.
     async fn task_request(
         &self,

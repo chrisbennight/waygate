@@ -605,7 +605,9 @@ This document covers:
   `bounded_resource_read_unsupported` because they cannot provide that
   pre-buffer guarantee. A governed file read
   can still transfer up to the independent file-service ceiling (1 GiB by
-  default): only its bounded descriptor crosses the MCP response path. Textual
+  default, or the server's
+  [`limits.file_max_bytes`](#per-server-call-limits)): only its bounded
+  descriptor crosses the MCP response path. Textual
   resource contents run through the configured response-inspector chain before
   file staging; blob contents deliberately remain outside text inspection.
   A tool-only upstream remains transport-eligible for its tools without being
@@ -857,8 +859,9 @@ and trust files take effect as before.
 
 ## Per-server call limits
 
-The optional `limits` block bounds each call to one upstream. Both fields are
-optional, and an omitted field inherits the gateway-wide setting:
+The optional `limits` block bounds each call to one upstream and the files it
+returns. Every field is optional, and an omitted field inherits the
+gateway-wide setting:
 
 ```yaml
 name: example-search
@@ -868,6 +871,8 @@ url: http://example-search:8080/mcp
 limits:
   call_timeout_seconds: 900
   call_response_max_bytes: 268435456
+  file_max_bytes: 10737418240
+  resource_file_preparation_seconds: 600
 tools:
   - name: search
     risk: low
@@ -900,6 +905,32 @@ tools:
   result within the limit can still be delivered as a gateway file under the
   [inline response threshold](../file-transfer.md#large-structured-tool-responses)
   rules.
+- `file_max_bytes` replaces `GATEWAY_FILE_MAX_BYTES` (default 1073741824,
+  1 GiB) for this server, with the same meaning and range: the total bytes of
+  the files the gateway stages from one result of this server, whether a
+  tool-call result, the files nested in a retained response, or a file-backed
+  resource read. It must be between 1 and 9223372036854775807; there is no
+  unlimited value. A value above the gateway-wide limit lets this server alone
+  deliver larger files, and a lower value tightens the bound for a less
+  trusted server. The gateway still enforces any smaller size a file declares.
+  A file that would take a result past the limit fails with
+  `quota_exhausted`, and the result's staged files are discarded. A retained response body is read into memory under a fixed
+  16 MiB ceiling, so only a value below that ceiling changes it. The gateway
+  downloads file bytes over its own HTTP client, so every transport accepts
+  the field. The upload limit stays gateway-wide, because it is checked before
+  the gateway knows which server will receive the file. Staged files are kept
+  for the [file retention](../file-transfer.md#gateway-settings) period and
+  no setting bounds their total, so size the storage volume for this server's
+  largest results.
+- `resource_file_preparation_seconds` replaces
+  `GATEWAY_RESOURCE_FILE_PREPARATION_SECONDS` (default 30) for this server:
+  the time the gateway allows for downloading every file that one
+  `resources/read` result carries. It must be between 1 and 86400 (24 hours).
+  Set it together with a large `file_max_bytes` when the server delivers large
+  files through resource reads; for example, 5 GiB at 1 Gbit/s takes about 43
+  seconds. Tool-call results have no such deadline, and `call_timeout_seconds`
+  does not cover the download that follows a call, so a large file limit does
+  not need a longer call timeout.
 
 Only the streamable-HTTP client can stop reading one response at a byte count.
 A legacy SSE session delivers every response on one long-lived stream, and
@@ -912,7 +943,9 @@ SDK resumes it on a new one, the resumed stream is bounded only by the SDK's
 Load-time validation names the upstream in every refusal. The pool reads
 `limits` from each call's manifest snapshot, so a reload applies a change to
 the next call without reconnecting and reports it with the other response
-settings; a call already in progress keeps the limits it started with.
+settings; a call already in progress keeps the limits it started with. The
+file limits are read when the gateway starts staging a result's files, so a
+reload applies to results staged after it.
 
 ## Upstream call cancellation
 

@@ -16,7 +16,8 @@ use anyhow::Context;
 /// 1 GiB is far above the documents, images, and archives tool calls actually
 /// move, and is a bound rather than a tuned fit — the point is that a single
 /// call can no longer consume the volume. Deployments that genuinely move
-/// larger files raise `GATEWAY_FILE_MAX_BYTES`; there is deliberately no
+/// larger files raise `GATEWAY_FILE_MAX_BYTES`, or set an upstream's
+/// `limits.file_max_bytes` when only that upstream does; there is deliberately no
 /// "unlimited" setting, because that is the state this default exists to end.
 pub(crate) const DEFAULT_FILE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub(crate) use waygate_dashboard_stores::response_settings::DEFAULT_INLINE_RESPONSE_THRESHOLD_BYTES;
@@ -113,7 +114,7 @@ impl FileTransferConfig {
                     .parse::<u64>()
                     .context("GATEWAY_FILE_MAX_BYTES must be a positive integer")
                     .and_then(|value| {
-                        if value == 0 || value > i64::MAX as u64 {
+                        if !(1..=waygate_upstream::MAX_FILE_BYTES).contains(&value) {
                             anyhow::bail!("GATEWAY_FILE_MAX_BYTES must be between 1 and i64::MAX");
                         }
                         Ok(value)

@@ -350,7 +350,7 @@ impl crate::files::FileOutputProcessor for CountFiles {
     fn inline_response_threshold_bytes(&self) -> Option<usize> {
         Some(1)
     }
-    fn retained_response_max_bytes(&self) -> Option<usize> {
+    fn retained_response_max_bytes(&self, _server: &str) -> Option<usize> {
         Some(4096)
     }
 

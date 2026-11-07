@@ -116,6 +116,17 @@ pub trait FileInputProcessor: Send + Sync + 'static {
 
 pub type SharedFileInputProcessor = Arc<dyn FileInputProcessor>;
 
+/// File-transfer bounds an operator set for one upstream. Each field that is
+/// present replaces the matching gateway-wide setting for files that upstream
+/// returns; an absent field leaves the gateway-wide setting in force.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UpstreamFileLimits {
+    /// Largest total of file bytes staged from one result.
+    pub max_bytes: Option<u64>,
+    /// Time allowed for downloading every file one resource read carries.
+    pub resource_preparation: Option<std::time::Duration>,
+}
+
 /// Facts needed to replace upstream file references after a tool call.
 #[derive(Debug, Clone)]
 pub struct FileOutputContext {
@@ -176,7 +187,8 @@ pub trait FileOutputProcessor: Send + Sync + 'static {
         Ok(self.inline_response_threshold_bytes())
     }
 
-    fn retained_response_max_bytes(&self) -> Option<usize> {
+    /// Largest retained response body the processor accepts from `server`.
+    fn retained_response_max_bytes(&self, _server: &str) -> Option<usize> {
         None
     }
 

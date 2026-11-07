@@ -258,8 +258,8 @@ fn manifest(
 
 fn response_limit(bytes: u64) -> Option<UpstreamLimits> {
     Some(UpstreamLimits {
-        call_timeout_seconds: None,
         call_response_max_bytes: Some(bytes),
+        ..UpstreamLimits::default()
     })
 }
 
@@ -427,7 +427,7 @@ async fn server_timeout_replaces_the_gateway_wide_timeout() {
     let gateway_timeout = Duration::from_secs(3600);
     let limits = Some(UpstreamLimits {
         call_timeout_seconds: Some(server_timeout.as_secs()),
-        call_response_max_bytes: None,
+        ..UpstreamLimits::default()
     });
     let pool = Arc::new(
         connect(manifest(upstream.addr, form, limits))
