@@ -60,7 +60,8 @@ pub use waygate_manifest_types::{
     IdentityTokenPolicy, MtlsConfig, OperationClassification, ResourceClassification, SecretHeader,
     SecretQueryParameter, SessionConfig, SessionIsolation, SessionScope, ToolClassification,
     Transport, TrustLevel, UpstreamAuth, UpstreamError, UpstreamLimits, UpstreamManifest,
-    UpstreamProtocol, MANIFEST_WRITE_MARKER, MAX_CALL_RESPONSE_BYTES, MIN_CALL_TIMEOUT_SECONDS,
+    UpstreamProtocol, MANIFEST_WRITE_MARKER, MAX_CALL_RESPONSE_BYTES, MAX_FILE_BYTES,
+    MAX_RESOURCE_FILE_PREPARATION_SECONDS, MIN_CALL_TIMEOUT_SECONDS,
 };
 
 /// A point-in-time snapshot of the upstream-manifest config health.

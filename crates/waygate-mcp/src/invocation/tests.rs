@@ -107,7 +107,7 @@ mod retained_response_pipeline_tests {
                 .or(self.threshold)
         }
 
-        fn retained_response_max_bytes(&self) -> Option<usize> {
+        fn retained_response_max_bytes(&self, _server: &str) -> Option<usize> {
             Some(1024 * 1024 * 1024)
         }
 

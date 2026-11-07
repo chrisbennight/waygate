@@ -1465,6 +1465,10 @@ impl UpstreamCatalog for UpstreamPool {
         self.long_running_tool_inner(server, tool)
     }
 
+    fn upstream_file_limits(&self, server: &str) -> waygate_mcp::files::UpstreamFileLimits {
+        self.upstream_file_limits_inner(server)
+    }
+
     async fn task_request(
         &self,
         server: &str,

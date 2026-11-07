@@ -891,13 +891,25 @@ path is available there.
 One tool call is capped at 1 GiB of staged bytes unless
 `GATEWAY_FILE_MAX_BYTES` sets a different ceiling. The budget is counted across
 every file a single result carries, not per file: a result may reference many
-files, so a per-file check alone would leave the call itself unbounded. The cap used to be absent by default, which left a
-deployment that never set the variable with no bound at all: an upstream
-declaring a file with no `size` could stream into the storage directory until
-the volume filled, and the concurrency limit below bounds simultaneous streams
-rather than bytes, so a single call was enough. Raise the value if the
-deployment genuinely moves larger files; there is deliberately no setting for
-"unlimited". `GATEWAY_FILE_TRANSFER_CONCURRENCY` limits simultaneous inbound and
+files, so a per-file check alone would leave the call itself unbounded. The cap
+always applies: without one, an upstream declaring a file with no `size` could
+stream into the storage directory until the volume filled, and the concurrency
+limit below bounds simultaneous streams rather than bytes, so a single call
+would be enough. There is deliberately no setting for "unlimited". When only
+some upstream servers move larger files, set
+[`limits.file_max_bytes`](agents/upstreams.md#per-server-call-limits) in those
+servers' manifests instead of raising the gateway-wide ceiling: it replaces
+`GATEWAY_FILE_MAX_BYTES` for one server's results, and a lower value tightens
+the bound for a less trusted server. Uploads stay under the gateway-wide
+ceiling, because an upload is authorized before the gateway knows which server
+will receive it. A file-backed `resources/read` must also stage all of its
+files within `GATEWAY_RESOURCE_FILE_PREPARATION_SECONDS` (30 seconds by
+default), which a server's `limits.resource_file_preparation_seconds` can
+replace. Nothing bounds the total size of stored files, and each file stays
+for the retention period, so size the storage volume for the largest results
+the servers you allow can return and how many of them can arrive within one
+retention period.
+`GATEWAY_FILE_TRANSFER_CONCURRENCY` limits simultaneous inbound and
 outbound file streams separately from normal MCP calls and defaults to 8. These
 limits apply within each gateway process. One owner, identified by tenant,
 issuer, and subject, can use at most half the configured slots rounded up.
@@ -1033,8 +1045,9 @@ Which projections exist today:
   The MCP response that carries a file descriptor is itself bounded by
   `GATEWAY_RESOURCE_RESPONSE_MAX_BYTES` (4 MiB by default), before rmcp decodes
   it. That is intentionally separate from `GATEWAY_FILE_MAX_BYTES` (1 GiB by
-  default): the first protects gateway memory while materializing the resource
-  envelope, while the second governs streamed file bytes. Text resource
+  default, or the server's `limits.file_max_bytes`): the first protects gateway
+  memory while materializing the resource envelope, while the second governs
+  streamed file bytes. Text resource
   contents also pass through the normal response-inspector chain before any
   file is staged or published; binary resource contents are not interpreted as
   text.

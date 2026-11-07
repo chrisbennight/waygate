@@ -58,6 +58,31 @@ impl UpstreamPool {
         )
     }
 
+    /// The file-transfer bounds in the `limits` block of `server`'s current
+    /// manifest, so a reload applies a change to the next result the gateway
+    /// stages. An unknown or removed server sets none.
+    pub(super) fn upstream_file_limits_inner(
+        &self,
+        server: &str,
+    ) -> waygate_mcp::files::UpstreamFileLimits {
+        let Some(entry) = self.entries.load().get(server).cloned() else {
+            return Default::default();
+        };
+        if entry.removed.load(Ordering::Acquire) {
+            return Default::default();
+        }
+        let manifest = entry.manifest.read().expect("manifest lock poisoned");
+        let Some(limits) = manifest.limits.as_ref() else {
+            return Default::default();
+        };
+        waygate_mcp::files::UpstreamFileLimits {
+            max_bytes: limits.file_max_bytes,
+            resource_preparation: limits
+                .resource_file_preparation_seconds
+                .map(Duration::from_secs),
+        }
+    }
+
     /// Override the per-lane [`DEFAULT_REDIAL_DIAL_TIMEOUT`] used by a
     /// live re-dial. Mainly for tests (a short bound so the black-hole-target
     /// path is exercised quickly); operators can leave the 15s default.

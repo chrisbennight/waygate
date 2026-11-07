@@ -329,7 +329,7 @@ impl DefaultInvocationService {
         let file_limit = self
             .file_output_processor
             .as_ref()
-            .and_then(|processor| processor.retained_response_max_bytes());
+            .and_then(|processor| processor.retained_response_max_bytes(ctx.server));
         let materialize = ctx.response_delivery
             == waygate_invocation::ResponseDelivery::Materialize
             && ctx

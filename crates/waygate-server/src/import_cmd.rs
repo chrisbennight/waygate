@@ -821,6 +821,8 @@ mod tests {
         let limits = waygate_upstream::UpstreamLimits {
             call_timeout_seconds: Some(900),
             call_response_max_bytes: Some(1_048_576),
+            file_max_bytes: Some(8 * 1024 * 1024 * 1024),
+            resource_file_preparation_seconds: Some(600),
         };
         m.limits = Some(limits.clone());
         let s = to_import_server(&m);
@@ -831,7 +833,7 @@ mod tests {
 
         m.limits = Some(waygate_upstream::UpstreamLimits {
             call_timeout_seconds: Some(0),
-            call_response_max_bytes: None,
+            ..waygate_upstream::UpstreamLimits::default()
         });
         let s = to_import_server(&m);
         assert_eq!(

@@ -518,6 +518,16 @@ pub const MIN_CALL_TIMEOUT_SECONDS: u64 = 5;
 /// limit.
 pub const MAX_CALL_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// Largest staged-file limit, in bytes, the gateway accepts. Shared by
+/// `GATEWAY_FILE_MAX_BYTES` and `limits.file_max_bytes` so both settings have
+/// the same bounds.
+pub const MAX_FILE_BYTES: u64 = i64::MAX as u64;
+
+/// Longest resource-read file preparation deadline, in seconds, a manifest
+/// accepts. Bounded so the deadline can always be computed from the current
+/// time.
+pub const MAX_RESOURCE_FILE_PREPARATION_SECONDS: u64 = 24 * 60 * 60;
+
 /// Per-upstream bounds on one forwarded call.
 ///
 /// Each field is optional and falls back to the gateway-wide setting it
@@ -539,6 +549,20 @@ pub struct UpstreamLimits {
     /// enforce it, so other transports refuse the setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_response_max_bytes: Option<u64>,
+    /// Largest total, in bytes, of the files the gateway stages from one
+    /// result of this upstream: a tool-call result, a retained response, or a
+    /// file-backed resource read. Replaces `GATEWAY_FILE_MAX_BYTES` for this
+    /// server with the same meaning. Must be between 1 and
+    /// [`MAX_FILE_BYTES`]; there is no unlimited value. The gateway downloads
+    /// file bytes itself, so every transport honors it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_max_bytes: Option<u64>,
+    /// Seconds the gateway allows for downloading every file that one
+    /// `resources/read` result of this upstream carries. Replaces
+    /// `GATEWAY_RESOURCE_FILE_PREPARATION_SECONDS` for this server. Must be
+    /// between 1 and [`MAX_RESOURCE_FILE_PREPARATION_SECONDS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_file_preparation_seconds: Option<u64>,
 }
 
 /// One upstream-owned resource URI space and its gateway classification.
@@ -1679,6 +1703,25 @@ fn validate_limits(m: &UpstreamManifest) -> Result<(), UpstreamError> {
         return Err(UpstreamError::InvalidManifest(format!(
             "upstream `{}`: `limits.call_timeout_seconds` must be 0, which disables the timeout, \
              or at least {MIN_CALL_TIMEOUT_SECONDS}",
+            m.name,
+        )));
+    }
+    if limits
+        .file_max_bytes
+        .is_some_and(|bytes| !(1..=MAX_FILE_BYTES).contains(&bytes))
+    {
+        return Err(UpstreamError::InvalidManifest(format!(
+            "upstream `{}`: `limits.file_max_bytes` must be between 1 and {MAX_FILE_BYTES}",
+            m.name,
+        )));
+    }
+    if limits
+        .resource_file_preparation_seconds
+        .is_some_and(|seconds| !(1..=MAX_RESOURCE_FILE_PREPARATION_SECONDS).contains(&seconds))
+    {
+        return Err(UpstreamError::InvalidManifest(format!(
+            "upstream `{}`: `limits.resource_file_preparation_seconds` must be between 1 and \
+             {MAX_RESOURCE_FILE_PREPARATION_SECONDS}",
             m.name,
         )));
     }
@@ -2873,7 +2916,8 @@ tools:
         );
 
         let configured = format!(
-            "{yaml}  limits:\n    call_timeout_seconds: 0\n    call_response_max_bytes: 1048576\n"
+            "{yaml}  limits:\n    call_timeout_seconds: 0\n    call_response_max_bytes: 1048576\n    \
+             file_max_bytes: 10737418240\n    resource_file_preparation_seconds: 600\n"
         );
         let manifests = parse_manifest_set(&configured).unwrap();
         let limits = manifests["example-search"].limits.clone().unwrap();
@@ -2883,12 +2927,27 @@ tools:
             "0 disables, as globally"
         );
         assert_eq!(limits.call_response_max_bytes, Some(1_048_576));
+        assert_eq!(
+            limits.file_max_bytes,
+            Some(10 * 1024 * 1024 * 1024),
+            "a server may stage more than the 1 GiB gateway default"
+        );
+        assert_eq!(limits.resource_file_preparation_seconds, Some(600));
         let reparsed = parse_manifest_set(&serialize_manifest_set(&manifests).unwrap()).unwrap();
         assert_eq!(reparsed["example-search"].limits, Some(limits));
 
         let floor =
             format!("{yaml}  limits:\n    call_timeout_seconds: {MIN_CALL_TIMEOUT_SECONDS}\n");
         parse_manifest_set(&floor).expect("the floor itself is accepted");
+        let file_bounds = format!(
+            "{yaml}  limits:\n    file_max_bytes: {MAX_FILE_BYTES}\n    \
+             resource_file_preparation_seconds: {MAX_RESOURCE_FILE_PREPARATION_SECONDS}\n"
+        );
+        parse_manifest_set(&file_bounds).expect("the file limits' maximums are accepted");
+        let smallest = format!(
+            "{yaml}  limits:\n    file_max_bytes: 1\n    resource_file_preparation_seconds: 1\n"
+        );
+        parse_manifest_set(&smallest).expect("the file limits' minimums are accepted");
 
         for (block, expected) in [
             (
@@ -2908,6 +2967,23 @@ tools:
                 "    call_response_max_byte: 1024\n",
                 "unknown field `call_response_max_byte`",
             ),
+            (
+                "    file_max_bytes: 0\n",
+                "`limits.file_max_bytes` must be between 1 and 9223372036854775807",
+            ),
+            (
+                "    file_max_bytes: 9223372036854775808\n",
+                "example-search",
+            ),
+            ("    file_max_bytes: -1\n", "example-search"),
+            (
+                "    resource_file_preparation_seconds: 0\n",
+                "`limits.resource_file_preparation_seconds` must be between 1 and 86400",
+            ),
+            (
+                "    resource_file_preparation_seconds: 86401\n",
+                "`limits.resource_file_preparation_seconds` must be between 1 and 86400",
+            ),
         ] {
             let candidate = format!("{yaml}  limits:\n{block}");
             let error = parse_manifest_set(&candidate).unwrap_err().to_string();
@@ -2922,6 +2998,7 @@ tools:
         manifest.limits = Some(UpstreamLimits {
             call_timeout_seconds: Some(30),
             call_response_max_bytes: Some(4096),
+            ..UpstreamLimits::default()
         });
         validate_manifest_invariants(&manifest).expect("streamable HTTP enforces the limit");
 
@@ -2939,8 +3016,30 @@ tools:
         manifest.limits = Some(UpstreamLimits {
             call_timeout_seconds: Some(30),
             call_response_max_bytes: None,
+            ..UpstreamLimits::default()
         });
         validate_manifest_invariants(&manifest).expect("every transport honors the timeout");
+    }
+
+    #[test]
+    fn file_limits_are_accepted_for_every_transport() {
+        // The gateway downloads file bytes over its own HTTP client, whatever
+        // transport carries the upstream's MCP messages.
+        let mut manifest = base_manifest();
+        manifest.limits = Some(UpstreamLimits {
+            file_max_bytes: Some(8 * 1024 * 1024 * 1024),
+            resource_file_preparation_seconds: Some(900),
+            ..UpstreamLimits::default()
+        });
+        validate_manifest_invariants(&manifest).expect("streamable HTTP");
+
+        manifest.transport = Transport::Sse;
+        validate_manifest_invariants(&manifest).expect("legacy SSE");
+
+        manifest.transport = Transport::Stdio;
+        manifest.url = None;
+        manifest.command = Some(vec!["example-server".into()]);
+        validate_manifest_invariants(&manifest).expect("stdio");
     }
 
     #[test]

@@ -574,24 +574,42 @@ async fn call_limits_follow_the_live_manifest_without_reconnecting() {
         .into_iter()
         .map(|manifest| (manifest.name.clone(), manifest))
         .collect();
-    for (limits, timeout, response_limit) in [
+    let ten_gib = 10 * 1024 * 1024 * 1024;
+    for (limits, timeout, response_limit, file_limits) in [
         (
             Some(crate::UpstreamLimits {
                 call_timeout_seconds: Some(7),
                 call_response_max_bytes: Some(1024),
+                file_max_bytes: Some(ten_gib),
+                resource_file_preparation_seconds: Some(600),
             }),
             Some(Duration::from_secs(7)),
             Some(1024),
+            waygate_mcp::files::UpstreamFileLimits {
+                max_bytes: Some(ten_gib),
+                resource_preparation: Some(Duration::from_secs(600)),
+            },
         ),
         (
             Some(crate::UpstreamLimits {
                 call_timeout_seconds: Some(0),
                 call_response_max_bytes: None,
+                file_max_bytes: Some(4096),
+                resource_file_preparation_seconds: None,
             }),
             None,
             Some(4096),
+            waygate_mcp::files::UpstreamFileLimits {
+                max_bytes: Some(4096),
+                resource_preparation: None,
+            },
         ),
-        (None, Some(Duration::from_secs(300)), Some(4096)),
+        (
+            None,
+            Some(Duration::from_secs(300)),
+            Some(4096),
+            waygate_mcp::files::UpstreamFileLimits::default(),
+        ),
     ] {
         manifests
             .get_mut("example-messages")
@@ -610,13 +628,23 @@ async fn call_limits_follow_the_live_manifest_without_reconnecting() {
             response_limit,
             "{limits:?}"
         );
+        assert_eq!(
+            pool.upstream_file_limits("example-messages"),
+            file_limits,
+            "{limits:?}"
+        );
     }
+    assert_eq!(
+        pool.upstream_file_limits("unknown-server"),
+        waygate_mcp::files::UpstreamFileLimits::default(),
+        "an unknown server leaves the gateway-wide file settings in force"
+    );
 
     let disabled_globally = pool.with_call_timeout(None);
     let mut overridden = live(&disabled_globally);
     overridden.limits = Some(crate::UpstreamLimits {
         call_timeout_seconds: Some(30),
-        call_response_max_bytes: None,
+        ..crate::UpstreamLimits::default()
     });
     assert_eq!(
         disabled_globally.call_timeout_for(&overridden),
