@@ -21,6 +21,7 @@ pub enum Surface {
     ImagesGenerations,
     ImagesEdits,
     AudioSpeech,
+    AudioTranscription,
     AudioResource,
     Realtime,
     /// The provider-native Anthropic Messages surface: the client body is
@@ -37,6 +38,7 @@ impl Surface {
             Self::ImagesGenerations => "images_generations",
             Self::ImagesEdits => "images_edits",
             Self::AudioSpeech => "audio_speech",
+            Self::AudioTranscription => "audio_transcription",
             Self::AudioResource => "audio_resource",
             Self::Realtime => "realtime",
             Self::AnthropicMessages => "anthropic_messages",

@@ -13,6 +13,7 @@ mod images;
 mod native;
 mod realtime;
 mod speech;
+mod transcription;
 
 const COMPLETION_CACHE_WRITE_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
 
@@ -91,6 +92,22 @@ impl DefaultInvocationService {
         // `/v1/messages`. Without this
         // the embeddings parser would choke on a chat body (or vice-versa)
         // or the wrong body would be POSTed to the wrong upstream path.
+        if matches!(model.operation, LlmOperation::Transcription(_)) || ctx.transcription.is_some()
+        {
+            if !matches!(model.operation, LlmOperation::Transcription(_))
+                || ctx.transcription.is_none()
+                || ctx.speech_surface
+                || ctx.images_surface.is_some()
+                || ctx.embeddings_surface
+                || ctx.responses_surface
+                || ctx.native_messages_surface
+            {
+                return Err(InvocationError::InvalidArguments(
+                    "transcription models require POST /v1/audio/transcriptions".into(),
+                ));
+            }
+            return self.invoke_transcription(ctx, model, dispatcher).await;
+        }
         if matches!(model.operation, LlmOperation::Speech(_)) || ctx.speech_surface {
             if !matches!(model.operation, LlmOperation::Speech(_))
                 || !ctx.speech_surface

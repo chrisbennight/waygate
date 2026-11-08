@@ -59,6 +59,7 @@ mod images;
 mod messages;
 mod realtime;
 mod speech;
+mod transcription;
 
 /// Max inbound request body (bytes) for an LLM call.
 const MAX_BODY: usize = 8 * 1024 * 1024;
@@ -85,6 +86,9 @@ struct ModelDef {
     /// Explicit capabilities required for a configured speech model.
     #[serde(default)]
     speech: Option<waygate_llm_translate::speech::SpeechCapabilities>,
+    /// Explicit capabilities required for a configured transcription model.
+    #[serde(default)]
+    transcription: Option<waygate_llm_translate::transcription::TranscriptionCapabilities>,
     /// Client-facing model name (the `model` field clients send).
     alias: String,
     /// Provider owning the credential: openai | anthropic | google | openrouter.
@@ -243,6 +247,12 @@ fn is_speech(def: &ModelDef) -> bool {
         .is_some_and(|kind| kind.eq_ignore_ascii_case("speech"))
 }
 
+fn is_transcription(def: &ModelDef) -> bool {
+    def.kind
+        .as_deref()
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("transcription"))
+}
+
 fn is_realtime(def: &ModelDef) -> bool {
     def.kind
         .as_deref()
@@ -270,6 +280,9 @@ fn upstream_api_for(def: &ModelDef) -> &'static str {
     }
     if is_speech(def) {
         return "speech";
+    }
+    if is_transcription(def) {
+        return "transcription";
     }
     if is_images(def) {
         return "images";
@@ -545,8 +558,10 @@ fn build_from_defs(
         let is_emb = is_embeddings(&def);
         let is_img = is_images(&def);
         let is_speech = is_speech(&def);
+        let is_transcription = is_transcription(&def);
         let is_realtime = is_realtime(&def);
         speech::validate_config(&def)?;
+        transcription::validate_config(&def)?;
         realtime::validate_config(&def)?;
         let no_auth = embedding_config::no_auth(&def)?;
         if is_img
@@ -578,6 +593,12 @@ fn build_from_defs(
                 Some("realtime".into())
             } else if is_speech {
                 Some(def.path.clone().unwrap_or_else(|| "audio/speech".into()))
+            } else if is_transcription {
+                Some(
+                    def.path
+                        .clone()
+                        .unwrap_or_else(|| "audio/transcriptions".into()),
+                )
             } else if is_img {
                 Some(def.path.clone().unwrap_or_else(|| "images".into()))
             } else {
@@ -622,6 +643,12 @@ fn build_from_defs(
                     )
                 } else if is_speech {
                     LlmOperation::Speech(def.speech.clone().expect("validated speech capabilities"))
+                } else if is_transcription {
+                    LlmOperation::Transcription(
+                        def.transcription
+                            .clone()
+                            .expect("validated transcription capabilities"),
+                    )
                 } else if is_img {
                     LlmOperation::Images
                 } else if is_emb {
@@ -694,9 +721,11 @@ fn build_from_defs(
 /// malformed row that could never route); the loader logs and skips it rather
 /// than failing the whole load.
 fn resolved_from_catalog_row(row: &waygate_storage::LlmModelRow) -> Option<ResolvedModel> {
-    // Speech capabilities are explicit configuration; a catalog row cannot
-    // revive a removed pin by guessing what its provider supports.
+    // Speech and transcription capabilities are explicit configuration; a
+    // catalog row cannot revive a removed pin by guessing what its provider
+    // supports.
     if row.upstream_api.eq_ignore_ascii_case("speech")
+        || row.upstream_api.eq_ignore_ascii_case("transcription")
         || row.upstream_api.eq_ignore_ascii_case("realtime")
     {
         return None;
@@ -823,6 +852,8 @@ fn model_def_to_upsert(def: &ModelDef) -> waygate_storage::LlmModelUpsert {
                 "realtime".to_string()
             } else if is_speech(def) {
                 "audio/speech".to_string()
+            } else if is_transcription(def) {
+                "audio/transcriptions".to_string()
             } else if is_images(def) {
                 "images".to_string()
             } else if is_embeddings(def) {
@@ -947,6 +978,7 @@ struct LlmRouterState {
     resolver: Arc<dyn LlmModelResolver>,
     image_capacity: Arc<tokio::sync::Semaphore>,
     audio_resource_capacity: Arc<tokio::sync::Semaphore>,
+    transcription_capacity: Arc<tokio::sync::Semaphore>,
 }
 
 /// The OpenAI-compatible inference router. Mounted behind the gateway's bearer
@@ -964,6 +996,7 @@ pub fn router(
         .route("/v1/images/generations", post(images::generations))
         .route("/v1/images/edits", post(images::edits))
         .route("/v1/audio/speech", post(speech::create))
+        .route("/v1/audio/transcriptions", post(transcription::create))
         .route("/v1/realtime", get(realtime::websocket))
         .route("/v1/realtime/calls", post(realtime::create_call))
         .route(
@@ -992,6 +1025,9 @@ pub fn router(
             resolver,
             image_capacity: Arc::new(tokio::sync::Semaphore::new(images::MAX_CONCURRENT_IMAGES)),
             audio_resource_capacity: Arc::new(tokio::sync::Semaphore::new(2)),
+            transcription_capacity: Arc::new(tokio::sync::Semaphore::new(
+                transcription::MAX_CONCURRENT_UPLOADS,
+            )),
         })
 }
 
@@ -1022,13 +1058,17 @@ fn models_list_json(rows: Vec<waygate_storage::LlmModelRow>) -> Value {
 /// (`chat_completions` / `responses` / `messages` / `generate_content`) is
 /// `text->text`. A non-standard OpenAI field (SDKs ignore unknown keys), it lets
 /// clients tell the surfaces apart without calling each one. Speech is
-/// `text->audio` and images are `text+image->image`; `?type=` filters by operation.
+/// `text->audio`, transcription is `audio->text` and images are
+/// `text+image->image`; `?type=` filters by operation.
 fn model_modality(upstream_api: &str) -> &'static str {
     if upstream_api.eq_ignore_ascii_case("realtime") {
         return "realtime-audio";
     }
     if upstream_api.eq_ignore_ascii_case("speech") {
         return "text->audio";
+    }
+    if upstream_api.eq_ignore_ascii_case("transcription") {
+        return "audio->text";
     }
     if upstream_api.eq_ignore_ascii_case("images") {
         return "text+image->image";
@@ -1041,11 +1081,12 @@ fn model_modality(upstream_api: &str) -> &'static str {
 }
 
 /// `?type=` filter for `GET /v1/models`: narrows the listing to one operation
-/// kind: chat, embeddings, images, or speech.
+/// kind: chat, embeddings, images, speech, transcription, or realtime.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ModelKindFilter {
     Realtime,
     Speech,
+    Transcription,
     Images,
     Embeddings,
     Chat,
@@ -1061,6 +1102,7 @@ impl ModelKindFilter {
             match v.to_ascii_lowercase().as_str() {
                 "realtime" => Some(Self::Realtime),
                 "speech" => Some(Self::Speech),
+                "transcription" | "transcriptions" => Some(Self::Transcription),
                 "embeddings" | "embedding" => Some(Self::Embeddings),
                 "chat" => Some(Self::Chat),
                 "images" | "image" => Some(Self::Images),
@@ -1075,12 +1117,14 @@ impl ModelKindFilter {
         match self {
             Self::Realtime => upstream_api.eq_ignore_ascii_case("realtime"),
             Self::Speech => upstream_api.eq_ignore_ascii_case("speech"),
+            Self::Transcription => upstream_api.eq_ignore_ascii_case("transcription"),
             Self::Images => upstream_api.eq_ignore_ascii_case("images"),
             Self::Embeddings => is_emb,
             Self::Chat => {
                 !is_emb
                     && !upstream_api.eq_ignore_ascii_case("images")
                     && !upstream_api.eq_ignore_ascii_case("speech")
+                    && !upstream_api.eq_ignore_ascii_case("transcription")
                     && !upstream_api.eq_ignore_ascii_case("realtime")
             }
         }
@@ -1164,6 +1208,7 @@ async fn models_response(
             {
                 let capabilities = match resolved.operation {
                     LlmOperation::Speech(caps) => Some(json!({"speech":caps})),
+                    LlmOperation::Transcription(caps) => Some(json!({"transcription":caps})),
                     LlmOperation::Realtime(caps) => Some(json!({"realtime":caps})),
                     _ => None,
                 };
@@ -1174,6 +1219,73 @@ async fn models_response(
         }
     }
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Chunk size for bounded response delivery.
+const DELIVERY_CHUNK: usize = 64 * 1024;
+
+/// Hold an ingress capacity permit until a buffered response body is delivered
+/// or `deadline` passes, so unread responses cannot accumulate beyond the
+/// route's admission limit. The producer deadline runs even when HTTP
+/// backpressure stops polling the response; small copied chunks keep queued
+/// bytes from retaining the whole body.
+fn deliver_with_capacity(
+    response: Response,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    deadline: std::time::Duration,
+    label: &'static str,
+) -> Response {
+    let (parts, body) = response.into_parts();
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    let delivery = tokio::spawn(async move {
+        let _permit = permit;
+        let send = async {
+            let mut body = body.into_data_stream();
+            while let Some(chunk) = body.next().await {
+                let chunk = chunk.map_err(std::io::Error::other)?;
+                for chunk in chunk.chunks(DELIVERY_CHUNK) {
+                    sender
+                        .send(bytes::Bytes::copy_from_slice(chunk))
+                        .await
+                        .map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::BrokenPipe,
+                                format!("{label} client disconnected"),
+                            )
+                        })?;
+                }
+            }
+            Ok::<_, std::io::Error>(())
+        };
+        tokio::select! {
+            _ = sender.closed() => Ok(()),
+            result = tokio::time::timeout(deadline, send) => {
+                result.unwrap_or_else(|_| Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{label} response delivery exceeded {} seconds", deadline.as_secs()),
+                )))
+            }
+        }
+    });
+    let stream = futures::stream::unfold(
+        (receiver, Some(delivery)),
+        move |(mut receiver, mut delivery)| async move {
+            if let Some(chunk) = receiver.recv().await {
+                return Some((Ok(chunk), (receiver, delivery)));
+            }
+            match delivery.take()?.await {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some((Err(error), (receiver, delivery))),
+                Err(_) => Some((
+                    Err(std::io::Error::other(format!(
+                        "{label} response delivery failed"
+                    ))),
+                    (receiver, delivery),
+                )),
+            }
+        },
+    );
+    Response::from_parts(parts, axum::body::Body::from_stream(stream))
 }
 
 /// Shared inference-route body reader: consume the size-capped request body,
