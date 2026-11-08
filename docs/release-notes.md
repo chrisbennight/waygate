@@ -1,6 +1,6 @@
 # Release notes
 
-## Unreleased
+## 2.2.0
 
 - A blocking `codemode.execute` or `codemode.resume` stops when its client
   cancels the request, as the MCP cancellation rules require, instead of running
