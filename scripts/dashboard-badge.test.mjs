@@ -11,6 +11,7 @@ function load() {
     const windowListeners = new Map();
     const intervals = [];
     const pending = [];
+    const requests = [];
     const document = {
         visibilityState: "visible",
         querySelectorAll: () => [badge],
@@ -20,14 +21,36 @@ function load() {
         document,
         window: { addEventListener: (name, callback) => windowListeners.set(name, callback) },
         setInterval: (callback, ms) => intervals.push({ callback, ms }),
-        fetch: () => new Promise(resolve => pending.push(resolve)),
+        fetch: (url, options) => {
+            requests.push({ url, options });
+            return new Promise(resolve => pending.push(resolve));
+        },
     });
     const respond = async (index, value) => {
         pending[index]({ ok: true, text: async () => value });
         await new Promise(resolve => setImmediate(resolve));
     };
-    return { badge, document, listeners, windowListeners, intervals, pending, respond };
+    const respondWith = async (index, response) => {
+        pending[index](response);
+        await new Promise(resolve => setImmediate(resolve));
+    };
+    return { badge, document, listeners, windowListeners, intervals, pending, requests, respond, respondWith };
 }
+
+test("an expired session's sign-in redirect is not followed and keeps the last count", async () => {
+    const { badge, intervals, requests, respond, respondWith } = load();
+    await respond(0, "2");
+    assert.equal(
+        requests[0].options.redirect,
+        "manual",
+        "following the redirect would request the sign-in page and replace its login-state cookie",
+    );
+    intervals[0].callback();
+    assert.equal(requests[1].options.redirect, "manual", "periodic refreshes must not follow redirects either");
+    await respondWith(1, { ok: false, status: 0, type: "opaqueredirect", text: async () => "" });
+    assert.equal(badge.hidden, false);
+    assert.equal(badge.textContent, "2");
+});
 
 test("catalog refresh updates the badge and an older response cannot erase it", async () => {
     const { badge, listeners, pending, respond } = load();

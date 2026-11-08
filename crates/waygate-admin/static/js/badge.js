@@ -5,6 +5,9 @@
 // refreshes while the tab is visible and whenever the page is shown again,
 // including a back/forward restore that would otherwise show an old count.
 // Fetch failures retain the last known hint; review pages hold the details.
+// An expired session answers with a redirect to sign-in. The badge must not
+// follow it: requesting the sign-in page replaces its login-state cookie,
+// which would break a sign-in in progress in another window.
 (function () {
     const REFRESH_MS = 30000;
     document.querySelectorAll("[data-badge-src]").forEach((el) => {
@@ -12,7 +15,10 @@
         async function refresh() {
             const request = ++latest;
             try {
-                const r = await fetch(el.dataset.badgeSrc, { headers: { Accept: "text/plain" } });
+                const r = await fetch(el.dataset.badgeSrc, {
+                    headers: { Accept: "text/plain" },
+                    redirect: "manual",
+                });
                 if (!r.ok) return;
                 const n = (await r.text()).trim();
                 if (request !== latest) return;
