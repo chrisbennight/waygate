@@ -485,7 +485,8 @@ const items = await Promise.all(
 
 Started calls overlap at the upstream and settle in the order they finish, so
 `Promise.all`, `Promise.allSettled`, `Promise.race` and `Promise.any` behave as
-usual. At most `connector_calls_in_flight` calls, as `codemode.limits` reports,
+usual. Calls with side effects take turns: one runs at a time, in the order
+they were started, while reads overlap with it and with each other. At most `connector_calls_in_flight` calls, as `codemode.limits` reports,
 are in flight at once. Calls started beyond that wait their turn in the order
 they were started, and a plain call made while every place is taken waits for
 one; the limit spaces calls out and never fails them. Each call still has its
@@ -497,8 +498,9 @@ started calls are pending, so await them before pausing. When the execution
 ends with started calls still pending, because the program returned without
 awaiting them, failed, ran out of time or was cancelled, nothing further is
 dispatched and their results are discarded. A read still in flight is
-cancelled; a call with side effects runs to completion and is recorded before
-the execution finishes. A timeout or cancellation error reports how many
+cancelled. A call with side effects that is already running finishes and is
+recorded before the execution finishes; one still waiting its turn is never
+sent. A timeout or cancellation error reports how many
 connector calls the execution submitted as `connector_calls`.
 
 A program whose promise can never settle, because nothing is left to run and

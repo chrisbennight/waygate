@@ -27,7 +27,8 @@ return await Promise.all(names.map(name => connectors["demo"]["greet"].start({ n
 ```
 
 Started calls overlap, up to the `connector_calls_in_flight` limit that
-`codemode.limits` reports; further calls wait their turn rather than fail. The
+`codemode.limits` reports; further calls wait their turn rather than fail.
+Calls with side effects take turns with each other while reads overlap. The
 [program runtime](../codemode.md#program-runtime) describes what happens to
 calls still pending when a program ends.
 

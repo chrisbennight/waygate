@@ -2531,7 +2531,12 @@ impl CodeModeTools {
                 .finish_requested_cancellation(claimed.store, claimed.claim)
                 .await?
             {
-                return Err(execution_cancelled());
+                // The program finished, but cancellation was requested before
+                // its result was recorded; report what the attempt submitted.
+                return Err(execution_error_with_console(
+                    with_connector_calls(execution_cancelled(), result.connector_calls),
+                    result.console.as_ref(),
+                ));
             }
             tracing::error!(
                 execution_id = %claimed.claim.execution_id,
@@ -3365,6 +3370,9 @@ impl CodeModeTools {
         let mut runner = RunnerWait::Running;
         // A synchronous call that arrived while every place was taken.
         let mut queued_call: Option<(u32, String, Value)> = None;
+        // Calls with side effects run one at a time, in the order received.
+        let mut waiting_effects: std::collections::VecDeque<ReceivedCall> =
+            std::collections::VecDeque::new();
         let mut cancellation = attempt
             .claim
             .map(|claim| self.cancellation_check(claim.execution_id));
@@ -3375,21 +3383,39 @@ impl CodeModeTools {
         tokio::pin!(frames);
         let outcome: Result<RunnerProgramOutcome, McpError> = async {
             loop {
-                if in_flight.len() < limit {
-                    if let Some((id, call_id, arguments)) = queued_call.take() {
+                if !in_flight.has_effect() {
+                    if let Some(call) = waiting_effects.pop_front() {
                         calls += 1;
                         in_flight.push(self.dispatch_connector_call(
                             &attempt,
-                            admitted_calls,
-                            DispatchedCall {
-                                id,
-                                delivery: CallDelivery::Immediate,
-                                call_id,
-                                arguments,
-                                ordinal: calls,
-                            },
+                            call,
+                            calls,
                             &mut mutation_calls,
                         )?);
+                    }
+                }
+                if in_flight.len() < limit {
+                    if let Some((id, call_id, arguments)) = queued_call.take() {
+                        let call = ReceivedCall::new(
+                            admitted_calls,
+                            id,
+                            CallDelivery::Immediate,
+                            &call_id,
+                            arguments,
+                        );
+                        if call.has_side_effects()
+                            && (in_flight.has_effect() || !waiting_effects.is_empty())
+                        {
+                            waiting_effects.push_back(call);
+                        } else {
+                            calls += 1;
+                            in_flight.push(self.dispatch_connector_call(
+                                &attempt,
+                                call,
+                                calls,
+                                &mut mutation_calls,
+                            )?);
+                        }
                     }
                 }
                 if runner == RunnerWait::Await {
@@ -3493,19 +3519,26 @@ impl CodeModeTools {
                                     return Err(runner_protocol_failure());
                                 }
                                 started_outstanding += 1;
-                                calls += 1;
-                                in_flight.push(self.dispatch_connector_call(
-                                    &attempt,
+                                let call = ReceivedCall::new(
                                     admitted_calls,
-                                    DispatchedCall {
-                                        id,
-                                        delivery: CallDelivery::Started,
-                                        call_id,
-                                        arguments,
-                                        ordinal: calls,
-                                    },
-                                    &mut mutation_calls,
-                                )?);
+                                    id,
+                                    CallDelivery::Started,
+                                    &call_id,
+                                    arguments,
+                                );
+                                if call.has_side_effects()
+                                    && (in_flight.has_effect() || !waiting_effects.is_empty())
+                                {
+                                    waiting_effects.push_back(call);
+                                } else {
+                                    calls += 1;
+                                    in_flight.push(self.dispatch_connector_call(
+                                        &attempt,
+                                        call,
+                                        calls,
+                                        &mut mutation_calls,
+                                    )?);
+                                }
                             }
                             RunnerFrame::Await => {
                                 if started_outstanding == 0 {
@@ -3600,9 +3633,10 @@ impl CodeModeTools {
             }
         }
         .await;
-        // However the attempt ends, nothing further is dispatched. Reads still
-        // in flight are recomputable and dropped; effects run to completion
-        // and their outcomes are journaled before the attempt can finalize.
+        // However the attempt ends, nothing further is dispatched: effects
+        // still waiting their turn are dropped undispatched. Reads in flight
+        // are recomputable and dropped; the effect in flight runs to
+        // completion and is journaled before the attempt can finalize.
         let finished = in_flight.finish().await;
         let outcome = match (outcome, finished) {
             // An effect whose outcome could not be journaled fails a run that
@@ -3622,41 +3656,23 @@ impl CodeModeTools {
         }
     }
 
-    /// Admit one connector call the runner sent and return the work that
-    /// dispatches and journals it. The ordinal is fixed here, in the order
-    /// the runner sent its calls.
+    /// Return the work that journals, dispatches and journals the outcome of
+    /// one received call. The ordinal is fixed here, in dispatch order.
     fn dispatch_connector_call<'a>(
         &'a self,
         attempt: &'a RunnerAttempt<'a>,
-        admitted_calls: &HashMap<String, AdmittedCall>,
-        call: DispatchedCall,
+        call: ReceivedCall,
+        ordinal: usize,
         mutation_calls: &mut usize,
     ) -> Result<(bool, CallFuture<'a>), McpError> {
-        let DispatchedCall {
+        let effect = call.has_side_effects();
+        let ReceivedCall {
             id,
             delivery,
-            call_id,
-            mut arguments,
-            ordinal,
+            admitted,
+            arguments,
         } = call;
         let hierarchy = nested_invocation_hierarchy(attempt, ordinal)?;
-        let admitted = admitted_call(admitted_calls, &call_id).and_then(|admitted| {
-            if let (Some(snapshot), Some(arguments)) = (
-                admitted
-                    .approval_context
-                    .as_ref()
-                    .and_then(|context| context.invocation_snapshot.as_ref()),
-                arguments.as_object_mut(),
-            ) {
-                snapshot
-                    .normalize_arguments(arguments)
-                    .map_err(|error| connector_error("invalid_arguments", error))?;
-            }
-            Ok(admitted)
-        });
-        let effect = admitted
-            .as_ref()
-            .is_ok_and(|admitted| admitted.contract.side_effects());
         let mutation_number =
             (effect && attempt.profile != CodeExecutionProfile::Direct).then(|| {
                 *mutation_calls += 1;
@@ -7060,12 +7076,50 @@ enum RunnerWait {
     Await,
 }
 
-struct DispatchedCall {
+/// A connector call the runner sent, resolved against the execution's
+/// admitted bindings and not yet dispatched.
+struct ReceivedCall {
     id: u32,
     delivery: CallDelivery,
-    call_id: String,
+    admitted: Result<AdmittedCall, String>,
     arguments: Value,
-    ordinal: usize,
+}
+
+impl ReceivedCall {
+    fn new(
+        admitted_calls: &HashMap<String, AdmittedCall>,
+        id: u32,
+        delivery: CallDelivery,
+        call_id: &str,
+        mut arguments: Value,
+    ) -> Self {
+        let admitted = admitted_call(admitted_calls, call_id).and_then(|admitted| {
+            if let (Some(snapshot), Some(arguments)) = (
+                admitted
+                    .approval_context
+                    .as_ref()
+                    .and_then(|context| context.invocation_snapshot.as_ref()),
+                arguments.as_object_mut(),
+            ) {
+                snapshot
+                    .normalize_arguments(arguments)
+                    .map_err(|error| connector_error("invalid_arguments", error))?;
+            }
+            Ok(admitted)
+        });
+        Self {
+            id,
+            delivery,
+            admitted,
+            arguments,
+        }
+    }
+
+    fn has_side_effects(&self) -> bool {
+        self.admitted
+            .as_ref()
+            .is_ok_and(|admitted| admitted.contract.side_effects())
+    }
 }
 
 enum ConnectorCallOutcome {
@@ -7084,9 +7138,11 @@ type CallFuture<'a> = futures::future::BoxFuture<'a, FinishedCall>;
 
 /// One attempt's dispatched connector calls that have not finished.
 ///
-/// Reads are recomputable and are dropped when the attempt ends. Calls with
-/// side effects are never abandoned: they are awaited to completion, with
-/// their outcomes journaled, before the attempt can end.
+/// Reads are recomputable and are dropped when the attempt ends. At most one
+/// call with side effects is dispatched at a time, and it is never abandoned:
+/// it is awaited to completion, with its outcome journaled, before the attempt
+/// can end. An effect still waiting its turn has not been dispatched, so an
+/// ending attempt simply never dispatches it.
 #[derive(Default)]
 struct InFlightCalls<'a> {
     reads: futures::stream::FuturesUnordered<CallFuture<'a>>,
@@ -7100,6 +7156,10 @@ impl<'a> InFlightCalls<'a> {
 
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    fn has_effect(&self) -> bool {
+        !self.effects.is_empty()
     }
 
     fn push(&mut self, (effect, call): (bool, CallFuture<'a>)) {
@@ -12385,14 +12445,16 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn started_effects_in_flight_at_cancellation_are_journaled_first() {
+    async fn an_effect_waiting_its_turn_is_never_dispatched_after_cancellation() {
         let fake = FakeCatalog::with_tools(&[("email", "send", true)]);
         let (call_id, admitted) = admitted_tool(&fake, "email", "send");
         let admitted_calls = HashMap::from([(call_id.clone(), admitted)]);
         let store = Arc::new(RecordingExecutionStore::default());
+        // Cancellation arrives while the first effect is in flight and the
+        // second is waiting its turn.
         let invocation = Arc::new(
             TimedInvocation::new(Duration::from_secs(limits().execution_seconds))
-                .cancelling_after(store.clone(), 2),
+                .cancelling_after(store.clone(), 1),
         );
         let tools =
             CodeModeTools::new(Arc::new(fake), Arc::new(SelectiveAuthz), invocation.clone())
@@ -12424,29 +12486,28 @@ mod tests {
             .await
             .expect_err("the execution is cancelled");
 
-        assert_eq!(error.data.expect("detail")["error"], "execution_cancelled");
+        let data = error.data.expect("cancellation detail");
+        assert_eq!(data["error"], "execution_cancelled");
+        assert_eq!(data["connector_calls"], 1);
         assert_eq!(
-            invocation.peak.load(Ordering::SeqCst),
-            2,
-            "the effects overlapped"
+            invocation.dispatched.load(Ordering::SeqCst),
+            1,
+            "the waiting effect is never dispatched"
         );
-        let mut kinds: Vec<ExecutionEventKind> = store
+        let kinds: Vec<ExecutionEventKind> = store
             .events
             .lock()
             .await
             .iter()
             .map(|event| event.kind)
             .collect();
-        kinds.sort_by_key(|kind| kind.as_str());
         assert_eq!(
             kinds,
             vec![
                 ExecutionEventKind::ConnectorCallStarted,
-                ExecutionEventKind::ConnectorCallStarted,
-                ExecutionEventKind::ConnectorCallSucceeded,
                 ExecutionEventKind::ConnectorCallSucceeded,
             ],
-            "both effects finish and are journaled before the cancellation finalizes"
+            "the effect in flight finishes and is journaled before the cancellation finalizes"
         );
         assert_eq!(
             store
@@ -12457,6 +12518,67 @@ mod tests {
                 .map(|execution| execution.status),
             Some(ExecutionStatus::Cancelled)
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn started_effects_take_turns_while_reads_overlap() {
+        let fake =
+            FakeCatalog::with_tools(&[("email", "send", true), ("example", "item.get", false)]);
+        let (effect_id, effect) = admitted_tool(&fake, "email", "send");
+        let (read_id, read) = admitted_tool(&fake, "example", "item.get");
+        let admitted_calls = HashMap::from([(effect_id.clone(), effect), (read_id.clone(), read)]);
+        let delay = Duration::from_secs(3);
+        let invocation = Arc::new(TimedInvocation::new(delay));
+        let tools =
+            CodeModeTools::new(Arc::new(fake), Arc::new(SelectiveAuthz), invocation.clone());
+        let started = [
+            (&effect_id, "first effect"),
+            (&effect_id, "second effect"),
+            (&read_id, "first read"),
+            (&read_id, "second read"),
+        ];
+        let mut frames: Vec<RunnerFrame> = started
+            .iter()
+            .zip(1..)
+            .map(|((call_id, value), id)| RunnerFrame::Dispatch {
+                id,
+                call_id: (*call_id).clone(),
+                arguments: json!({"value": value}),
+            })
+            .collect();
+        frames.extend(started.iter().map(|_| RunnerFrame::Await));
+        frames.push(RunnerFrame::Complete {
+            result: json!(null),
+        });
+        let (mut parent_stdin, runner_input, mut parent_stdout) = scripted_runner(frames).await;
+        let principal = reader();
+
+        let began = tokio::time::Instant::now();
+        let outcome = tools
+            .broker_runner_frames(
+                unclaimed_attempt(&principal, "effects and reads"),
+                &admitted_calls,
+                &mut parent_stdin,
+                &mut parent_stdout,
+            )
+            .await
+            .expect("every started call completes");
+
+        assert!(matches!(
+            outcome,
+            RunnerProgramOutcome::Completed { calls: 4, .. }
+        ));
+        assert_eq!(
+            invocation.peak.load(Ordering::SeqCst),
+            3,
+            "both reads overlap with one effect at a time"
+        );
+        assert!(
+            began.elapsed() >= delay * 2,
+            "the second effect waits for the first"
+        );
+        assert!(began.elapsed() < delay * 3);
+        assert_eq!(parent_replies(parent_stdin, runner_input).await.len(), 4);
     }
 
     #[tokio::test(start_paused = true)]
