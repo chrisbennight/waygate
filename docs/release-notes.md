@@ -1,6 +1,6 @@
 # Release notes
 
-## Unreleased
+## 2.1.0
 
 - Code Mode programs can run independent connector calls at the same time.
   Every binding gains a `start` method that returns a promise, so
