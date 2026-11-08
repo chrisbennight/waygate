@@ -1208,7 +1208,8 @@ impl GatewayServer {
     /// downstream client's MRTR posture: whether an `input_required` pause may
     /// be returned to it at all, and which capabilities the upstream leg may
     /// rely on it answering. `cancellation` fires when the downstream request
-    /// is abandoned, and cancels the upstream request it dispatched.
+    /// is abandoned. It cancels the upstream request the call dispatched, or
+    /// reaches the built-in that answers it.
     async fn dispatch_tool_call_with(
         &self,
         mut request: CallToolRequestParams,
@@ -1226,7 +1227,7 @@ impl GatewayServer {
         // The impl re-checks authorization. First matching namespace wins.
         if let Some((builtin, tool)) = self.authorized_builtin(name, principal).await? {
             return builtin
-                .call(tool, request.arguments, principal)
+                .call_with_cancellation(tool, request.arguments, principal, cancellation)
                 .await
                 .map(Into::into);
         }
@@ -5424,6 +5425,96 @@ mod mrtr_projection_tests {
         cancellation.cancel();
         assert!(invocation.requests.lock().await[0]
             .cancellation
+            .is_cancelled());
+    }
+
+    /// Built-in that keeps the cancellation its call received.
+    #[derive(Default)]
+    struct CancellationProbe {
+        received: std::sync::Mutex<Option<CancellationToken>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::builtin::BuiltinTools for CancellationProbe {
+        fn namespace(&self) -> &str {
+            "probe"
+        }
+
+        fn catalog(&self) -> crate::builtin::BuiltinCatalog {
+            crate::builtin::BuiltinCatalog::from_descriptor(
+                crate::builtin::BuiltinSurfaceDescriptor {
+                    namespace: "probe".into(),
+                    required_scope: "mcp:invoke".into(),
+                    summary: "cancellation probe".into(),
+                    tools: vec![crate::builtin::BuiltinToolDescriptor {
+                        name: "wait".into(),
+                        description: "wait for the caller".into(),
+                        risk: RiskTier::Low,
+                        side_effects: false,
+                        pii: false,
+                    }],
+                },
+                vec![Tool::new(
+                    "probe.wait".to_owned(),
+                    "wait for the caller".to_owned(),
+                    Arc::new(
+                        serde_json::json!({"type": "object"})
+                            .as_object()
+                            .expect("object schema")
+                            .clone(),
+                    ),
+                )],
+            )
+        }
+
+        async fn list_tools(&self, _principal: Option<&Principal>) -> Vec<Tool> {
+            Vec::new()
+        }
+
+        async fn call(
+            &self,
+            _tool: &str,
+            _arguments: Option<JsonObject>,
+            _principal: Option<&Principal>,
+        ) -> Result<CallToolResult, McpError> {
+            unreachable!("a connected caller's call carries its cancellation")
+        }
+
+        async fn call_with_cancellation(
+            &self,
+            _tool: &str,
+            _arguments: Option<JsonObject>,
+            _principal: Option<&Principal>,
+            cancellation: CancellationToken,
+        ) -> Result<CallToolResult, McpError> {
+            *self.received.lock().expect("probe lock") = Some(cancellation);
+            Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text("done"),
+            ]))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_requests_cancellation_reaches_a_builtin() {
+        let probe = Arc::new(CancellationProbe::default());
+        let gw = server(ScriptedInvocation::new(ScriptedOutcome::Complete))
+            .with_builtin_tools(probe.clone());
+        let cancellation = CancellationToken::new();
+        gw.dispatch_tool_call_with(
+            call("probe.wait"),
+            None,
+            &bare_2026_caller(),
+            cancellation.clone(),
+        )
+        .await
+        .expect("completes");
+        cancellation.cancel();
+        assert!(probe
+            .received
+            .lock()
+            .expect("probe lock")
+            .as_ref()
+            .expect("the built-in received a cancellation")
             .is_cancelled());
     }
 

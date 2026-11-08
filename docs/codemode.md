@@ -464,6 +464,37 @@ should check for `codemode.result` before starting work that depends on
 retrieving one later, rather than discovering the gap after the execution
 exists.
 
+### When the client stops waiting
+
+A blocking `codemode.execute` or `codemode.resume` lasts only as long as its
+client waits for the answer. When the client cancels the request, by sending
+`notifications/cancelled` or, for a 2026-07-28 request, by closing the response
+stream, the program stops before its next connector call. A call already in
+flight finishes, the outcome of an effect is journaled, and the runner is
+released. With an execution store, the execution ends as `cancelled` with the
+reason `cancelled_by_client`, as if its owner had called `codemode.cancel`.
+The result is not returned, because the request that would have carried it is
+gone. A 2025-11-25 client that only drops its connection without sending
+`notifications/cancelled` has not cancelled: its program keeps running, and its
+response stream can be resumed on the same replica while the session lives.
+
+A cancelled blocking call never becomes a detached execution. Keeping work
+alive after the client leaves is a choice the caller makes before it starts:
+
+- A client that supports MCP Tasks invokes `codemode.execute` as a task and
+  receives a durable task once the program is admitted.
+- Otherwise the caller uses `codemode.start`, polls `codemode.status`, and
+  fetches the result with `codemode.result`, where the posture serves them.
+  Starting is safe to retry.
+- When the work is short and the client's timeout is known, `timeout_seconds`
+  ends the program first, so the caller receives `execution_timeout` instead of
+  nothing.
+
+Use a detached form for work that may run longer than the client will wait,
+and for a program whose side effects must not run twice. A blocking call that
+is cut short may already have applied some of its effects, and its caller
+cannot see which.
+
 ## Program runtime
 
 A program is the body of an async function. It may use `await`, and its

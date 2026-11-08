@@ -21,6 +21,7 @@ use tokio::io::{
 };
 use tokio::process::Command;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
 #[cfg(test)]
 use waygate_codemode::DetachedExecutionSlot;
 use waygate_codemode::{
@@ -1157,10 +1158,14 @@ impl CodeModeTools {
         Ok(selected)
     }
 
+    /// Run a program while its caller waits. `caller` fires when the caller
+    /// stops waiting; the execution then ends under the cancellation rules
+    /// rather than running on with nobody to receive its result.
     async fn execute(
         &self,
         principal: &Principal,
         params: StartParams,
+        caller: &CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         // One published schema serves both consumption shapes of this tool,
         // but only the task-augmented shape creates a retained handle that
@@ -1193,11 +1198,11 @@ impl CodeModeTools {
         let permits = permits.expect("source admission acquires execution capacity");
         match self.execution_store.as_ref() {
             Some(store) => {
-                self.execute_durable(store, principal, source, input, profile, permits)
+                self.execute_durable(store, principal, source, input, profile, permits, caller)
                     .await
             }
             None => {
-                self.execute_ephemeral(principal, source, input, profile, permits)
+                self.execute_ephemeral(principal, source, input, profile, permits, caller)
                     .await
             }
         }
@@ -1207,12 +1212,13 @@ impl CodeModeTools {
         &self,
         principal: &Principal,
         params: ResumeParams,
+        caller: &CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         if !self.durable_continuation_available() {
             return Err(resume_storage_unavailable());
         }
         self.check_execution_quota(principal, "resume").await?;
-        let result = self.resume_durable(principal, params).await?;
+        let result = self.resume_durable(principal, params, caller).await?;
         Ok(structured(&result))
     }
 
@@ -1577,7 +1583,7 @@ impl CodeModeTools {
         let tools = self.clone();
         let principal = principal.clone();
         self.execution_capacity.spawn_detached(async move {
-            if let Err(error) = tools.run_claimed_program(&principal, claimed).await {
+            if let Err(error) = tools.run_claimed_program(&principal, claimed, None).await {
                 // There is no caller left to return this to, and the terminal
                 // state is journaled regardless. This is for an operator
                 // reading logs, not for the poller.
@@ -1617,7 +1623,7 @@ impl CodeModeTools {
         let tools = self.clone();
         let principal = principal.clone();
         self.execution_capacity.spawn_detached(async move {
-            if let Err(error) = tools.run_claimed_program(&principal, claimed).await {
+            if let Err(error) = tools.run_claimed_program(&principal, claimed, None).await {
                 tracing::debug!(
                     %execution_id,
                     error_code = %error.code.0,
@@ -1918,9 +1924,11 @@ impl CodeModeTools {
         &self,
         principal: &Principal,
         params: ResumeParams,
+        caller: &CancellationToken,
     ) -> Result<ExecuteResponse, McpError> {
         let claimed = self.claim_resume(principal, params).await?;
-        self.run_claimed_program(principal, claimed).await
+        self.run_claimed_program(principal, claimed, Some(caller))
+            .await
     }
 
     async fn claim_resume(
@@ -2112,10 +2120,13 @@ impl CodeModeTools {
         })
     }
 
+    /// `caller` is the waiting caller of a blocking execution, or `None` for
+    /// a detached one that nobody waits on.
     async fn run_claimed_program(
         &self,
         principal: &Principal,
         claimed: ClaimedProgram,
+        caller: Option<&CancellationToken>,
     ) -> Result<ExecuteResponse, McpError> {
         let ClaimedProgram {
             store,
@@ -2146,6 +2157,7 @@ impl CodeModeTools {
                     claim: &claim,
                     persist_result,
                     deadline,
+                    caller,
                 },
                 program,
             )
@@ -2214,6 +2226,7 @@ impl CodeModeTools {
         input: Value,
         profile: CodeExecutionProfile,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
+        caller: &CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         // The attempt clock and the setup allowance share this instant, so the
         // allowance bounds everything before the program rather than restarting
@@ -2240,6 +2253,7 @@ impl CodeModeTools {
                     profile,
                     source_digest,
                     deadline: None,
+                    caller: Some(caller),
                 },
                 ExecutionProgram {
                     source,
@@ -2255,6 +2269,7 @@ impl CodeModeTools {
         Ok(structured(&result))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_durable(
         &self,
         store: &SharedExecutionStore,
@@ -2263,6 +2278,7 @@ impl CodeModeTools {
         input: Value,
         profile: CodeExecutionProfile,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
+        caller: &CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         let persist_content = self.result_persistence_allowed;
         self.retain_resolved_source(principal, &mut source).await?;
@@ -2286,7 +2302,7 @@ impl CodeModeTools {
             .await
             .map_err(|error| execution_error_with_id(error, execution_id))?;
         let result = self
-            .run_claimed_program(principal, claimed)
+            .run_claimed_program(principal, claimed, Some(caller))
             .await
             .map_err(|error| execution_error_with_id(error, execution_id))?;
         Ok(structured(&result))
@@ -2458,6 +2474,7 @@ impl CodeModeTools {
                 // not here: an instant taken before binding discovery and
                 // claiming would charge that setup to the program.
                 deadline: None,
+                caller: claimed.caller,
             },
             program,
             // The same origin as the attempt deadline: that is
@@ -2618,6 +2635,45 @@ impl CodeModeTools {
                     "could not check for Code Mode cancellation; retrying"
                 ),
             }
+        }
+    }
+
+    /// End an attempt whose waiting caller left. A stored execution first
+    /// records an owner cancellation, so it finalizes as `cancelled` with the
+    /// same provenance and journal as `codemode.cancel`; an unstored one has
+    /// nothing to record. Either way the attempt stops: the returned error
+    /// goes to a request nobody is waiting on.
+    async fn stop_for_departed_caller(&self, attempt: &RunnerAttempt<'_>) -> McpError {
+        let (Some(claim), Some(store)) = (attempt.claim, self.execution_store.as_ref()) else {
+            return execution_cancelled();
+        };
+        let principal = attempt.principal;
+        if let Err(error) = store
+            .request_cancellation(
+                principal.tenant.as_str(),
+                &principal.sub,
+                &principal.issuer,
+                claim.execution_id,
+            )
+            .await
+        {
+            tracing::error!(
+                %error,
+                execution_id = %claim.execution_id,
+                "could not record Code Mode cancellation for a departed caller"
+            );
+            return execution_unavailable();
+        }
+        match self.finish_requested_cancellation(store, claim).await {
+            Ok(true) => execution_cancelled(),
+            Ok(false) => {
+                tracing::error!(
+                    execution_id = %claim.execution_id,
+                    "Code Mode cancellation for a departed caller was not recorded"
+                );
+                execution_unavailable()
+            }
+            Err(error) => error,
         }
     }
 
@@ -3297,25 +3353,36 @@ impl CodeModeTools {
         let result = loop {
             match bounded_by_deadline(attempt.deadline, async {
                 let read = read_runner_frame(&mut *child_stdout);
-                if let (Some(claim), Some(store), Some(cancellation)) = (
-                    attempt.claim,
-                    self.execution_store.as_ref(),
-                    cancellation.as_mut(),
-                ) {
-                    tokio::select! {
-                        // A frame the runner has already sent is handled
-                        // before a cancellation check: cancellation is
-                        // observed while the runner is quiet.
-                        biased;
-                        frame = read => frame.map_err(runner_frame_failure),
-                        cancelled = self.wait_for_cancellation(store, attempt.principal, claim.execution_id, cancellation) => {
-                            cancelled?;
+                let requested = async {
+                    match (
+                        attempt.claim,
+                        self.execution_store.as_ref(),
+                        cancellation.as_mut(),
+                    ) {
+                        (Some(claim), Some(store), Some(cancellation)) => {
+                            self.wait_for_cancellation(
+                                store,
+                                attempt.principal,
+                                claim.execution_id,
+                                cancellation,
+                            )
+                            .await?;
                             self.persist_claimed_cancellation(store, claim).await?;
                             Err(execution_cancelled())
                         }
+                        _ => std::future::pending::<Result<RunnerFrame, McpError>>().await,
                     }
-                } else {
-                    read.await.map_err(runner_frame_failure)
+                };
+                tokio::select! {
+                    // A frame the runner has already sent is handled
+                    // before a cancellation check: cancellation is
+                    // observed while the runner is quiet.
+                    biased;
+                    frame = read => frame.map_err(runner_frame_failure),
+                    cancelled = requested => cancelled,
+                    () = caller_departed(attempt.caller) => {
+                        Err(self.stop_for_departed_caller(&attempt).await)
+                    }
                 }
             })
             .await?
@@ -3325,6 +3392,12 @@ impl CodeModeTools {
                     call_id,
                     mut arguments,
                 } => {
+                    // A call the runner sends after its caller left is never
+                    // dispatched, the same boundary the journal fence draws
+                    // for a requested cancellation.
+                    if attempt.caller.is_some_and(CancellationToken::is_cancelled) {
+                        return Err(self.stop_for_departed_caller(&attempt).await);
+                    }
                     calls += 1;
                     let hierarchy = nested_invocation_hierarchy(&attempt, calls)?;
                     let admitted = admitted_call(admitted_calls, &call_id).and_then(|admitted| {
@@ -3378,11 +3451,16 @@ impl CodeModeTools {
                         {
                             self.confirm_claim_before_effect(attempt.claim).await?;
                             let dispatch = self.invoke_connector(
-                                attempt.principal, &admitted, arguments, hierarchy,
-                                CodeExecutionProfile::Direct, None,
+                                attempt.principal,
+                                &admitted,
+                                arguments,
+                                hierarchy,
+                                CodeExecutionProfile::Direct,
+                                None,
                             );
                             self.await_effect_with_claim_renewal(attempt.claim, dispatch)
-                                .await.map_err(|error| connector_error(error.kind(), &error))
+                                .await
+                                .map_err(|error| connector_error(error.kind(), &error))
                         }
                         Ok(admitted) if admitted.contract.side_effects() => {
                             mutation_calls += 1;
@@ -3412,7 +3490,8 @@ impl CodeModeTools {
                                          {}-byte argument limit; \
                                          reduce the effect payload so an administrator can \
                                          review the complete arguments the approval would \
-                                         authorize", limits().request_bytes
+                                         authorize",
+                                        limits().request_bytes
                                     ),
                                 ))
                             } else {
@@ -3495,7 +3574,14 @@ impl CodeModeTools {
                             self.append_claimed_event(claim, event).await?;
                         }
                     }
-                    write_connector_result(&mut *child_stdin, connector_spool, id, result, limits().connector_response_bytes).await?;
+                    write_connector_result(
+                        &mut *child_stdin,
+                        connector_spool,
+                        id,
+                        result,
+                        limits().connector_response_bytes,
+                    )
+                    .await?;
                 }
                 RunnerFrame::Complete { result } => {
                     break RunnerProgramOutcome::Completed {
@@ -3521,9 +3607,15 @@ impl CodeModeTools {
                     if !attempt.persist_content {
                         return Err(artifact_unavailable());
                     }
-                    let bytes = serde_json::to_vec(&value).map_err(|_| artifact_too_large())?.len();
-                    artifact_bytes = artifact_bytes.checked_add(bytes).ok_or_else(artifact_too_large)?;
-                    if bytes > limits().artifact_bytes || artifact_bytes > limits().artifact_total_bytes {
+                    let bytes = serde_json::to_vec(&value)
+                        .map_err(|_| artifact_too_large())?
+                        .len();
+                    artifact_bytes = artifact_bytes
+                        .checked_add(bytes)
+                        .ok_or_else(artifact_too_large)?;
+                    if bytes > limits().artifact_bytes
+                        || artifact_bytes > limits().artifact_total_bytes
+                    {
                         return Err(artifact_too_large());
                     }
                     if artifacts.len() >= limits().artifacts_per_attempt {
@@ -4054,6 +4146,18 @@ impl BuiltinTools for CodeModeTools {
         arguments: Option<JsonObject>,
         principal: Option<&Principal>,
     ) -> Result<CallToolResult, McpError> {
+        // A token that never fires: no caller can withdraw this call.
+        self.call_with_cancellation(tool, arguments, principal, CancellationToken::new())
+            .await
+    }
+
+    async fn call_with_cancellation(
+        &self,
+        tool: &str,
+        arguments: Option<JsonObject>,
+        principal: Option<&Principal>,
+        cancellation: CancellationToken,
+    ) -> Result<CallToolResult, McpError> {
         let principal = principal.ok_or_else(|| insufficient_scope(Scope::McpRead.as_str()))?;
         let requires_invoke = matches!(
             tool,
@@ -4121,11 +4225,11 @@ impl BuiltinTools for CodeModeTools {
                 result
             }
             "execute" => {
-                this.execute(principal, parse_args(&arguments, "execute")?)
+                this.execute(principal, parse_args(&arguments, "execute")?, &cancellation)
                     .await
             }
             "resume" => {
-                this.resume(principal, parse_args(&arguments, "resume")?)
+                this.resume(principal, parse_args(&arguments, "resume")?, &cancellation)
                     .await
             }
             "result" => {
@@ -4456,7 +4560,7 @@ impl BuiltinTools for CodeModeTools {
         let tools = self.clone();
         let principal = principal.clone();
         self.execution_capacity.spawn_detached(async move {
-            if let Err(error) = tools.run_claimed_program(&principal, claimed).await {
+            if let Err(error) = tools.run_claimed_program(&principal, claimed, None).await {
                 tracing::debug!(
                     %execution_id,
                     error_code = %error.code.0,
@@ -6652,6 +6756,19 @@ struct RunnerAttempt<'a> {
     /// timeout — and its outcome journaled before a deadline failure can
     /// terminalize the attempt.
     deadline: Option<tokio::time::Instant>,
+    /// Fires when the caller waiting for this attempt's response stops
+    /// waiting. `None` for a detached attempt, which no request waits on and
+    /// which therefore outlives the request that started it.
+    caller: Option<&'a CancellationToken>,
+}
+
+/// Resolves once the caller waiting on an attempt stops waiting; never for a
+/// detached attempt.
+async fn caller_departed(caller: Option<&CancellationToken>) {
+    match caller {
+        Some(caller) => caller.cancelled().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Await `future` under the attempt's journal-safe deadline, converting
@@ -6701,6 +6818,7 @@ struct ClaimedExecution<'a> {
     claim: &'a ExecutionClaim,
     persist_result: bool,
     deadline: tokio::time::Instant,
+    caller: Option<&'a CancellationToken>,
 }
 
 /// A contract version as callers see it: the number as a decimal JSON string.
@@ -7349,9 +7467,12 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
              its execution budget, publish intermediate JSON with `execution.emitArtifact(value)`, \
              and checkpoint with `execution.pause(checkpoint)` to continue through \
              `codemode.resume`. A lost worker never replays a program. `codemode.limits` reports \
-             the size and time budgets. Invoked as an MCP Task, this returns a durable task once \
-             the program is admitted; a client that cannot keep a long call open can use \
-             `codemode.start` instead. `repeat_after` applies only to those detached starts. \
+             the size and time budgets. A blocking call ends with its client: if the client \
+             cancels, no further connector call runs and the result is lost; `timeout_seconds` \
+             can end it before a known client timeout. For work that may outlast the client's \
+             wait or must not run twice, invoke this as an MCP Task, which returns a durable task \
+             once the program is admitted, or use `codemode.start` where listed. `repeat_after` \
+             applies only to those detached starts. \
              Failures return a stable `data.error` code with a message, such as \
              `execution_timeout`, `execution_capacity` or `execution_result_too_large`, or a \
              `source_` or `skill_script_` code when the source cannot be resolved. A program \
@@ -10696,6 +10817,7 @@ mod tests {
                     profile: CodeExecutionProfile::Direct,
                     source_digest: source_digest("return null;"),
                     deadline: None,
+                    caller: None,
                 },
                 &admitted_calls,
                 &mut parent_stdin,
@@ -10908,6 +11030,7 @@ mod tests {
                     profile: CodeExecutionProfile::Direct,
                     source_digest: source_digest("return null;"),
                     deadline: None,
+                    caller: None,
                 },
                 &current_admitted,
                 &mut parent_stdin,
@@ -10969,6 +11092,7 @@ mod tests {
                     profile: CodeExecutionProfile::Direct,
                     source_digest: source_digest("return null;"),
                     deadline: None,
+                    caller: None,
                 },
                 &HashMap::new(),
                 &mut parent_stdin,
@@ -11017,6 +11141,7 @@ mod tests {
             profile: CodeExecutionProfile::Direct,
             source_digest: source_digest("return null;"),
             deadline,
+            caller: None,
         }
     }
 
@@ -11210,6 +11335,7 @@ mod tests {
                     profile: CodeExecutionProfile::LegacyApprovalBound,
                     source_digest: source_digest("return null;"),
                     deadline: None,
+                    caller: None,
                 },
                 &HashMap::new(),
                 &mut parent_stdin,
@@ -11275,6 +11401,7 @@ mod tests {
                     profile: CodeExecutionProfile::Direct,
                     source_digest: source_digest(source),
                     deadline: Some(tokio::time::Instant::now()),
+                    caller: None,
                 },
                 &admitted_calls,
                 &mut parent_stdin,
@@ -11372,6 +11499,7 @@ mod tests {
                     profile: CodeExecutionProfile::Direct,
                     source_digest: source_digest(source),
                     deadline: None,
+                    caller: None,
                 },
                 &admitted_calls,
                 &mut parent_stdin,
@@ -11477,6 +11605,7 @@ mod tests {
                     profile: CodeExecutionProfile::Direct,
                     source_digest: source_digest(source),
                     deadline: None,
+                    caller: None,
                 },
                 &admitted_calls,
                 &mut parent_stdin,
@@ -11566,6 +11695,7 @@ mod tests {
                     profile: CodeExecutionProfile::LegacyApprovalBound,
                     source_digest: source_digest("return null;"),
                     deadline: None,
+                    caller: None,
                 },
                 &admitted_calls,
                 &mut parent_stdin,
@@ -11861,6 +11991,7 @@ mod tests {
                     profile: CodeExecutionProfile::LegacyApprovalBound,
                     source_digest: source_digest(source),
                     deadline: None,
+                    caller: None,
                 },
                 &admitted_calls,
                 &mut parent_stdin,
@@ -11882,6 +12013,210 @@ mod tests {
             cancelled.terminal_reason_code.as_deref(),
             Some("cancelled_by_client")
         );
+    }
+
+    async fn write_runner_frame(output: &mut (impl AsyncWrite + Unpin), frame: &RunnerFrame) {
+        output
+            .write_all(&encode_frame(frame).expect("encode runner frame"))
+            .await
+            .expect("write runner frame");
+        output
+            .write_all(b"\n")
+            .await
+            .expect("terminate runner frame");
+    }
+
+    /// A blocking execution without a store has no journal to consult, so
+    /// its waiting caller is the only signal that the work is unwanted: a
+    /// call already made completes, and nothing runs after the caller left.
+    #[tokio::test]
+    async fn an_unstored_execution_stops_when_its_caller_leaves() {
+        let fake = FakeCatalog::with_tools(&[("email", "read", false)]);
+        let (admitted_calls, runner_bindings, _) =
+            admit_execution_bindings(read_execution_binding(&fake));
+        let call_id = runner_bindings[0].call_id.clone();
+        let invocation = Arc::new(RecordingInvocation::default());
+        let tools =
+            CodeModeTools::new(Arc::new(fake), Arc::new(SelectiveAuthz), invocation.clone());
+        let (mut parent_stdin, runner_input) = tokio::io::duplex(4096);
+        let (mut runner_output, parent_stdout) = tokio::io::duplex(4096);
+        write_runner_frame(
+            &mut runner_output,
+            &RunnerFrame::Call {
+                id: 1,
+                call_id,
+                arguments: json!({"value": "inbox"}),
+            },
+        )
+        .await;
+        let mut parent_stdout = BufReader::new(parent_stdout);
+        let principal = reader();
+        let caller = CancellationToken::new();
+
+        let broker = tools.broker_runner_frames(
+            RunnerAttempt {
+                principal: &principal,
+                execution_id: Uuid::now_v7(),
+                claim: None,
+                persist_content: false,
+                profile: CodeExecutionProfile::Direct,
+                source_digest: source_digest("return connectors.email.read({});"),
+                deadline: None,
+                caller: Some(&caller),
+            },
+            &admitted_calls,
+            &mut parent_stdin,
+            &mut parent_stdout,
+        );
+        // The runner stays open and quiet after the first result, so only
+        // the caller leaving can end the execution.
+        let leave_after_first_result = async {
+            let mut result = String::new();
+            BufReader::new(runner_input)
+                .read_line(&mut result)
+                .await
+                .expect("first call result");
+            caller.cancel();
+        };
+        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(broker, leave_after_first_result)
+        })
+        .await
+        .expect("the execution ends once its caller leaves");
+
+        let error = outcome.expect_err("a departed caller ends the execution");
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("error")),
+            Some(&json!("execution_cancelled"))
+        );
+        assert_eq!(
+            invocation.requests.lock().await.len(),
+            1,
+            "the call made before the caller left completes; nothing follows it"
+        );
+        drop(runner_output);
+    }
+
+    /// A call frame already waiting when the broker notices the caller left
+    /// is refused before dispatch rather than raced against the departure.
+    #[tokio::test]
+    async fn a_call_sent_after_the_caller_left_is_never_dispatched() {
+        let fake = FakeCatalog::with_tools(&[("email", "read", false)]);
+        let (admitted_calls, runner_bindings, _) =
+            admit_execution_bindings(read_execution_binding(&fake));
+        let invocation = Arc::new(RecordingInvocation::default());
+        let tools =
+            CodeModeTools::new(Arc::new(fake), Arc::new(SelectiveAuthz), invocation.clone());
+        let (mut parent_stdin, _runner_input) = tokio::io::duplex(4096);
+        let (mut runner_output, parent_stdout) = tokio::io::duplex(4096);
+        write_runner_frame(
+            &mut runner_output,
+            &RunnerFrame::Call {
+                id: 1,
+                call_id: runner_bindings[0].call_id.clone(),
+                arguments: json!({"value": "inbox"}),
+            },
+        )
+        .await;
+        let mut parent_stdout = BufReader::new(parent_stdout);
+        let caller = CancellationToken::new();
+        caller.cancel();
+
+        let error = tools
+            .broker_runner_frames(
+                RunnerAttempt {
+                    principal: &reader(),
+                    execution_id: Uuid::now_v7(),
+                    claim: None,
+                    persist_content: false,
+                    profile: CodeExecutionProfile::Direct,
+                    source_digest: source_digest("return connectors.email.read({});"),
+                    deadline: None,
+                    caller: Some(&caller),
+                },
+                &admitted_calls,
+                &mut parent_stdin,
+                &mut parent_stdout,
+            )
+            .await
+            .expect_err("a departed caller ends the execution");
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("error")),
+            Some(&json!("execution_cancelled"))
+        );
+        assert!(
+            invocation.requests.lock().await.is_empty(),
+            "no call may be dispatched after the caller left"
+        );
+    }
+
+    /// A stored execution records its departed caller as an owner
+    /// cancellation, so its row ends `cancelled` exactly as after
+    /// `codemode.cancel`, and nothing is dispatched.
+    #[tokio::test]
+    async fn a_stored_execution_ends_cancelled_when_its_caller_leaves() {
+        let fake = FakeCatalog::with_tools(&[("email", "send", true)]);
+        let call_id = runner_call_id("email", "send");
+        let admitted_calls = HashMap::from([(
+            call_id.clone(),
+            AdmittedCall {
+                approval_context: None,
+                server: "email".to_owned(),
+                tool: "send".to_owned(),
+                contract: upstream_contract(fake.contract_identity("email", "send")),
+            },
+        )]);
+        let invocation = Arc::new(RecordingInvocation::default());
+        let store = Arc::new(RecordingExecutionStore::default());
+        let tools =
+            CodeModeTools::new(Arc::new(fake), Arc::new(SelectiveAuthz), invocation.clone())
+                .with_execution_store(store.clone());
+        let source = "return connectors.email.send({value: 'x'});";
+        let claim = claimed_mutation_fixture(&store, source).await;
+        let (mut parent_stdin, _runner_input) = tokio::io::duplex(4096);
+        let (mut runner_output, parent_stdout) = tokio::io::duplex(4096);
+        write_runner_frame(
+            &mut runner_output,
+            &RunnerFrame::Call {
+                id: 1,
+                call_id,
+                arguments: json!({}),
+            },
+        )
+        .await;
+        let mut parent_stdout = BufReader::new(parent_stdout);
+        let caller = CancellationToken::new();
+        caller.cancel();
+
+        let error = tools
+            .broker_runner_frames(
+                RunnerAttempt {
+                    principal: &reader(),
+                    execution_id: claim.execution_id,
+                    claim: Some(&claim),
+                    persist_content: true,
+                    profile: CodeExecutionProfile::LegacyApprovalBound,
+                    source_digest: source_digest(source),
+                    deadline: None,
+                    caller: Some(&caller),
+                },
+                &admitted_calls,
+                &mut parent_stdin,
+                &mut parent_stdout,
+            )
+            .await
+            .expect_err("a departed caller ends the execution");
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("error")),
+            Some(&json!("execution_cancelled"))
+        );
+        assert!(
+            invocation.requests.lock().await.is_empty(),
+            "no dispatch may follow the caller's departure"
+        );
+        let cancelled = store.current.lock().await.clone().expect("execution");
+        assert_eq!(cancelled.status, ExecutionStatus::Cancelled);
+        assert!(cancelled.cancellation_requested_at.is_some());
     }
 
     /// The requester is off the call path when a live-claim cancellation
@@ -11944,6 +12279,7 @@ mod tests {
                     profile: CodeExecutionProfile::LegacyApprovalBound,
                     source_digest: source_digest(source),
                     deadline: None,
+                    caller: None,
                 },
                 &admitted_calls,
                 &mut parent_stdin,
@@ -12015,6 +12351,7 @@ mod tests {
                     profile,
                     source_digest: source_digest(source),
                     deadline: None,
+                    caller: None,
                 },
                 &admitted_calls,
                 &mut parent_stdin,
@@ -12135,6 +12472,7 @@ mod tests {
                     profile: CodeExecutionProfile::LegacyApprovalBound,
                     source_digest: source_digest(source),
                     deadline: None,
+                    caller: None,
                 },
                 &admitted_calls,
                 &mut parent_stdin,
@@ -12215,6 +12553,7 @@ mod tests {
                     profile: CodeExecutionProfile::Direct,
                     source_digest: source_digest("return null;"),
                     deadline: None,
+                    caller: None,
                 },
                 &HashMap::new(),
                 &mut parent_stdin,
@@ -12366,6 +12705,7 @@ mod tests {
             profile: CodeExecutionProfile::Direct,
             source_digest: source_digest("synthetic program"),
             deadline: None,
+            caller: None,
         };
         let request = mutation_approval_request(&attempt, call, &arguments, test_hierarchy(1));
         assert_eq!(request.description.as_deref(), Some(description));
@@ -12465,6 +12805,7 @@ mod tests {
                     profile: CodeExecutionProfile::LegacyApprovalBound,
                     source_digest: source_digest("fixture program"),
                     deadline: None,
+                    caller: None,
                 },
                 &admitted,
                 &mut parent_stdin,
@@ -12551,6 +12892,7 @@ mod tests {
                     profile: CodeExecutionProfile::LegacyApprovalBound,
                     source_digest: digest.clone(),
                     deadline: None,
+                    caller: None,
                 },
                 &admitted_calls,
                 &mut parent_stdin,
@@ -12701,6 +13043,7 @@ mod tests {
                     profile: CodeExecutionProfile::Direct,
                     source_digest: source_digest("return null;"),
                     deadline: None,
+                    caller: None,
                 },
                 &admitted_calls,
                 &mut parent_stdin,
@@ -12806,6 +13149,7 @@ mod tests {
                         profile: CodeExecutionProfile::Direct,
                         source_digest: source_digest("return null;"),
                         deadline: None,
+                        caller: None,
                     },
                     &admitted_calls,
                     &mut parent_stdin,
@@ -13993,7 +14337,10 @@ mod tests {
                 "skill_script": "skill://homelab/pr-and-monitor/scripts/pr-wait.js"
             }))
             .unwrap();
-            let error = tools.execute(&reader(), params).await.unwrap_err();
+            let error = tools
+                .execute(&reader(), params, &CancellationToken::new())
+                .await
+                .unwrap_err();
             assert_eq!(error.data.as_ref().unwrap()["error"], refusal);
             assert_eq!(loads.load(Ordering::SeqCst), 0, "{refusal}");
         }
@@ -14546,6 +14893,7 @@ mod tests {
                     retain_for_seconds: Some(3600),
                     repeat_after: None,
                 },
+                &CancellationToken::new(),
             )
             .await
             .expect_err("exhausted capacity is refused");
@@ -14603,6 +14951,7 @@ mod tests {
                     retain_for_seconds: Some(3600),
                     repeat_after: None,
                 },
+                &CancellationToken::new(),
             )
             .await
             .expect_err("quota denial refuses execution");
@@ -14830,6 +15179,7 @@ mod tests {
                     repeat_after: None,
                     input: None,
                 },
+                &CancellationToken::new(),
             )
             .await
             .expect_err("ordinary argument validation runs without a storage prerequisite");
@@ -14844,6 +15194,7 @@ mod tests {
                     execution_id: Uuid::now_v7().to_string(),
                     input: None,
                 },
+                &CancellationToken::new(),
             )
             .await
             .expect_err("resume requires explicit durable content storage");
@@ -16180,6 +16531,7 @@ mod tests {
                     execution_id: id.to_string(),
                     input: Some(json!({"value": 42})),
                 },
+                &CancellationToken::new(),
             )
             .await
             .expect_err("stale runner contract must not resume");
@@ -17520,7 +17872,11 @@ mod tests {
         );
 
         let blocking = tools
-            .execute(&principal, repeat_source("return 1;", first.id))
+            .execute(
+                &principal,
+                repeat_source("return 1;", first.id),
+                &CancellationToken::new(),
+            )
             .await
             .expect_err("the blocking shape refuses a repetition request");
         assert_eq!(

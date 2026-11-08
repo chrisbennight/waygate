@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A blocking `codemode.execute` or `codemode.resume` stops when its client
+  cancels the request, as the MCP cancellation rules require, instead of running
+  on with nobody to receive its result. It makes no further connector calls, and
+  with an execution store it ends as `cancelled`. Detached and task-augmented
+  executions are unaffected. The tool description and the Code Mode guide say
+  when to use a detached execution instead. No migration or configuration
+  changes are required.
+
 - Change requests support selected approval of independent new rate-limit
   policies. Full captured intent and individual approval conditions remain in
   force; per-item results distinguish partial reviewer quorum from completed
