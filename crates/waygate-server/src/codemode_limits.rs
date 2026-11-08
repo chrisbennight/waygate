@@ -37,6 +37,8 @@ pub(crate) struct CodeModeLimits {
     /// Maximum console output kept per attempt, counting each entry's UTF-8
     /// text plus a small fixed charge per entry.
     pub console_bytes: usize,
+    /// Most connector calls one execution has in flight; further started calls wait their turn.
+    pub connector_calls_in_flight: usize,
     /// Maximum search query length in UTF-8 bytes.
     pub query_bytes: usize,
     /// Maximum distinct files in a file bundle.
@@ -85,6 +87,7 @@ impl Default for CodeModeLimits {
             artifacts_per_attempt: 256,
             artifact_total_bytes: 128 * MIB,
             console_bytes: 64 * 1024,
+            connector_calls_in_flight: 8,
             query_bytes: 4096,
             file_count: 64,
             file_locations: 512,
@@ -186,6 +189,11 @@ impl CodeModeLimits {
                 "Code Mode payload and stack budgets must be positive and fit the heap"
             );
         }
+        anyhow::ensure!(
+            self.connector_calls_in_flight > 0
+                && u32::try_from(self.connector_calls_in_flight).is_ok(),
+            "Code Mode connector calls in flight must be positive and fit the runner protocol"
+        );
         anyhow::ensure!(
             self.artifacts_per_attempt > 0 && self.artifact_total_bytes >= self.artifact_bytes,
             "Code Mode artifact count must be positive and total bytes must admit one artifact"

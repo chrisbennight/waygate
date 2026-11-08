@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Code Mode programs can run independent connector calls at the same time.
+  Every binding gains a `start` method that returns a promise, so
+  `Promise.all` over started calls overlaps at the upstream instead of running
+  one call after another. `GATEWAY_CODEMODE_MAX_CONCURRENT_CONNECTOR_CALLS`
+  (default 8, reported by `codemode.limits`) bounds the calls one execution has
+  in flight; further calls wait their turn. Calls with side effects run one
+  at a time while reads overlap. Existing synchronous calls are unchanged.
+  Cancellation is now observed while calls are in flight; a call with side
+  effects that is already running still finishes and is recorded, and one
+  still waiting its turn is never sent.
+  Contract stamps advance to SDK 8 and runner 11; 7/10 stays continuable.
+
 - Change requests support selected approval of independent new rate-limit
   policies. Full captured intent and individual approval conditions remain in
   force; per-item results distinguish partial reviewer quorum from completed
