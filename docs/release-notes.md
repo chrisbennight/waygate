@@ -14,6 +14,25 @@
   still waiting its turn is never sent.
   Contract stamps advance to SDK 8 and runner 11; 7/10 stays continuable.
 
+- OpenAI-compatible audio APIs: `POST /v1/audio/speech` with streaming,
+  standard Realtime transports, and `POST /v1/audio/transcriptions` for
+  completed audio files. Each is opt-in through a model registered with the
+  matching `kind` and its declared capabilities, and applies the gateway's
+  model authorization, credential-profile restrictions, quotas and audit.
+  Provider credentials stay server-side. Migrations `0119`, `0120` and `0122` extend the model registry
+  for these kinds. See the [audio APIs](audio-api.md).
+
+- An upstream manifest can set `limits.file_max_bytes` and
+  `limits.resource_file_preparation_seconds`, replacing the gateway-wide file
+  staging limit and resource file deadline for that server.
+
+- Approvers reviewing a held tool call see its argument values. Migration
+  `0121` adds their storage.
+
+- Change-request cards name each change's target, show current and proposed
+  values, state what approving does, and lead policy and server-set previews
+  with the change. A requested tool change appears as one Decisions entry.
+
 - Change requests support selected approval of independent new rate-limit
   policies. Full captured intent and individual approval conditions remain in
   force; per-item results distinguish partial reviewer quorum from completed
