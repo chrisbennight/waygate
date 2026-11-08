@@ -988,6 +988,32 @@ async fn owned_in_flight_listing_is_identity_scoped_and_keyset_bounded() {
         "paging past the last row yields nothing"
     );
 
+    // Every submission purges rows past retention, so the row that must stay
+    // out of the retained listing for that reason is aged only after the last
+    // submission, and its presence is checked before listing.
+    let mut lapsed = new_execution(&tenant, Uuid::now_v7());
+    lapsed.execution_profile = confined_profile(json!(null));
+    let lapsed = store.submit(lapsed).await.expect("submit lapsed row");
+    sqlx::query(
+        r#"
+        UPDATE codemode_executions
+           SET status = 'succeeded', completed_at = now(),
+               retention_until = now() - interval '1 second'
+         WHERE id = $1
+        "#,
+    )
+    .bind(lapsed.id)
+    .execute(&pool)
+    .await
+    .expect("age lapsed row past retention");
+    let lapsed_present: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM codemode_executions WHERE id = $1")
+            .bind(lapsed.id)
+            .fetch_one(&pool)
+            .await
+            .expect("count lapsed row");
+    assert_eq!(lapsed_present, 1, "the lapsed row exists when listing");
+
     // The retained listing adds the caller's finished row and nothing else:
     // rows past retention, other owners, issuer-less and keyless rows, tool
     // calls and other confinements stay out exactly as they do in flight.
