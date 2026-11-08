@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 
 use crate::canonical::{Surface, UpstreamProtocol};
 use crate::outbound::STRUCTURED_OUTPUT_TOOL_NAME;
-use crate::record::{FinishReason, InferenceRecord};
+use crate::record::{FinishReason, InferenceRecord, TokenUsage};
 use crate::response::{
     anthropic_stop_reason_to_openai, anthropic_token_usage_from, finish_reason_openai_str,
     gemini_finish_reason_to_openai, gemini_token_usage_from, normalize_anthropic_stop_reason,
@@ -242,12 +242,11 @@ impl StreamTranslator {
     }
 }
 
-/// The usage-only `chat.completion.chunk` a translated stream ends with when the
-/// client asked for usage. Prompt and completion counts are the ones the unary
-/// chat body reports for that provider, and the total is their sum. `None` when
-/// the provider reported neither count.
-fn usage_chunk(record: &InferenceRecord) -> Option<Value> {
-    let usage = &record.usage;
+/// The OpenAI chat `usage` object for a folded record: the prompt and completion
+/// counts the unary chat body reports for that provider, with their sum as the
+/// total. `None` when the provider reported neither count, so no usage is
+/// invented.
+pub fn openai_chat_usage(usage: &TokenUsage) -> Option<Value> {
     if usage.input.is_none() && usage.output.is_none() {
         return None;
     }
@@ -256,15 +255,21 @@ fn usage_chunk(record: &InferenceRecord) -> Option<Value> {
         _ => None,
     };
     Some(json!({
+        "prompt_tokens": usage.input,
+        "completion_tokens": usage.output,
+        "total_tokens": total,
+    }))
+}
+
+/// The usage-only `chat.completion.chunk` a translated stream ends with when the
+/// client asked for usage, or `None` when there is no usage to report.
+fn usage_chunk(record: &InferenceRecord) -> Option<Value> {
+    Some(json!({
         "id": record.upstream_request_id.clone().unwrap_or_default(),
         "object": "chat.completion.chunk",
         "model": record.model_served.clone().unwrap_or_default(),
         "choices": [],
-        "usage": {
-            "prompt_tokens": usage.input,
-            "completion_tokens": usage.output,
-            "total_tokens": total,
-        },
+        "usage": openai_chat_usage(&record.usage)?,
     }))
 }
 

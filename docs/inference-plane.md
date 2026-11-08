@@ -827,8 +827,9 @@ rolling/daily/weekly/monthly. Cost weighting comes from the `llm_models` costing
   and subject** — exact-match cache
   entries are **per-principal scoped**, so one user's completion is never served to another
   (security invariant; strictly stronger than tenant isolation). The key is
-  **transport-agnostic** (it normalizes `stream`), so a unary call and a streaming call for the
-  same content share one entry, served in whichever transport the request asked for.
+  **transport-agnostic** (it normalizes `stream` and `stream_include_usage`), so a unary call
+  and a streaming call for the same content share one entry, served in whichever transport the
+  request asked for.
   The key format is versioned: entries written before issuer scoping are never
   reused after upgrading. They expire and are swept normally; no database
   migration or manual purge is required. Cache lookups still follow current
@@ -841,7 +842,9 @@ rolling/daily/weekly/monthly. Cost weighting comes from the `llm_models` costing
   model is never cached. (Per-request no-store flag and a `temperature == 0` default-gate are
   not supported.)
 - **Streaming:** on miss, tee the assembled completion into the cache as it streams; on hit,
-  replay as a synthetic SSE stream (client behaviour identical). A cache hit still produces an
+  replay as a synthetic SSE stream (client behaviour identical). The stored completion carries
+  the provider's usage counts even when the client did not ask for usage on its stream, so a
+  later unary hit or a streamed hit that asks for usage can report it. A cache hit still produces an
   `InferenceRecord` (`gateway_cache_hit = true`, zero upstream tokens/cost).
 - **Backend:** a `CacheStore` trait, Postgres-backed in v1, trait admits
   Valkey/semantic later without touching call sites.
