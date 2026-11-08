@@ -906,10 +906,28 @@ pub fn render_openai_responses(req: &LlmRequest, model: &str) -> Result<Value, T
         obj.insert("max_output_tokens".into(), json!(m));
     }
     // The Responses API nests reasoning depth under `reasoning.effort` (vs. the
-    // top-level `reasoning_effort` of Chat Completions). The Codex finalizer does
-    // NOT strip `reasoning`, so this survives onto the ChatGPT-backend route too.
+    // top-level `reasoning_effort` of Chat Completions), beside the requested
+    // reasoning `summary`. The Codex finalizer does NOT strip `reasoning`, so
+    // both survive onto the ChatGPT-backend route too.
+    let mut reasoning = Map::new();
     if let Some(effort) = &req.sampling.reasoning_effort {
-        obj.insert("reasoning".into(), json!({ "effort": effort }));
+        reasoning.insert("effort".into(), json!(effort));
+    }
+    if let Some(summary) = &req.sampling.reasoning_summary {
+        reasoning.insert("summary".into(), json!(summary));
+    }
+    if !reasoning.is_empty() {
+        obj.insert("reasoning".into(), Value::Object(reasoning));
+    }
+    // Encrypted reasoning lets a stateless client replay the model's reasoning
+    // on its next turn. The Codex finalizer always requests it.
+    if req.include_encrypted_reasoning {
+        obj.insert("include".into(), json!(["reasoning.encrypted_content"]));
+    }
+    // A prompt-cache routing hint; both the standard endpoint and the Codex
+    // backend accept it.
+    if let Some(key) = &req.prompt_cache_key {
+        obj.insert("prompt_cache_key".into(), json!(key));
     }
     // The Responses API expresses structured output under `text.format`, with the
     // json_schema fields flattened directly into the `format` object (vs Chat
@@ -1161,6 +1179,47 @@ mod tests {
             .unwrap()
             .get("reasoning")
             .is_none());
+    }
+
+    #[test]
+    fn responses_agent_fields_reach_responses_upstreams_only() {
+        let req = crate::inbound::parse_responses(&json!({
+            "model": "m", "input": "x", "stream": true,
+            "reasoning": {"summary": "auto"},
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "session-1"
+        }))
+        .unwrap();
+        let resp = render_openai_responses(&req, "served").unwrap();
+        assert_eq!(resp["reasoning"], json!({"summary": "auto"}));
+        assert_eq!(resp["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(resp["prompt_cache_key"], "session-1");
+        // The ChatGPT backend accepts all three.
+        let codex = finalize_codex_responses_body(resp);
+        assert_eq!(codex["reasoning"]["summary"], "auto");
+        assert_eq!(codex["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(codex["prompt_cache_key"], "session-1");
+        // Other protocols have no equivalent: none of it is sent, and the
+        // request still renders.
+        for (name, body) in [
+            ("chat", render_openai_chat(&req, "served").unwrap()),
+            (
+                "anthropic",
+                render_anthropic_messages(&req, "served").unwrap(),
+            ),
+            ("gemini", render_gemini(&req).unwrap()),
+        ] {
+            let text = body.to_string();
+            for absent in ["session-1", "encrypted_content", "summary"] {
+                assert!(!text.contains(absent), "{name} carried `{absent}`: {text}");
+            }
+        }
+        // A request that asks for none of it renders none of it.
+        let plain = crate::inbound::parse_responses(&json!({"model": "m", "input": "x"})).unwrap();
+        let plain = render_openai_responses(&plain, "served").unwrap();
+        for absent in ["reasoning", "include", "prompt_cache_key"] {
+            assert!(plain.get(absent).is_none(), "{absent}");
+        }
     }
 
     #[test]
@@ -1487,6 +1546,8 @@ mod tests {
             store: None,
             stream: false,
             stream_include_usage: false,
+            include_encrypted_reasoning: false,
+            prompt_cache_key: None,
         };
         let err = render_anthropic_messages(&req, "m").unwrap_err();
         assert!(
@@ -1614,6 +1675,8 @@ mod tests {
             store: None,
             stream: false,
             stream_include_usage: false,
+            include_encrypted_reasoning: false,
+            prompt_cache_key: None,
         };
         assert!(matches!(render_gemini(&sys_img).unwrap_err(),
             TranslateError::Unsupported { surface: "gemini", param } if param == "non-text content in a system message"));
@@ -1735,6 +1798,8 @@ mod tests {
             store: None,
             stream: false,
             stream_include_usage: false,
+            include_encrypted_reasoning: false,
+            prompt_cache_key: None,
         };
         assert!(
             matches!(render_openai_responses(&sys_img, "m").unwrap_err(),

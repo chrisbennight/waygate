@@ -183,11 +183,13 @@ fn cache_identity(ctx: &InvocationContext<'_>) -> (String, Option<String>, Optio
 /// whether the caller asked for a unary or a streamed response — only the
 /// delivery transport differs — so both share one entry: a streaming request
 /// can hit a body a unary call stored, and vice versa. A streamed replay ends
-/// with the stored usage whenever the body has it.
+/// with the stored usage whenever the body has it. The upstream prompt-cache
+/// hint does not change the output either, so it is left out as well.
 fn cache_canonical(llm_req: &waygate_llm_translate::LlmRequest) -> String {
     let mut keyed = llm_req.clone();
     keyed.stream = false;
     keyed.stream_include_usage = false;
+    keyed.prompt_cache_key = None;
     serde_json::to_string(&keyed).unwrap_or_default()
 }
 
