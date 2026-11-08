@@ -1,6 +1,6 @@
 # Release notes
 
-## 2.1.0
+## Unreleased
 
 - A blocking `codemode.execute` or `codemode.resume` stops when its client
   cancels the request, as the MCP cancellation rules require, instead of running
@@ -9,6 +9,15 @@
   executions are unaffected. The tool description and the Code Mode guide say
   when to use a detached execution instead. No migration or configuration
   changes are required.
+
+- `codemode.executions` accepts `include_finished: true` to also list the
+  caller's finished executions until their retention ends, so a caller whose
+  response was lost can learn how the execution ended without its id. The
+  default listing is unchanged. Migration `0123` adds an index so the new
+  listing reads only the caller's own retained rows. No configuration changes
+  are required.
+
+## 2.1.0
 
 - Code Mode programs can run independent connector calls at the same time.
   Every binding gains a `start` method that returns a promise, so

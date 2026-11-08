@@ -286,11 +286,18 @@ of running unreachable until expiry. The listing is scoped exactly as the
 by-id tools are — tenant, subject, issuer, and effective profile — and
 returns only executions those tools would serve: it reveals nothing about any
 other principal's work, and it hands out no protocol-level enumeration
-(`tasks/list` stays removed; this is an ordinary governed tool). Terminal
-executions are not listed — a known handle's outcome stays retrievable through
-`codemode.status` and `codemode.result` until retention expires — and listed
-rows are projected as stored: polling a discovered identifier is what
-reconciles it.
+(`tasks/list` stays removed; this is an ordinary governed tool). Listed rows
+are projected as stored: polling a discovered identifier is what reconciles
+it.
+
+By default the listing shows only work still in flight. With
+`include_finished: true` it also lists the caller's finished executions until
+their retention ends, in the same order, scope and status vocabulary. That is
+how a caller whose response was lost learns what happened without the
+execution id: for example a blocking `codemode.execute` whose client gave up,
+which ends as `cancelled` with `cancelled_by_client`. An entry reports how the
+execution ended and whether a result is available; poll its identifier with
+`codemode.status` for the rest.
 
 Operators have their own view of the same journal, deliberately separate from
 the caller listing because the authorization models differ: the admin REST
@@ -495,8 +502,9 @@ alive after the client leaves is a choice the caller makes before it starts:
 
 Use a detached form for work that may run longer than the client will wait,
 and for a program whose side effects must not run twice. A blocking call that
-is cut short may already have applied some of its effects, and its caller
-cannot see which.
+is cut short may already have applied some of its effects. Where the posture
+serves `codemode.executions`, its caller can find the execution afterwards
+with `include_finished: true` and read how it ended with `codemode.status`.
 
 ## Program runtime
 
