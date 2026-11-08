@@ -1,5 +1,13 @@
 # Release notes
 
+## 2.2.1
+
+- A database test of the bulk change-request panel checks each request's
+  focused view instead of the tenant-wide list, so pending requests that
+  other tests create in the shared tenant can no longer make it fail. The
+  gateway's behavior is unchanged. No migration or configuration changes are
+  required.
+
 ## 2.2.0
 
 - A blocking `codemode.execute` or `codemode.resume` stops when its client
