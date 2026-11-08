@@ -779,12 +779,37 @@ fn usage_to_responses(u: &Usage) -> Value {
     Value::Object(usage)
 }
 
+/// The reasoning text a Chat Completions message or stream delta carries, under
+/// either spelling OpenAI-compatible servers use (`reasoning_content` first).
+pub(crate) fn chat_reasoning_text(message: &Value) -> Option<&str> {
+    ["reasoning_content", "reasoning"]
+        .into_iter()
+        .find_map(|key| message.get(key).and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+}
+
+/// A Responses `reasoning` item carrying a chat upstream's reasoning as plain
+/// `reasoning_text` content. `summary` stays empty and there is no
+/// `encrypted_content`, because the upstream produced neither.
+pub(crate) fn reasoning_text_item(id: Option<&str>, text: &str) -> Value {
+    let mut item = json!({
+        "type": "reasoning",
+        "summary": [],
+        "content": [{"type": "reasoning_text", "text": text}],
+    });
+    if let Some(id) = id {
+        item["id"] = json!(id);
+    }
+    item
+}
+
 /// Fold an **OpenAI Chat Completions** response body into a [`CanonicalResponse`].
 /// Used for a Responses-surface client whose call routed to a Chat-Completions
 /// upstream (the one provider R2a left as a chat passthrough): the chat body must
 /// be lifted into the hub so the Responses egress can render it. `choices[0]`'s
-/// message text → an assistant `Message` item; its `tool_calls` → `FunctionCall`
-/// items; `finish_reason` → [`ResponseStatus`].
+/// reasoning → a leading `Reasoning` item of plain reasoning text; its message
+/// text → an assistant `Message` item; its `tool_calls` → `FunctionCall` items;
+/// `finish_reason` → [`ResponseStatus`].
 pub fn openai_chat_to_canonical_response(resp: &Value) -> CanonicalResponse {
     let choice = resp
         .get("choices")
@@ -793,6 +818,12 @@ pub fn openai_chat_to_canonical_response(resp: &Value) -> CanonicalResponse {
     let message = choice.and_then(|c| c.get("message"));
 
     let mut output: Vec<OutputItem> = Vec::new();
+    // Reasoning the upstream returned beside the answer leads the turn.
+    if let Some(text) = message.and_then(chat_reasoning_text) {
+        output.push(OutputItem::Reasoning {
+            raw: reasoning_text_item(None, text),
+        });
+    }
     // Assemble the assistant message item's content parts: output text, then a
     // refusal part if the chat upstream reported one.
     let mut content_parts: Vec<OutputContentPart> = Vec::new();
@@ -1228,6 +1259,38 @@ mod tests {
         })));
         assert_eq!(len["status"], "incomplete");
         assert_eq!(len["incomplete_details"]["reason"], "max_output_tokens");
+    }
+
+    #[test]
+    fn chat_reasoning_leads_the_responses_output_as_plain_text() {
+        // Either spelling a chat upstream uses becomes a leading reasoning item
+        // of plain reasoning text: no summary, no encrypted content.
+        for field in ["reasoning_content", "reasoning"] {
+            let mut chat = json!({
+                "choices": [{"finish_reason": "tool_calls", "message": {
+                    "role": "assistant", "content": null,
+                    "tool_calls": [{"id": "c1", "type": "function",
+                        "function": {"name": "bash", "arguments": "{}"}}]
+                }}]
+            });
+            chat["choices"][0]["message"][field] = json!("Run ls first.");
+            let r = canonical_response_to_responses(&openai_chat_to_canonical_response(&chat));
+            let output = r["output"].as_array().unwrap();
+            assert_eq!(
+                output[0],
+                json!({"type": "reasoning", "summary": [],
+                       "content": [{"type": "reasoning_text", "text": "Run ls first."}]}),
+                "{field}"
+            );
+            assert_eq!(output[1]["type"], "function_call");
+            assert!(output[0].get("encrypted_content").is_none());
+        }
+        // Empty reasoning is no reasoning.
+        let r = canonical_response_to_responses(&openai_chat_to_canonical_response(&json!({
+            "choices": [{"finish_reason": "stop", "message": {
+                "role": "assistant", "content": "ok", "reasoning_content": ""}}]
+        })));
+        assert_eq!(r["output"][0]["type"], "message");
     }
 
     #[test]

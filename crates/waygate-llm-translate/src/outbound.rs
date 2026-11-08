@@ -27,11 +27,9 @@ fn partition_parts(
         match p {
             ContentPart::ToolUse { .. } => tool_uses.push(p),
             ContentPart::ToolResult { .. } => tool_results.push(p),
-            // Replayed reasoning is never text. Responses reasoning items are
-            // emitted only by the OpenAI-Responses renderer and chat reasoning
-            // only by the OpenAI-chat renderer, each collecting its own kind
-            // directly from the message, so both are dropped here rather than
-            // mis-bucketed as text.
+            // Replayed reasoning is never text. The OpenAI-Responses and
+            // OpenAI-chat renderers collect it directly from the message, so it
+            // is dropped here rather than mis-bucketed as text.
             ContentPart::Reasoning { .. } | ContentPart::ChatReasoning { .. } => {}
             _ => textish.push(p),
         }
@@ -257,29 +255,65 @@ fn render_message(m: &CanonicalMessage) -> Result<Value, TranslateError> {
         obj.insert("tool_calls".into(), openai_tool_calls(&tool_uses));
     }
     // Replayed chat reasoning goes back under the field the client sent it in,
-    // value unchanged. Only an assistant turn can carry it, once per field; a
-    // directly-constructed message that breaks either rule fails closed (I6).
+    // value unchanged. Replayed Responses reasoning items contribute their plain
+    // text as `reasoning_content`, the spelling OpenAI-compatible servers most
+    // widely accept. Only an assistant turn can carry reasoning, once per field;
+    // a directly-constructed message that breaks either rule fails closed (I6).
+    let mut fields: Vec<(&str, Value)> = Vec::new();
+    let mut item_texts: Vec<String> = Vec::new();
     for part in &m.content {
-        let ContentPart::ChatReasoning { field, value } = part else {
-            continue;
-        };
+        match part {
+            ContentPart::ChatReasoning { field, value } => {
+                fields.push((field.wire_name(), value.clone()));
+            }
+            ContentPart::Reasoning { raw } => item_texts.extend(responses_reasoning_text(raw)),
+            _ => continue,
+        }
         if !matches!(m.role, Role::Assistant) {
             return Err(TranslateError::Unsupported {
                 surface: "openai_chat",
                 param: "reasoning on a non-assistant message".into(),
             });
         }
-        if obj
-            .insert(field.wire_name().into(), value.clone())
-            .is_some()
-        {
+    }
+    if !item_texts.is_empty() {
+        fields.push(("reasoning_content", json!(item_texts.join("\n\n"))));
+    }
+    for (field, value) in fields {
+        if obj.insert(field.into(), value).is_some() {
             return Err(TranslateError::Unsupported {
                 surface: "openai_chat",
-                param: format!("repeated `{}` on one message", field.wire_name()),
+                param: format!("repeated `{field}` on one message"),
             });
         }
     }
     Ok(Value::Object(obj))
+}
+
+/// The plain reasoning text of a replayed Responses `reasoning` item, for a Chat
+/// Completions upstream: its `reasoning_text` content, or else its `summary_text`
+/// parts, where clients such as OpenCode keep the text they were shown. An item
+/// carrying `encrypted_content` holds reasoning only its originating Responses
+/// provider can read, so it yields nothing.
+fn responses_reasoning_text(raw: &Value) -> Option<String> {
+    fn texts<'a>(raw: &'a Value, key: &str, kind: &str) -> Vec<&'a str> {
+        raw.get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|part| part.get("type").and_then(Value::as_str) == Some(kind))
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .filter(|text| !text.is_empty())
+            .collect()
+    }
+    if raw.get("encrypted_content").is_some_and(|v| !v.is_null()) {
+        return None;
+    }
+    let mut parts = texts(raw, "content", "reasoning_text");
+    if parts.is_empty() {
+        parts = texts(raw, "summary", "summary_text");
+    }
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 /// Render assistant tool-call parts as OpenAI `tool_calls`
@@ -1391,6 +1425,41 @@ mod tests {
             .unwrap()
             .iter()
             .any(|m| m["role"] == "assistant" && m["content"] == "Done."));
+    }
+
+    #[test]
+    fn replayed_responses_reasoning_reaches_a_chat_upstream_as_text() {
+        let turn = |reasoning: Value| {
+            let req = crate::inbound::parse_responses(&json!({
+                "model": "m",
+                "input": [
+                    {"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "list the files"}]},
+                    reasoning,
+                    {"type": "function_call", "id": "fc_1", "call_id": "c1",
+                        "name": "bash", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "c1", "output": "a.txt"}
+                ]
+            }))
+            .unwrap();
+            render_openai_chat(&req, "m").unwrap()["messages"][1].clone()
+        };
+        // A client that keeps the text it was shown in `summary`, as OpenCode does.
+        let assistant = turn(json!({"type": "reasoning", "id": "rs_0",
+            "summary": [{"type": "summary_text", "text": "Run ls."}]}));
+        assert_eq!(assistant["reasoning_content"], "Run ls.");
+        assert_eq!(assistant["tool_calls"][0]["id"], "c1");
+        // Raw reasoning text wins over a summary of it.
+        let assistant = turn(json!({"type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "A summary."}],
+            "content": [{"type": "reasoning_text", "text": "The reasoning."}]}));
+        assert_eq!(assistant["reasoning_content"], "The reasoning.");
+        // Encrypted reasoning belongs to its originating provider and stays out.
+        let assistant = turn(json!({"type": "reasoning", "id": "rs_1",
+            "summary": [{"type": "summary_text", "text": "A summary."}],
+            "encrypted_content": "opaque"}));
+        assert!(assistant.get("reasoning_content").is_none());
+        assert_eq!(assistant["tool_calls"][0]["id"], "c1");
     }
 
     #[test]

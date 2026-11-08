@@ -32,6 +32,7 @@ use crate::response::{
     normalize_finish_reason, normalize_gemini_finish_reason, responses_finish,
     responses_token_usage_from, str_field, token_usage_from, u64_field,
 };
+use crate::response_canonical::{chat_reasoning_text, reasoning_text_item};
 
 /// Folds OpenAI chat streaming chunks into an [`InferenceRecord`]. Build from
 /// the pre-dispatch base record (provider / credential / requested model /
@@ -897,9 +898,11 @@ impl ResponsesStreamTranslator {
 ///
 /// Fidelity matches the chat / unary-Responses projection for these providers:
 /// assistant text and function calls are carried (as `message` + `output_text` and
-/// `function_call` items); reasoning / annotations are not (the chat translators
-/// drop them upstream of this point). An OpenAI-Responses upstream keeps full
-/// fidelity via the separate 1:1 frame passthrough, not this lifter.
+/// `function_call` items), and reasoning an OpenAI-chat upstream streams is carried
+/// as a `reasoning` item of plain `reasoning_text`, closed when the answer or a
+/// tool call begins. Annotations, and the Anthropic / Gemini translators'
+/// thinking, are not. An OpenAI-Responses upstream keeps full fidelity via the
+/// separate 1:1 frame passthrough, not this lifter.
 ///
 /// The lifter is self-contained on the chat chunks — `id` / `model` from the first
 /// chunk that carries them, text accumulated from `content` deltas, tool calls from
@@ -914,6 +917,8 @@ pub struct ChatStreamToResponses {
     id: Option<String>,
     model: Option<String>,
     msg: Option<ResponsesMsgItem>,
+    /// Reasoning items in stream order; only the last can still be open.
+    reasoning: Vec<ResponsesReasoningItem>,
     next_output_index: u64,
     tools: Vec<ResponsesToolItem>,
     /// chat `tool_calls[].index` → position in `tools`.
@@ -933,6 +938,14 @@ struct ResponsesMsgItem {
     /// The `refusal` content part, opened lazily on the first refusal delta
     /// (OpenAI structured-output refusals stream a `delta.refusal` string).
     refusal: Option<ResponsesContentPart>,
+}
+
+#[derive(Debug)]
+struct ResponsesReasoningItem {
+    output_index: u64,
+    item_id: String,
+    text: String,
+    open: bool,
 }
 
 #[derive(Debug)]
@@ -1065,6 +1078,57 @@ impl ChatStreamToResponses {
         r
     }
 
+    /// Append streamed reasoning text, opening a `reasoning` item first when none
+    /// is open.
+    fn reasoning_delta(&mut self, text: &str, out: &mut Vec<(String, Value)>) {
+        if !self.reasoning.last().is_some_and(|r| r.open) {
+            let oi = self.next_index();
+            let item_id = format!("rs_{oi}");
+            let mut item = reasoning_text_item(Some(&item_id), "");
+            item["content"] = json!([]);
+            out.push(self.event(
+                "response.output_item.added",
+                json!({"output_index": oi, "item": item}),
+            ));
+            self.reasoning.push(ResponsesReasoningItem {
+                output_index: oi,
+                item_id,
+                text: String::new(),
+                open: true,
+            });
+        }
+        let (item_id, oi) = {
+            let r = self
+                .reasoning
+                .last_mut()
+                .expect("reasoning item opened above");
+            r.text.push_str(text);
+            (r.item_id.clone(), r.output_index)
+        };
+        out.push(self.event(
+            "response.reasoning_text.delta",
+            json!({"item_id": item_id, "output_index": oi, "content_index": 0, "delta": text}),
+        ));
+    }
+
+    /// Close the open `reasoning` item, if any: the model has moved on to its
+    /// answer or a tool call, or the stream ended.
+    fn close_reasoning(&mut self, out: &mut Vec<(String, Value)>) {
+        let Some(r) = self.reasoning.last_mut().filter(|r| r.open) else {
+            return;
+        };
+        r.open = false;
+        let (item_id, oi, text) = (r.item_id.clone(), r.output_index, r.text.clone());
+        out.push(self.event(
+            "response.reasoning_text.done",
+            json!({"item_id": item_id, "output_index": oi, "content_index": 0, "text": text}),
+        ));
+        out.push(self.event(
+            "response.output_item.done",
+            json!({"output_index": oi, "item": reasoning_text_item(Some(&item_id), &text)}),
+        ));
+    }
+
     /// Process one chat-completion-chunk, returning the Responses events it maps to
     /// (0..N). A usage-only chunk (`choices: []`) and the `[DONE]` sentinel yield no
     /// events but are still observed for the terminal `response.completed`.
@@ -1099,6 +1163,24 @@ impl ChatStreamToResponses {
             self.finish_reason = Some(fr.to_owned());
         }
         let delta = choice.get("delta");
+        // Reasoning streams ahead of the answer; its item closes once the answer
+        // or a tool call begins.
+        if let Some(text) = delta.and_then(chat_reasoning_text) {
+            self.reasoning_delta(text, &mut out);
+        }
+        let answering = delta.is_some_and(|d| {
+            ["content", "refusal"].into_iter().any(|key| {
+                d.get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| !t.is_empty())
+            }) || d
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty())
+        });
+        if answering {
+            self.close_reasoning(&mut out);
+        }
         // Assistant text → output_text deltas (opening the message item + part lazily).
         if let Some(text) = delta
             .and_then(|d| d.get("content"))
@@ -1240,6 +1322,7 @@ impl ChatStreamToResponses {
             self.usage = fallback_usage;
         }
         let mut out = Vec::new();
+        self.close_reasoning(&mut out);
         let msg = self.msg.take();
         let tools = std::mem::take(&mut self.tools);
         // The message item's assembled content parts, in open order (text, refusal).
@@ -1300,20 +1383,34 @@ impl ChatStreamToResponses {
                                 "name": t.name, "arguments": t.args, "status": "completed"}}),
             ));
         }
-        let mut output = Vec::new();
+        // Every item in the order it was opened.
+        let mut output: Vec<(u64, Value)> = self
+            .reasoning
+            .iter()
+            .map(|r| {
+                (
+                    r.output_index,
+                    reasoning_text_item(Some(&r.item_id), &r.text),
+                )
+            })
+            .collect();
         if let Some(m) = &msg {
-            output.push(
+            output.push((
+                m.output_index,
                 json!({"type": "message", "id": m.item_id, "status": "completed",
                                "role": "assistant",
                                "content": msg_content.unwrap_or_else(|| json!([]))}),
-            );
+            ));
         }
         for t in &tools {
-            output.push(
+            output.push((
+                t.output_index,
                 json!({"type": "function_call", "id": t.item_id, "call_id": t.call_id,
                                "name": t.name, "arguments": t.args, "status": "completed"}),
-            );
+            ));
         }
+        output.sort_by_key(|(index, _)| *index);
+        let output = output.into_iter().map(|(_, item)| item).collect();
         let (status, incomplete) = self.terminal_status();
         let response = self.build_response(status, Value::Array(output), incomplete);
         let name = if status == "completed" {
@@ -2132,6 +2229,63 @@ mod tests {
         assert_eq!(completed["usage"]["input_tokens"], 3);
         assert_eq!(completed["usage"]["output_tokens"], 2);
         assert_eq!(completed["usage"]["total_tokens"], 5);
+    }
+
+    #[test]
+    fn chat_lift_streams_reasoning_as_an_item_closed_before_the_answer() {
+        let mut lift = ChatStreamToResponses::new();
+        let mut evs: Vec<(String, Value)> = Vec::new();
+        let chunk = |delta: Value| json!({"id":"c1","model":"m","choices":[{"delta": delta}]});
+        evs.extend(lift.push(&chunk(json!({"role": "assistant"}))));
+        evs.extend(lift.push(&chunk(json!({"reasoning_content": "Run "}))));
+        evs.extend(lift.push(&chunk(json!({"reasoning": "ls."}))));
+        evs.extend(lift.push(&chunk(json!({"content": "Done."}))));
+        evs.extend(
+            lift.push(
+                &json!({"id":"c1","model":"m","choices":[{"delta":{},"finish_reason":"stop"}]}),
+            ),
+        );
+        evs.extend(lift.finish(None));
+
+        let names: Vec<&str> = evs.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names[..7],
+            [
+                "response.created",
+                "response.output_item.added",
+                "response.reasoning_text.delta",
+                "response.reasoning_text.delta",
+                "response.reasoning_text.done",
+                "response.output_item.done",
+                "response.output_item.added",
+            ]
+        );
+        assert_eq!(
+            evs[1].1["item"],
+            json!({"type": "reasoning", "id": "rs_0", "summary": [], "content": []})
+        );
+        assert_eq!(evs[4].1["text"], "Run ls.");
+        assert_eq!(evs[6].1["item"]["type"], "message");
+        // The completed response lists the reasoning ahead of the answer, as
+        // plain reasoning text with no encrypted content.
+        let completed = &evs.last().unwrap().1["response"];
+        assert_eq!(
+            completed["output"][0],
+            json!({"type": "reasoning", "id": "rs_0", "summary": [],
+                   "content": [{"type": "reasoning_text", "text": "Run ls."}]})
+        );
+        assert_eq!(completed["output"][1]["type"], "message");
+
+        // Reasoning that runs to the end of the stream still closes.
+        let mut lift = ChatStreamToResponses::new();
+        let mut evs = lift.push(&chunk(json!({"reasoning_content": "Thinking"})));
+        evs.extend(lift.finish(None));
+        let names: Vec<&str> = evs.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"response.reasoning_text.done"));
+        assert_eq!(
+            evs.last().unwrap().1["response"]["output"][0]["type"],
+            "reasoning"
+        );
     }
 
     #[test]

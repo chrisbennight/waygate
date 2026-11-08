@@ -115,10 +115,11 @@ pub enum ContentPart {
     /// `ToolUse`/`Text` parts of that turn, and **never interpreted** — the raw
     /// item (which may include provider `encrypted_content` the model needs to
     /// continue) is round-tripped verbatim. The OpenAI-Responses renderer emits
-    /// it back as a `reasoning` input item; every other renderer drops it (it
-    /// has no Chat/Anthropic/Gemini equivalent and the encrypted payload is
-    /// meaningless off its origin provider). Only ever produced by the Responses
-    /// inbound parser; the Chat parser never emits it.
+    /// it back as a `reasoning` input item. The OpenAI-chat renderer sends an
+    /// item's plain reasoning text as `reasoning_content`, unless the item
+    /// carries encrypted content, which is meaningless off its origin provider.
+    /// The Anthropic and Gemini renderers drop it. Only ever produced by the
+    /// Responses inbound parser; the Chat parser never emits it.
     Reasoning {
         raw: serde_json::Value,
     },
