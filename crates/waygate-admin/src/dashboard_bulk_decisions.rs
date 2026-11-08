@@ -758,12 +758,6 @@ async fn confirm(
             }
         }
     }
-    state
-        .hitl
-        .decisions_badge_cache
-        .lock()
-        .await
-        .remove(actor.tenant.as_str());
     Ok(Redirect::to(&tenant_ctx::nav_url(
         tenant.as_ref().map(|Extension(t)| t),
         &format!("/decisions/bulk/{id}"),

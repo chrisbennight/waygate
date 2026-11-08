@@ -121,9 +121,8 @@
            in-page tab bar (below), so the sidebar stays short and
            scannable. Settings is pinned to the foot and never re-prints a
            header. The Decisions entry carries the one badge in the nav:
-           static/js/badge.js fetches the pending count from the
-           server-side cached endpoint and leaves the chip hidden at
-           zero / on error / with JS off. #}
+           static/js/badge.js fetches the live pending count and leaves
+           the chip hidden at zero / on error / with JS off. #}
         <ul class="sidebar__nav">
             {% for group in chrome.nav %}
             {% match group.section_header %}

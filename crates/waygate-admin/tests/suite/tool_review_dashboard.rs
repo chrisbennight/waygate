@@ -755,7 +755,6 @@ async fn acceptance_workflow(
     }
     if startup_mismatch {
         db.close().await;
-        state.hitl.decisions_badge_cache.lock().await.clear();
         let badge = app
             .clone()
             .oneshot(

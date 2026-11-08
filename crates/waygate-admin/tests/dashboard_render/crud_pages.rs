@@ -1251,10 +1251,9 @@ pub(crate) async fn rbac_page_renders_assignment_and_mapping_forms_when_roles_ex
     );
 }
 
-/// The Decisions badge endpoint returns a plain-text count, is
-/// no-store (the 30s cache is server-side, per tenant), and degrades
-/// to "0" when no decision stores are configured — the badge is a
-/// hint, never an error surface.
+/// The Decisions badge endpoint returns a plain-text count and reads
+/// "0" when no decision stores are configured — the badge is a hint,
+/// never an error surface.
 #[tokio::test]
 pub(crate) async fn decisions_badge_endpoint_returns_zero_without_stores() {
     let app = dashboard_router(empty_state().await, DashboardAuth::Disabled);

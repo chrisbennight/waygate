@@ -539,11 +539,6 @@ pub struct HitlPlane {
     /// [`AdminState::with_two_approver_mode`]; `waygate-server` reads
     /// `GATEWAY_REQUIRE_TWO_APPROVALS` at boot.
     pub require_two_approvals: bool,
-    /// 30s TTL cache for the sidebar Decisions badge, keyed by tenant:
-    /// `(computed_at, pending_count)`. Internal — initialized empty, no
-    /// constructor argument; see `dashboard::decisions_badge`.
-    pub decisions_badge_cache:
-        tokio::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>,
 }
 
 /// The dashboard's chat agent: per-tenant agent configs, conversation
@@ -942,7 +937,6 @@ impl AdminState {
                 ),
                 hitl_hub: Arc::new(crate::hitl_ws::ApprovalHub::default()),
                 require_two_approvals: false,
-                decisions_badge_cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             },
             agent: AgentPlane {
                 agent_configs: Capability::absent("agent config store not configured"),

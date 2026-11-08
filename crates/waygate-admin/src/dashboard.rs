@@ -122,8 +122,8 @@ pub struct NavGroup {
     /// one entry; the layout only renders a tab bar for 2+.
     pub items: Vec<NavItem>,
     /// `Some(url)` on the Decisions destination: the endpoint
-    /// `static/js/badge.js` fetches the pending-count from (30s
-    /// server-side TTL cache; renders nothing when 0 / on error).
+    /// `static/js/badge.js` fetches the pending-count from (read live on
+    /// each fetch; renders nothing when 0).
     pub badge_href: Option<String>,
     /// `Some(label)` on the FIRST destination of each sidebar section
     /// (Common / MCP Gateway / LLM Gateway); `None` on every other
@@ -429,13 +429,19 @@ pub(crate) fn render<T: Template>(t: &T) -> Response {
 /// `Router<()>` can be `.merge`d into a stateless outer router without an
 /// extra plumbing turn.
 /// `GET /badge/decisions` — plain-text pending-decision count for the
-/// sidebar badge (`static/js/badge.js`). Counts pending change requests
-/// plus active break-glass tokens for the principal's tenant, behind the
-/// same admin posture as the Overview banner (non-admin sessions read
-/// "0" rather than learning counts exist). Results are cached per tenant
-/// for 30s on `AdminState` so the per-page-view fetch never adds store
-/// round-trips in steady state; absent stores contribute zero, and the
-/// badge is a hint — every failure path degrades to "0".
+/// sidebar badge (`static/js/badge.js`). Counts the Decisions queue's
+/// sources for the principal's tenant: pending change requests, tool and
+/// skill reviews, invocation requests, Code Mode executions awaiting
+/// approval, and active break-glass tokens. It sits behind the same admin
+/// posture as the Overview banner (non-admin sessions read "0" rather than
+/// learning counts exist). Absent stores contribute zero; an unreadable
+/// review or invocation count reads "?".
+///
+/// The count is read on every request and never cached: expiry, re-listed
+/// tool definitions, agent proposals, and decisions on other replicas all
+/// change the queue without passing through a point that could invalidate
+/// a cache, so any cached count can claim work the queue no longer shows.
+/// The badge loads after the page, so these reads never delay rendering.
 async fn decisions_badge(
     State(state): State<Arc<AdminState>>,
     user: Option<Extension<Principal>>,
@@ -447,16 +453,6 @@ async fn decisions_badge(
     let tenant = user_principal
         .map(|p| p.tenant.as_str().to_owned())
         .unwrap_or_else(|| waygate_core::TenantId::DEFAULT.to_owned());
-
-    const TTL: std::time::Duration = std::time::Duration::from_secs(30);
-    {
-        let cache = state.hitl.decisions_badge_cache.lock().await;
-        if let Some((at, label)) = cache.get(&tenant) {
-            if at.elapsed() < TTL {
-                return ([(header::CACHE_CONTROL, "no-store")], label.clone()).into_response();
-            }
-        }
-    }
 
     // Both component counts are capped; when either hits its cap the badge
     // renders "{n}+" rather than silently undercounting. Change requests use
@@ -545,13 +541,6 @@ async fn decisions_badge(
     } else {
         total.to_string()
     };
-
-    state
-        .hitl
-        .decisions_badge_cache
-        .lock()
-        .await
-        .insert(tenant, (std::time::Instant::now(), label.clone()));
     ([(header::CACHE_CONTROL, "no-store")], label).into_response()
 }
 

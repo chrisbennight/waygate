@@ -80,12 +80,6 @@ pub(crate) async fn decide_core(
         })
         .await
         .map_err(request_error)?;
-    state
-        .hitl
-        .decisions_badge_cache
-        .lock()
-        .await
-        .remove(actor.tenant.as_str());
     crate::admin_mutation::record_admin_mutation(
         state,
         "invocation requests",

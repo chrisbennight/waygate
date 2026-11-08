@@ -466,11 +466,5 @@ pub(crate) async fn confirm(
         )
         .await?;
     }
-    state
-        .hitl
-        .decisions_badge_cache
-        .lock()
-        .await
-        .remove(actor.tenant.as_str());
     Ok(())
 }

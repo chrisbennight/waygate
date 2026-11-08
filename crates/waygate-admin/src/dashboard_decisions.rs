@@ -5,6 +5,8 @@
 //! - **Pending skill contents** — review the complete candidate before distribution.
 //! - **Pending change requests** — a human must approve (and execute) or
 //!   deny (with a reason). The decision action.
+//! - **Pending invocation requests and Code Mode executions awaiting
+//!   approval** — calls held for an operator's permission.
 //! - **Active break-glass tokens** — overrides currently bypassing the
 //!   policy gate; the operator reviews and revokes illegitimate ones.
 //!

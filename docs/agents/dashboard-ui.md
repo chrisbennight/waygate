@@ -216,14 +216,21 @@ the chrome moved.
 - The active destination carries `aria-current="page"` on its sidebar
   link, and the active tab carries `aria-current="page"` in the tab bar.
 - The Decisions entry carries the nav's one badge: `static/js/badge.js`
-  fetches the pending count (change requests + pending tool and skill reviews + active break-glass) from
-  `GET /badge/decisions`, which caches per tenant for 30s server-side and
-  shows "0" for non-admin sessions or absent stores. Unreadable tool or skill
-  review counts show "?" and link to the queue, which explains unavailable data.
-  Inline catalog refresh also reports pending tool reviews and updates the badge.
+  fetches the pending count (change requests + pending tool and skill reviews +
+  invocation requests + Code Mode executions awaiting approval + active
+  break-glass) from `GET /badge/decisions`, which shows "0" for non-admin
+  sessions or absent stores. The endpoint reads the count on every request
+  and keeps no cache: expiry, re-listed tool definitions, agent proposals,
+  and decisions on other replicas change the queue without passing through a
+  point that could invalidate one. The script refreshes on page load, on a
+  back/forward restore, when the tab becomes visible, and every 30 seconds
+  while it stays visible. Unreadable review or invocation counts show "?" and
+  link to the queue, which explains unavailable data. Inline catalog refresh
+  also reports pending tool reviews and updates the badge.
 - The Decisions destination lands on the **merged Queue**
   (`dashboard_decisions`, `/decisions`): pending change requests, pending tool and skill
-  reviews, and active break-glass in one inbox. Change requests and break-glass
+  reviews, invocation requests, Code Mode executions awaiting approval, and
+  active break-glass in one inbox. Change requests and break-glass
   have inline approve / deny / revoke forms that
   POST to queue-owned routes (`/decisions/changes/{id}/{approve,deny}`,
   `/decisions/break_glass/{id}/revoke`). Those routes are thin
@@ -231,7 +238,8 @@ the chrome moved.
   per-surface pages (`change_requests::approve_and_execute_core`,
   `deny_core`, `break_glass::revoke_token_core`) and PRG back to
   `/decisions` — no mutation logic is duplicated. **The queue's sources
-  are exactly the badge's** (pending CRs + pending tool and skill reviews + active break-glass).
+  are exactly the badge's**, and both read them live, so the badge never
+  counts work the queue no longer lists.
   Pending tool rows link to the exact contract comparison on `/servers/tool-changes`;
   pending skill rows link to the exact content review on `/skills/review`.
   Review summaries state the changed fields or files. Missing historical tool

@@ -765,6 +765,45 @@ pub(crate) async fn decisions_deny_without_reason_returns_to_queue_with_error() 
     );
 }
 
+/// The sidebar badge reports the queue as it is now. A decision recorded
+/// anywhere (another replica, the REST API) clears it on the next read, and
+/// a proposal made outside the dashboard appears on the next read, with no
+/// window where the badge claims work the queue does not list.
+#[tokio::test]
+pub(crate) async fn decisions_badge_tracks_the_queue_without_delay() {
+    use waygate_changeset::ChangeRequestStore as _;
+    let cr = Arc::new(waygate_changeset::InMemoryChangeRequestStore::new());
+    let cr_id = seed_pending_cr(&cr, "default", "example-agent").await;
+    let bg = Arc::new(FakeBreakGlassStore::default());
+    let app = dashboard_router(
+        state_with_decision_stores(cr.clone(), bg).await,
+        DashboardAuth::Disabled,
+    );
+    let (_, badge) = body_of(app.clone(), "/badge/decisions").await;
+    assert_eq!(badge.trim(), "1");
+
+    cr.try_deny("default", cr_id, "example-admin", "not needed")
+        .await
+        .unwrap()
+        .expect("the pending request is denied");
+    let (_, queue) = body_of(app.clone(), "/decisions").await;
+    assert!(queue.contains("Nothing awaiting a decision"));
+    let (_, badge) = body_of(app.clone(), "/badge/decisions").await;
+    assert_eq!(
+        badge.trim(),
+        "0",
+        "the badge must not keep counting a request the queue no longer lists"
+    );
+
+    seed_pending_cr(&cr, "default", "example-agent").await;
+    let (_, badge) = body_of(app, "/badge/decisions").await;
+    assert_eq!(
+        badge.trim(),
+        "1",
+        "a new proposal must appear without waiting for a cache to expire"
+    );
+}
+
 /// A change-request store whose read methods error. Mutation tests use it to
 /// pin the operator-visible failure state for both list and focused reads.
 #[derive(Default)]
