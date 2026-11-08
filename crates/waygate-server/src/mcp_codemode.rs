@@ -9639,15 +9639,19 @@ mod tests {
             id: Uuid,
         ) -> Result<Option<Execution>, StoreError> {
             let mut current = self.current.lock().await;
-            if self
+            #[allow(
+                deprecated,
+                reason = "try_update requires Rust 1.95; the workspace supports 1.88"
+            )]
+            let failing = self
                 .failing_cancellation_requests
-                .try_update(
+                .fetch_update(
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
                     |remaining| remaining.checked_sub(1),
                 )
-                .is_ok()
-            {
+                .is_ok();
+            if failing {
                 return Err(StoreError::Database(sqlx::Error::PoolTimedOut));
             }
             let Some(execution) = current.as_mut().filter(|execution| {
