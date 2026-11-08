@@ -43,8 +43,8 @@ mod stream;
 pub mod transcription;
 
 pub use canonical::{
-    CanonicalMessage, CanonicalTool, ContentPart, LlmRequest, ResponseFormat, Role, Sampling,
-    Surface, ToolChoice, UpstreamProtocol,
+    CanonicalMessage, CanonicalTool, ChatReasoningField, ContentPart, LlmRequest, ResponseFormat,
+    Role, Sampling, Surface, ToolChoice, UpstreamProtocol,
 };
 pub use capability::check_provider_support;
 pub use embeddings::{

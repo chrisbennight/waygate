@@ -122,6 +122,40 @@ pub enum ContentPart {
     Reasoning {
         raw: serde_json::Value,
     },
+    /// Reasoning a Chat Completions client sends back on an earlier `Assistant`
+    /// message — model output being replayed, not a client instruction.
+    /// OpenAI-compatible servers disagree on the field name, so the value is
+    /// kept exactly as received together with the field it arrived in. The
+    /// OpenAI-chat renderer forwards it unchanged under that field; every other
+    /// renderer drops it, because plain or provider-structured chat reasoning
+    /// cannot stand in for another provider's signed or encrypted reasoning.
+    /// Only ever produced by the Chat inbound parser.
+    ChatReasoning {
+        field: ChatReasoningField,
+        value: serde_json::Value,
+    },
+}
+
+/// The Chat Completions assistant-message field that carried replayed
+/// reasoning. Text spellings carry a string; `reasoning_details` carries the
+/// structured array some providers return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatReasoningField {
+    ReasoningContent,
+    Reasoning,
+    ReasoningDetails,
+}
+
+impl ChatReasoningField {
+    /// The wire name of the field on a Chat Completions message.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::ReasoningContent => "reasoning_content",
+            Self::Reasoning => "reasoning",
+            Self::ReasoningDetails => "reasoning_details",
+        }
+    }
 }
 
 /// A single conversation message in canonical form.

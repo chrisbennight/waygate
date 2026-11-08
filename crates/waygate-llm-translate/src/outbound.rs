@@ -27,11 +27,12 @@ fn partition_parts(
         match p {
             ContentPart::ToolUse { .. } => tool_uses.push(p),
             ContentPart::ToolResult { .. } => tool_results.push(p),
-            // Reasoning parts are opaque Responses-input echoes with no Chat/
-            // Anthropic/Gemini equivalent; they are emitted only by the
-            // OpenAI-Responses renderer (which collects them directly from the
-            // message), so they are dropped here rather than mis-bucketed as text.
-            ContentPart::Reasoning { .. } => {}
+            // Replayed reasoning is never text. Responses reasoning items are
+            // emitted only by the OpenAI-Responses renderer and chat reasoning
+            // only by the OpenAI-chat renderer, each collecting its own kind
+            // directly from the message, so both are dropped here rather than
+            // mis-bucketed as text.
+            ContentPart::Reasoning { .. } | ContentPart::ChatReasoning { .. } => {}
             _ => textish.push(p),
         }
     }
@@ -254,6 +255,29 @@ fn render_message(m: &CanonicalMessage) -> Result<Value, TranslateError> {
     obj.insert("content".into(), content);
     if !tool_uses.is_empty() {
         obj.insert("tool_calls".into(), openai_tool_calls(&tool_uses));
+    }
+    // Replayed chat reasoning goes back under the field the client sent it in,
+    // value unchanged. Only an assistant turn can carry it, once per field; a
+    // directly-constructed message that breaks either rule fails closed (I6).
+    for part in &m.content {
+        let ContentPart::ChatReasoning { field, value } = part else {
+            continue;
+        };
+        if !matches!(m.role, Role::Assistant) {
+            return Err(TranslateError::Unsupported {
+                surface: "openai_chat",
+                param: "reasoning on a non-assistant message".into(),
+            });
+        }
+        if obj
+            .insert(field.wire_name().into(), value.clone())
+            .is_some()
+        {
+            return Err(TranslateError::Unsupported {
+                surface: "openai_chat",
+                param: format!("repeated `{}` on one message", field.wire_name()),
+            });
+        }
     }
     Ok(Value::Object(obj))
 }
@@ -529,8 +553,22 @@ fn anthropic_system_text(parts: &[ContentPart]) -> Result<String, TranslateError
 /// `null` — Anthropic rejects null content); mixed/typed parts become the typed
 /// block array. Assistant `tool_use` parts render to `tool_use` blocks; tool
 /// results are handled separately (merged into a following user turn).
+///
+/// Replayed reasoning has no Anthropic equivalent: neither an OpenAI-encrypted
+/// Responses item nor unsigned chat reasoning can become a thinking block. It
+/// is dropped before the shape is chosen, so a turn that is otherwise a lone
+/// text part still collapses to a plain string.
 fn anthropic_content(parts: &[ContentPart]) -> Value {
-    match parts {
+    let parts: Vec<&ContentPart> = parts
+        .iter()
+        .filter(|p| {
+            !matches!(
+                p,
+                ContentPart::Reasoning { .. } | ContentPart::ChatReasoning { .. }
+            )
+        })
+        .collect();
+    match parts.as_slice() {
         [] => json!(""),
         [ContentPart::Text { text }] => json!(text),
         parts => Value::Array(
@@ -555,9 +593,8 @@ fn anthropic_content(parts: &[ContentPart]) -> Value {
                     // Tool results never appear on a user/assistant message;
                     // they're rendered from their own Role::Tool message.
                     ContentPart::ToolResult { .. } => None,
-                    // A Responses-input reasoning echo has no Anthropic equivalent
-                    // (its encrypted payload is OpenAI-specific) — dropped.
-                    ContentPart::Reasoning { .. } => None,
+                    // Filtered out above.
+                    ContentPart::Reasoning { .. } | ContentPart::ChatReasoning { .. } => None,
                 })
                 .collect(),
         ),
@@ -703,8 +740,9 @@ fn gemini_parts(parts: &[ContentPart]) -> Value {
                     "functionCall": { "name": name, "args": tool_arguments_object(arguments) }
                 })),
                 ContentPart::ToolResult { .. } => None,
-                // A Responses-input reasoning echo has no Gemini equivalent — dropped.
-                ContentPart::Reasoning { .. } => None,
+                // Replayed reasoning has no Gemini equivalent: Gemini continues
+                // its own thinking only from its own signatures — dropped.
+                ContentPart::Reasoning { .. } | ContentPart::ChatReasoning { .. } => None,
             })
             .collect(),
     )
@@ -1071,6 +1109,7 @@ fn responses_tool_choice(tc: &ToolChoice) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canonical::ChatReasoningField;
     use crate::inbound::parse_chat_completions;
     use serde_json::json;
 
@@ -1224,6 +1263,99 @@ mod tests {
             "expected null content, got {}",
             out["messages"][0]["content"]
         );
+    }
+
+    /// A coding agent's follow-up request: each assistant turn it replays
+    /// carries the model's reasoning, under whichever field the upstream used.
+    fn replayed_reasoning_request() -> LlmRequest {
+        parse_chat_completions(&json!({
+            "model": "m",
+            "stream": true,
+            "messages": [
+                {"role": "user", "content": "list the files"},
+                {"role": "assistant", "content": "",
+                    "reasoning_content": "The user wants a listing; run ls.",
+                    "tool_calls": [{"id": "c1", "type": "function",
+                        "function": {"name": "bash", "arguments": "{\"cmd\":\"ls\"}"}}]},
+                {"role": "tool", "content": "a.txt", "tool_call_id": "c1"},
+                {"role": "assistant", "content": "Done.", "reasoning": "",
+                    "reasoning_details": [
+                        {"type": "reasoning.text", "text": "Summarize the listing.", "index": 0}
+                    ]},
+                {"role": "user", "content": "thanks"}
+            ],
+            "tools": [{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn openai_chat_forwards_replayed_reasoning_unchanged() {
+        let out = render_openai_chat(&replayed_reasoning_request(), "m").unwrap();
+        let tool_turn = &out["messages"][1];
+        assert_eq!(
+            tool_turn["reasoning_content"],
+            "The user wants a listing; run ls."
+        );
+        assert!(tool_turn.get("reasoning").is_none());
+        assert_eq!(tool_turn["content"], "");
+        assert_eq!(tool_turn["tool_calls"][0]["id"], "c1");
+        // Each field keeps its own name and exact value, an empty string included.
+        let text_turn = &out["messages"][3];
+        assert_eq!(text_turn["content"], "Done.");
+        assert_eq!(text_turn["reasoning"], "");
+        assert_eq!(
+            text_turn["reasoning_details"],
+            json!([{"type": "reasoning.text", "text": "Summarize the listing.", "index": 0}])
+        );
+        assert!(text_turn.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn other_renderers_drop_replayed_chat_reasoning() {
+        let req = replayed_reasoning_request();
+        let anthropic = render_anthropic_messages(&req, "m").unwrap();
+        for (name, body) in [
+            ("anthropic", anthropic.clone()),
+            ("gemini", render_gemini(&req).unwrap()),
+            ("responses", render_openai_responses(&req, "m").unwrap()),
+        ] {
+            let text = body.to_string();
+            for leaked in ["listing; run ls", "Summarize the listing", "reasoning_"] {
+                assert!(!text.contains(leaked), "{name} carried `{leaked}`: {text}");
+            }
+        }
+        // Dropping the reasoning leaves an otherwise text-only Anthropic turn in
+        // its plain-string form rather than a one-element block array.
+        assert!(anthropic["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["role"] == "assistant" && m["content"] == "Done."));
+    }
+
+    #[test]
+    fn openai_chat_rejects_misplaced_or_repeated_chat_reasoning() {
+        let reasoning = |text: &str| ContentPart::ChatReasoning {
+            field: ChatReasoningField::Reasoning,
+            value: json!(text),
+        };
+        let mut req = parse_chat_completions(&json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "x"}]
+        }))
+        .unwrap();
+        req.messages[0].content.push(reasoning("r"));
+        assert!(matches!(
+            render_openai_chat(&req, "m"),
+            Err(TranslateError::Unsupported { param, .. }) if param.contains("non-assistant")
+        ));
+        req.messages[0].role = Role::Assistant;
+        req.messages[0].content.push(reasoning("again"));
+        assert!(matches!(
+            render_openai_chat(&req, "m"),
+            Err(TranslateError::Unsupported { param, .. }) if param.contains("repeated `reasoning`")
+        ));
     }
 
     // ---- Anthropic Messages renderer --------------------------------------
