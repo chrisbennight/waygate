@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_VOICE_RECORDING_BYTES: usize = 10 * 1024 * 1024;
 
+/// The OpenAI transcription API's documented upload limit (26,214,400 bytes).
+pub const MAX_TRANSCRIPTION_FILE_BYTES: usize = 25 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioResourceOperation {
@@ -76,6 +79,23 @@ pub struct AudioResourceRequest {
     pub id: Option<String>,
     pub fields: BTreeMap<String, String>,
     pub upload: Option<AudioUpload>,
+}
+
+/// A standard transcription form admitted by HTTP ingress: the audio `file` and
+/// every other text field, including `model`. Audio and prompt text stay inside
+/// the runtime and are omitted from Debug output.
+#[derive(Clone)]
+pub struct TranscriptionInput {
+    pub upload: AudioUpload,
+    pub fields: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for TranscriptionInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TranscriptionInput")
+            .field("upload_bytes", &self.upload.bytes.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for AudioResourceRequest {

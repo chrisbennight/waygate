@@ -4,6 +4,8 @@
 configured provider. The same invocation service applies model authorization,
 credential-profile restrictions, request quotas, applicable lagging budgets, and
 audit posture before provider contact. Provider credentials remain server-side.
+`POST /v1/audio/transcriptions` transcribes completed audio files through the
+same gates; see [Transcription](#transcription).
 
 ## Configure a speech model
 
@@ -116,6 +118,110 @@ The usage ledger identifies the `audio_speech` surface. Provider speech token
 placeholders are not measured usage. Speech token counts and costs currently
 remain unknown; unknown costs
 do not become a known free call or a hard spending guarantee.
+
+## Transcription
+
+`POST /v1/audio/transcriptions` transcribes a completed audio file using the
+standard multipart `file` and `model` fields. It applies the same model
+authorization, credential-profile restrictions, request quotas, approvals, and
+audit posture as other inference calls. Provider credentials and addresses stay
+server-side, so the provider can be on a private network with no public listener.
+
+### Configure a transcription model
+
+```json
+{
+  "alias": "local-asr",
+  "provider": "openai",
+  "credential_label": "STT",
+  "base_url": "http://stt-provider:8080/v1",
+  "upstream_model": "provider-asr-model",
+  "kind": "transcription",
+  "transcription": {
+    "file_types": ["wav"],
+    "response_formats": ["json", "text"],
+    "language": false,
+    "prompt": false,
+    "temperature": false
+  }
+}
+```
+
+The default path is `audio/transcriptions`; an explicit `path` overrides it.
+Transcription supports the `openai` and `openrouter` credential namespaces with
+standard bearer authentication. For a private provider, generate a shared key,
+configure the provider to require it, and inject the same key into the gateway as
+`LLM_CRED_OPENAI_STT`:
+
+```json
+{"api_key": "<shared provider key>"}
+```
+
+Clients authenticate to the gateway with their own gateway credential and never
+receive the provider key.
+
+List only what the provider supports:
+
+- `file_types`: accepted audio files, identified by extension as in the OpenAI
+  API: `flac`, `m4a`, `mp3`, `mp4`, `mpeg`, `mpga`, `oga`, `ogg`, `wav`, `webm`.
+  The gateway does not convert audio, and the provider still validates the audio
+  itself, such as its sample rate or channel count.
+- `response_formats`: `json` (required; the API default), `verbose_json`,
+  `text`, `srt`, `vtt`.
+- `language`, `prompt`, `temperature`: whether the provider accepts these
+  optional fields. Each defaults to `false`.
+
+Transcription uses one route without fallback, credential pooling, or caching.
+Capabilities come from the configured model; a catalog row cannot revive a
+removed transcription configuration. `GET /v1/models?type=transcription` lists
+configured, resolvable transcription models with modality `audio->text` and
+their capabilities.
+
+### Standard transcription requests
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="https://gateway.example/v1")
+with open("sample.wav", "rb") as recording:
+    result = client.audio.transcriptions.create(model="local-asr", file=recording)
+print(result.text)
+```
+
+The supported fields are `file`, `model`, `response_format`, `language`,
+`prompt`, `temperature`, and `stream`. `stream` may only be `false`; streaming
+transcription is not supported. Options the model's configuration does not list,
+and other standard fields such as `timestamp_granularities[]`, `include[]`, and
+`chunking_strategy`, fail before provider contact rather than being silently
+stripped. The gateway sends the provider a rebuilt form containing the validated
+fields and the configured upstream model.
+
+`json` and `verbose_json` return `application/json` with a string `text`; other
+standard fields from the provider are preserved. `text`, `srt`, and `vtt` return
+`text/plain; charset=utf-8`, which the OpenAI SDK returns as a string. A provider
+reply that does not match the requested format is a gateway error. Errors always
+use the OpenAI JSON error envelope, whatever format was requested.
+
+### Transcription limits, failures, and evidence
+
+Files are limited to 25 MiB (26,214,400 bytes), the OpenAI API limit; larger
+uploads return HTTP 413. Uploads have a 60-second deadline, and at most four are
+buffered at once; further requests receive HTTP 429 with `Retry-After`.
+Transcription shares the inference processing capacity. Provider calls have a
+five-minute deadline and one attempt, and responses are capped at 16 MiB.
+
+A busy provider (429 or 503) keeps its status and `Retry-After`. Other provider
+client errors keep their 4xx status, including 413 when the provider's own size
+limit is smaller than the gateway's. A provider authentication failure is a
+gateway error (502), not a client authentication failure. Provider error bodies
+are not passed to clients. A client disconnect abandons the request; the gateway
+records the abandonment but cannot confirm that the provider stopped work.
+
+Evidence records the outcome, upload size, response format, attribution, and
+timing. Audio, prompts, transcripts, and credentials are never recorded. The
+usage ledger identifies the `audio_transcription` surface. Transcription reports
+no token counts or cost, so it is treated as zero cost and spending budgets do
+not block it. Request quotas and other gateway limits still apply.
 
 ## Voice and consent resources
 
@@ -327,6 +433,16 @@ AUDIO_SDK_PYTHON=/path/to/venv/bin/python cargo test -p waygate-server \
   openai_audio_sdk_and_real_webrtc_media -- --ignored --nocapture
 ```
 
-The default workspace suite skips this optional environment-dependent test.
+A separate transcription test needs only the `openai` package. A real OpenAI
+client, given only the gateway URL, transcribes a file through an authenticated
+local gateway to a private stand-in provider that requires a shared key. It also
+checks text output, an unsupported format, and an unauthenticated caller:
+
+```sh
+TRANSCRIPTION_SDK_PYTHON=/path/to/venv/bin/python cargo test -p waygate-server \
+  openai_transcription_sdk_through_authenticated_gateway -- --ignored --nocapture
+```
+
+The default workspace suite skips these optional environment-dependent tests.
 Provider deployment qualification must additionally verify its real inference,
 voice resources, private HTTP routing, and client-reachable ICE/TURN addresses.

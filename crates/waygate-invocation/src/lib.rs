@@ -278,6 +278,10 @@ pub struct InvocationRequest {
     /// never enter serialized invocation envelopes or diagnostic output.
     #[serde(skip)]
     pub audio_resource: Option<waygate_core::audio::AudioResourceRequest>,
+    /// Standard transcription form admitted by HTTP ingress. Audio and prompt
+    /// text never enter serialized invocation envelopes or diagnostic output.
+    #[serde(skip)]
+    pub transcription: Option<waygate_core::audio::TranscriptionInput>,
     #[serde(skip)]
     pub realtime: Option<waygate_core::realtime::RealtimeRequest>,
     /// LLM fast-path only: `true` when the call arrived on the provider-native
@@ -344,6 +348,7 @@ impl InvocationRequest {
             images_surface: None,
             speech_surface: false,
             audio_resource: None,
+            transcription: None,
             realtime: None,
             native_messages_surface: false,
             input_responses: None,

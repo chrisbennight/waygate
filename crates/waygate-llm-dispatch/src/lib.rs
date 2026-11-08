@@ -27,6 +27,7 @@ mod images;
 mod realtime;
 mod resolver;
 mod speech;
+mod transcription;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -59,6 +60,7 @@ use waygate_llm_translate::{
 pub use realtime::{RealtimeCallControl, RealtimeCallSetup};
 pub use waygate_llm_providers::realtime::{RealtimeMessage, RealtimeSocket};
 pub use waygate_llm_providers::speech::{AudioStream, SpeechResponse, MAX_AUDIO_RESPONSE_BYTES};
+pub use waygate_llm_providers::transcription::TranscriptionBody;
 pub use waygate_llm_providers::{SseEvent, SseStream as ProviderSseStream};
 
 /// Where a resolved request is sent and how it authenticates. Produced by the

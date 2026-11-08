@@ -10,6 +10,11 @@
   OpenAI-compatible speech providers through the shared model gates. Audio bytes
   and speech SSE retain their separate delivery contracts; usage stays unknown
   when no authoritative counts are reported. See [Speech API](audio-api.md).
+- **Transcription surface:** `POST /v1/audio/transcriptions` serves explicitly
+  configured OpenAI-compatible transcription providers through the shared model
+  gates. Uploads are bounded, provider requests are rebuilt from validated fields,
+  and standard JSON or plain-text formats are returned. Transcription is recorded
+  as zero cost. See [Transcription](audio-api.md#transcription).
 - Standard recording-based voice and consent resources use one explicitly
   configured audio provider and the same model gates. Resource visibility and
   persistence remain provider-owned; see [voice and consent resources](audio-api.md#voice-and-consent-resources).
@@ -448,14 +453,15 @@ machinery (§7), the unified pipeline gates (§5), `InferenceRecord`/usage, and 
   because embeddings generate no completion; their input can then be priced alone.
 - **Operation discriminator.** The resolved model carries
   `LlmOperation` distinguishes chat, embeddings, images, and configured speech
-  capabilities. Embeddings use env config
+  and transcription capabilities. Embeddings use env config
   `kind: embeddings` and catalog `upstream_api = embeddings`; images use
   `kind: images` and `upstream_api = images`. The pipeline selects `invoke_llm`,
-  `invoke_embeddings`, `invoke_images`, or `invoke_speech` and rejects a **surface/operation
+  `invoke_embeddings`, `invoke_images`, `invoke_speech`, or `invoke_transcription` and rejects a **surface/operation
   mismatch** before parsing or provider contact. Chat models use the chat and
   Responses routes, embeddings use `/v1/embeddings`, and image models use the
   generation and edit routes described in [Images API](images-api.md). Speech
-  uses `/v1/audio/speech`; see [Speech API](audio-api.md).
+  uses `/v1/audio/speech` and transcription uses `/v1/audio/transcriptions`;
+  see [Audio APIs](audio-api.md).
 - **Caching.** Embeddings participate in the per-principal exact-match cache (§9) on the same
   two-key arming as chat (`GATEWAY_LLM_CACHE_ENABLED` + the model's `cache_ttl`). Being
   unary-only, it is the simplest cache path: a hit replays the stored body verbatim (free, no
@@ -734,12 +740,14 @@ two fields at parse time, and is mutually exclusive with them.
   does **not** imply a model is callable on *every* surface: sending an embeddings
   model to `/v1/chat/completions` (or a chat model to `/v1/embeddings`) is the
   surface/operation mismatch the pipeline rejects (§4.7). Each entry carries a
-  **`modality`** field (`text->embedding`, `text->text`, or `text+image->image`,
-  derived from the row's `upstream_api`; a non-standard OpenAI field SDKs ignore), and the listing accepts
-  **`?type=embeddings|chat|images`** to filter to one kind — so a client discovers
-  image and embeddings models as *distinct* from chat without probing each surface. The same
-  operation distinction is projected into the `llm_models_catalog` view as a
-  **`kind`** column (`embeddings` | `chat` | `images`).
+  **`modality`** field (`text->embedding`, `text->text`, `text+image->image`,
+  `text->audio`, `audio->text`, or `realtime-audio`, derived from the row's
+  `upstream_api`; a non-standard OpenAI field SDKs ignore), and the listing accepts
+  **`?type=embeddings|chat|images|speech|transcription|realtime`** to filter to one
+  kind — so a client discovers non-chat models as *distinct* from chat without
+  probing each surface. The same operation distinction is projected into the
+  `llm_models_catalog` view as a **`kind`** column (`embeddings` | `chat` |
+  `images` | `speech` | `transcription` | `realtime`).
 - **Embeddings discovery — OpenRouter wired, others operator-pinned.** OpenRouter
   publishes a dedicated `/embeddings/models` listing, so the refresher discovers its
   embeddings models distinctly and tags each row `upstream_api = embeddings` (path
