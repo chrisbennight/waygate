@@ -1001,13 +1001,15 @@ impl ExecutionStore for PgExecutionStore {
         before: Option<(OffsetDateTime, Uuid)>,
         limit: usize,
     ) -> Result<Vec<ListedExecution>, StoreError> {
-        // The in-flight listing's predicates without its completion filter.
-        // The digest predicate is absent because its index covers only
-        // in-flight rows; the general owner index orders this scan by
-        // submission instead, and nearly every retained row of the owner
-        // matches, so a page stops after about its own size. The exact
-        // equality predicates still bind the full owner identity, and SQL
-        // NULL in the issuer or confinement matches no caller.
+        // The in-flight listing's predicates without its completion filter,
+        // served by the `codemode_executions_owned_retained` index. Its key is
+        // the same owner digest, so the digest expression must appear
+        // verbatim; it leaves tool-call rows out, so the tool-call predicate
+        // must name the profile as the literal the index predicate uses
+        // (`TOOL_CALL_EXECUTION_PROFILE`) for the planner to prove the index
+        // applies. The exact equality predicates remain the correctness
+        // filter, and SQL NULL in the issuer or confinement matches no
+        // caller.
         let rows = sqlx::query(
             r#"
             SELECT id, status, terminal_reason_code,
@@ -1018,8 +1020,11 @@ impl ExecutionStore for PgExecutionStore {
              WHERE tenant_id = $1
                AND principal_sub = $2
                AND principal_issuer = $3
+               AND md5(principal_sub || chr(31) || principal_issuer || chr(31)
+                       || (execution_profile -> 'profile_confinement')::text) =
+                   md5($2 || chr(31) || $3 || chr(31) || $4::text)
                AND execution_profile -> 'profile_confinement' = $4
-               AND execution_profile ->> 'name' IS DISTINCT FROM $8
+               AND execution_profile ->> 'name' IS DISTINCT FROM 'tool_call'
                AND retention_until > now()
                AND ($5::timestamptz IS NULL OR (submitted_at, id) < ($5, $6))
              ORDER BY submitted_at DESC, id DESC
@@ -1033,7 +1038,6 @@ impl ExecutionStore for PgExecutionStore {
         .bind(before.map(|(submitted_at, _)| submitted_at))
         .bind(before.map(|(_, id)| id))
         .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-        .bind(crate::TOOL_CALL_EXECUTION_PROFILE)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(row_to_listed_execution).collect())

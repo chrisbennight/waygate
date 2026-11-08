@@ -5,8 +5,9 @@
 - `codemode.executions` accepts `include_finished: true` to also list the
   caller's finished executions until their retention ends, so a caller whose
   response was lost can learn how the execution ended without its id. The
-  default listing is unchanged. No migration or configuration changes are
-  required.
+  default listing is unchanged. Migration `0123` adds an index so the new
+  listing reads only the caller's own retained rows. No configuration changes
+  are required.
 
 - Change requests support selected approval of independent new rate-limit
   policies. Full captured intent and individual approval conditions remain in

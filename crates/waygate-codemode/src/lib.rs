@@ -929,6 +929,14 @@ pub fn source_digest(source: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The owned retained index excludes tool-call rows by this literal, and
+    /// the listing must repeat it for the planner to use that index. Applied
+    /// migrations cannot change, so the profile name cannot either.
+    #[test]
+    fn tool_call_profile_matches_the_retained_listing_index() {
+        assert_eq!(TOOL_CALL_EXECUTION_PROFILE, "tool_call");
+    }
+
     #[test]
     fn lifecycle_vocabulary_roundtrips() {
         for status in [
