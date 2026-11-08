@@ -18,7 +18,20 @@ const second = connectors["demo"]["greet"]({ name: "Grace" });
 return { first, second };
 ```
 
-This example requires the tutorial's `demo.greet` tool to be admitted for the
+To run independent calls at the same time, call the binding's `start` method,
+which returns a promise of the same result:
+
+```javascript
+const names = ["Ada", "Grace", "Katherine"];
+return await Promise.all(names.map(name => connectors["demo"]["greet"].start({ name })));
+```
+
+Started calls overlap, up to the `connector_calls_in_flight` limit that
+`codemode.limits` reports; further calls wait their turn rather than fail. The
+[program runtime](../codemode.md#program-runtime) describes what happens to
+calls still pending when a program ends.
+
+These examples require the tutorial's `demo.greet` tool to be admitted for the
 caller. Submit the body in `codemode.execute.source`. The body runs as an async
 function, so `await` also works, including on a connector result. Output from
 `console.log` and the other `console` methods comes back in the response's

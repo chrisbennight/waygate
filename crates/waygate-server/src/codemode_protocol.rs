@@ -95,11 +95,23 @@ pub enum RunnerFrame {
     Ready {
         confinement_profile: String,
     },
+    /// A synchronous connector call. The runner waits for its `CallResult`.
     Call {
         id: u32,
         call_id: String,
         arguments: Value,
     },
+    /// A connector call the program started with `start`. The runner does
+    /// not wait; the result arrives in reply to a later `Await`.
+    Dispatch {
+        id: u32,
+        call_id: String,
+        arguments: Value,
+    },
+    /// The program has nothing left to run until a started call completes.
+    /// The parent replies with exactly one `CallResult` for a started call,
+    /// so only one result is ever in transit through the shared spool.
+    Await,
     Complete {
         result: Value,
     },

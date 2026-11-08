@@ -1,7 +1,9 @@
 use crate::codemode_limits::limits;
+use std::cell::{Cell, RefCell};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,7 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context};
 use rquickjs::{
     convert::List, function::Func, CatchResultExt, CaughtError, CaughtResult, Context as JsContext,
-    Ctx, Exception, Promise, Runtime, String as JsString, TypedArray,
+    Ctx, Exception, Function, Persistent, Promise, Runtime, String as JsString, TypedArray,
 };
 use serde_json::Value;
 
@@ -960,11 +962,22 @@ struct RunnerExecutionFailure {
 
 struct ExecutionCapabilities<F, P, A, W, C> {
     call: F,
+    started: Rc<dyn StartedCalls>,
     pause: P,
     artifact: A,
     wait: W,
     console: C,
     artifacts_available: bool,
+}
+
+/// Connector calls a program started with `start`: sent without waiting,
+/// then completed one at a time when the program has nothing else to run.
+trait StartedCalls {
+    /// Send a request and return the id its result will carry.
+    fn dispatch(&self, request_json: &str) -> rquickjs::Result<u32>;
+    /// Wait for the next started call to complete, returning its id and the
+    /// encoded `{ok}` or `{err}` envelope the prelude settles it with.
+    fn next_completed(&self) -> rquickjs::Result<(u32, String)>;
 }
 
 impl RunnerExecutionFailure {
@@ -1015,6 +1028,7 @@ pub fn run() -> anyhow::Result<()> {
     deadline.arm(execution_limit_ms);
 
     drop(input);
+    let connectors = Rc::new(ConnectorChannel::new(spool));
     let outcome = execute_in(
         &context,
         &source,
@@ -1022,7 +1036,8 @@ pub fn run() -> anyhow::Result<()> {
         resume.as_ref(),
         &program_input,
         ExecutionCapabilities {
-            call: runner_call(spool),
+            call: runner_call(connectors.clone()),
+            started: connectors,
             pause: runner_pause(),
             artifact: runner_artifact(),
             wait: runner_wait(deadline.clone(), deadline_reached.clone()),
@@ -1110,10 +1125,27 @@ fn runner_pause() -> impl Fn(&str) -> rquickjs::Result<String> {
     }
 }
 
-fn runner_call(spool: File) -> impl Fn(&str) -> rquickjs::Result<String> {
-    let next_id = AtomicU32::new(1);
-    let spool = std::sync::Mutex::new(spool);
-    move |request_json| {
+/// The connector half of the parent channel: synchronous calls, calls the
+/// program started with `start`, and the one result spool both read from.
+///
+/// Ids are shared so the parent can tell every call in an attempt apart.
+/// Results are read from the spool as each result frame arrives, and the
+/// parent writes a result only when the runner is waiting for exactly that
+/// frame, so one reusable spool serves every call.
+struct ConnectorChannel {
+    next_id: AtomicU32,
+    spool: std::sync::Mutex<File>,
+}
+
+impl ConnectorChannel {
+    fn new(spool: File) -> Self {
+        Self {
+            next_id: AtomicU32::new(1),
+            spool: std::sync::Mutex::new(spool),
+        }
+    }
+
+    fn request_parts(request_json: &str) -> rquickjs::Result<(String, Value)> {
         let request: Value = serde_json::from_str(request_json).map_err(|_| {
             rquickjs::Error::new_from_js_message("string", "request", "invalid connector request")
         })?;
@@ -1139,66 +1171,74 @@ fn runner_call(spool: File) -> impl Fn(&str) -> rquickjs::Result<String> {
                 "connector arguments must be an object",
             ));
         }
-        let id = next_id.fetch_add(1, Ordering::Relaxed);
+        Ok((call_id, arguments))
+    }
+
+    fn send(frame: &RunnerFrame) -> rquickjs::Result<()> {
         let stdout = std::io::stdout();
-        write_runner_frame(
-            &mut stdout.lock(),
-            &RunnerFrame::Call {
-                id,
-                call_id,
-                arguments,
-            },
-        )
-        .map_err(|_| {
+        write_runner_frame(&mut stdout.lock(), frame).map_err(|_| {
             rquickjs::Error::new_from_js_message(
                 "request",
                 "connector call",
                 "connector transport failed",
             )
-        })?;
+        })
+    }
+
+    fn receive() -> rquickjs::Result<ParentFrame> {
         let stdin = std::io::stdin();
-        match read_parent_frame(&mut stdin.lock()).map_err(|_| {
+        read_parent_frame(&mut stdin.lock()).map_err(|_| {
             rquickjs::Error::new_from_js_message(
                 "response",
                 "connector call",
                 "connector transport failed",
             )
-        })? {
+        })
+    }
+
+    /// The `{ok}` or `{err}` envelope the prelude settles a call with: a
+    /// structured Error (message plus a stable `code` split from the
+    /// broker's "code: message" contract) for the err arm, so program code
+    /// branches on `error.code` rather than catching an opaque native
+    /// exception.
+    fn envelope(&self, result: Result<ConnectorCallResult, String>) -> rquickjs::Result<String> {
+        let envelope = match result {
+            Ok(ConnectorCallResult::Inline { value }) => serde_json::json!({ "ok": value }),
+            Ok(ConnectorCallResult::Spool { bytes }) => {
+                let mut spool = self.spool.lock().map_err(|_| {
+                    rquickjs::Error::new_from_js_message(
+                        "response",
+                        "connector call",
+                        "connector spool lock failed",
+                    )
+                })?;
+                let value = crate::codemode_spool::read_value(&mut spool, bytes).map_err(|_| {
+                    rquickjs::Error::new_from_js_message(
+                        "response",
+                        "connector call",
+                        "connector spool read failed",
+                    )
+                })?;
+                serde_json::json!({ "ok": value })
+            }
+            Err(message) => serde_json::json!({ "err": message }),
+        };
+        Ok(envelope.to_string())
+    }
+
+    fn call(&self, request_json: &str) -> rquickjs::Result<String> {
+        let (call_id, arguments) = Self::request_parts(request_json)?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        Self::send(&RunnerFrame::Call {
+            id,
+            call_id,
+            arguments,
+        })?;
+        match Self::receive()? {
             ParentFrame::CallResult {
                 id: response_id,
                 result,
-            } if response_id == id => {
-                // Both arms reach the SDK as an envelope: the prelude throws
-                // a structured Error (message plus a stable `code` split
-                // from the broker's "code: message" contract) for the err
-                // arm, so program code branches on `error.code` rather than
-                // catching an opaque native exception.
-                let envelope = match result {
-                    Ok(ConnectorCallResult::Inline { value }) => {
-                        serde_json::json!({ "ok": value })
-                    }
-                    Ok(ConnectorCallResult::Spool { bytes }) => {
-                        let mut spool = spool.lock().map_err(|_| {
-                            rquickjs::Error::new_from_js_message(
-                                "response",
-                                "connector call",
-                                "connector spool lock failed",
-                            )
-                        })?;
-                        let value =
-                            crate::codemode_spool::read_value(&mut spool, bytes).map_err(|_| {
-                                rquickjs::Error::new_from_js_message(
-                                    "response",
-                                    "connector call",
-                                    "connector spool read failed",
-                                )
-                            })?;
-                        serde_json::json!({ "ok": value })
-                    }
-                    Err(message) => serde_json::json!({ "err": message }),
-                };
-                Ok(envelope.to_string())
-            }
+            } if response_id == id => self.envelope(result),
             _ => Err(rquickjs::Error::new_from_js_message(
                 "response",
                 "connector call",
@@ -1206,6 +1246,35 @@ fn runner_call(spool: File) -> impl Fn(&str) -> rquickjs::Result<String> {
             )),
         }
     }
+}
+
+impl StartedCalls for ConnectorChannel {
+    fn dispatch(&self, request_json: &str) -> rquickjs::Result<u32> {
+        let (call_id, arguments) = Self::request_parts(request_json)?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        Self::send(&RunnerFrame::Dispatch {
+            id,
+            call_id,
+            arguments,
+        })?;
+        Ok(id)
+    }
+
+    fn next_completed(&self) -> rquickjs::Result<(u32, String)> {
+        Self::send(&RunnerFrame::Await)?;
+        match Self::receive()? {
+            ParentFrame::CallResult { id, result } => Ok((id, self.envelope(result)?)),
+            _ => Err(rquickjs::Error::new_from_js_message(
+                "response",
+                "connector call",
+                "unexpected connector response",
+            )),
+        }
+    }
+}
+
+fn runner_call(channel: Rc<ConnectorChannel>) -> impl Fn(&str) -> rquickjs::Result<String> {
+    move |request_json| channel.call(request_json)
 }
 
 fn runner_artifact() -> impl Fn(&str) -> rquickjs::Result<String> {
@@ -1373,6 +1442,57 @@ where
     )
 }
 
+/// Started calls answered in-process by the handler synchronous calls use.
+///
+/// Calls complete in reverse dispatch order, so a program's results cannot
+/// depend on the order it started them in. The most calls ever pending at
+/// once is kept for tests of the in-flight limit.
+#[cfg(test)]
+struct InProcessStartedCalls<F> {
+    handler: Rc<F>,
+    next_id: Cell<u32>,
+    pending: RefCell<Vec<(u32, String)>>,
+    most_pending: Cell<usize>,
+    dispatched: Cell<usize>,
+}
+
+#[cfg(test)]
+impl<F> InProcessStartedCalls<F> {
+    fn new(handler: Rc<F>) -> Self {
+        Self {
+            handler,
+            next_id: Cell::new(1),
+            pending: RefCell::default(),
+            most_pending: Cell::new(0),
+            dispatched: Cell::new(0),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<F> StartedCalls for InProcessStartedCalls<F>
+where
+    F: Fn(&str) -> rquickjs::Result<String>,
+{
+    fn dispatch(&self, request_json: &str) -> rquickjs::Result<u32> {
+        let id = self.next_id.get();
+        self.next_id.set(id + 1);
+        let mut pending = self.pending.borrow_mut();
+        pending.push((id, request_json.to_owned()));
+        self.most_pending
+            .set(self.most_pending.get().max(pending.len()));
+        self.dispatched.set(self.dispatched.get() + 1);
+        Ok(id)
+    }
+
+    fn next_completed(&self) -> rquickjs::Result<(u32, String)> {
+        let (id, request) = self.pending.borrow_mut().pop().ok_or_else(|| {
+            rquickjs::Error::new_from_js_message("request", "connector call", "nothing pending")
+        })?;
+        Ok((id, (self.handler)(&request)?))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn execute_with_capabilities<F, P, A, C>(
@@ -1404,6 +1524,8 @@ where
             "Code Mode runner could not initialize",
         )
     })?;
+    let call = Rc::new(call);
+    let started = Rc::new(InProcessStartedCalls::new(Rc::clone(&call)));
     execute_in(
         &context,
         source,
@@ -1411,7 +1533,8 @@ where
         data.resume,
         data.input.unwrap_or(&Value::Null),
         ExecutionCapabilities {
-            call,
+            call: move |request: &str| call(request),
+            started,
             pause,
             artifact,
             wait: runner_wait(deadline, deadline_reached.clone()),
@@ -1668,6 +1791,7 @@ where
     })?;
     let ExecutionCapabilities {
         call,
+        started,
         pause,
         artifact,
         wait,
@@ -1698,6 +1822,62 @@ where
                     call_materialization.store(true, Ordering::Relaxed);
                     Ok(encoded)
                 }),
+            )
+            .map_err(|_| {
+                RunnerExecutionFailure::new(
+                    RunnerFailureCode::RunnerInternal,
+                    "Code Mode runner could not install connector bindings",
+                )
+            })?;
+        let started_calls = StartedDelivery {
+            started,
+            outstanding: Rc::new(Cell::new(0)),
+            deliver: Rc::default(),
+            materializing: Arc::clone(&connector_materialization_in_progress),
+        };
+        // Released before the context: a saved JavaScript function must not
+        // outlive the runtime that owns it, on every way this scope ends.
+        let _release_delivery = started_calls.release_on_drop();
+        let dispatch_gate = gate.clone();
+        let dispatch_calls = started_calls.started.clone();
+        let dispatch_outstanding = Rc::clone(&started_calls.outstanding);
+        ctx.globals()
+            .set(
+                "__gateway_dispatch",
+                Func::from(move |request: JsString<'_>| -> rquickjs::Result<u32> {
+                    dispatch_gate.require_open()?;
+                    let request = request.to_cstring()?;
+                    validate_connector_request(request.as_str(), limits().request_bytes)?;
+                    let id = dispatch_calls.dispatch(request.as_str())?;
+                    dispatch_outstanding.set(dispatch_outstanding.get() + 1);
+                    Ok(id)
+                }),
+            )
+            .map_err(|_| {
+                RunnerExecutionFailure::new(
+                    RunnerFailureCode::RunnerInternal,
+                    "Code Mode runner could not install connector bindings",
+                )
+            })?;
+        let registered_delivery = Rc::clone(&started_calls.deliver);
+        ctx.globals()
+            .set(
+                "__gateway_register_delivery",
+                Func::from(move |deliver: Function<'_>| {
+                    let ctx = deliver.ctx().clone();
+                    *registered_delivery.borrow_mut() = Some(Persistent::save(&ctx, deliver));
+                }),
+            )
+            .map_err(|_| {
+                RunnerExecutionFailure::new(
+                    RunnerFailureCode::RunnerInternal,
+                    "Code Mode runner could not install connector bindings",
+                )
+            })?;
+        ctx.globals()
+            .set(
+                "__gateway_calls_in_flight",
+                limits().connector_calls_in_flight,
             )
             .map_err(|_| {
                 RunnerExecutionFailure::new(
@@ -1824,12 +2004,19 @@ const gatewayStringSlice = Function.prototype.call.bind(String.prototype.slice);
 const gatewayRegexTest = Function.prototype.call.bind(RegExp.prototype.test);
 const gatewayHasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 const gatewayCodePattern = /^[a-z][a-z0-9_]*$/;
-const connectors = (() => {{
+const GatewayPromise = Promise;
+const gatewayConnectorSurface = (() => {{
   const gatewayCall = __gateway_call;
+  const gatewayDispatch = __gateway_dispatch;
+  const gatewayRegisterDelivery = __gateway_register_delivery;
+  const gatewayCallsInFlight = __gateway_calls_in_flight;
   const gatewayConnectorMaterializing = __gateway_connector_materializing;
   const gatewayConnectorMaterialized = __gateway_connector_materialized;
   const bindingSpecs = gatewayJsonParse(__gateway_bindings_json);
   delete globalThis.__gateway_call;
+  delete globalThis.__gateway_dispatch;
+  delete globalThis.__gateway_register_delivery;
+  delete globalThis.__gateway_calls_in_flight;
   delete globalThis.__gateway_connector_materializing;
   delete globalThis.__gateway_connector_materialized;
   delete globalThis.__gateway_bindings_json;
@@ -1842,6 +2029,93 @@ const connectors = (() => {{
     gatewayConnectorMaterialized();
     return error;
   }};
+  const gatewayRequest = (callId, args) => {{
+    const request = gatewayObjectCreate(null);
+    gatewayDefineProperty(request, "call_id", {{
+      value: callId,
+      enumerable: true
+    }});
+    gatewayDefineProperty(request, "arguments", {{
+      value: args,
+      enumerable: true
+    }});
+    return gatewayJsonStringify(request);
+  }};
+  // A completed call's value, or the structured Error the program sees.
+  const gatewaySettle = (encodedEnvelope) => {{
+    let envelope;
+    try {{
+      envelope = gatewayJsonParse(encodedEnvelope);
+    }} catch {{
+      throw gatewayMaterializationError();
+    }}
+    gatewayConnectorMaterialized();
+    if (gatewayHasOwn(envelope, "err")) {{
+      const separator = gatewayStringIndexOf(envelope.err, ": ");
+      const candidate = separator > 0
+        ? gatewayStringSlice(envelope.err, 0, separator)
+        : "";
+      const recognized = candidate !== ""
+        && gatewayRegexTest(gatewayCodePattern, candidate);
+      const error = new GatewayError(recognized
+        ? gatewayStringSlice(envelope.err, separator + 2)
+        : envelope.err);
+      gatewayDefineProperty(error, "code", {{
+        value: recognized ? candidate : "connector_failure",
+        enumerable: true
+      }});
+      throw error;
+    }}
+    return envelope.ok;
+  }};
+  // Started calls in flight, keyed by the id the host assigned, and calls
+  // waiting for a free place in call order. Null-prototype records keep
+  // program changes to built-in prototypes out of this bookkeeping.
+  const startedPending = gatewayObjectCreate(null);
+  const startedWaiting = gatewayObjectCreate(null);
+  let startedActive = 0;
+  let waitingHead = 0;
+  let waitingTail = 0;
+  const startedRecord = (request, resolve, reject) => {{
+    const record = gatewayObjectCreate(null);
+    record.request = request;
+    record.resolve = resolve;
+    record.reject = reject;
+    return record;
+  }};
+  const startedDispatch = (record) => {{
+    let id;
+    try {{
+      id = gatewayDispatch(record.request);
+    }} catch (cause) {{
+      record.reject(cause);
+      return;
+    }}
+    startedActive += 1;
+    startedPending[id] = record;
+  }};
+  gatewayRegisterDelivery((id, encodedEnvelope) => {{
+    const record = startedPending[id];
+    if (record === undefined) {{
+      return;
+    }}
+    delete startedPending[id];
+    startedActive -= 1;
+    try {{
+      if (encodedEnvelope === null) {{
+        throw gatewayMaterializationError();
+      }}
+      record.resolve(gatewaySettle(encodedEnvelope));
+    }} catch (error) {{
+      record.reject(error);
+    }}
+    while (startedActive < gatewayCallsInFlight && waitingHead < waitingTail) {{
+      const next = startedWaiting[waitingHead];
+      delete startedWaiting[waitingHead];
+      waitingHead += 1;
+      startedDispatch(next);
+    }}
+  }});
   const generated = gatewayObjectCreate(null);
   for (const binding of bindingSpecs) {{
     let connector = generated[binding.connector];
@@ -1852,60 +2126,46 @@ const connectors = (() => {{
         enumerable: true
       }});
     }}
+    const callId = binding.call_id;
+    const call = (args = {{}}) => {{
+      let encodedEnvelope;
+      try {{
+        encodedEnvelope = gatewayCall(gatewayRequest(callId, args));
+      }} catch (cause) {{
+        if (!gatewayConnectorMaterializing()) {{
+          throw cause;
+        }}
+        throw gatewayMaterializationError();
+      }}
+      return gatewaySettle(encodedEnvelope);
+    }};
+    gatewayDefineProperty(call, "start", {{
+      value: (args = {{}}) => new GatewayPromise((resolve, reject) => {{
+        const record = startedRecord(gatewayRequest(callId, args), resolve, reject);
+        if (startedActive < gatewayCallsInFlight) {{
+          startedDispatch(record);
+        }} else {{
+          startedWaiting[waitingTail] = record;
+          waitingTail += 1;
+        }}
+      }})
+    }});
     gatewayDefineProperty(connector, binding.operation, {{
-      value: (args = {{}}) => {{
-        const request = gatewayObjectCreate(null);
-        gatewayDefineProperty(request, "call_id", {{
-          value: binding.call_id,
-          enumerable: true
-        }});
-        gatewayDefineProperty(request, "arguments", {{
-          value: args,
-          enumerable: true
-        }});
-        let encodedEnvelope;
-        try {{
-          encodedEnvelope = gatewayCall(gatewayJsonStringify(request));
-        }} catch (cause) {{
-          if (!gatewayConnectorMaterializing()) {{
-            throw cause;
-          }}
-          throw gatewayMaterializationError();
-        }}
-        let envelope;
-        try {{
-          envelope = gatewayJsonParse(encodedEnvelope);
-        }} catch {{
-          throw gatewayMaterializationError();
-        }}
-        gatewayConnectorMaterialized();
-        if (gatewayHasOwn(envelope, "err")) {{
-          const separator = gatewayStringIndexOf(envelope.err, ": ");
-          const candidate = separator > 0
-            ? gatewayStringSlice(envelope.err, 0, separator)
-            : "";
-          const recognized = candidate !== ""
-            && gatewayRegexTest(gatewayCodePattern, candidate);
-          const error = new GatewayError(recognized
-            ? gatewayStringSlice(envelope.err, separator + 2)
-            : envelope.err);
-          gatewayDefineProperty(error, "code", {{
-            value: recognized ? candidate : "connector_failure",
-            enumerable: true
-          }});
-          throw error;
-        }}
-        return envelope.ok;
-      }},
+      value: call,
       enumerable: true
     }});
   }}
   for (const connectorName of Object.keys(generated)) {{
     Object.freeze(generated[connectorName]);
   }}
-  return Object.freeze(generated);
+  const surface = gatewayObjectCreate(null);
+  surface.connectors = Object.freeze(generated);
+  surface.pendingStarted = () => startedActive + (waitingTail - waitingHead);
+  return Object.freeze(surface);
 }})();
+const connectors = gatewayConnectorSurface.connectors;
 const execution = (() => {{
+  const gatewayPendingStarted = gatewayConnectorSurface.pendingStarted;
   const gatewayPause = __gateway_pause;
   const gatewayArtifact = __gateway_artifact;
   const gatewayWait = __gateway_wait;
@@ -1928,8 +2188,21 @@ const execution = (() => {{
     enumerable: true
   }});
   gatewayDefineProperty(generated, "pause", {{
-    value: (checkpoint = {{}}) =>
-      gatewayPause(gatewayJsonStringify(checkpoint)),
+    value: (checkpoint = {{}}) => {{
+      // A checkpoint ends this attempt, so a call still pending would be
+      // abandoned with its result unseen.
+      if (gatewayPendingStarted() > 0) {{
+        const error = new GatewayError(
+          "execution.pause cannot run while started connector calls are pending; await them first"
+        );
+        gatewayDefineProperty(error, "code", {{
+          value: "connector_calls_pending",
+          enumerable: true
+        }});
+        throw error;
+      }}
+      return gatewayPause(gatewayJsonStringify(checkpoint));
+    }},
     enumerable: true
   }});
   gatewayDefineProperty(generated, "artifactsAvailable", {{
@@ -2016,7 +2289,7 @@ const execution = (() => {{
         })?;
         let wrapped = format!("{prelude}{source}{PROGRAM_EPILOGUE}");
         let evaluated = match ctx.eval::<Promise<'_>, _>(wrapped).catch(&ctx) {
-            Ok(program) => settle_program(&ctx, &program, deadline_reached),
+            Ok(program) => settle_program(&ctx, &program, deadline_reached, &started_calls),
             Err(error) => ProgramSettlement::Settled(Err(error)),
         };
         gate.settled.store(true, Ordering::Relaxed);
@@ -2026,12 +2299,16 @@ const execution = (() => {{
                 "Code Mode execution exceeded its time limit",
             ));
         }
-        let ProgramSettlement::Settled(evaluated) = evaluated else {
-            return Err(RunnerExecutionFailure::new(
-                RunnerFailureCode::ProgramFailed,
-                "Code Mode program never finished: it is waiting on a promise that nothing \
-                 left to run can settle",
-            ));
+        let evaluated = match evaluated {
+            ProgramSettlement::Settled(evaluated) => evaluated,
+            ProgramSettlement::Unsettled => {
+                return Err(RunnerExecutionFailure::new(
+                    RunnerFailureCode::ProgramFailed,
+                    "Code Mode program never finished: it is waiting on a promise that nothing \
+                     left to run can settle",
+                ));
+            }
+            ProgramSettlement::Failed(failure) => return Err(failure),
         };
         let result_json = evaluated.map_err(|error| {
             let is_stable_connector_error = match &error {
@@ -2119,29 +2396,119 @@ const execution = (() => {{
 
 enum ProgramSettlement<'js> {
     Settled(CaughtResult<'js, Option<JsString<'js>>>),
-    /// The job queue emptied, or the deadline fired, while the program's
-    /// promise was still pending.
+    /// The job queue emptied with no started call left to complete, or the
+    /// deadline fired, while the program's promise was still pending.
     Unsettled,
+    /// A started call's result could not be delivered.
+    Failed(RunnerExecutionFailure),
+}
+
+type SavedDelivery = Rc<RefCell<Option<Persistent<Function<'static>>>>>;
+
+/// Hands completed started calls back to the program.
+///
+/// The prelude registers one delivery function that settles a started call's
+/// promise by id. Nothing else can settle those promises, so a program waiting
+/// on one is waiting on the parent, not stuck.
+struct StartedDelivery {
+    started: Rc<dyn StartedCalls>,
+    outstanding: Rc<Cell<usize>>,
+    deliver: SavedDelivery,
+    materializing: Arc<AtomicBool>,
+}
+
+struct ReleaseDelivery(SavedDelivery);
+
+impl Drop for ReleaseDelivery {
+    fn drop(&mut self) {
+        self.0.borrow_mut().take();
+    }
+}
+
+impl StartedDelivery {
+    fn release_on_drop(&self) -> ReleaseDelivery {
+        ReleaseDelivery(Rc::clone(&self.deliver))
+    }
+
+    /// Wait for one started call and settle its promise. Returns whether a
+    /// call was pending.
+    fn deliver_next(&self, ctx: &Ctx<'_>) -> Result<bool, RunnerExecutionFailure> {
+        let pending = self.outstanding.get();
+        if pending == 0 {
+            return Ok(false);
+        }
+        let transport_failure = || {
+            RunnerExecutionFailure::new(
+                RunnerFailureCode::RunnerInternal,
+                "Code Mode runner lost its connector channel",
+            )
+        };
+        let (id, encoded) = self
+            .started
+            .next_completed()
+            .map_err(|_| transport_failure())?;
+        self.outstanding.set(pending - 1);
+        let deliver = self
+            .deliver
+            .borrow()
+            .clone()
+            .ok_or_else(transport_failure)?
+            .restore(ctx)
+            .map_err(|_| transport_failure())?;
+        // Covers converting the envelope into a JavaScript string and the
+        // prelude's decoding; the prelude clears it once decoding succeeds.
+        self.materializing.store(true, Ordering::Relaxed);
+        let delivered = match JsString::from_str(ctx.clone(), &encoded) {
+            Ok(text) => deliver.call::<_, ()>((id, text)),
+            // The prelude rejects the call with the materialization error.
+            Err(_) => deliver.call::<_, ()>((id, rquickjs::Null)),
+        };
+        if delivered.catch(ctx).is_err() {
+            // The prelude settles every delivery itself, so a failure here is
+            // the interrupt or memory pressure while materializing.
+            return Err(RunnerExecutionFailure::new(
+                RunnerFailureCode::ConnectorResultTooLarge,
+                "Code Mode connector result exceeded runtime materialization capacity",
+            ));
+        }
+        Ok(true)
+    }
 }
 
 /// Run queued promise jobs until the program's promise settles.
 ///
-/// Connector calls, waits and pauses are synchronous host calls, so the only
-/// jobs are the program's own promise reactions. A queue that empties while
-/// the promise is pending can never settle it. The interrupt handler still
-/// bounds every job, and the deadline is checked between jobs because a job
-/// the interrupt aborted reports as executed.
+/// Synchronous connector calls, waits and pauses block inside their host
+/// call, so the only jobs are the program's own promise reactions. When the
+/// queue empties while calls the program started are still pending, the next
+/// one to complete is delivered and its reactions run. A queue that empties
+/// with nothing pending can never settle the promise. The interrupt handler
+/// still bounds every job, and the deadline is checked between jobs because a
+/// job the interrupt aborted reports as executed.
 fn settle_program<'js>(
     ctx: &Ctx<'js>,
     program: &Promise<'js>,
     deadline_reached: &AtomicBool,
+    started: &StartedDelivery,
 ) -> ProgramSettlement<'js> {
     loop {
         if let Some(outcome) = program.result::<Option<JsString<'js>>>() {
             return ProgramSettlement::Settled(outcome.catch(ctx));
         }
-        if deadline_reached.load(Ordering::Relaxed) || !ctx.execute_pending_job() {
+        if deadline_reached.load(Ordering::Relaxed) {
             return ProgramSettlement::Unsettled;
+        }
+        if ctx.execute_pending_job() {
+            continue;
+        }
+        match started.deliver_next(ctx) {
+            Ok(true) => {}
+            Ok(false) => return ProgramSettlement::Unsettled,
+            Err(failure) => {
+                if deadline_reached.load(Ordering::Relaxed) {
+                    return ProgramSettlement::Unsettled;
+                }
+                return ProgramSettlement::Failed(failure);
+            }
         }
     }
 }
@@ -3181,6 +3548,7 @@ return connectors.email.read({value: "inbox"}).result;
             None,
             &Value::Null,
             ExecutionCapabilities {
+                started: no_started_calls(),
                 call: |_: &str| -> rquickjs::Result<String> {
                     unreachable!("program makes no connector calls")
                 },
@@ -3218,6 +3586,7 @@ return connectors.email.read({value: "inbox"}).result;
             None,
             &Value::Null,
             ExecutionCapabilities {
+                started: no_started_calls(),
                 call: |_: &str| -> rquickjs::Result<String> {
                     unreachable!("program makes no connector calls")
                 },
@@ -3282,6 +3651,7 @@ return connectors.email.read({value: "inbox"}).result;
             None,
             &Value::Null,
             ExecutionCapabilities {
+                started: no_started_calls(),
                 call: |_: &str| -> rquickjs::Result<String> {
                     unreachable!("program makes no connector calls")
                 },
@@ -3337,6 +3707,7 @@ return "too late";
             None,
             &Value::Null,
             ExecutionCapabilities {
+                started: no_started_calls(),
                 call: move |_: &str| -> rquickjs::Result<String> {
                     connector_observed.store(true, Ordering::Relaxed);
                     Ok(serde_json::json!({"ok": Value::Null}).to_string())
@@ -3381,6 +3752,7 @@ return "too late";
             None,
             &Value::Null,
             ExecutionCapabilities {
+                started: no_started_calls(),
                 call: |_: &str| -> rquickjs::Result<String> {
                     unreachable!("program makes no connector calls")
                 },
@@ -3432,6 +3804,7 @@ return "too late";
             None,
             &Value::Null,
             ExecutionCapabilities {
+                started: no_started_calls(),
                 call: |_: &str| -> rquickjs::Result<String> {
                     unreachable!("program makes no connector calls")
                 },
@@ -3535,9 +3908,26 @@ return "too late";
     type HostWait = fn(f64) -> rquickjs::Result<String>;
     type HostConsole = fn(ConsoleLevel, &str) -> rquickjs::Result<()>;
 
+    struct NoStartedCalls;
+
+    impl StartedCalls for NoStartedCalls {
+        fn dispatch(&self, _: &str) -> rquickjs::Result<u32> {
+            unreachable!("program starts no connector calls")
+        }
+
+        fn next_completed(&self) -> rquickjs::Result<(u32, String)> {
+            unreachable!("program starts no connector calls")
+        }
+    }
+
+    fn no_started_calls() -> Rc<dyn StartedCalls> {
+        Rc::new(NoStartedCalls)
+    }
+
     fn unused_capabilities(
     ) -> ExecutionCapabilities<HostCall, HostCall, HostCall, HostWait, HostConsole> {
         ExecutionCapabilities {
+            started: no_started_calls(),
             call: |_: &str| -> rquickjs::Result<String> {
                 unreachable!("program makes no connector calls")
             },
@@ -3558,6 +3948,215 @@ return "too late";
         .expect_err("program fails");
         assert_eq!(error.code, RunnerFailureCode::ProgramFailed);
         error.message
+    }
+
+    fn echo_value(request: &str) -> rquickjs::Result<String> {
+        let request: Value = serde_json::from_str(request).expect("connector request");
+        Ok(serde_json::json!({"ok": {"value": request["arguments"]["value"]}}).to_string())
+    }
+
+    #[test]
+    fn started_calls_settle_their_own_promises_whatever_order_they_complete_in() {
+        // The in-process double completes calls newest first.
+        let result = execute_with(
+            r#"
+const values = ["a", "b", "c"];
+const results = await Promise.all(values.map(value => connectors.example["item.get"].start({value})));
+return results.map(result => result.value);
+"#,
+            &bindings(&[("example", "item.get")]),
+            echo_value,
+        )
+        .expect("started calls settle");
+
+        assert_eq!(result, serde_json::json!(["a", "b", "c"]));
+    }
+
+    #[test]
+    fn a_started_call_refusal_rejects_with_its_stable_code() {
+        let result = execute_with(
+            r#"
+const outcomes = await Promise.allSettled([
+  connectors.example.read.start({value: "fine"}),
+  connectors.example.refused.start({}),
+]);
+return outcomes.map(outcome => outcome.status === "fulfilled"
+  ? outcome.value.value
+  : {code: outcome.reason.code, message: outcome.reason.message, isError: outcome.reason instanceof Error});
+"#,
+            &bindings(&[("example", "read"), ("example", "refused")]),
+            |request| {
+                let parsed: Value = serde_json::from_str(request).expect("connector request");
+                if parsed["call_id"] == "example:refused" {
+                    return Ok(serde_json::json!({"err": "forbidden: not for you"}).to_string());
+                }
+                echo_value(request)
+            },
+        )
+        .expect("program completes");
+
+        assert_eq!(
+            result,
+            serde_json::json!([
+                "fine",
+                {"code": "forbidden", "message": "not for you", "isError": true}
+            ])
+        );
+    }
+
+    #[test]
+    fn started_calls_beyond_the_limit_wait_their_turn_in_call_order() {
+        let limit = limits().connector_calls_in_flight;
+        let order = Rc::new(RefCell::new(Vec::new()));
+        let observed = Rc::clone(&order);
+        let handler = Rc::new(move |request: &str| {
+            let parsed: Value = serde_json::from_str(request).expect("connector request");
+            observed
+                .borrow_mut()
+                .push(parsed["arguments"]["value"].as_u64().expect("call number"));
+            echo_value(request)
+        });
+        let started = Rc::new(InProcessStartedCalls::new(Rc::clone(&handler)));
+        let (runtime, deadline_reached) =
+            create_runtime_with_limit(EXECUTION_LIMIT).expect("create runtime");
+        let context = JsContext::full(&runtime).expect("create context");
+        let result = execute_in(
+            &context,
+            &format!(
+                "const calls = Array.from({{length: {}}}, (_, value) => \
+                 connectors.example.read.start({{value}})); \
+                 return (await Promise.all(calls)).length;",
+                limit * 2 + 1
+            ),
+            &bindings(&[("example", "read")]),
+            None,
+            &Value::Null,
+            ExecutionCapabilities {
+                started: started.clone(),
+                call: |_: &str| -> rquickjs::Result<String> {
+                    unreachable!("program makes no synchronous calls")
+                },
+                pause: |_: &str| -> rquickjs::Result<String> {
+                    unreachable!("program does not pause")
+                },
+                artifact: |_: &str| -> rquickjs::Result<String> {
+                    unreachable!("program emits no artifacts")
+                },
+                wait: |_: f64| -> rquickjs::Result<String> {
+                    unreachable!("program does not wait")
+                },
+                console: |_: ConsoleLevel, _: &str| -> rquickjs::Result<()> { Ok(()) },
+                artifacts_available: false,
+            },
+            &deadline_reached,
+        )
+        .expect("every started call completes");
+
+        assert_eq!(result, serde_json::json!(limit * 2 + 1));
+        assert_eq!(started.dispatched.get(), limit * 2 + 1);
+        assert_eq!(
+            started.most_pending.get(),
+            limit,
+            "no more than the limit is ever in flight"
+        );
+        let order = order.borrow();
+        let first_waiting = u64::try_from(limit).expect("limit fits");
+        let waiting: Vec<u64> = order
+            .iter()
+            .copied()
+            .filter(|value| *value >= first_waiting)
+            .collect();
+        let mut sorted = waiting.clone();
+        sorted.sort_unstable();
+        assert_eq!(waiting, sorted, "calls that waited dispatch in call order");
+    }
+
+    #[test]
+    fn pause_refuses_while_started_calls_are_pending() {
+        let result = execute_with(
+            r#"
+const pending = connectors.example.read.start({value: "x"});
+let code;
+try {
+  execution.pause({step: 1});
+} catch (error) {
+  code = error.code;
+}
+const settled = await pending;
+return {code, settled: settled.value};
+"#,
+            &bindings(&[("example", "read")]),
+            echo_value,
+        )
+        .expect("program completes without pausing");
+
+        assert_eq!(
+            result,
+            serde_json::json!({"code": "connector_calls_pending", "settled": "x"})
+        );
+    }
+
+    #[test]
+    fn a_program_may_return_before_its_started_calls_finish() {
+        let result = execute_with(
+            r#"
+connectors.example.read.start({value: "ignored"});
+return "done";
+"#,
+            &bindings(&[("example", "read")]),
+            echo_value,
+        )
+        .expect("the program's own result is final");
+
+        assert_eq!(result, serde_json::json!("done"));
+    }
+
+    #[test]
+    fn start_rejects_arguments_that_are_not_json() {
+        let result = execute_with(
+            r#"
+try {
+  await connectors.example.read.start({value: 1n});
+  return "dispatched";
+} catch (error) {
+  return error instanceof TypeError;
+}
+"#,
+            &bindings(&[("example", "read")]),
+            |_| unreachable!("arguments that cannot be serialized are never sent"),
+        )
+        .expect("program completes");
+
+        assert_eq!(result, serde_json::json!(true));
+    }
+
+    #[test]
+    fn bindings_keep_their_synchronous_form_and_gain_start() {
+        let result = execute_with(
+            r#"
+const binding = connectors.example.read;
+const synchronous = binding({value: "now"});
+return {
+  synchronous: synchronous.value,
+  start: typeof binding.start,
+  startEnumerable: Object.keys(binding).includes("start"),
+  replaced: Reflect.set(binding, "start", () => "replaced"),
+};
+"#,
+            &bindings(&[("example", "read")]),
+            echo_value,
+        )
+        .expect("program completes");
+
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "synchronous": "now",
+                "start": "function",
+                "startEnumerable": false,
+                "replaced": false
+            })
+        );
     }
 
     #[test]

@@ -468,11 +468,42 @@ exists.
 
 A program is the body of an async function. It may use `await`, and its
 `return` value, or the value a returned promise settles to, becomes the result.
-Connector bindings and the `execution` capabilities are synchronous, so
-awaiting their results also works. A program whose promise can never settle,
-because nothing is left to run, fails with `execution_failed` instead of
-returning. Time limits bound promise work exactly as they bound other
-computation.
+Calling a connector binding, such as `connectors.email.read({...})`, waits for
+the call and returns its result, and the `execution` capabilities are
+synchronous too, so awaiting their results also works. Calls made this way
+never overlap: each finishes before the program continues.
+
+To run independent calls at the same time, use the binding's `start` method. It
+sends the call and returns a promise that resolves to the same result, or
+rejects with the same `Error` and `code`:
+
+```js
+const items = await Promise.all(
+  execution.input.ids.map(id => connectors.example["item.get"].start({ id })),
+);
+```
+
+Started calls overlap at the upstream and settle in the order they finish, so
+`Promise.all`, `Promise.allSettled`, `Promise.race` and `Promise.any` behave as
+usual. At most `connector_calls_in_flight` calls, as `codemode.limits` reports,
+are in flight at once. Calls started beyond that wait their turn in the order
+they were started, and a plain call made while every place is taken waits for
+one; the limit spaces calls out and never fails them. Each call still has its
+own authorization, validation, approval, upstream concurrency limit, timeout
+and audit record, and waiting counts toward the execution's time limit.
+
+`execution.pause` throws an `Error` with code `connector_calls_pending` while
+started calls are pending, so await them before pausing. When the execution
+ends with started calls still pending, because the program returned without
+awaiting them, failed, ran out of time or was cancelled, nothing further is
+dispatched and their results are discarded. A read still in flight is
+cancelled; a call with side effects runs to completion and is recorded before
+the execution finishes. A timeout or cancellation error reports how many
+connector calls the execution submitted as `connector_calls`.
+
+A program whose promise can never settle, because nothing is left to run and
+no started call is pending, fails with `execution_failed` instead of returning.
+Time limits bound promise work exactly as they bound other computation.
 
 The engine is QuickJS with current ECMAScript built-ins, for example
 `Object.groupBy`, iterator helpers, the `Set` composition methods,
@@ -661,9 +692,9 @@ unsupported delivery is explicit and does not change the caller's authority.
 Values that fit the control frame stay inline. A larger completed value is
 serialized once into one execution-private temporary file, using the same
 materialization budget. The runner opens that file before confinement and the
-parent immediately unlinks it; JavaScript receives no path or file API, and
-synchronous connector calls reuse the same file so disk use cannot grow with
-call count. This is completed-result buffering, not an end-to-end streaming or
+parent immediately unlinks it; JavaScript receives no path or file API. Every
+connector call reuses the same file, because the parent sends a result only
+when the runner is waiting for it, so disk use cannot grow with call count. This is completed-result buffering, not an end-to-end streaming or
 backpressure protocol, and requires no upstream or JavaScript SDK change.
 
 `codemode.execute` and `codemode.resume` support MCP task augmentation when the
@@ -741,8 +772,9 @@ retain their existing rule that an attempt is not aborted around a possibly
 in-flight effect.
 
 The initial executable profile requires `mcp:invoke`, accepts a JavaScript
-function body, and exposes synchronous
-`connectors[server][operation]` callable bindings (dot notation is shorthand when
+function body, and exposes
+`connectors[server][operation]` callable bindings, each with a promise-returning
+`start` method (dot notation is shorthand when
 both names are JavaScript identifiers). Search returns the exact connector and
 operation pair used by describe and execution, so dots inside either name are
 not parsed as separators. Search and describe remain available with `mcp:read`.
