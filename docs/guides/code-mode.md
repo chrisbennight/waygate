@@ -84,7 +84,9 @@ execution ID and call `codemode.resume` with that ID and
 the checkpoint chooses its next work. It does not restore a suspended JavaScript
 stack or automatically replay prior calls.
 
-Discover `codemode.start` and `start_resume` when work should continue after the
+A blocking `execute` or `resume` stops before its next connector call when its
+client cancels the request, and its result is not returned. Discover
+`codemode.start` and `start_resume` when work should continue after the
 request disconnects. Poll the returned execution with `status`, retrieve its
 bounded `result`, or cancel it using the advertised schemas. The official MCP
 Tasks extension is another projection of the same durable state, including

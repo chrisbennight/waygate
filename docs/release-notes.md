@@ -2,6 +2,14 @@
 
 ## 2.1.0
 
+- A blocking `codemode.execute` or `codemode.resume` stops when its client
+  cancels the request, as the MCP cancellation rules require, instead of running
+  on with nobody to receive its result. It makes no further connector calls, and
+  with an execution store it ends as `cancelled`. Detached and task-augmented
+  executions are unaffected. The tool description and the Code Mode guide say
+  when to use a detached execution instead. No migration or configuration
+  changes are required.
+
 - Code Mode programs can run independent connector calls at the same time.
   Every binding gains a `start` method that returns a promise, so
   `Promise.all` over started calls overlaps at the upstream instead of running
