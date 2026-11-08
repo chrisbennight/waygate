@@ -2471,9 +2471,9 @@ impl CodeModeTools {
         // and deadlines between calls, after an in-flight outcome is journaled.
         let result = match run.await {
             Err(error) => {
-                self.persist_claimed_failure(claimed.store, claimed.claim, &error)
-                    .await?;
-                return Err(error);
+                return Err(self
+                    .report_claimed_failure(claimed.store, claimed.claim, error)
+                    .await);
             }
             Ok(result) => result,
         };
@@ -2737,6 +2737,28 @@ impl CodeModeTools {
             return Err(execution_unavailable());
         }
         Ok(())
+    }
+
+    /// Record a failed attempt and return the error its caller receives.
+    ///
+    /// A cancellation the broker already finalized keeps the error the broker
+    /// reported, which carries the attempt's console output and submitted-call
+    /// count; recording it again only finds the row already cancelled.
+    async fn report_claimed_failure(
+        &self,
+        store: &SharedExecutionStore,
+        claim: &ExecutionClaim,
+        error: McpError,
+    ) -> McpError {
+        match self.persist_claimed_failure(store, claim, &error).await {
+            Ok(()) => error,
+            Err(persisted)
+                if is_execution_cancelled(&error) && is_execution_cancelled(&persisted) =>
+            {
+                error
+            }
+            Err(persisted) => persisted,
+        }
     }
 
     async fn persist_claimed_failure(
@@ -12497,6 +12519,43 @@ mod tests {
                 ExecutionEventKind::ConnectorCallSucceeded,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_finalized_cancellation_keeps_the_error_the_broker_reported() {
+        let fake = FakeCatalog::with_tools(&[("example", "item.get", false)]);
+        let store = Arc::new(RecordingExecutionStore::default());
+        let tools = CodeModeTools::new(
+            Arc::new(fake),
+            Arc::new(SelectiveAuthz),
+            Arc::new(RecordingInvocation::default()),
+        )
+        .with_execution_store(store.clone());
+        let claim = claimed_mutation_fixture(&store, "cancelled durable run").await;
+        store
+            .current
+            .lock()
+            .await
+            .as_mut()
+            .expect("claimed execution")
+            .cancellation_requested_at = Some(time::OffsetDateTime::now_utc());
+        let shared: SharedExecutionStore = store.clone();
+        assert!(tools
+            .finish_requested_cancellation(&shared, &claim)
+            .await
+            .expect("the broker finalizes the cancellation"));
+
+        let reported = tools
+            .report_claimed_failure(
+                &shared,
+                &claim,
+                with_connector_calls(execution_cancelled(), 3),
+            )
+            .await;
+
+        let data = reported.data.expect("cancellation detail");
+        assert_eq!(data["error"], "execution_cancelled");
+        assert_eq!(data["connector_calls"], 3);
     }
 
     #[tokio::test]
