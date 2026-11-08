@@ -3964,6 +3964,13 @@ impl CodeModeTools {
                 }
             }
             Ok(admitted) => {
+                // The start append above can outlast the caller. A read
+                // never journals an outcome it did not dispatch, so it can
+                // stop here without one; its recorded lack of side effects
+                // tells reconciliation it was merely in flight.
+                if dispatch_closed(stopped, attempt) {
+                    return Ok(ConnectorCallOutcome::NotDispatched);
+                }
                 // Reads are recomputable, so a deadline may cut them off.
                 // In-flight effects finish before the broker enforces the
                 // deadline.
@@ -9026,6 +9033,9 @@ mod tests {
         /// How many upcoming `request_cancellation` calls fail with a
         /// transient store error before one succeeds.
         failing_cancellation_requests: std::sync::atomic::AtomicUsize,
+        /// A caller the next ordinary append cancels, standing in for a
+        /// caller that leaves while a call awaits its start append.
+        leave_on_append: Mutex<Option<CancellationToken>>,
         /// When set, effect outcome appends are refused by the claim fence.
         refuse_effect_outcomes: std::sync::atomic::AtomicBool,
         /// A flag the next ordinary append sets, standing in for an attempt
@@ -9518,6 +9528,9 @@ mod tests {
         ) -> Result<bool, StoreError> {
             if let Some(stop) = self.stop_on_append.lock().expect("stop hook lock").take() {
                 stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            if let Some(caller) = self.leave_on_append.lock().expect("leave hook lock").take() {
+                caller.cancel();
             }
             // Mirror the Pg fence: a pending cancellation refuses ordinary
             // appends, which is the broker's pre-dispatch boundary.
@@ -13877,6 +13890,79 @@ mod tests {
         assert!(
             invocation.requests.lock().await.is_empty(),
             "nothing is dispatched after the caller left, even before the record lands"
+        );
+    }
+
+    /// A read's start append can outlast its caller. A read whose caller
+    /// leaves while its start is being journaled is not dispatched once the
+    /// append completes.
+    #[tokio::test]
+    async fn a_read_whose_caller_leaves_during_its_start_append_is_not_dispatched() {
+        let fake = FakeCatalog::with_tools(&[("email", "read", false)]);
+        let (admitted_calls, runner_bindings, _) =
+            admit_execution_bindings(read_execution_binding(&fake));
+        let invocation = Arc::new(RecordingInvocation::default());
+        let store = Arc::new(RecordingExecutionStore::default());
+        let tools =
+            CodeModeTools::new(Arc::new(fake), Arc::new(SelectiveAuthz), invocation.clone())
+                .with_execution_store(store.clone());
+        let source = "return connectors.email.read({});";
+        let claim = claimed_mutation_fixture(&store, source).await;
+        let caller = CancellationToken::new();
+        *store.leave_on_append.lock().expect("leave hook lock") = Some(caller.clone());
+        let (mut parent_stdin, _runner_input) = tokio::io::duplex(4096);
+        let (mut runner_output, parent_stdout) = tokio::io::duplex(4096);
+        write_runner_frame(
+            &mut runner_output,
+            &RunnerFrame::Call {
+                id: 1,
+                call_id: runner_bindings[0].call_id.clone(),
+                arguments: json!({"value": "inbox"}),
+            },
+        )
+        .await;
+        let mut parent_stdout = BufReader::new(parent_stdout);
+        let principal = reader();
+
+        let broker = tools.broker_runner_frames(
+            RunnerAttempt {
+                principal: &principal,
+                execution_id: claim.execution_id,
+                claim: Some(&claim),
+                persist_content: true,
+                profile: CodeExecutionProfile::Direct,
+                source_digest: source_digest(source),
+                deadline: None,
+                caller: Some(&caller),
+            },
+            &admitted_calls,
+            &mut parent_stdin,
+            &mut parent_stdout,
+        );
+        let record_later = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            store
+                .current
+                .lock()
+                .await
+                .as_mut()
+                .expect("claimed execution")
+                .cancellation_requested_at = Some(time::OffsetDateTime::now_utc());
+        };
+        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(broker, record_later)
+        })
+        .await
+        .expect("the attempt ends once the cancellation is recorded");
+
+        let error = outcome.expect_err("a departed caller's attempt ends cancelled");
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("error")),
+            Some(&json!("execution_cancelled"))
+        );
+        assert!(
+            invocation.requests.lock().await.is_empty(),
+            "the read is not dispatched after its caller left during the start append"
         );
         assert_eq!(
             store
