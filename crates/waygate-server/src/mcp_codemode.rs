@@ -3394,8 +3394,11 @@ impl CodeModeTools {
                 } => {
                     // A call the runner sends after its caller left is never
                     // dispatched, the same boundary the journal fence draws
-                    // for a requested cancellation.
-                    if attempt.caller.is_some_and(CancellationToken::is_cancelled) {
+                    // for a requested cancellation. The check repeats after
+                    // every await below that precedes a dispatch, so a caller
+                    // who leaves during a journal write or claim renewal
+                    // still stops the call.
+                    if attempt.caller_left() {
                         return Err(self.stop_for_departed_caller(&attempt).await);
                     }
                     calls += 1;
@@ -3441,6 +3444,9 @@ impl CodeModeTools {
                         )
                         .await?;
                     }
+                    if attempt.caller_left() {
+                        return Err(self.stop_for_departed_caller(&attempt).await);
+                    }
                     let dispatches_effect = admitted
                         .as_ref()
                         .is_ok_and(|admitted| admitted.contract.side_effects());
@@ -3450,6 +3456,9 @@ impl CodeModeTools {
                                 && attempt.profile == CodeExecutionProfile::Direct =>
                         {
                             self.confirm_claim_before_effect(attempt.claim).await?;
+                            if attempt.caller_left() {
+                                return Err(self.stop_for_departed_caller(&attempt).await);
+                            }
                             let dispatch = self.invoke_connector(
                                 attempt.principal,
                                 &admitted,
@@ -3499,6 +3508,9 @@ impl CodeModeTools {
                                 // cancellation refusal atomically with
                                 // authority consumption.
                                 self.confirm_claim_before_effect(attempt.claim).await?;
+                                if attempt.caller_left() {
+                                    return Err(self.stop_for_departed_caller(&attempt).await);
+                                }
                                 let approval = mutation_approval_request(
                                     &attempt, &admitted, &arguments, hierarchy,
                                 );
@@ -3524,6 +3536,13 @@ impl CodeModeTools {
                                             ..
                                         },
                                     ) => {
+                                        // Nobody is left to see the request
+                                        // or wait for its decision.
+                                        if attempt.caller_left() {
+                                            return Err(self
+                                                .stop_for_departed_caller(&attempt)
+                                                .await);
+                                        }
                                         break RunnerProgramOutcome::WaitingForApproval {
                                             approval: Box::new(approval),
                                             calls,
@@ -3591,6 +3610,13 @@ impl CodeModeTools {
                     }
                 }
                 RunnerFrame::Pause { checkpoint } => {
+                    // A checkpoint waits for its caller to answer it; one
+                    // whose caller left would wait for nobody. A completed
+                    // program, by contrast, keeps its outcome: its work is
+                    // done and nothing is left to stop.
+                    if attempt.caller_left() {
+                        return Err(self.stop_for_departed_caller(&attempt).await);
+                    }
                     if !attempt.persist_content {
                         return Err(pause_unavailable());
                     }
@@ -6762,6 +6788,13 @@ struct RunnerAttempt<'a> {
     caller: Option<&'a CancellationToken>,
 }
 
+impl RunnerAttempt<'_> {
+    /// Whether the caller waiting for this attempt has already left.
+    fn caller_left(&self) -> bool {
+        self.caller.is_some_and(CancellationToken::is_cancelled)
+    }
+}
+
 /// Resolves once the caller waiting on an attempt stops waiting; never for a
 /// detached attempt.
 async fn caller_departed(caller: Option<&CancellationToken>) {
@@ -8467,6 +8500,10 @@ mod tests {
         /// `tasks/cancel` arriving between the fenced call-start append and
         /// the effect dispatch.
         cancel_on_first_append: std::sync::atomic::AtomicBool,
+        /// When set, the first successful `append_event` cancels this
+        /// caller — simulating a caller that leaves while a call start is
+        /// being journaled.
+        leave_on_first_append: std::sync::Mutex<Option<CancellationToken>>,
         /// Lease renewals observed while an effect dispatch was in flight.
         renewals: tokio::sync::Mutex<Vec<Duration>>,
         /// Claims recorded as interrupted when a drain window ended.
@@ -8969,6 +9006,14 @@ mod tests {
                 if let Some(execution) = current.as_mut() {
                     execution.cancellation_requested_at = Some(time::OffsetDateTime::now_utc());
                 }
+            }
+            if let Some(caller) = self
+                .leave_on_first_append
+                .lock()
+                .expect("leave hook lock")
+                .take()
+            {
+                caller.cancel();
             }
             drop(current);
             self.events.lock().await.push(event);
@@ -12217,6 +12262,131 @@ mod tests {
         let cancelled = store.current.lock().await.clone().expect("execution");
         assert_eq!(cancelled.status, ExecutionStatus::Cancelled);
         assert!(cancelled.cancellation_requested_at.is_some());
+    }
+
+    /// Journaling a call start awaits the database; a caller that leaves
+    /// during that write must still stop the call, which has not been
+    /// dispatched yet.
+    #[tokio::test]
+    async fn a_caller_leaving_while_a_call_start_is_journaled_stops_the_call() {
+        let fake = FakeCatalog::with_tools(&[("email", "send", true)]);
+        let call_id = runner_call_id("email", "send");
+        let admitted_calls = HashMap::from([(
+            call_id.clone(),
+            AdmittedCall {
+                approval_context: None,
+                server: "email".to_owned(),
+                tool: "send".to_owned(),
+                contract: upstream_contract(fake.contract_identity("email", "send")),
+            },
+        )]);
+        let invocation = Arc::new(RecordingInvocation::default());
+        let store = Arc::new(RecordingExecutionStore::default());
+        let tools =
+            CodeModeTools::new(Arc::new(fake), Arc::new(SelectiveAuthz), invocation.clone())
+                .with_execution_store(store.clone());
+        let source = "return connectors.email.send({value: 'x'});";
+        let claim = claimed_mutation_fixture(&store, source).await;
+        let caller = CancellationToken::new();
+        *store.leave_on_first_append.lock().expect("leave hook lock") = Some(caller.clone());
+        let (mut parent_stdin, _runner_input) = tokio::io::duplex(4096);
+        let (mut runner_output, parent_stdout) = tokio::io::duplex(4096);
+        write_runner_frame(
+            &mut runner_output,
+            &RunnerFrame::Call {
+                id: 1,
+                call_id,
+                arguments: json!({}),
+            },
+        )
+        .await;
+        let mut parent_stdout = BufReader::new(parent_stdout);
+
+        let error = tools
+            .broker_runner_frames(
+                RunnerAttempt {
+                    principal: &reader(),
+                    execution_id: claim.execution_id,
+                    claim: Some(&claim),
+                    persist_content: true,
+                    profile: CodeExecutionProfile::Direct,
+                    source_digest: source_digest(source),
+                    deadline: None,
+                    caller: Some(&caller),
+                },
+                &admitted_calls,
+                &mut parent_stdin,
+                &mut parent_stdout,
+            )
+            .await
+            .expect_err("a caller who left during the journal write ends the execution");
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("error")),
+            Some(&json!("execution_cancelled"))
+        );
+        assert!(
+            invocation.requests.lock().await.is_empty(),
+            "the call whose start was being journaled is never dispatched"
+        );
+        let cancelled = store.current.lock().await.clone().expect("execution");
+        assert_eq!(cancelled.status, ExecutionStatus::Cancelled);
+    }
+
+    /// A checkpoint waits for its caller to answer it. When the caller has
+    /// left, the execution ends instead of waiting for nobody.
+    #[tokio::test]
+    async fn a_pause_after_the_caller_left_ends_the_execution() {
+        let invocation = Arc::new(RecordingInvocation::default());
+        let store = Arc::new(RecordingExecutionStore::default());
+        let tools = CodeModeTools::new(
+            Arc::new(FakeCatalog::with_tools(&[])),
+            Arc::new(SelectiveAuthz),
+            invocation,
+        )
+        .with_execution_store(store.clone());
+        let source = "return execution.pause({step: 1});";
+        let claim = claimed_mutation_fixture(&store, source).await;
+        let (mut parent_stdin, _runner_input) = tokio::io::duplex(4096);
+        let (mut runner_output, parent_stdout) = tokio::io::duplex(4096);
+        write_runner_frame(
+            &mut runner_output,
+            &RunnerFrame::Pause {
+                checkpoint: json!({"step": 1}),
+            },
+        )
+        .await;
+        let mut parent_stdout = BufReader::new(parent_stdout);
+        let caller = CancellationToken::new();
+        caller.cancel();
+
+        let error = tools
+            .broker_runner_frames(
+                RunnerAttempt {
+                    principal: &reader(),
+                    execution_id: claim.execution_id,
+                    claim: Some(&claim),
+                    persist_content: true,
+                    profile: CodeExecutionProfile::Direct,
+                    source_digest: source_digest(source),
+                    deadline: None,
+                    caller: Some(&caller),
+                },
+                &HashMap::new(),
+                &mut parent_stdin,
+                &mut parent_stdout,
+            )
+            .await
+            .expect_err("a pause whose caller left ends the execution");
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("error")),
+            Some(&json!("execution_cancelled"))
+        );
+        let cancelled = store.current.lock().await.clone().expect("execution");
+        assert_eq!(
+            cancelled.status,
+            ExecutionStatus::Cancelled,
+            "no paused execution is left waiting for a caller that is gone"
+        );
     }
 
     /// The requester is off the call path when a live-claim cancellation
