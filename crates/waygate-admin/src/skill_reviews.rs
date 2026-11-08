@@ -50,7 +50,6 @@ pub(crate) async fn seed_tenant(
         Ok::<_, ApiError>(())
     }
     .await;
-    state.hitl.decisions_badge_cache.lock().await.remove(tenant);
     match result {
         Ok(()) => SideEffectStatus {
             status: "seeded",
@@ -173,7 +172,6 @@ pub(crate) async fn decide_for_batch(
         )
         .await
         .map_err(review_error)?;
-    state.hitl.decisions_badge_cache.lock().await.remove(tenant);
     state.upstreams.tool_catalog_epoch().mark_changed();
     let action = match decision {
         ReviewDecision::Approve => "skill.approve",

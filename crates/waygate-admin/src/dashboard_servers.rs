@@ -2172,12 +2172,6 @@ pub(crate) async fn servers_refresh_catalog(
         .await
     {
         Some(report) => {
-            state
-                .hitl
-                .decisions_badge_cache
-                .lock()
-                .await
-                .remove(waygate_core::TenantId::DEFAULT);
             let mut result = ServerCatalogRefreshResult::from(report);
             let context = tenant_ctx.as_ref().map(|Extension(context)| context);
             let tenant = context

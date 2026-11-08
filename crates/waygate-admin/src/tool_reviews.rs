@@ -258,7 +258,6 @@ pub(crate) async fn record_acceptance(
         .upstreams
         .release_accepted_tool(&params.server, &params.tool, &params.observed_hash)
         .await;
-    state.hitl.decisions_badge_cache.lock().await.remove(tenant);
     crate::admin_mutation::record_admin_mutation(
         state,
         "tool contract",
@@ -318,7 +317,6 @@ pub(crate) async fn reject_for_batch(
     {
         return Err(stale());
     }
-    state.hitl.decisions_badge_cache.lock().await.remove(tenant);
     crate::admin_mutation::record_admin_mutation(
         state,
         "tool reviews",
