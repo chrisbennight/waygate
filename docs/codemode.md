@@ -481,8 +481,9 @@ response stream can be resumed on the same replica while the session lives.
 A cancelled blocking call never becomes a detached execution. Keeping work
 alive after the client leaves is a choice the caller makes before it starts:
 
-- A client that supports MCP Tasks invokes `codemode.execute` as a task and
-  receives a durable task once the program is admitted.
+- Where the posture offers MCP Tasks, a client that supports them invokes
+  `codemode.execute` as a task and receives a durable task once the program is
+  admitted.
 - Otherwise the caller uses `codemode.start`, polls `codemode.status`, and
   fetches the result with `codemode.result`, where the posture serves them.
   Starting is safe to retry.
