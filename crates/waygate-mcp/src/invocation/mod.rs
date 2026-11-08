@@ -545,6 +545,7 @@ struct InvocationContext<'a> {
     images_surface: Option<waygate_invocation::ImagesSurface>,
     speech_surface: bool,
     audio_resource: Option<waygate_core::audio::AudioResourceRequest>,
+    transcription: Option<waygate_core::audio::TranscriptionInput>,
     realtime: Option<waygate_core::realtime::RealtimeRequest>,
     /// LLM fast-path only: the call arrived on the provider-native Anthropic
     /// Messages surface (`POST /v1/messages`). The fast-path branches to
@@ -728,6 +729,7 @@ impl InvocationService for DefaultInvocationService {
         }
         let arguments = req.arguments.take();
         let audio_resource = req.audio_resource.take();
+        let transcription = req.transcription.take();
         let realtime = req.realtime.take();
         let mrtr = crate::catalog::ToolCallMrtr {
             input_responses: req.input_responses.take(),
@@ -763,6 +765,7 @@ impl InvocationService for DefaultInvocationService {
             images_surface: req.images_surface,
             speech_surface: req.speech_surface,
             audio_resource,
+            transcription,
             realtime,
             native_messages_surface: req.native_messages_surface,
             acting_agent: req.acting_agent(),

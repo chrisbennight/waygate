@@ -119,6 +119,61 @@ return {
 
 #[test]
 #[cfg(target_os = "linux")]
+fn external_runner_dispatches_started_calls_without_waiting_for_results() {
+    let (mut child, mut input, mut output) = spawn_ready_runner();
+    write_frame(
+        &mut input,
+        json!({
+            "type": "start",
+            "artifacts_available": false,
+            "bindings": [
+                {
+                    "connector": "example",
+                    "operation": "item.get",
+                    "call_id": "7:example8:item.get"
+                }
+            ],
+            "source": r#"
+const values = ["a", "b", "c"];
+const results = await Promise.all(
+  values.map(value => connectors.example["item.get"].start({value}))
+);
+return results.map(result => result.value);
+"#
+        }),
+    );
+
+    // Every started call is sent before the runner asks for any result.
+    for (id, value) in [(1, "a"), (2, "b"), (3, "c")] {
+        let dispatched = read_frame(&mut output);
+        assert_eq!(dispatched["type"], "dispatch");
+        assert_eq!(dispatched["id"], id);
+        assert_eq!(dispatched["call_id"], "7:example8:item.get");
+        assert_eq!(dispatched["arguments"], json!({"value": value}));
+    }
+    // Results arrive in whatever order the calls finish.
+    for (id, value) in [(3, "C"), (1, "A"), (2, "B")] {
+        let waiting = read_frame(&mut output);
+        assert_eq!(waiting["type"], "await");
+        write_frame(
+            &mut input,
+            json!({
+                "type": "call_result",
+                "id": id,
+                "result": {"Ok": {"storage": "inline", "value": {"value": value}}}
+            }),
+        );
+    }
+
+    let completed = read_frame(&mut output);
+    assert_eq!(completed["type"], "complete");
+    assert_eq!(completed["result"], json!(["A", "B", "C"]));
+    drop(input);
+    assert!(child.wait().expect("wait for runner").success());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn external_runner_materializes_a_large_completed_result_from_its_private_spool() {
     let (mut child, mut input, mut output, mut spool) = spawn_ready_runner_with_spool();
     write_frame(

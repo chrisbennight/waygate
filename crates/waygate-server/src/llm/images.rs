@@ -11,7 +11,6 @@ const MAX_IMAGE_BODY: usize = 64 * 1024 * 1024;
 pub(super) const MAX_CONCURRENT_IMAGES: usize = 2;
 const IMAGE_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const IMAGE_DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-const IMAGE_DELIVERY_CHUNK: usize = 64 * 1024;
 
 pub(super) async fn generations(State(state): State<LlmRouterState>, req: Request) -> Response {
     handle(state, req, ImagesSurface::Generations).await
@@ -34,56 +33,7 @@ async fn handle(state: LlmRouterState, req: Request, surface: ImagesSurface) -> 
 }
 
 fn deliver_response(response: Response, permit: tokio::sync::OwnedSemaphorePermit) -> Response {
-    let (parts, body) = response.into_parts();
-    let (sender, receiver) = tokio::sync::mpsc::channel(1);
-    // The producer deadline runs even when HTTP backpressure stops polling the
-    // response. Copy small chunks so queued bytes cannot retain the large body.
-    let delivery = tokio::spawn(async move {
-        let _permit = permit;
-        let send = async {
-            let mut body = body.into_data_stream();
-            while let Some(chunk) = body.next().await {
-                let chunk = chunk.map_err(std::io::Error::other)?;
-                for chunk in chunk.chunks(IMAGE_DELIVERY_CHUNK) {
-                    sender
-                        .send(bytes::Bytes::copy_from_slice(chunk))
-                        .await
-                        .map_err(|_| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::BrokenPipe,
-                                "image client disconnected",
-                            )
-                        })?;
-                }
-            }
-            Ok::<_, std::io::Error>(())
-        };
-        tokio::select! {
-            _ = sender.closed() => Ok(()),
-            result = tokio::time::timeout(IMAGE_DELIVERY_TIMEOUT, send) => {
-                result.unwrap_or_else(|_| Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut, "image response delivery exceeded 60 seconds",
-                )))
-            }
-        }
-    });
-    let stream = futures::stream::unfold(
-        (receiver, Some(delivery)),
-        |(mut receiver, mut delivery)| async move {
-            if let Some(chunk) = receiver.recv().await {
-                return Some((Ok(chunk), (receiver, delivery)));
-            }
-            match delivery.take()?.await {
-                Ok(Ok(())) => None,
-                Ok(Err(error)) => Some((Err(error), (receiver, delivery))),
-                Err(_) => Some((
-                    Err(std::io::Error::other("image response delivery failed")),
-                    (receiver, delivery),
-                )),
-            }
-        },
-    );
-    Response::from_parts(parts, axum::body::Body::from_stream(stream))
+    deliver_with_capacity(response, permit, IMAGE_DELIVERY_TIMEOUT, "image")
 }
 
 async fn invoke_image(state: LlmRouterState, req: Request, surface: ImagesSurface) -> Response {
@@ -297,8 +247,7 @@ mod tests {
             let mut response =
                 json!({"created":42,"data":[{"b64_json":"aW1hZ2U="}],"output_format":"png"});
             if self.2 {
-                response["data"][0]["b64_json"] =
-                    Value::String("a".repeat(4 * IMAGE_DELIVERY_CHUNK));
+                response["data"][0]["b64_json"] = Value::String("a".repeat(4 * DELIVERY_CHUNK));
             }
             Ok(InvocationResponse::UnaryValue(response))
         }
@@ -346,7 +295,7 @@ mod tests {
         tokio::task::yield_now().await;
         let response = app.clone().oneshot(generation_request()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        axum::body::to_bytes(response.into_body(), 4 * IMAGE_DELIVERY_CHUNK + 1024)
+        axum::body::to_bytes(response.into_body(), 4 * DELIVERY_CHUNK + 1024)
             .await
             .unwrap();
         let response = app.oneshot(generation_request()).await.unwrap();
@@ -358,7 +307,7 @@ mod tests {
         let capacity = Arc::new(tokio::sync::Semaphore::new(1));
         let permit = capacity.clone().try_acquire_owned().unwrap();
         let response = deliver_response(
-            Response::new(axum::body::Body::from(vec![b'a'; 4 * IMAGE_DELIVERY_CHUNK])),
+            Response::new(axum::body::Body::from(vec![b'a'; 4 * DELIVERY_CHUNK])),
             permit,
         );
         tokio::task::yield_now().await;
@@ -370,7 +319,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-        let error = axum::body::to_bytes(response.into_body(), 4 * IMAGE_DELIVERY_CHUNK)
+        let error = axum::body::to_bytes(response.into_body(), 4 * DELIVERY_CHUNK)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("delivery exceeded"));

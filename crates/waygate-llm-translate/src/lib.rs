@@ -40,6 +40,7 @@ mod response;
 mod response_canonical;
 pub mod speech;
 mod stream;
+pub mod transcription;
 
 pub use canonical::{
     CanonicalMessage, CanonicalTool, ContentPart, LlmRequest, ResponseFormat, Role, Sampling,
