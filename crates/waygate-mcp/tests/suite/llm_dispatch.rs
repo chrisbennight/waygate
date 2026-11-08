@@ -730,6 +730,49 @@ async fn recognized_model_returns_unary_value_through_the_pipeline() {
 }
 
 #[tokio::test]
+async fn replayed_reasoning_reaches_an_openai_compatible_upstream() {
+    // A coding agent's follow-up turn replays the model's reasoning beside its
+    // tool call. The gateway accepts it and the upstream receives it unchanged,
+    // under the field the client used.
+    let cap = Arc::new(Mutex::new(Captured::default()));
+    let addr = spawn_provider(cap.clone()).await;
+    let sink = Arc::new(RecordingSink::default());
+
+    let dispatcher = LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), store());
+    let svc =
+        DefaultInvocationService::new(Arc::new(FakeCatalog), Arc::new(AllowAllGate), sink.clone())
+            .with_llm(dispatcher, resolver(addr));
+
+    let args = json!({
+        "model": "gpt-x",
+        "messages": [
+            {"role": "user", "content": "list the files"},
+            {"role": "assistant", "content": null,
+                "reasoning_content": "The user wants a listing; run ls.",
+                "tool_calls": [{"id": "c1", "type": "function",
+                    "function": {"name": "bash", "arguments": "{\"cmd\":\"ls\"}"}}]},
+            {"role": "tool", "content": "a.txt", "tool_call_id": "c1"}
+        ],
+        "tools": [{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let req = InvocationRequest::new("llm", "gpt-x").with_arguments(Some(args));
+    svc.invoke(None, req).await.expect("invoke");
+
+    let c = cap.lock().unwrap();
+    let body = c.body.as_ref().expect("captured upstream body");
+    let assistant = &body["messages"][1];
+    assert_eq!(
+        assistant["reasoning_content"],
+        "The user wants a listing; run ls."
+    );
+    assert_eq!(assistant["tool_calls"][0]["id"], "c1");
+    assert_eq!(body["messages"][2]["tool_call_id"], "c1");
+}
+
+#[tokio::test]
 async fn response_format_is_rendered_through_to_an_openai_compatible_upstream() {
     // Structured output on an OpenAI-chat route is admitted (no longer rejected
     // at translate) and forwarded 1:1 to the upstream.

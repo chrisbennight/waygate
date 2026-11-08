@@ -161,6 +161,7 @@ struct LlmRequest {
     inbound_surface: Surface,                // ChatCompletions | Responses (selects the egress shape)
     model_requested: String,                 // alias as the client asked
     messages: Vec<CanonicalMessage>,         // system/user/assistant/tool; content parts incl. ToolUse / ToolResult
+                                              //   and replayed reasoning (§14)
     sampling: Sampling,                       // temperature, top_p, max_tokens, stop, seed, reasoning_effort, …
     tools: Vec<CanonicalTool>,                // function/tool defs (name, description, parameters, strict)
     tool_choice: Option<ToolChoice>,          // Auto | None | Required | Function(name)
@@ -1019,6 +1020,21 @@ written (§14).
   meaningless); on the Codex backend the gateway requests `include:
   ["reasoning.encrypted_content"]` so a **stateless** reasoning loop round-trips the
   encrypted reasoning without the gateway (or the backend's store) holding content.
+- **Replayed model output.** Clients that keep their own history send the model's earlier
+  output back with each request, including its reasoning. The canonical surfaces treat that
+  differently from client instructions. An instruction the gateway cannot translate is
+  rejected (I6). Replayed model output records what the model already produced rather than
+  asking for new behavior, so it is carried to upstreams that can use it and left out where
+  it has no meaning. On Chat Completions an assistant message may carry `reasoning_content`,
+  `reasoning`, or `reasoning_details`, the spellings OpenAI-compatible servers return and
+  the chat passthrough delivers to clients unchanged. An OpenAI-chat upstream receives each
+  one back unchanged, under the name the client used. The gateway does not rename them:
+  servers disagree on the spelling, and a route does not record which server it reaches.
+  Anthropic, Gemini, and Responses upstreams receive none of it, because plain or
+  provider-structured chat reasoning cannot stand in for their own signed or encrypted
+  reasoning. Responses `reasoning` input items follow the rule above. Replayed reasoning is
+  conversation content: it is part of the completion-cache key and stays out of the
+  content-free audit ledger.
 - **Retrieval endpoints are unsupported.** `GET` / `DELETE /v1/responses/{id}` and the cancel
   endpoint are **not** served: they require the server-side response store the gateway
   deliberately does not keep (I9). A client that needs retrieval points `store` at an upstream
