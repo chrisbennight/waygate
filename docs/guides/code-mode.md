@@ -18,7 +18,21 @@ const second = connectors["demo"]["greet"]({ name: "Grace" });
 return { first, second };
 ```
 
-This example requires the tutorial's `demo.greet` tool to be admitted for the
+To run independent calls at the same time, call the binding's `start` method,
+which returns a promise of the same result:
+
+```javascript
+const names = ["Ada", "Grace", "Katherine"];
+return await Promise.all(names.map(name => connectors["demo"]["greet"].start({ name })));
+```
+
+Started calls overlap, up to the `connector_calls_in_flight` limit that
+`codemode.limits` reports; further calls wait their turn rather than fail.
+Calls with side effects take turns with each other while reads overlap. The
+[program runtime](../codemode.md#program-runtime) describes what happens to
+calls still pending when a program ends.
+
+These examples require the tutorial's `demo.greet` tool to be admitted for the
 caller. Submit the body in `codemode.execute.source`. The body runs as an async
 function, so `await` also works, including on a connector result. Output from
 `console.log` and the other `console` methods comes back in the response's
@@ -70,7 +84,9 @@ execution ID and call `codemode.resume` with that ID and
 the checkpoint chooses its next work. It does not restore a suspended JavaScript
 stack or automatically replay prior calls.
 
-Discover `codemode.start` and `start_resume` when work should continue after the
+A blocking `execute` or `resume` stops before its next connector call when its
+client cancels the request, and its result is not returned. Discover
+`codemode.start` and `start_resume` when work should continue after the
 request disconnects. Poll the returned execution with `status`, retrieve its
 bounded `result`, or cancel it using the advertised schemas. The official MCP
 Tasks extension is another projection of the same durable state, including

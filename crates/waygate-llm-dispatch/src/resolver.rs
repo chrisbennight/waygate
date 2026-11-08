@@ -37,7 +37,9 @@ pub enum ModelRisk {
 /// model hit on `/v1/chat/completions`, or vice-versa, is a clean client error,
 /// not a mis-dispatch). `Images` serves generation and editing through the
 /// separate Images API parser and direct Codex transport. `Speech` carries
-/// configured generation and resource capabilities. Defaults to `Chat`.
+/// configured generation and resource capabilities. `Transcription` carries the
+/// configured file types, output formats and options of a completed-file
+/// transcription provider. Defaults to `Chat`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum LlmOperation {
     #[default]
@@ -45,6 +47,7 @@ pub enum LlmOperation {
     Embeddings,
     Images,
     Speech(waygate_llm_translate::speech::SpeechCapabilities),
+    Transcription(waygate_llm_translate::transcription::TranscriptionCapabilities),
     Realtime(waygate_core::realtime::RealtimeCapabilities),
 }
 

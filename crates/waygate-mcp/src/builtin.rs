@@ -23,6 +23,7 @@ use std::sync::Arc;
 use rmcp::model::{CallToolResult, JsonObject, Task, Tool};
 use rmcp::ErrorData as McpError;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
 use waygate_core::RiskTier;
 use waygate_oidc::Principal;
@@ -304,6 +305,22 @@ pub trait BuiltinTools: Send + Sync {
         arguments: Option<JsonObject>,
         principal: Option<&Principal>,
     ) -> Result<CallToolResult, McpError>;
+
+    /// [`call`](BuiltinTools::call) for a caller that may stop waiting.
+    /// `cancellation` fires when the downstream request is cancelled or its
+    /// client disconnects. A namespace whose calls can run long enough to
+    /// outlive their caller observes it; the default ignores it, which suits
+    /// calls that finish promptly.
+    async fn call_with_cancellation(
+        &self,
+        tool: &str,
+        arguments: Option<JsonObject>,
+        principal: Option<&Principal>,
+        cancellation: CancellationToken,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = cancellation;
+        self.call(tool, arguments, principal).await
+    }
 
     /// Bare tool whose profile and Cedar overlay govern this operation.
     /// Continuation operations can map back to the authority of the execution

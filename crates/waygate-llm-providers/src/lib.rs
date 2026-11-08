@@ -25,6 +25,7 @@ pub mod audio_resources;
 pub mod realtime;
 pub mod speech;
 mod sse;
+pub mod transcription;
 
 use futures::stream::BoxStream;
 use futures::StreamExt;

@@ -93,6 +93,8 @@
                                 <span class="chip chip--accent">embeddings</span>
                             {% else if m.is_speech %}
                                 <span class="chip">speech</span>
+                            {% else if m.is_transcription %}
+                                <span class="chip">transcription</span>
                             {% else if m.is_realtime %}
                                 <span class="chip">realtime</span>
                             {% else %}

@@ -50,6 +50,10 @@ pub(super) fn from_env() -> anyhow::Result<CodeModeLimits> {
         multiply(limits.artifact_bytes, 16)?,
     )?;
     limits.console_bytes = read("GATEWAY_CODEMODE_CONSOLE_MAX_BYTES", limits.console_bytes)?;
+    limits.connector_calls_in_flight = read(
+        "GATEWAY_CODEMODE_MAX_CONCURRENT_CONNECTOR_CALLS",
+        limits.connector_calls_in_flight,
+    )?;
     limits.query_bytes = read("GATEWAY_CODEMODE_QUERY_MAX_BYTES", limits.query_bytes)?;
     limits.file_count = read("GATEWAY_FILE_BUNDLE_MAX_FILES", limits.file_count)?;
     limits.file_locations = read(
