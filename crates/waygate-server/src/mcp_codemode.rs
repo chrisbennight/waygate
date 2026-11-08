@@ -3709,6 +3709,35 @@ impl CodeModeTools {
         ))
     }
 
+    /// Close the journal entry of an effect whose attempt ended after its start
+    /// was journaled but before it was invoked, so reconciliation never
+    /// mistakes it for one whose outcome is unknown.
+    async fn record_undispatched_effect(
+        &self,
+        attempt: &RunnerAttempt<'_>,
+        ordinal: usize,
+        hierarchy: InvocationHierarchy,
+        mut detail: Value,
+    ) -> Result<ConnectorCallOutcome, McpError> {
+        if let Some(claim) = attempt.claim {
+            if let Some(fields) = detail.as_object_mut() {
+                fields.insert("dispatched".to_owned(), Value::Bool(false));
+            }
+            self.append_claimed_effect_outcome(
+                claim,
+                execution_event_with_attempt(
+                    ExecutionEventKind::ConnectorCallFailed,
+                    Some(ordinal),
+                    Some(hierarchy.call_id),
+                    Some(hierarchy.attempt.get()),
+                    detail,
+                ),
+            )
+            .await?;
+        }
+        Ok(ConnectorCallOutcome::NotDispatched)
+    }
+
     /// Journal, dispatch and journal the outcome of one connector call.
     #[allow(clippy::too_many_arguments)]
     async fn run_connector_call(
@@ -3721,8 +3750,11 @@ impl CodeModeTools {
         hierarchy: InvocationHierarchy,
         mutation_number: Option<usize>,
     ) -> Result<ConnectorCallOutcome, McpError> {
-        // Calls are created before they are first polled. One first polled
-        // after the attempt ended must not cross the pre-dispatch boundary.
+        // Calls are created before they are first polled, and an effect
+        // awaits its journal and claim checks before dispatch. The attempt can
+        // end during either, so an effect decides immediately before it is
+        // invoked, with nothing awaited in between, and a call first polled
+        // after the end never starts.
         if stopped.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(ConnectorCallOutcome::NotDispatched);
         }
@@ -3761,6 +3793,11 @@ impl CodeModeTools {
                     && attempt.profile == CodeExecutionProfile::Direct =>
             {
                 self.confirm_claim_before_effect(attempt.claim).await?;
+                if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                    return self
+                        .record_undispatched_effect(attempt, ordinal, hierarchy, event_detail)
+                        .await;
+                }
                 let dispatch = self.invoke_connector(
                     attempt.principal,
                     &admitted,
@@ -3807,6 +3844,11 @@ impl CodeModeTools {
                     // The bound grant claim repeats the gate's cancellation
                     // refusal atomically with authority consumption.
                     self.confirm_claim_before_effect(attempt.claim).await?;
+                    if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                        return self
+                            .record_undispatched_effect(attempt, ordinal, hierarchy, event_detail)
+                            .await;
+                    }
                     let approval =
                         mutation_approval_request(attempt, &admitted, &arguments, hierarchy);
                     let dispatch = self.invoke_connector(
@@ -8856,6 +8898,9 @@ mod tests {
         cancel_on_first_append: std::sync::atomic::AtomicBool,
         /// When set, effect outcome appends are refused by the claim fence.
         refuse_effect_outcomes: std::sync::atomic::AtomicBool,
+        /// A flag the next ordinary append sets, standing in for an attempt
+        /// that ends while a call awaits its start append.
+        stop_on_append: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
         /// Lease renewals observed while an effect dispatch was in flight.
         renewals: tokio::sync::Mutex<Vec<Duration>>,
         /// Claims recorded as interrupted when a drain window ended.
@@ -9341,6 +9386,9 @@ mod tests {
             claim: &ExecutionClaim,
             event: NewExecutionEvent,
         ) -> Result<bool, StoreError> {
+            if let Some(stop) = self.stop_on_append.lock().expect("stop hook lock").take() {
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             // Mirror the Pg fence: a pending cancellation refuses ordinary
             // appends, which is the broker's pre-dispatch boundary.
             let mut current = self.current.lock().await;
@@ -12770,6 +12818,62 @@ mod tests {
         ));
         assert_eq!(invocation.dispatched.load(Ordering::SeqCst), 0);
         assert!(store.events.lock().await.is_empty(), "nothing is journaled");
+    }
+
+    #[tokio::test]
+    async fn an_effect_whose_attempt_ends_before_invocation_is_closed_undispatched() {
+        let fake = FakeCatalog::with_tools(&[("email", "send", true)]);
+        let (call_id, admitted) = admitted_tool(&fake, "email", "send");
+        let admitted_calls = HashMap::from([(call_id.clone(), admitted)]);
+        let store = Arc::new(RecordingExecutionStore::default());
+        let invocation = Arc::new(TimedInvocation::new(Duration::from_secs(1)));
+        let tools =
+            CodeModeTools::new(Arc::new(fake), Arc::new(SelectiveAuthz), invocation.clone())
+                .with_execution_store(store.clone());
+        let source = "ended before invocation";
+        let claim = claimed_mutation_fixture(&store, source).await;
+        let principal = reader();
+        let attempt = RunnerAttempt {
+            principal: &principal,
+            execution_id: claim.execution_id,
+            claim: Some(&claim),
+            persist_content: true,
+            profile: CodeExecutionProfile::Direct,
+            source_digest: source_digest(source),
+            deadline: None,
+        };
+        // The attempt ends while the effect awaits its start append.
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        *store.stop_on_append.lock().expect("stop hook lock") = Some(stopped.clone());
+        let call = ReceivedCall::new(
+            &admitted_calls,
+            1,
+            CallDelivery::Started,
+            &call_id,
+            json!({"value": "late"}),
+        );
+        let (_, pending) = tools
+            .dispatch_connector_call(&attempt, &stopped, call, 1, &mut 0)
+            .expect("the call is admitted");
+
+        let finished = pending.await;
+
+        assert!(matches!(
+            finished.outcome,
+            Ok(ConnectorCallOutcome::NotDispatched)
+        ));
+        assert_eq!(invocation.dispatched.load(Ordering::SeqCst), 0);
+        let events = store.events.lock().await;
+        let kinds: Vec<ExecutionEventKind> = events.iter().map(|event| event.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ExecutionEventKind::ConnectorCallStarted,
+                ExecutionEventKind::ConnectorCallFailed,
+            ],
+            "the journaled start is closed so it never reads as an unknown outcome"
+        );
+        assert_eq!(events[1].detail["dispatched"], false);
     }
 
     #[tokio::test(start_paused = true)]
