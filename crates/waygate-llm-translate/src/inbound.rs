@@ -8,8 +8,8 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::canonical::{
-    CanonicalMessage, CanonicalTool, ContentPart, LlmRequest, ResponseFormat, Role, Sampling,
-    Surface, ToolChoice,
+    CanonicalMessage, CanonicalTool, ChatReasoningField, ContentPart, LlmRequest, ResponseFormat,
+    Role, Sampling, Surface, ToolChoice,
 };
 use crate::outbound::STRUCTURED_OUTPUT_TOOL_NAME;
 
@@ -105,6 +105,16 @@ struct ChatMsg {
     /// Correlation id on a `tool`-role result message.
     #[serde(default)]
     tool_call_id: Option<String>,
+    /// Reasoning a client replays on an earlier assistant message, under each
+    /// spelling OpenAI-compatible servers return it in. Typed fields (not in
+    /// `rest`) so the model's own output is carried back rather than rejected;
+    /// a JSON `null` is the same as absent.
+    #[serde(default)]
+    reasoning_content: Option<Value>,
+    #[serde(default)]
+    reasoning: Option<Value>,
+    #[serde(default)]
+    reasoning_details: Option<Value>,
     /// Remaining message-level fields this slice does not translate
     /// (`function_call` (deprecated), `name`, `refusal`, …). Rejected rather than
     /// silently dropped (I6).
@@ -505,8 +515,9 @@ fn parse_response_format(rf: Value) -> Result<Option<ResponseFormat>, TranslateE
 
 fn convert_message(m: ChatMsg) -> Result<CanonicalMessage, TranslateError> {
     // Reject remaining message-level fields we cannot translate faithfully (I6)
-    // — e.g. the deprecated `function_call`, or `name`/`refusal`. `tool_calls`
-    // and `tool_call_id` are typed fields (handled below), not in `rest`.
+    // — e.g. the deprecated `function_call`, or `name`/`refusal`. `tool_calls`,
+    // `tool_call_id` and the replayed-reasoning fields are typed fields (handled
+    // below), not in `rest`.
     if !m.rest.is_empty() {
         let mut params: Vec<String> = m.rest.keys().map(|k| format!("message.{k}")).collect();
         params.sort_unstable();
@@ -527,6 +538,17 @@ fn convert_message(m: ChatMsg) -> Result<CanonicalMessage, TranslateError> {
             )))
         }
     };
+    // Replayed reasoning is the model's own earlier output, so it belongs only
+    // on the assistant turn that produced it.
+    let reasoning = chat_reasoning_parts(m.reasoning_content, m.reasoning, m.reasoning_details)?;
+    if let Some(ContentPart::ChatReasoning { field, .. }) = reasoning.first() {
+        if !matches!(role, Role::Assistant) {
+            return Err(TranslateError::Invalid(format!(
+                "`{}` is only valid on an `assistant` message",
+                field.wire_name()
+            )));
+        }
+    }
     // A `tool`-role message is a tool result: its content is the result text and
     // it must carry the `tool_call_id` that correlates it with the call.
     if matches!(role, Role::Tool) {
@@ -553,14 +575,17 @@ fn convert_message(m: ChatMsg) -> Result<CanonicalMessage, TranslateError> {
             "`tool_call_id` is only valid on a `tool` message".into(),
         ));
     }
-    let mut content = match m.content {
-        ChatContent::Text(text) => vec![ContentPart::Text { text }],
-        ChatContent::Parts(parts) => parts
-            .into_iter()
-            .map(convert_part)
-            .collect::<Result<Vec<_>, _>>()?,
-        ChatContent::Absent => Vec::new(),
-    };
+    // Reasoning leads the turn, in the order the model produced it.
+    let mut content = reasoning;
+    match m.content {
+        ChatContent::Text(text) => content.push(ContentPart::Text { text }),
+        ChatContent::Parts(parts) => {
+            for part in parts {
+                content.push(convert_part(part)?);
+            }
+        }
+        ChatContent::Absent => {}
+    }
     // Assistant tool calls become `ToolUse` parts appended after any text.
     if let Some(calls) = m.tool_calls {
         if !matches!(role, Role::Assistant) {
@@ -573,6 +598,40 @@ fn convert_message(m: ChatMsg) -> Result<CanonicalMessage, TranslateError> {
         }
     }
     Ok(CanonicalMessage { role, content })
+}
+
+/// Carry the reasoning a client replays on a message as
+/// [`ContentPart::ChatReasoning`] parts, in a fixed field order. Only the shape
+/// is checked — a string for the text spellings, an array for
+/// `reasoning_details` — and the value is otherwise forwarded unchanged: the
+/// upstream that produced it is the authority on its contents.
+fn chat_reasoning_parts(
+    reasoning_content: Option<Value>,
+    reasoning: Option<Value>,
+    reasoning_details: Option<Value>,
+) -> Result<Vec<ContentPart>, TranslateError> {
+    let mut parts = Vec::new();
+    for (field, value) in [
+        (ChatReasoningField::ReasoningContent, reasoning_content),
+        (ChatReasoningField::Reasoning, reasoning),
+        (ChatReasoningField::ReasoningDetails, reasoning_details),
+    ] {
+        let Some(value) = value else { continue };
+        let (well_formed, expected) = match field {
+            ChatReasoningField::ReasoningDetails => (value.is_array(), "an array"),
+            ChatReasoningField::ReasoningContent | ChatReasoningField::Reasoning => {
+                (value.is_string(), "a string")
+            }
+        };
+        if !well_formed {
+            return Err(TranslateError::Invalid(format!(
+                "`{}` must be {expected}",
+                field.wire_name()
+            )));
+        }
+        parts.push(ContentPart::ChatReasoning { field, value });
+    }
+    Ok(parts)
 }
 
 /// Flatten a `tool` message's content (string, multipart text, or null) to the
@@ -1716,6 +1775,91 @@ mod tests {
             })),
             Err(TranslateError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn replayed_reasoning_is_carried_on_the_assistant_turn() {
+        // A coding agent replays the model's reasoning beside its tool call; the
+        // reasoning is model output, carried rather than rejected.
+        let req = parse_chat_completions(&json!({
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "list the files"},
+                {"role": "assistant", "content": null,
+                    "reasoning_content": "Run ls.", "reasoning": null,
+                    "tool_calls": [{"id": "c1", "type": "function",
+                        "function": {"name": "bash", "arguments": "{}"}}]},
+                {"role": "tool", "content": "a.txt", "tool_call_id": "c1"}
+            ]
+        }))
+        .unwrap();
+        // Reasoning leads the turn; a `null` spelling is absent, not empty.
+        assert_eq!(
+            req.messages[1].content,
+            vec![
+                ContentPart::ChatReasoning {
+                    field: ChatReasoningField::ReasoningContent,
+                    value: json!("Run ls."),
+                },
+                ContentPart::ToolUse {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                },
+            ]
+        );
+        // Every spelling is kept, each exactly as sent — an empty string too.
+        let all = parse_chat_completions(&json!({
+            "model": "m",
+            "messages": [{"role": "assistant", "content": "ok",
+                "reasoning_details": [{"type": "reasoning.encrypted", "data": "x"}],
+                "reasoning": "", "reasoning_content": "think"}]
+        }))
+        .unwrap();
+        assert_eq!(
+            all.messages[0].content,
+            vec![
+                ContentPart::ChatReasoning {
+                    field: ChatReasoningField::ReasoningContent,
+                    value: json!("think"),
+                },
+                ContentPart::ChatReasoning {
+                    field: ChatReasoningField::Reasoning,
+                    value: json!(""),
+                },
+                ContentPart::ChatReasoning {
+                    field: ChatReasoningField::ReasoningDetails,
+                    value: json!([{"type": "reasoning.encrypted", "data": "x"}]),
+                },
+                ContentPart::Text { text: "ok".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_replayed_reasoning_off_the_assistant_turn_or_misshapen() {
+        for (message, expected) in [
+            (
+                json!({"role": "user", "content": "x", "reasoning_content": "r"}),
+                "`reasoning_content` is only valid on an `assistant` message",
+            ),
+            (
+                json!({"role": "tool", "content": "x", "tool_call_id": "c1", "reasoning": "r"}),
+                "`reasoning` is only valid on an `assistant` message",
+            ),
+            (
+                json!({"role": "assistant", "content": "x", "reasoning_content": {"text": "r"}}),
+                "`reasoning_content` must be a string",
+            ),
+            (
+                json!({"role": "assistant", "content": "x", "reasoning_details": "r"}),
+                "`reasoning_details` must be an array",
+            ),
+        ] {
+            let err =
+                parse_chat_completions(&json!({"model": "m", "messages": [message]})).unwrap_err();
+            assert_eq!(err, TranslateError::Invalid(expected.into()), "{message}");
+        }
     }
 
     #[test]
