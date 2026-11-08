@@ -1,5 +1,14 @@
 # Release notes
 
+## 2.2.2
+
+- The dashboard's Decisions badge reads the pending decisions each time it
+  refreshes, so it no longer reports work that the Decisions queue does not
+  list. It refreshes when a page is restored with the back or forward button,
+  when its tab becomes visible, and periodically while the tab stays visible.
+  An expired session keeps the last count instead of starting a sign-in in
+  the background. No migration or configuration changes are required.
+
 ## 2.2.1
 
 - A database test of the bulk change-request panel checks each request's
