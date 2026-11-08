@@ -345,6 +345,8 @@ pub(super) struct StreamFinalize {
     /// How provider frames are presented to the client. The translator folds
     /// the audit/usage record the same way for every framing.
     pub(super) framing: ClientFraming,
+    /// A chat client asked for a final usage chunk (`stream_options`).
+    pub(super) client_usage: bool,
 }
 
 /// The client transport a streamed inference call is rendered into.
@@ -537,7 +539,8 @@ pub(super) fn finalizing_inference_stream(
         started,
         finished: false,
         telemetry_finished: false,
-        translator: StreamTranslator::for_record(fin.record_base),
+        translator: StreamTranslator::for_record(fin.record_base)
+            .with_client_usage(fin.client_usage),
         pending: VecDeque::new(),
         usage: fin.usage,
         tenant_id: fin.tenant_id,

@@ -170,6 +170,7 @@ struct LlmRequest {
                                               //   upstream, gated for non-Responses routes (§14)
     store: Option<bool>,                      // forwarded; store:false is honoured (§14)
     stream: bool,
+    stream_include_usage: bool,               // chat stream_options.include_usage (§4.4)
 }
 enum Surface { ChatCompletions, Responses }
 ```
@@ -318,6 +319,16 @@ into the OpenAI `chat.completion.chunk` shape the gateway streams back to a
 `InferenceRecord`. `push(frame) -> StreamStep { chunks: Vec<Value>, done }`; OpenAI/OpenRouter
 frames pass through 1:1, Anthropic / Gemini / Responses events are translated, and each
 non-OpenAI stream synthesizes the terminal `[DONE]` for the chat transport.
+
+A chat client that sets `stream_options.include_usage` receives a final usage-only chunk
+(`choices: []`) before `[DONE]` on every route. OpenAI/OpenRouter routes already send it,
+because the gateway always requests usage upstream for metering and forwards that chunk; the
+translated protocols add one carrying the same prompt and completion counts as the unary chat
+body, with their sum as the total, and add none when the provider reported no counts. Without the option, or
+with `include_usage: false`, each route keeps its existing behavior: OpenAI/OpenRouter
+streams still carry the upstream's usage chunk and translated streams carry none. Other
+`stream_options` keys are rejected by name, and a cache-hit replay ends with the stored
+usage.
 
 For a `/v1/responses` client, this chat-chunk stream is the egress *source*, not the
 client output: an OpenAI-Responses upstream's frames are relayed 1:1 as named Responses

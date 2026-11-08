@@ -592,6 +592,59 @@ async fn responses_surface_streaming_relays_named_events_through_egress() {
 }
 
 #[tokio::test]
+async fn chat_stream_ends_with_usage_on_a_translated_route_when_asked() {
+    // A chat client that sets `stream_options.include_usage` gets a final usage
+    // chunk even when the upstream speaks another protocol; a client that does
+    // not ask gets the stream it always did.
+    use futures::StreamExt;
+
+    let addr = spawn_anthropic_stream_provider().await;
+    let collect = |stream_options: Option<Value>| async move {
+        let dispatcher = LlmDispatcher::new(
+            ProviderClient::new(reqwest::Client::new()),
+            anthropic_store(),
+        );
+        let svc = DefaultInvocationService::new(
+            Arc::new(FakeCatalog),
+            Arc::new(AllowAllGate),
+            Arc::new(RecordingSink::default()),
+        )
+        .with_llm(dispatcher, anthropic_resolver(addr));
+        let mut args = json!({"model": "claude-x", "stream": true,
+            "messages": [{"role": "user", "content": "hi"}]})
+        .as_object()
+        .cloned()
+        .unwrap();
+        if let Some(options) = stream_options {
+            args.insert("stream_options".into(), options);
+        }
+        let req = InvocationRequest::new("llm", "claude-x").with_arguments(Some(args));
+        let mut stream = match svc.invoke(None, req).await.expect("invoke") {
+            InvocationResponse::Stream(s) => s,
+            other => panic!("expected Stream, got {other:?}"),
+        };
+        let mut events = Vec::new();
+        while let Some(item) = stream.next().await {
+            events.push(item.expect("chunk").event);
+        }
+        events
+    };
+
+    let asked = collect(Some(json!({"include_usage": true}))).await;
+    let [.., usage, done] = asked.as_slice() else {
+        panic!("too few chunks: {asked:?}");
+    };
+    assert_eq!(done.as_str(), Some("[DONE]"));
+    assert_eq!(usage["choices"], json!([]));
+    assert_eq!(usage["usage"]["completion_tokens"], 2);
+    assert!(usage["usage"]["prompt_tokens"].as_u64().is_some());
+
+    let plain = collect(None).await;
+    assert!(plain.iter().all(|e| e.get("usage").is_none()));
+    assert_eq!(plain.len(), asked.len() - 1);
+}
+
+#[tokio::test]
 async fn responses_surface_streaming_translates_anthropic_to_responses_events() {
     // R3b: a /v1/responses streaming caller on a NON-Responses upstream (Anthropic)
     // has its normalized chat-chunk stream LIFTED into Responses streaming events:

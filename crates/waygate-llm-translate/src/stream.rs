@@ -146,7 +146,13 @@ pub struct StreamStep {
 ///
 /// Built from the pre-dispatch base record, whose `upstream_protocol` selects
 /// the variant — so no extra protocol plumbing is needed at the call site.
-pub enum StreamTranslator {
+pub struct StreamTranslator {
+    inner: ProtocolTranslator,
+    /// The client asked for a final usage chunk; see [`Self::with_client_usage`].
+    client_usage: bool,
+}
+
+enum ProtocolTranslator {
     OpenAi(OpenAiChatStreamAggregator),
     Anthropic(AnthropicStreamTranslator),
     Gemini(GeminiStreamTranslator),
@@ -157,23 +163,56 @@ impl StreamTranslator {
     /// Choose the translator matching the call's upstream protocol (carried on
     /// the pre-dispatch base record).
     pub fn for_record(base: InferenceRecord) -> Self {
-        match base.upstream_protocol {
+        let inner = match base.upstream_protocol {
             UpstreamProtocol::AnthropicMessages => {
-                Self::Anthropic(AnthropicStreamTranslator::new(base))
+                ProtocolTranslator::Anthropic(AnthropicStreamTranslator::new(base))
             }
-            UpstreamProtocol::Gemini => Self::Gemini(GeminiStreamTranslator::new(base)),
+            UpstreamProtocol::Gemini => {
+                ProtocolTranslator::Gemini(GeminiStreamTranslator::new(base))
+            }
             UpstreamProtocol::OpenAiResponses => {
-                Self::Responses(ResponsesStreamTranslator::new(base))
+                ProtocolTranslator::Responses(ResponsesStreamTranslator::new(base))
             }
-            _ => Self::OpenAi(OpenAiChatStreamAggregator::new(base)),
+            _ => ProtocolTranslator::OpenAi(OpenAiChatStreamAggregator::new(base)),
+        };
+        Self {
+            inner,
+            client_usage: false,
         }
+    }
+
+    /// End the client stream with a usage-only chunk (`choices: []`) before
+    /// `[DONE]`, as a client that sets `stream_options.include_usage` expects.
+    /// An OpenAI-compatible upstream already sends that chunk — the gateway
+    /// always requests it for metering — and it passes through unchanged, so
+    /// only translated protocols add one. A provider that reported no token
+    /// counts gets no usage chunk rather than an invented one.
+    pub fn with_client_usage(mut self, include: bool) -> Self {
+        self.client_usage = include;
+        self
     }
 
     /// Observe one provider `data:` payload: update the in-progress record and
     /// return the client frames to forward plus the terminal flag.
     pub fn push(&mut self, data: &str) -> StreamStep {
-        match self {
-            Self::OpenAi(agg) => {
+        let mut step = self.push_protocol(data);
+        let translated = !matches!(self.inner, ProtocolTranslator::OpenAi(_));
+        if self.client_usage && translated && step.done {
+            if let Some(chunk) = usage_chunk(&self.snapshot()) {
+                let done_at = step
+                    .chunks
+                    .iter()
+                    .position(|c| c.as_str() == Some("[DONE]"))
+                    .unwrap_or(step.chunks.len());
+                step.chunks.insert(done_at, chunk);
+            }
+        }
+        step
+    }
+
+    fn push_protocol(&mut self, data: &str) -> StreamStep {
+        match &mut self.inner {
+            ProtocolTranslator::OpenAi(agg) => {
                 // The client already speaks OpenAI: fold for metering and forward
                 // the frame verbatim (1:1), preserving the prior passthrough.
                 agg.observe_data(data);
@@ -186,21 +225,47 @@ impl StreamTranslator {
                     done,
                 }
             }
-            Self::Anthropic(t) => t.push(data),
-            Self::Gemini(t) => t.push(data),
-            Self::Responses(t) => t.push(data),
+            ProtocolTranslator::Anthropic(t) => t.push(data),
+            ProtocolTranslator::Gemini(t) => t.push(data),
+            ProtocolTranslator::Responses(t) => t.push(data),
         }
     }
 
     /// A clone of the record accumulated so far (for the close-time usage row).
     pub fn snapshot(&self) -> InferenceRecord {
-        match self {
-            Self::OpenAi(a) => a.snapshot(),
-            Self::Anthropic(t) => t.snapshot(),
-            Self::Gemini(t) => t.snapshot(),
-            Self::Responses(t) => t.snapshot(),
+        match &self.inner {
+            ProtocolTranslator::OpenAi(a) => a.snapshot(),
+            ProtocolTranslator::Anthropic(t) => t.snapshot(),
+            ProtocolTranslator::Gemini(t) => t.snapshot(),
+            ProtocolTranslator::Responses(t) => t.snapshot(),
         }
     }
+}
+
+/// The usage-only `chat.completion.chunk` a translated stream ends with when the
+/// client asked for usage. Prompt and completion counts are the ones the unary
+/// chat body reports for that provider, and the total is their sum. `None` when
+/// the provider reported neither count.
+fn usage_chunk(record: &InferenceRecord) -> Option<Value> {
+    let usage = &record.usage;
+    if usage.input.is_none() && usage.output.is_none() {
+        return None;
+    }
+    let total = match (usage.input, usage.output) {
+        (Some(prompt), Some(completion)) => prompt.checked_add(completion),
+        _ => None,
+    };
+    Some(json!({
+        "id": record.upstream_request_id.clone().unwrap_or_default(),
+        "object": "chat.completion.chunk",
+        "model": record.model_served.clone().unwrap_or_default(),
+        "choices": [],
+        "usage": {
+            "prompt_tokens": usage.input,
+            "completion_tokens": usage.output,
+            "total_tokens": total,
+        },
+    }))
 }
 
 /// Per-Anthropic-content-block state for a `tool_use` block being streamed.
@@ -1761,6 +1826,104 @@ mod tests {
         assert_eq!(rec.finish_reason, Some(FinishReason::Stop));
         assert_eq!(rec.provider_prompt_cache, Some(true));
         assert!(!rec.refusal);
+    }
+
+    /// A complete provider stream for each translated protocol.
+    fn translated_streams() -> Vec<(InferenceRecord, Vec<&'static str>)> {
+        vec![
+            (
+                anthropic_base(),
+                vec![
+                    r#"{"type":"message_start","message":{"id":"msg_1","model":"claude-served-x","usage":{"input_tokens":12,"output_tokens":1}}}"#,
+                    r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
+                    r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}"#,
+                    r#"{"type":"message_stop"}"#,
+                ],
+            ),
+            (
+                gemini_base(),
+                vec![
+                    r#"{"responseId":"resp_1","modelVersion":"gemini-served-x","candidates":[{"finishReason":"STOP","content":{"role":"model","parts":[{"text":"Hi"}]}}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}"#,
+                ],
+            ),
+            (
+                responses_base(),
+                vec![
+                    r#"{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4","status":"in_progress"}}"#,
+                    r#"{"type":"response.output_text.delta","delta":"Hi"}"#,
+                    r#"{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","status":"completed","usage":{"input_tokens":7,"output_tokens":3}}}"#,
+                ],
+            ),
+        ]
+    }
+
+    /// Every client frame a stream produces, and the record it folded.
+    fn client_frames(
+        base: InferenceRecord,
+        frames: &[&str],
+        client_usage: bool,
+    ) -> (Vec<Value>, InferenceRecord) {
+        let mut t = StreamTranslator::for_record(base).with_client_usage(client_usage);
+        let mut out = Vec::new();
+        for frame in frames {
+            out.extend(t.push(frame).chunks);
+        }
+        (out, t.snapshot())
+    }
+
+    #[test]
+    fn translated_streams_end_with_usage_when_the_client_asks() {
+        for (base, frames) in translated_streams() {
+            let protocol = base.upstream_protocol;
+            let (out, rec) = client_frames(base.clone(), &frames, true);
+            let [.., usage, done] = out.as_slice() else {
+                panic!("{protocol:?}: too few client frames");
+            };
+            assert_eq!(*done, Value::String("[DONE]".into()), "{protocol:?}");
+            assert_eq!(usage["object"], "chat.completion.chunk", "{protocol:?}");
+            assert_eq!(usage["choices"], json!([]), "{protocol:?}");
+            assert_eq!(usage["model"], json!(rec.model_served), "{protocol:?}");
+            let (input, output) = (rec.usage.input.unwrap(), rec.usage.output.unwrap());
+            assert_eq!(
+                usage["usage"],
+                json!({"prompt_tokens": input, "completion_tokens": output,
+                       "total_tokens": input + output}),
+                "{protocol:?}"
+            );
+            // A client that did not ask gets the same stream without it.
+            let (plain, _) = client_frames(base, &frames, false);
+            assert_eq!(
+                plain[..plain.len() - 1],
+                out[..out.len() - 2],
+                "{protocol:?}"
+            );
+            assert_eq!(*plain.last().unwrap(), Value::String("[DONE]".into()));
+        }
+    }
+
+    #[test]
+    fn openai_passthrough_is_unchanged_by_the_client_usage_request() {
+        // The upstream's own usage chunk already reaches the client.
+        let frames = [
+            r#"{"id":"c1","model":"m","choices":[{"delta":{"content":"hi"}}]}"#,
+            r#"{"id":"c1","model":"m","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}"#,
+            "[DONE]",
+        ];
+        let (with, _) = client_frames(base(), &frames, true);
+        let (without, _) = client_frames(base(), &frames, false);
+        assert_eq!(with, without);
+        assert_eq!(with.len(), frames.len());
+    }
+
+    #[test]
+    fn no_usage_chunk_is_invented_when_the_provider_reports_none() {
+        let frames = [
+            r#"{"type":"message_start","message":{"id":"msg_1","model":"claude-served-x"}}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        let (out, _) = client_frames(anthropic_base(), &frames, true);
+        assert!(out.iter().all(|c| c.get("usage").is_none()));
+        assert_eq!(*out.last().unwrap(), Value::String("[DONE]".into()));
     }
 
     #[test]

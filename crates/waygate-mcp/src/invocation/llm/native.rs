@@ -131,6 +131,7 @@ impl DefaultInvocationService {
                         model_alias: ctx.tool.to_owned(),
                         cache_store: None,
                         framing: ClientFraming::NativeRelay,
+                        client_usage: false,
                     },
                 );
                 Ok(InvocationResponse::Stream(hold_response_capacity(

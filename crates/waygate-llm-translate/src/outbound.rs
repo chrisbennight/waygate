@@ -1354,6 +1354,7 @@ mod tests {
             previous_response_id: None,
             store: None,
             stream: false,
+            stream_include_usage: false,
         };
         let err = render_anthropic_messages(&req, "m").unwrap_err();
         assert!(
@@ -1480,6 +1481,7 @@ mod tests {
             previous_response_id: None,
             store: None,
             stream: false,
+            stream_include_usage: false,
         };
         assert!(matches!(render_gemini(&sys_img).unwrap_err(),
             TranslateError::Unsupported { surface: "gemini", param } if param == "non-text content in a system message"));
@@ -1600,6 +1602,7 @@ mod tests {
             previous_response_id: None,
             store: None,
             stream: false,
+            stream_include_usage: false,
         };
         assert!(
             matches!(render_openai_responses(&sys_img, "m").unwrap_err(),

@@ -75,6 +75,11 @@ struct ChatReq {
     parallel_tool_calls: Option<bool>,
     #[serde(default)]
     stream: bool,
+    /// Streaming delivery options. A typed field so `include_usage` is honored
+    /// rather than rejected; any other key is an instruction the gateway does not
+    /// implement and is rejected by [`parse_stream_options`].
+    #[serde(default)]
+    stream_options: Option<Value>,
     /// Any Chat Completions field this slice does not translate (e.g.
     /// `presence_penalty`, `logit_bias`, `logprobs`). Serde would otherwise
     /// ignore unknown fields and we would silently strip request semantics —
@@ -201,6 +206,11 @@ pub fn parse_chat_completions(body: &Value) -> Result<LlmRequest, TranslateError
             "`tool_choice` requires at least one tool".into(),
         ));
     }
+    let include_usage = req
+        .stream_options
+        .map(parse_stream_options)
+        .transpose()?
+        .unwrap_or(false);
     Ok(LlmRequest {
         inbound_surface: Surface::ChatCompletions,
         model_requested: req.model,
@@ -221,7 +231,27 @@ pub fn parse_chat_completions(body: &Value) -> Result<LlmRequest, TranslateError
         previous_response_id: None,
         store: None,
         stream: req.stream,
+        // A unary response always carries usage, so the option only matters
+        // on a stream.
+        stream_include_usage: req.stream && include_usage,
     })
+}
+
+/// Parse Chat Completions `stream_options`, returning `include_usage`. That key
+/// asks for a final usage chunk on a streamed response, which the gateway can
+/// provide on every route; any other key is rejected rather than ignored (I6).
+fn parse_stream_options(options: Value) -> Result<bool, TranslateError> {
+    let obj = options
+        .as_object()
+        .ok_or_else(|| TranslateError::Invalid("`stream_options` must be an object".into()))?;
+    reject_extra_keys(obj, &["include_usage"], "stream_options")?;
+    match obj.get("include_usage") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(include)) => Ok(*include),
+        Some(_) => Err(TranslateError::Invalid(
+            "`stream_options.include_usage` must be a boolean".into(),
+        )),
+    }
 }
 
 /// Parse one OpenAI Chat Completions tool definition into a [`CanonicalTool`].
@@ -861,6 +891,7 @@ pub fn parse_responses(body: &Value) -> Result<LlmRequest, TranslateError> {
         previous_response_id: req.previous_response_id,
         store: req.store,
         stream: req.stream,
+        stream_include_usage: false,
     })
 }
 
@@ -1649,6 +1680,55 @@ mod tests {
     }
 
     #[test]
+    fn stream_options_include_usage_is_honored_and_other_keys_rejected() {
+        let parse = |stream: bool, options: Value| {
+            parse_chat_completions(&json!({
+                "model": "m", "messages": [{"role": "user", "content": "x"}],
+                "stream": stream, "stream_options": options
+            }))
+        };
+        // A coding agent's default streaming request asks for usage.
+        assert!(
+            parse(true, json!({"include_usage": true}))
+                .unwrap()
+                .stream_include_usage
+        );
+        for (stream, options) in [
+            (true, json!({"include_usage": false})),
+            (true, json!({})),
+            (true, Value::Null),
+            // A unary response always carries usage; the option is moot there.
+            (false, json!({"include_usage": true})),
+        ] {
+            assert!(
+                !parse(stream, options.clone()).unwrap().stream_include_usage,
+                "{options}"
+            );
+        }
+        // An option the gateway does not implement is named, not ignored.
+        assert_eq!(
+            parse(
+                true,
+                json!({"include_usage": true, "include_obfuscation": false})
+            )
+            .unwrap_err(),
+            TranslateError::Unsupported {
+                surface: "chat_completions",
+                param: "stream_options.include_obfuscation".into(),
+            }
+        );
+        for options in [json!({"include_usage": "yes"}), json!("include_usage")] {
+            assert!(
+                matches!(
+                    parse(true, options.clone()),
+                    Err(TranslateError::Invalid(_))
+                ),
+                "{options}"
+            );
+        }
+    }
+
+    #[test]
     fn parses_assistant_tool_calls_and_tool_results() {
         // Assistant `tool_calls` graduate to `ToolUse` content parts (appended
         // after any text); a `tool` message graduates to a `ToolResult` part.
@@ -2335,6 +2415,7 @@ mod tests {
             previous_response_id: None,
             store: None,
             stream: false,
+            stream_include_usage: false,
         }
     }
 
