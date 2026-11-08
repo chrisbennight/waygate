@@ -2651,6 +2651,13 @@ impl CodeModeTools {
     /// than checking it inside the runner loop, lets every one of those
     /// fences see it, including the ones behind database writes and the
     /// attempt deadline.
+    ///
+    /// The attempt is polled throughout, including while the request is
+    /// being written: it may be inside a journal transaction holding the
+    /// execution row's lock, which the request also takes, so pausing it
+    /// would leave the request waiting for a lock nothing can release. A
+    /// failed write is retried while the attempt runs, so a transient store
+    /// error delays the cancellation instead of losing it.
     async fn run_with_caller<T>(
         &self,
         claimed: &ClaimedExecution<'_>,
@@ -2659,31 +2666,35 @@ impl CodeModeTools {
         let Some(caller) = claimed.caller else {
             return run.await;
         };
-        tokio::pin!(run);
-        tokio::select! {
-            biased;
-            outcome = &mut run => outcome,
-            () = caller.cancelled() => {
-                let principal = claimed.principal;
-                let execution_id = claimed.claim.execution_id;
-                if let Err(error) = claimed
-                    .store
-                    .request_cancellation(
-                        principal.tenant.as_str(),
-                        &principal.sub,
-                        &principal.issuer,
-                        execution_id,
-                    )
-                    .await
-                {
-                    tracing::error!(
-                        %error,
-                        %execution_id,
-                        "could not record Code Mode cancellation for a departed caller"
-                    );
-                }
-                run.await
+        let record = async {
+            caller.cancelled().await;
+            let principal = claimed.principal;
+            let execution_id = claimed.claim.execution_id;
+            let mut retry_after = CANCELLATION_POLL_INTERVAL;
+            while let Err(error) = claimed
+                .store
+                .request_cancellation(
+                    principal.tenant.as_str(),
+                    &principal.sub,
+                    &principal.issuer,
+                    execution_id,
+                )
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    %execution_id,
+                    "could not record Code Mode cancellation for a departed caller; retrying"
+                );
+                tokio::time::sleep(retry_after).await;
+                retry_after = (retry_after * 2).min(CANCELLATION_FALLBACK_INTERVAL);
             }
+            // Recorded: the attempt now ends at its next journal boundary.
+            std::future::pending::<std::convert::Infallible>().await
+        };
+        tokio::select! {
+            outcome = run => outcome,
+            never = record => match never {},
         }
     }
 
@@ -8488,6 +8499,9 @@ mod tests {
         /// `tasks/cancel` arriving between the fenced call-start append and
         /// the effect dispatch.
         cancel_on_first_append: std::sync::atomic::AtomicBool,
+        /// How many upcoming `request_cancellation` calls fail with a
+        /// transient store error before one succeeds.
+        failing_cancellation_requests: std::sync::atomic::AtomicUsize,
         /// Lease renewals observed while an effect dispatch was in flight.
         renewals: tokio::sync::Mutex<Vec<Duration>>,
         /// Claims recorded as interrupted when a drain window ended.
@@ -9074,6 +9088,17 @@ mod tests {
             id: Uuid,
         ) -> Result<Option<Execution>, StoreError> {
             let mut current = self.current.lock().await;
+            if self
+                .failing_cancellation_requests
+                .try_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok()
+            {
+                return Err(StoreError::Database(sqlx::Error::PoolTimedOut));
+            }
             let Some(execution) = current.as_mut().filter(|execution| {
                 execution.tenant_id == tenant_id
                     && execution.principal_sub == principal_sub
@@ -12221,6 +12246,119 @@ mod tests {
         .await
         .expect("the attempt observes the recorded request and finishes");
         assert_eq!(outcome, "observed");
+    }
+
+    /// A journal write holds the execution row while it awaits, and
+    /// recording the request needs that row too. The attempt must keep being
+    /// polled while the request is written, or neither could finish.
+    #[tokio::test]
+    async fn recording_a_departed_caller_keeps_the_attempt_running() {
+        let store = Arc::new(RecordingExecutionStore::default());
+        let tools = CodeModeTools::new(
+            Arc::new(FakeCatalog::with_tools(&[])),
+            Arc::new(SelectiveAuthz),
+            Arc::new(RecordingInvocation::default()),
+        )
+        .with_execution_store(store.clone());
+        let claim = claimed_mutation_fixture(&store, "return 1;").await;
+        let shared: SharedExecutionStore = store.clone();
+        let principal = reader();
+        let caller = CancellationToken::new();
+        caller.cancel();
+        let claimed = ClaimedExecution {
+            store: &shared,
+            principal: &principal,
+            claim: &claim,
+            persist_result: true,
+            deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+            caller: Some(&caller),
+        };
+        let attempt = async {
+            // Holds the row across an await that only this attempt's own
+            // polling completes, as a journal transaction does.
+            {
+                let _row = store.current.lock().await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            loop {
+                let requested = store
+                    .current
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|execution| execution.cancellation_requested_at.is_some());
+                if requested {
+                    break "observed";
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            tools.run_with_caller(&claimed, attempt),
+        )
+        .await
+        .expect("the attempt releases the row and the request is then recorded");
+        assert_eq!(outcome, "observed");
+    }
+
+    /// A transient store error while recording the request delays the
+    /// cancellation; it is retried while the attempt runs, not dropped.
+    #[tokio::test]
+    async fn a_failed_cancellation_record_is_retried() {
+        let store = Arc::new(RecordingExecutionStore::default());
+        store
+            .failing_cancellation_requests
+            .store(2, std::sync::atomic::Ordering::SeqCst);
+        let tools = CodeModeTools::new(
+            Arc::new(FakeCatalog::with_tools(&[])),
+            Arc::new(SelectiveAuthz),
+            Arc::new(RecordingInvocation::default()),
+        )
+        .with_execution_store(store.clone());
+        let claim = claimed_mutation_fixture(&store, "return 1;").await;
+        let shared: SharedExecutionStore = store.clone();
+        let principal = reader();
+        let caller = CancellationToken::new();
+        caller.cancel();
+        let claimed = ClaimedExecution {
+            store: &shared,
+            principal: &principal,
+            claim: &claim,
+            persist_result: true,
+            deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+            caller: Some(&caller),
+        };
+        let attempt = async {
+            loop {
+                let requested = store
+                    .current
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|execution| execution.cancellation_requested_at.is_some());
+                if requested {
+                    break "observed";
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            tools.run_with_caller(&claimed, attempt),
+        )
+        .await
+        .expect("the request is recorded once the store recovers");
+        assert_eq!(outcome, "observed");
+        assert_eq!(
+            store
+                .failing_cancellation_requests
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "both transient failures were retried"
+        );
     }
 
     /// The requester is off the call path when a live-claim cancellation
