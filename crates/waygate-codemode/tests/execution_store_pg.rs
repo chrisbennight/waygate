@@ -988,10 +988,47 @@ async fn owned_in_flight_listing_is_identity_scoped_and_keyset_bounded() {
         "paging past the last row yields nothing"
     );
 
+    // The retained listing adds the caller's finished row and nothing else:
+    // rows past retention, other owners, issuer-less and keyless rows, tool
+    // calls and other confinements stay out exactly as they do in flight.
+    let retained = store
+        .list_owned_retained(&owner, None, 10)
+        .await
+        .expect("retained listing");
+    assert_eq!(
+        retained.iter().map(|e| e.id).collect::<Vec<_>>(),
+        vec![terminal.id, mine[2].id, mine[1].id, mine[0].id],
+        "finished rows join in-flight ones, newest first"
+    );
+    assert!(
+        retained[0].status.is_terminal() && retained[0].completed_at.is_some(),
+        "a finished row is listed as finished"
+    );
+    let retained_tail = store
+        .list_owned_retained(&owner, Some((retained[1].submitted_at, retained[1].id)), 10)
+        .await
+        .expect("retained second page");
+    assert_eq!(
+        retained_tail.iter().map(|e| e.id).collect::<Vec<_>>(),
+        vec![mine[1].id, mine[0].id],
+        "the keyset bound pages the retained listing too"
+    );
+
     let confined_owner = OwnedInFlight {
         profile_confinement: restriction,
         ..owner.clone()
     };
+    assert_eq!(
+        store
+            .list_owned_retained(&confined_owner, None, 10)
+            .await
+            .expect("confined retained listing")
+            .iter()
+            .map(|e| e.id)
+            .collect::<Vec<_>>(),
+        vec![restricted.id],
+        "a confined caller's retained listing keeps its confinement"
+    );
     assert_eq!(
         store
             .list_owned_in_flight(&confined_owner, None, 10)

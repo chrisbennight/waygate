@@ -1191,7 +1191,7 @@
       {
         "name": "codemode.executions",
         "title": "List the caller's in-flight Code Mode executions",
-        "description": "List the caller's own in-flight executions, newest first, to recover a handle that was lost or to check for an existing attempt before starting another. Entries use the `codemode.status` vocabulary without the checkpoint; a listed identifier works with `codemode.status`, `codemode.result`, `codemode.artifacts` and `codemode.cancel`. An empty page means nothing of the caller's is in flight. Finished executions are not listed, but a known handle's outcome stays available through `codemode.status` and `codemode.result` until retention ends. Pass `next_cursor` unchanged to continue.",
+        "description": "List the caller's own in-flight executions, newest first, to recover a handle that was lost or to check for an existing attempt before starting another. Entries use the `codemode.status` vocabulary without the checkpoint; a listed identifier works with `codemode.status`, `codemode.result`, `codemode.artifacts` and `codemode.cancel`. An empty page means nothing of the caller's is in flight. Pass `include_finished: true` to also list finished executions until retention ends, such as a blocking execution whose response was lost. Pass `next_cursor` unchanged to continue.",
         "inputSchema": {
           "additionalProperties": false,
           "title": "ExecutionListParams",
@@ -1221,6 +1221,11 @@
                   "type": "null"
                 }
               ]
+            },
+            "include_finished": {
+              "description": "Also list retained finished executions. Defaults to false.",
+              "type": "boolean",
+              "default": false
             }
           }
         },

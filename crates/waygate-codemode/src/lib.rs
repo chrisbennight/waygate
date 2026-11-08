@@ -447,13 +447,14 @@ pub struct OwnedInFlight {
     pub profile_confinement: Value,
 }
 
-/// The decision-shaped subset of an execution a listing returns. This is a
+/// The decision-shaped subset of an execution an owner listing returns,
+/// whether the execution is still in flight or already finished. This is a
 /// SQL-level selection, not a projection of a full row: caller-controlled
 /// payloads — source, checkpoints, results, tool snapshots — are never
 /// materialized, so a page's size is bounded by its row count alone no
 /// matter what the listed programs stored.
 #[derive(Debug, Clone)]
-pub struct InFlightExecution {
+pub struct ListedExecution {
     pub id: Uuid,
     pub status: ExecutionStatus,
     pub terminal_reason_code: Option<String>,
@@ -467,7 +468,7 @@ pub struct InFlightExecution {
 
 /// The operator-facing metadata subset of an in-flight execution.
 ///
-/// Unlike [`InFlightExecution`] this carries the owner identity and claim
+/// Unlike [`ListedExecution`] this carries the owner identity and claim
 /// liveness: the operator's question is "what is running here, for whom,
 /// and since when", which the owner-scoped listing deliberately omits
 /// because its caller already is the owner. It stays payload-free for the
@@ -710,7 +711,25 @@ pub trait ExecutionStore: Send + Sync + 'static {
         owner: &OwnedInFlight,
         before: Option<(OffsetDateTime, Uuid)>,
         limit: usize,
-    ) -> Result<Vec<InFlightExecution>, StoreError> {
+    ) -> Result<Vec<ListedExecution>, StoreError> {
+        let _ = (owner, before, limit);
+        Ok(Vec::new())
+    }
+
+    /// List every retained Code Mode execution the owner can still reach,
+    /// finished or not, newest submission first. This is how a caller whose
+    /// response was lost, such as a blocking execution cancelled with its
+    /// request, learns how the execution ended without holding its id.
+    ///
+    /// Scoping, retention, paging and the decision-shaped selection are
+    /// those of [`ExecutionStore::list_owned_in_flight`]; only the
+    /// in-flight restriction is absent.
+    async fn list_owned_retained(
+        &self,
+        owner: &OwnedInFlight,
+        before: Option<(OffsetDateTime, Uuid)>,
+        limit: usize,
+    ) -> Result<Vec<ListedExecution>, StoreError> {
         let _ = (owner, before, limit);
         Ok(Vec::new())
     }

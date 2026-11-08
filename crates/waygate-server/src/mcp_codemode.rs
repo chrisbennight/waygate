@@ -1704,7 +1704,8 @@ impl CodeModeTools {
         Ok(structured(&response))
     }
 
-    /// List the caller's own in-flight executions, newest first.
+    /// List the caller's own in-flight executions, newest first, and with
+    /// `include_finished` its retained finished ones too.
     ///
     /// This is the recovery half of retry-safe starting: convergence prevents
     /// an orphan, and this listing finds one that already exists — work whose
@@ -1739,13 +1740,16 @@ impl CodeModeTools {
             principal_issuer: principal.issuer.clone(),
             profile_confinement: task_profile_confinement(principal),
         };
-        let mut executions = store
-            .list_owned_in_flight(&owner, before, limit.saturating_add(1))
-            .await
-            .map_err(|error| {
-                tracing::error!(%error, "could not list Code Mode executions");
-                execution_unavailable()
-            })?;
+        let page = limit.saturating_add(1);
+        let listed = if params.include_finished {
+            store.list_owned_retained(&owner, before, page).await
+        } else {
+            store.list_owned_in_flight(&owner, before, page).await
+        };
+        let mut executions = listed.map_err(|error| {
+            tracing::error!(%error, "could not list Code Mode executions");
+            execution_unavailable()
+        })?;
         let next_cursor = if executions.len() > limit {
             executions.pop();
             executions.last().map(execution_list_cursor)
@@ -1754,7 +1758,7 @@ impl CodeModeTools {
         };
         Ok(structured(&ExecutionListResponse {
             contract_version: ContractVersion::CODE_MODE,
-            executions: executions.iter().map(in_flight_status_projection).collect(),
+            executions: executions.iter().map(listed_status_projection).collect(),
             next_cursor,
         }))
     }
@@ -4764,7 +4768,7 @@ fn parse_artifact_cursor(cursor: &str) -> Result<i64, McpError> {
 /// timestamp travels as unix nanoseconds so the round trip is exact: an
 /// equal-timestamp tie is broken by the identifier, and a lossy encoding
 /// would skip or repeat rows at page boundaries.
-fn execution_list_cursor(entry: &waygate_codemode::InFlightExecution) -> String {
+fn execution_list_cursor(entry: &waygate_codemode::ListedExecution) -> String {
     format!("{}.{}", entry.submitted_at.unix_timestamp_nanos(), entry.id)
 }
 
@@ -4773,9 +4777,7 @@ fn execution_list_cursor(entry: &waygate_codemode::InFlightExecution) -> String 
 /// checkpoints are caller-controlled payloads, so a page that included them
 /// would grow with what the listed programs stored rather than with its row
 /// count. The by-id poll reports the checkpoint for a discovered identifier.
-fn in_flight_status_projection(
-    entry: &waygate_codemode::InFlightExecution,
-) -> ExecutionStatusResponse {
+fn listed_status_projection(entry: &waygate_codemode::ListedExecution) -> ExecutionStatusResponse {
     ExecutionStatusResponse {
         contract_version: ContractVersion::CODE_MODE,
         execution_id: entry.id,
@@ -6433,6 +6435,9 @@ struct ExecutionListParams {
     /// Maximum returned executions. Defaults to 50.
     #[schemars(range(min = 1))]
     limit: Option<usize>,
+    /// Also list retained finished executions. Defaults to false.
+    #[serde(default)]
+    include_finished: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -7448,9 +7453,9 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
              lost or to check for an existing attempt before starting another. Entries use the \
              `codemode.status` vocabulary without the checkpoint; a listed identifier works with \
              `codemode.status`, `codemode.result`, `codemode.artifacts` and `codemode.cancel`. An \
-             empty page means nothing of the caller's is in flight. Finished executions are not \
-             listed, but a known handle's outcome stays available through `codemode.status` and \
-             `codemode.result` until retention ends. Pass `next_cursor` unchanged to continue.",
+             empty page means nothing of the caller's is in flight. Pass `include_finished: true` \
+             to also list finished executions until retention ends, such as a blocking execution \
+             whose response was lost. Pass `next_cursor` unchanged to continue.",
             input_schema::<ExecutionListParams>(),
         )
         .with_title("List the caller's in-flight Code Mode executions")
@@ -7550,8 +7555,8 @@ mod tests {
     use serde_json::{json, Map};
     use uuid::Uuid;
     use waygate_codemode::{
-        Execution, ExecutionEvent, ExecutionStore, InFlightExecution, OwnedInFlight,
-        RetainedSource, SourceArtifactStore,
+        Execution, ExecutionEvent, ExecutionStore, ListedExecution, OwnedInFlight, RetainedSource,
+        SourceArtifactStore,
     };
     use waygate_core::store::StoreError;
     use waygate_mcp::audit::NullSink;
@@ -8367,6 +8372,9 @@ mod tests {
         /// Rows served to `list_owned_in_flight`, in any order; the fake
         /// applies the keyset bound and ordering itself.
         in_flight: tokio::sync::Mutex<Vec<Execution>>,
+        /// Finished rows that only `list_owned_retained` serves, alongside
+        /// the in-flight ones.
+        finished: tokio::sync::Mutex<Vec<Execution>>,
         /// Owner identities each listing call was scoped by, so a test can
         /// assert what the handler passed down.
         list_owners: tokio::sync::Mutex<Vec<OwnedInFlight>>,
@@ -8432,6 +8440,33 @@ mod tests {
             retention_until: execution.retention_until,
         }
     }
+    /// One owner-listing page over the fake's rows: the keyset bound, newest
+    /// submission first, truncated to `limit`.
+    fn listed_page(
+        rows: &[Execution],
+        before: Option<(time::OffsetDateTime, Uuid)>,
+        limit: usize,
+    ) -> Vec<ListedExecution> {
+        let mut page: Vec<ListedExecution> = rows
+            .iter()
+            .filter(|row| before.is_none_or(|bound| (row.submitted_at, row.id) < bound))
+            .map(|row| ListedExecution {
+                id: row.id,
+                status: row.status,
+                terminal_reason_code: row.terminal_reason_code.clone(),
+                result_available: row.result_payload.is_some(),
+                cancellation_requested: row.cancellation_requested_at.is_some(),
+                submitted_at: row.submitted_at,
+                updated_at: row.updated_at,
+                completed_at: row.completed_at,
+                retention_until: row.retention_until,
+            })
+            .collect();
+        page.sort_by_key(|row| std::cmp::Reverse((row.submitted_at, row.id)));
+        page.truncate(limit);
+        page
+    }
+
     #[async_trait]
     impl ExecutionStore for RecordingExecutionStore {
         async fn list_owned_in_flight(
@@ -8439,29 +8474,22 @@ mod tests {
             owner: &OwnedInFlight,
             before: Option<(time::OffsetDateTime, Uuid)>,
             limit: usize,
-        ) -> Result<Vec<InFlightExecution>, StoreError> {
+        ) -> Result<Vec<ListedExecution>, StoreError> {
             self.list_owners.lock().await.push(owner.clone());
-            let mut page: Vec<InFlightExecution> = self
-                .in_flight
-                .lock()
-                .await
-                .iter()
-                .filter(|row| before.is_none_or(|bound| (row.submitted_at, row.id) < bound))
-                .map(|row| InFlightExecution {
-                    id: row.id,
-                    status: row.status,
-                    terminal_reason_code: row.terminal_reason_code.clone(),
-                    result_available: row.result_payload.is_some(),
-                    cancellation_requested: row.cancellation_requested_at.is_some(),
-                    submitted_at: row.submitted_at,
-                    updated_at: row.updated_at,
-                    completed_at: row.completed_at,
-                    retention_until: row.retention_until,
-                })
-                .collect();
-            page.sort_by_key(|row| std::cmp::Reverse((row.submitted_at, row.id)));
-            page.truncate(limit);
-            Ok(page)
+            let rows = self.in_flight.lock().await.clone();
+            Ok(listed_page(&rows, before, limit))
+        }
+
+        async fn list_owned_retained(
+            &self,
+            owner: &OwnedInFlight,
+            before: Option<(time::OffsetDateTime, Uuid)>,
+            limit: usize,
+        ) -> Result<Vec<ListedExecution>, StoreError> {
+            self.list_owners.lock().await.push(owner.clone());
+            let mut rows = self.in_flight.lock().await.clone();
+            rows.extend(self.finished.lock().await.iter().cloned());
+            Ok(listed_page(&rows, before, limit))
         }
 
         async fn acquire_detached_slot(
@@ -16767,6 +16795,7 @@ mod tests {
                 ExecutionListParams {
                     cursor: None,
                     limit: Some(2),
+                    include_finished: false,
                 },
             )
             .await
@@ -16806,6 +16835,7 @@ mod tests {
                 ExecutionListParams {
                     cursor: Some(cursor),
                     limit: Some(2),
+                    include_finished: false,
                 },
             )
             .await
@@ -16845,6 +16875,7 @@ mod tests {
                     ExecutionListParams {
                         cursor: None,
                         limit,
+                        include_finished: false,
                     },
                 )
                 .await
@@ -16863,7 +16894,8 @@ mod tests {
                 &principal,
                 ExecutionListParams {
                     cursor: None,
-                    limit: Some(0)
+                    limit: Some(0),
+                    include_finished: false,
                 }
             )
             .await
@@ -16882,6 +16914,105 @@ mod tests {
         );
     }
 
+    /// A caller whose response was lost never received the execution id.
+    /// Asking for finished executions lists them beside in-flight work, so
+    /// it can learn how the execution ended; the default listing is
+    /// unchanged.
+    #[tokio::test]
+    async fn executions_lists_finished_work_only_when_asked() {
+        let store = Arc::new(RecordingExecutionStore::default());
+        let tools = code_mode_tools(
+            Arc::new(FakeCatalog::with_tools(&[])),
+            Arc::new(SelectiveAuthz),
+        )
+        .with_execution_store(store.clone())
+        .with_result_persistence_allowed(true);
+        let mut principal = reader();
+        principal.scopes.push(Scope::McpInvoke.as_str().to_owned());
+
+        let base = time::OffsetDateTime::now_utc();
+        let execution = |minutes_ago: i64, status: ExecutionStatus| {
+            let source = "return 1;";
+            let new = NewExecution {
+                program_input: None,
+                id: Uuid::now_v7(),
+                tenant_id: principal.tenant.to_string(),
+                principal_sub: principal.sub.clone(),
+                principal_issuer: principal.issuer.clone(),
+                source: Some(source.to_owned()),
+                source_digest: source_digest(source),
+                execution_profile: json!({"name": "direct"}),
+                sdk_contract_version: SDK_CONTRACT_VERSION,
+                runner_contract_version: RUNNER_CONTRACT_VERSION,
+                retention_until: base + time::Duration::days(1),
+            };
+            let mut execution = recorded_execution(&new, status, None);
+            execution.submitted_at = base - time::Duration::minutes(minutes_ago);
+            execution
+        };
+        let running = execution(2, ExecutionStatus::Running);
+        let mut cancelled = execution(1, ExecutionStatus::Cancelled);
+        cancelled.terminal_reason_code = Some("cancelled_by_client".to_owned());
+        cancelled.cancellation_requested_at = Some(base);
+        cancelled.completed_at = Some(base);
+        *store.in_flight.lock().await = vec![running.clone()];
+        *store.finished.lock().await = vec![cancelled.clone()];
+
+        let list = |include_finished| {
+            tools.list_executions(
+                &principal,
+                ExecutionListParams {
+                    cursor: None,
+                    limit: None,
+                    include_finished,
+                },
+            )
+        };
+        let in_flight = list(false).await.expect("default listing");
+        let in_flight = structured(&in_flight);
+        let ids: Vec<&str> = in_flight["executions"]
+            .as_array()
+            .expect("executions array")
+            .iter()
+            .map(|entry| entry["execution_id"].as_str().expect("execution id"))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![running.id.to_string()],
+            "the default listing stays in flight"
+        );
+
+        let all = list(true).await.expect("listing with finished work");
+        let all = structured(&all);
+        let entries = all["executions"].as_array().expect("executions array");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry["execution_id"].as_str().expect("execution id"))
+                .collect::<Vec<_>>(),
+            vec![cancelled.id.to_string(), running.id.to_string()],
+            "finished work is listed beside in-flight work, newest first"
+        );
+        assert_eq!(entries[0]["status"], "cancelled");
+        assert_eq!(entries[0]["terminal"], true);
+        assert_eq!(entries[0]["terminal_reason_code"], "cancelled_by_client");
+        assert!(
+            entries[0]["completed_at"].is_string(),
+            "a finished entry says when it ended"
+        );
+
+        let owners = store.list_owners.lock().await;
+        assert!(
+            owners.iter().all(|owner| {
+                owner.tenant_id == principal.tenant.to_string()
+                    && owner.principal_sub == principal.sub
+                    && owner.principal_issuer == principal.issuer
+                    && owner.profile_confinement == Value::Null
+            }),
+            "both listings are scoped by the caller's full identity"
+        );
+    }
+
     #[tokio::test]
     async fn executions_refuses_without_durable_continuation_and_teaches_cursor_misuse() {
         let mut principal = reader();
@@ -16897,6 +17028,7 @@ mod tests {
                 ExecutionListParams {
                     cursor: None,
                     limit: None,
+                    include_finished: false,
                 },
             )
             .await
@@ -16918,6 +17050,7 @@ mod tests {
                 ExecutionListParams {
                     cursor: Some("not-a-cursor".to_owned()),
                     limit: None,
+                    include_finished: false,
                 },
             )
             .await

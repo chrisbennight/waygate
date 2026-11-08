@@ -11,7 +11,7 @@ use time::OffsetDateTime;
 use crate::{
     AbandonedExecution, DetachedExecutionSlot, Execution, ExecutionArtifact,
     ExecutionArtifactContent, ExecutionClaim, ExecutionEvent, ExecutionStatus,
-    ExecutionStatusRecord, ExecutionStore, ExecutionTransition, InFlightExecution, NewExecution,
+    ExecutionStatusRecord, ExecutionStore, ExecutionTransition, ListedExecution, NewExecution,
     NewExecutionEvent, OperatorInFlightExecution, OwnedInFlight, ResumeExecution, RetainedSource,
     RetryEquivalence, SourceArtifactOwner, SourceArtifactStore, StartExecution,
     StartExecutionResult, MAX_RETAINED_SOURCES_PER_OWNER, MAX_RETAINED_SOURCES_PER_TENANT,
@@ -935,7 +935,7 @@ impl ExecutionStore for PgExecutionStore {
         owner: &OwnedInFlight,
         before: Option<(OffsetDateTime, Uuid)>,
         limit: usize,
-    ) -> Result<Vec<InFlightExecution>, StoreError> {
+    ) -> Result<Vec<ListedExecution>, StoreError> {
         // The confinement predicate uses `->` deliberately: a row whose
         // profile lacks the key yields SQL NULL and matches no caller, which
         // is exactly how the by-id read treats an absent key. Coalescing the
@@ -992,24 +992,51 @@ impl ExecutionStore for PgExecutionStore {
         .bind(crate::TOOL_CALL_EXECUTION_PROFILE)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .iter()
-            .map(|row| {
-                let status: String = row.get("status");
-                InFlightExecution {
-                    id: row.get("id"),
-                    status: ExecutionStatus::parse(&status)
-                        .expect("codemode_executions status CHECK admits only known states"),
-                    terminal_reason_code: row.get("terminal_reason_code"),
-                    result_available: row.get("result_available"),
-                    cancellation_requested: row.get("cancellation_requested"),
-                    submitted_at: row.get("submitted_at"),
-                    updated_at: row.get("updated_at"),
-                    completed_at: row.get("completed_at"),
-                    retention_until: row.get("retention_until"),
-                }
-            })
-            .collect())
+        Ok(rows.iter().map(row_to_listed_execution).collect())
+    }
+
+    async fn list_owned_retained(
+        &self,
+        owner: &OwnedInFlight,
+        before: Option<(OffsetDateTime, Uuid)>,
+        limit: usize,
+    ) -> Result<Vec<ListedExecution>, StoreError> {
+        // The in-flight listing's predicates without its completion filter.
+        // The digest predicate is absent because its index covers only
+        // in-flight rows; the general owner index orders this scan by
+        // submission instead, and nearly every retained row of the owner
+        // matches, so a page stops after about its own size. The exact
+        // equality predicates still bind the full owner identity, and SQL
+        // NULL in the issuer or confinement matches no caller.
+        let rows = sqlx::query(
+            r#"
+            SELECT id, status, terminal_reason_code,
+                   result_payload IS NOT NULL AS result_available,
+                   cancellation_requested_at IS NOT NULL AS cancellation_requested,
+                   submitted_at, updated_at, completed_at, retention_until
+              FROM codemode_executions
+             WHERE tenant_id = $1
+               AND principal_sub = $2
+               AND principal_issuer = $3
+               AND execution_profile -> 'profile_confinement' = $4
+               AND execution_profile ->> 'name' IS DISTINCT FROM $8
+               AND retention_until > now()
+               AND ($5::timestamptz IS NULL OR (submitted_at, id) < ($5, $6))
+             ORDER BY submitted_at DESC, id DESC
+             LIMIT $7
+            "#,
+        )
+        .bind(&owner.tenant_id)
+        .bind(&owner.principal_sub)
+        .bind(&owner.principal_issuer)
+        .bind(&owner.profile_confinement)
+        .bind(before.map(|(submitted_at, _)| submitted_at))
+        .bind(before.map(|(_, id)| id))
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .bind(crate::TOOL_CALL_EXECUTION_PROFILE)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_listed_execution).collect())
     }
 
     async fn list_in_flight_for_operator(
@@ -2097,6 +2124,22 @@ fn row_to_execution(row: &PgRow) -> Execution {
         claim_expires_at: row.get("claim_expires_at"),
         cancellation_requested_at: row.get("cancellation_requested_at"),
         cancellation_reason_code: row.get("cancellation_reason_code"),
+        submitted_at: row.get("submitted_at"),
+        updated_at: row.get("updated_at"),
+        completed_at: row.get("completed_at"),
+        retention_until: row.get("retention_until"),
+    }
+}
+
+fn row_to_listed_execution(row: &PgRow) -> ListedExecution {
+    let status: String = row.get("status");
+    ListedExecution {
+        id: row.get("id"),
+        status: ExecutionStatus::parse(&status)
+            .expect("codemode_executions status CHECK admits only known states"),
+        terminal_reason_code: row.get("terminal_reason_code"),
+        result_available: row.get("result_available"),
+        cancellation_requested: row.get("cancellation_requested"),
         submitted_at: row.get("submitted_at"),
         updated_at: row.get("updated_at"),
         completed_at: row.get("completed_at"),
