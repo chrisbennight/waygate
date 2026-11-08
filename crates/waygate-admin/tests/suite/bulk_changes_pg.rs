@@ -103,16 +103,17 @@ async fn selected_changes_preserve_conditions_exact_intent_and_independent_execu
         )));
     state.evidence = Arc::new(waygate_storage::PgAuditSink::with_pool(pool.clone()));
     let app = dashboard_router(Arc::new(state), DashboardAuth::Disabled);
-    let (status, list) = get(app.clone(), "/t/default/changes").await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(list.contains("Selected rate-limit policy creations"));
     let mut selected = Vec::new();
     for row in rows.values() {
-        let (_, focused) = get(
+        // The focused view lists only this request, so pending requests that
+        // other tests create in the shared tenant cannot push it off the page.
+        let (status, focused) = get(
             app.clone(),
             &format!("/t/default/changes?pending_id={}", row.id),
         )
         .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(focused.contains("Selected rate-limit policy creations"));
         selected.push(
             tokens(&focused)
                 .get(&row.id)
