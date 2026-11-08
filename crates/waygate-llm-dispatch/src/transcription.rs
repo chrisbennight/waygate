@@ -19,11 +19,18 @@ impl LlmDispatcher {
             .credentials
             .api_key(route.provider, &route.credential_label)
             .await?;
-        let json = request.format.is_json();
+        let format = request.format.as_str();
         let (upload, fields) = request.render(&route.upstream_model);
         Ok(self
             .providers
-            .send_transcription(&route.base_url, &route.path, &bearer, upload, fields, json)
+            .send_transcription(
+                &route.base_url,
+                &route.path,
+                &bearer,
+                upload,
+                fields,
+                format,
+            )
             .await?)
     }
 }

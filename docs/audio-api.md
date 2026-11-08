@@ -199,16 +199,22 @@ fields and the configured upstream model.
 `json` and `verbose_json` return `application/json` with a string `text`; other
 standard fields from the provider are preserved. `text`, `srt`, and `vtt` return
 `text/plain; charset=utf-8`, which the OpenAI SDK returns as a string. A provider
-reply that does not match the requested format is a gateway error. Errors always
-use the OpenAI JSON error envelope, whatever format was requested.
+reply that does not match the requested format is a gateway error: JSON formats
+need a JSON content type and a string `text`, the others need a text content type,
+and VTT and SRT bodies must start like WebVTT and SRT files. Errors always use the
+OpenAI JSON error envelope, whatever format was requested.
 
 ### Transcription limits, failures, and evidence
 
 Files are limited to 25 MiB (26,214,400 bytes), the OpenAI API limit; larger
-uploads return HTTP 413. Uploads have a 60-second deadline, and at most four are
-buffered at once; further requests receive HTTP 429 with `Retry-After`.
-Transcription shares the inference processing capacity. Provider calls have a
-five-minute deadline and one attempt, and responses are capped at 16 MiB.
+uploads return HTTP 413. Uploads have a 60-second deadline. At most four requests
+hold uploads or responses at once, from before the upload is read until the
+response is delivered or its 60-second delivery deadline passes; further requests
+receive HTTP 429 with `Retry-After`. Transcription shares the inference processing
+capacity. Provider calls have a five-minute deadline and one attempt, and
+responses are capped at 16 MiB. Exceeding the deadline returns HTTP 504; a
+connection failure, including the operator's provider connect or read timeout,
+returns HTTP 502, as on the other inference surfaces.
 
 A busy provider (429 or 503) keeps its status and `Retry-After`. Other provider
 client errors keep their 4xx status, including 413 when the provider's own size
@@ -218,10 +224,11 @@ are not passed to clients. A client disconnect abandons the request; the gateway
 records the abandonment but cannot confirm that the provider stopped work.
 
 Evidence records the outcome, upload size, response format, attribution, and
-timing. Audio, prompts, transcripts, and credentials are never recorded. The
-usage ledger identifies the `audio_transcription` surface. Transcription reports
-no token counts or cost, so it is treated as zero cost and spending budgets do
-not block it. Request quotas and other gateway limits still apply.
+timing, including for abandoned requests. Audio, prompts, transcripts, and
+credentials are never recorded. The usage ledger identifies the
+`audio_transcription` surface. Transcription consumes no metered tokens: each call
+records zero input and output tokens, which price as zero cost, and spending
+budgets do not block it. Request quotas and other gateway limits still apply.
 
 ## Voice and consent resources
 

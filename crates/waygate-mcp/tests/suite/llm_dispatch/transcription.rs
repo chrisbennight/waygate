@@ -179,8 +179,8 @@ async fn standard_transcription_returns_each_format_with_private_metadata_only_e
     assert!(rows
         .iter()
         .all(|row| row.inbound_surface == "audio_transcription"
-            && row.input_tokens.is_none()
-            && row.output_tokens.is_none()
+            && row.input_tokens == Some(0)
+            && row.output_tokens == Some(0)
             && row.finish_reason.as_deref() == Some("provider_complete")));
     let events = audit.best_effort.lock().unwrap();
     let completed: Vec<_> = events
@@ -308,5 +308,57 @@ async fn unsupported_options_wrong_routes_and_denied_callers_do_not_contact_prov
         Err(InvocationError::Forbidden { .. })
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn abandoned_transcription_keeps_audit_latency_and_usage_accounting() {
+    let contacted = Arc::new(tokio::sync::Notify::new());
+    let provider_contacted = contacted.clone();
+    let app = Router::new().route(
+        "/v1/audio/transcriptions",
+        post(move || {
+            provider_contacted.notify_one();
+            futures::future::pending::<&'static str>()
+        }),
+    );
+    let (addr, server) = serve(app).await;
+    let (dispatcher, resolver) = dependencies(addr);
+    let audit = Arc::new(RecordingSink::default());
+    let usage = Arc::new(RecordingUsage::default());
+    let service = Arc::new(
+        DefaultInvocationService::new(Arc::new(FakeCatalog), Arc::new(AllowAllGate), audit.clone())
+            .with_llm(dispatcher, resolver)
+            .with_llm_usage_store(usage.clone()),
+    );
+    let call = tokio::spawn({
+        let service = service.clone();
+        async move {
+            service
+                .invoke(Some(&principal()), transcription_request(&[]))
+                .await
+        }
+    });
+    contacted.notified().await;
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while usage.rows.lock().unwrap().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("abandoned call recorded usage");
+    let rows = usage.rows.lock().unwrap();
+    assert_eq!(rows[0].finish_reason.as_deref(), Some("abandoned"));
+    assert!(rows[0].latency_ms.is_some());
+    let events = audit.best_effort.lock().unwrap();
+    let abandoned = events
+        .iter()
+        .find(|event| event.action == "AudioTranscription")
+        .expect("abandonment audited");
+    assert_eq!(abandoned.outcome, AuditOutcome::ExecutionError);
+    assert!(abandoned.latency_ms.is_some());
+    assert!(abandoned.reason.as_deref().unwrap().contains("abandoned"));
     server.abort();
 }

@@ -5,12 +5,14 @@ use axum::extract::{DefaultBodyLimit, FromRequest, Multipart};
 use std::collections::BTreeMap;
 use waygate_core::audio::{AudioUpload, TranscriptionInput, MAX_TRANSCRIPTION_FILE_BYTES};
 
-/// Uploads are buffered completely before dispatch, so ingress bounds how many
-/// can be held at once before reading any body.
+/// Uploads and buffered transcripts are held in memory, so ingress bounds how
+/// many requests can hold them at once, from before the body is read until the
+/// response is delivered.
 pub(super) const MAX_CONCURRENT_UPLOADS: usize = 4;
 const MAX_TRANSCRIPTION_BODY: usize = MAX_TRANSCRIPTION_FILE_BYTES + 64 * 1024;
 const MAX_FIELD_BYTES: usize = 16 * 1024;
 const UPLOAD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+const DELIVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(super) fn validate_config(def: &ModelDef) -> anyhow::Result<()> {
     if !is_transcription(def) {
@@ -70,7 +72,7 @@ fn too_large() -> Response {
 }
 
 pub(super) async fn create(State(state): State<LlmRouterState>, req: Request) -> Response {
-    let Ok(_permit) = state.transcription_capacity.clone().try_acquire_owned() else {
+    let Ok(permit) = state.transcription_capacity.clone().try_acquire_owned() else {
         let mut response = error_response(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limit_error",
@@ -117,7 +119,7 @@ pub(super) async fn create(State(state): State<LlmRouterState>, req: Request) ->
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store"),
     );
-    response
+    deliver_with_capacity(response, permit, DELIVERY_DEADLINE, "transcription")
 }
 
 async fn read_form(req: Request) -> Result<TranscriptionInput, Box<Response>> {
@@ -466,6 +468,40 @@ mod tests {
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers()["retry-after"], "1");
         assert!(capture.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unread_responses_keep_their_capacity_until_delivered() {
+        let capture = Arc::new(Capture::default());
+        let (_, resolver) = build_from_defs(vec![config(json!({}))], None)
+            .unwrap()
+            .unwrap();
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let state = LlmRouterState {
+            invocation: capture.clone(),
+            models: None,
+            resolver,
+            image_capacity: Arc::new(tokio::sync::Semaphore::new(1)),
+            audio_resource_capacity: Arc::new(tokio::sync::Semaphore::new(1)),
+            transcription_capacity: capacity.clone(),
+        };
+        let request = || {
+            post(
+                "multipart/form-data; boundary=fixture",
+                form(&[("model", None, b"asr"), ("file", Some("a.wav"), b"RIFF")]),
+            )
+        };
+        let unread = create(State(state.clone()), request()).await;
+        assert_eq!(unread.status(), StatusCode::OK);
+        let refused = create(State(state.clone()), request()).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body_text(unread).await, r#"{"text":"fixture words"}"#);
+        // Delivery finishes after the body is consumed; wait for the slot.
+        let _slot = tokio::time::timeout(std::time::Duration::from_secs(5), capacity.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(capture.requests.lock().unwrap().len(), 1);
     }
 
     #[test]

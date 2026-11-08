@@ -63,7 +63,13 @@ impl DefaultInvocationService {
             waygate_llm_translate::Surface::AudioTranscription,
             model.route.protocol,
         );
-        record.usage = Default::default();
+        // Transcription consumes no metered tokens. Reported zeros price as zero
+        // cost, rather than the unknown cost of absent counts.
+        record.usage = waygate_llm_translate::TokenUsage {
+            input: Some(0),
+            output: Some(0),
+            ..Default::default()
+        };
         let (tenant, _, principal) = cache_identity(&ctx);
         let row = build_usage_row(&record, tenant, principal, ctx.tool.to_owned(), None);
         let format = request.format;
@@ -179,18 +185,29 @@ impl TranscriptionEvidence {
 impl Drop for TranscriptionEvidence {
     fn drop(&mut self) {
         if !self.finished {
+            // An abandoned call keeps the same audit and usage accounting as a
+            // finished one; only the outcome differs.
+            let latency_ms = Some(elapsed_ms(self.started));
             let mut event = self.base.clone();
             event.outcome = AuditOutcome::ExecutionError;
             event.reason = Some(self.reason("abandoned"));
+            event.latency_ms = latency_ms;
+            let mut row = self.row.clone();
+            row.latency_ms = latency_ms;
+            row.finish_reason = Some("abandoned".into());
             let audit = self.audit.clone();
+            let usage = self.usage.clone();
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 runtime.spawn(async move {
-                    if tokio::time::timeout(
-                        EVIDENCE_DEADLINE,
-                        audit.record_chained_best_effort(event),
-                    )
-                    .await
-                    .is_err()
+                    let finalize = async {
+                        audit.record_chained_best_effort(event).await;
+                        if let Some(usage) = &usage {
+                            usage.record_usage(row).await;
+                        }
+                    };
+                    if tokio::time::timeout(EVIDENCE_DEADLINE, finalize)
+                        .await
+                        .is_err()
                     {
                         tracing::warn!("transcription evidence exceeded its deadline");
                     }

@@ -1221,6 +1221,73 @@ async fn models_response(
     (StatusCode::OK, Json(body)).into_response()
 }
 
+/// Chunk size for bounded response delivery.
+const DELIVERY_CHUNK: usize = 64 * 1024;
+
+/// Hold an ingress capacity permit until a buffered response body is delivered
+/// or `deadline` passes, so unread responses cannot accumulate beyond the
+/// route's admission limit. The producer deadline runs even when HTTP
+/// backpressure stops polling the response; small copied chunks keep queued
+/// bytes from retaining the whole body.
+fn deliver_with_capacity(
+    response: Response,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    deadline: std::time::Duration,
+    label: &'static str,
+) -> Response {
+    let (parts, body) = response.into_parts();
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    let delivery = tokio::spawn(async move {
+        let _permit = permit;
+        let send = async {
+            let mut body = body.into_data_stream();
+            while let Some(chunk) = body.next().await {
+                let chunk = chunk.map_err(std::io::Error::other)?;
+                for chunk in chunk.chunks(DELIVERY_CHUNK) {
+                    sender
+                        .send(bytes::Bytes::copy_from_slice(chunk))
+                        .await
+                        .map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::BrokenPipe,
+                                format!("{label} client disconnected"),
+                            )
+                        })?;
+                }
+            }
+            Ok::<_, std::io::Error>(())
+        };
+        tokio::select! {
+            _ = sender.closed() => Ok(()),
+            result = tokio::time::timeout(deadline, send) => {
+                result.unwrap_or_else(|_| Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{label} response delivery exceeded {} seconds", deadline.as_secs()),
+                )))
+            }
+        }
+    });
+    let stream = futures::stream::unfold(
+        (receiver, Some(delivery)),
+        move |(mut receiver, mut delivery)| async move {
+            if let Some(chunk) = receiver.recv().await {
+                return Some((Ok(chunk), (receiver, delivery)));
+            }
+            match delivery.take()?.await {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some((Err(error), (receiver, delivery))),
+                Err(_) => Some((
+                    Err(std::io::Error::other(format!(
+                        "{label} response delivery failed"
+                    ))),
+                    (receiver, delivery),
+                )),
+            }
+        },
+    );
+    Response::from_parts(parts, axum::body::Body::from_stream(stream))
+}
+
 /// Shared inference-route body reader: consume the size-capped request body,
 /// parse it as JSON, and extract the required `model`. `Err` is a
 /// ready-to-return error envelope (oversized body / invalid JSON / missing

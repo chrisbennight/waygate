@@ -15,7 +15,33 @@ pub enum TranscriptionBody {
     Text(String),
 }
 
+/// Whether a provider content type matches the requested `response_format`.
+fn content_type_matches(format: &str, media_type: &str) -> bool {
+    match format {
+        "json" | "verbose_json" => {
+            media_type == "application/json" || media_type.ends_with("+json")
+        }
+        "srt" => media_type.starts_with("text/") || media_type == "application/x-subrip",
+        _ => media_type.starts_with("text/"),
+    }
+}
+
+/// Whether a text body has the shape of the requested format. A WebVTT file
+/// starts with its signature; an SRT file is empty or starts with a cue number.
+fn text_matches(format: &str, text: &str) -> bool {
+    let text = text.trim_start_matches('\u{feff}');
+    match format {
+        "vtt" => text.starts_with("WEBVTT"),
+        "srt" => {
+            let text = text.trim_start();
+            text.is_empty() || text.starts_with(|c: char| c.is_ascii_digit())
+        }
+        _ => true,
+    }
+}
+
 impl ProviderClient {
+    /// `format` is the validated `response_format` already present in `fields`.
     pub async fn send_transcription(
         &self,
         base_url: &str,
@@ -23,8 +49,9 @@ impl ProviderClient {
         bearer: &str,
         upload: AudioUpload,
         fields: BTreeMap<String, String>,
-        json: bool,
+        format: &str,
     ) -> Result<TranscriptionBody, ProviderError> {
+        let json = matches!(format, "json" | "verbose_json");
         let http = self.single_attempt_http.as_ref().ok_or_else(|| {
             ProviderError::Protocol(
                 "single-attempt transcription transport is not configured".into(),
@@ -76,6 +103,22 @@ impl ProviderClient {
                 retry_after,
             });
         }
+        let wrong_format = || {
+            ProviderError::Protocol(
+                "transcription provider response does not match the requested format".into(),
+            )
+        };
+        let media_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if !content_type_matches(format, &media_type) {
+            return Err(wrong_format());
+        }
         let too_large =
             || ProviderError::Protocol("transcription response exceeded its byte limit".into());
         if response
@@ -96,23 +139,48 @@ impl ProviderClient {
             bytes.extend_from_slice(&chunk);
         }
         if json {
-            let body: Value = serde_json::from_slice(&bytes).map_err(|_| {
-                ProviderError::Protocol("transcription provider returned invalid JSON".into())
-            })?;
+            let body: Value = serde_json::from_slice(&bytes).map_err(|_| wrong_format())?;
             if !body.get("text").is_some_and(Value::is_string) {
-                return Err(ProviderError::Protocol(
-                    "transcription provider response has no text".into(),
-                ));
+                return Err(wrong_format());
             }
             Ok(TranscriptionBody::Json(body))
         } else {
-            String::from_utf8(bytes)
-                .map(TranscriptionBody::Text)
-                .map_err(|_| {
-                    ProviderError::Protocol(
-                        "transcription provider returned invalid UTF-8 text".into(),
-                    )
-                })
+            let text = String::from_utf8(bytes).map_err(|_| wrong_format())?;
+            if !text_matches(format, &text) {
+                return Err(wrong_format());
+            }
+            Ok(TranscriptionBody::Text(text))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_content_type_and_body_must_match_the_requested_format() {
+        assert!(content_type_matches("json", "application/json"));
+        assert!(content_type_matches(
+            "verbose_json",
+            "application/vnd.fixture+json"
+        ));
+        assert!(!content_type_matches("json", "text/plain"));
+        assert!(!content_type_matches("text", "application/json"));
+        assert!(!content_type_matches("text", ""));
+        assert!(content_type_matches("vtt", "text/vtt"));
+        assert!(content_type_matches("srt", "application/x-subrip"));
+        assert!(text_matches(
+            "vtt",
+            "\u{feff}WEBVTT\n\n00:00.000 --> 00:01.000\nhello"
+        ));
+        assert!(!text_matches("vtt", "hello"));
+        assert!(text_matches(
+            "srt",
+            "1\n00:00:00,000 --> 00:00:01,000\nhello"
+        ));
+        assert!(text_matches("srt", ""));
+        assert!(!text_matches("srt", "hello"));
+        assert!(text_matches("text", "hello"));
     }
 }
