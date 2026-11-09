@@ -623,6 +623,99 @@ async fn responses_agent_fields_reach_a_responses_upstream_and_are_omitted_elsew
 }
 
 #[tokio::test]
+async fn responses_client_keeps_a_chat_upstreams_reasoning_across_turns() {
+    use futures::StreamExt;
+
+    // A chat upstream that reasons before answering.
+    async fn reasoning_stream_handler() -> Response {
+        let sse = concat!(
+            "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"Run \"}}]}\n\n",
+            "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"reasoning_content\":\"ls.\"}}]}\n\n",
+            "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"Done.\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(Body::from(sse))
+            .unwrap()
+    }
+    let service = |addr: SocketAddr| {
+        let dispatcher = LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), store());
+        DefaultInvocationService::new(
+            Arc::new(FakeCatalog),
+            Arc::new(AllowAllGate),
+            Arc::new(RecordingSink::default()),
+        )
+        .with_llm(dispatcher, resolver(addr))
+    };
+
+    // Turn 1: the Responses client sees the reasoning ahead of the answer.
+    let app = Router::new().route("/chat/completions", post(reasoning_stream_handler));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let args = json!({"model": "gpt-x", "input": "list the files", "stream": true})
+        .as_object()
+        .cloned()
+        .unwrap();
+    let req = InvocationRequest::new("llm", "gpt-x")
+        .with_arguments(Some(args))
+        .with_responses_surface(true);
+    let mut stream = match service(addr).invoke(None, req).await.expect("invoke") {
+        InvocationResponse::Stream(s) => s,
+        other => panic!("expected Stream, got {other:?}"),
+    };
+    let mut completed = None;
+    while let Some(item) = stream.next().await {
+        let chunk = item.expect("chunk");
+        if chunk.event_name.as_deref() == Some("response.completed") {
+            completed = Some(chunk.event["response"].clone());
+        }
+    }
+    let output = completed.expect("response.completed")["output"].clone();
+    assert_eq!(output[0]["type"], "reasoning");
+    assert_eq!(output[0]["content"][0]["text"], "Run ls.");
+    assert_eq!(output[1]["content"][0]["text"], "Done.");
+
+    // Turn 2: the client sends the reasoning back the way it keeps it, and the
+    // chat upstream receives it on the assistant turn that produced it.
+    let cap = Arc::new(Mutex::new(Captured::default()));
+    let args = json!({"model": "gpt-x", "input": [
+        {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "list the files"}]},
+        {"type": "reasoning", "id": output[0]["id"],
+            "summary": [{"type": "summary_text", "text": "Run ls."}]},
+        {"type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "Done."}]},
+        {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "thanks"}]}
+    ]})
+    .as_object()
+    .cloned()
+    .unwrap();
+    let req = InvocationRequest::new("llm", "gpt-x")
+        .with_arguments(Some(args))
+        .with_responses_surface(true);
+    service(spawn_provider(cap.clone()).await)
+        .invoke(None, req)
+        .await
+        .expect("invoke");
+    let body = cap
+        .lock()
+        .unwrap()
+        .body
+        .clone()
+        .expect("captured upstream body");
+    assert_eq!(body["messages"][1]["role"], "assistant");
+    assert_eq!(body["messages"][1]["reasoning_content"], "Run ls.");
+    assert_eq!(body["messages"][1]["content"], "Done.");
+}
+
+#[tokio::test]
 async fn responses_surface_streaming_relays_named_events_through_egress() {
     // R3a: a /v1/responses streaming caller routed to an OpenAI-Responses upstream
     // receives the provider's Responses events relayed 1:1 as NAMED SSE events

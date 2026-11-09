@@ -26,8 +26,9 @@
   chat-chunk stream is lifted into Responses streaming events (`response.created` →
   `output_item.added` → `output_text.delta` … → `response.completed`) — there is no `[DONE]`
   sentinel on the Responses transport. As on the unary path, the translated providers carry
-  text + function calls; reasoning is preserved only for the native-protocol
-  (OpenAI-Responses) upstream. **Exception — the ChatGPT/Codex subscription backend is
+  text + function calls; reasoning is carried in full for the native-protocol
+  (OpenAI-Responses) upstream, and as plain reasoning text for an OpenAI-chat upstream that
+  returns it (§14). **Exception — the ChatGPT/Codex subscription backend is
   streaming-only:** a non-streaming call to a Codex-backed model is rejected fail-closed
   (`use stream=true`) because that backend streams-only and the gateway does not aggregate the
   upstream SSE back into a unary body (§13.1). Every other route serves both transports.
@@ -408,8 +409,8 @@ Two egresses, both rendered from the canonical, selected by `LlmRequest.inbound_
   `incomplete_details` reconstruction. For an OpenAI-Responses upstream this is a lossless
   near-identity round-trip (the native-passthrough behaviour falls out of the faithful hub —
   no separate passthrough path); for a translated provider it is the faithful Responses
-  projection of the call (text + function calls + refusal; reasoning only where the provider
-  emits it natively).
+  projection of the call (text + function calls + refusal; reasoning where the provider returns
+  it — an OpenAI-chat upstream's reasoning text becomes a `reasoning` item, §14).
 
 **Streaming is symmetric** (§4.4): the chat transport keeps its proven per-provider
 `StreamTranslator`; the Responses transport relays an OpenAI-Responses upstream's frames 1:1
@@ -1033,8 +1034,8 @@ written (§14).
   stateless-by-design and overrides it — its finalizer (`finalize_codex_responses_body`)
   forces `store:false` and **strips** `previous_response_id` (§13.1), because the subscription
   backend exposes no server-side store. Reasoning *input* items are carried opaquely and
-  forwarded to a Responses upstream (dropped for Anthropic / Gemini / chat, where they are
-  meaningless); on the Codex backend the gateway requests `include:
+  forwarded to a Responses upstream; an OpenAI-chat upstream receives their plain text (see
+  replayed model output below), and Anthropic / Gemini receive nothing; on the Codex backend the gateway requests `include:
   ["reasoning.encrypted_content"]` so a **stateless** reasoning loop round-trips the
   encrypted reasoning without the gateway (or the backend's store) holding content.
 - **Replayed model output.** Clients that keep their own history send the model's earlier
@@ -1049,8 +1050,15 @@ written (§14).
   servers disagree on the spelling, and a route does not record which server it reaches.
   Anthropic, Gemini, and Responses upstreams receive none of it, because plain or
   provider-structured chat reasoning cannot stand in for their own signed or encrypted
-  reasoning. Responses `reasoning` input items follow the rule above. Replayed reasoning is
-  conversation content: it is part of the completion-cache key and stays out of the
+  reasoning. On Responses, an OpenAI-chat upstream's reasoning reaches the client as a
+  `reasoning` item of plain `reasoning_text` content, with an empty `summary` and no
+  `encrypted_content`, because the upstream produced neither; when streamed, the item closes
+  once the answer or a tool call begins. When a client sends a reasoning item back on a turn
+  routed to an OpenAI-chat upstream, the item's plain text — its `reasoning_text` content, or
+  else its `summary_text` parts, where some clients keep it — reaches the upstream as that
+  assistant message's `reasoning_content`, the spelling OpenAI-compatible servers most widely
+  accept. An item carrying `encrypted_content` holds reasoning only its originating Responses
+  provider can read and is left out. Replayed reasoning is conversation content: it is part of the completion-cache key and stays out of the
   content-free audit ledger.
 - **Responses options from stateless clients.** Coding agents send three options with their
   Responses requests. `include: ["reasoning.encrypted_content"]` and `reasoning.summary` ask
