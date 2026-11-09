@@ -1,5 +1,36 @@
 # Release notes
 
+## 2.3.0
+
+- Chat Completions clients can send the model's earlier reasoning back on
+  assistant messages, as coding agents such as OpenCode do on every turn.
+  `reasoning_content`, `reasoning`, and `reasoning_details` reach an
+  OpenAI-compatible upstream unchanged, under the name the client used, and
+  are left out for Anthropic, Gemini, and Responses upstreams. Tool-calling
+  conversations with reasoning turned on no longer stop after their first
+  tool call. The fields are still rejected on non-assistant messages or in the
+  wrong shape. No migration or configuration changes are required.
+
+- Streaming Chat Completions requests may set `stream_options.include_usage`,
+  which OpenAI-compatible clients send by default. Streams from Anthropic,
+  Gemini, and Responses upstreams then end with a usage chunk, as
+  OpenAI-compatible upstreams already did. Requests without the option keep
+  their previous behavior, and other `stream_options` keys are still rejected.
+  A cached streamed completion keeps the provider's usage, so a later cache
+  hit can report it. No migration or configuration changes are required.
+
+- Responses requests from coding agents can ask for encrypted reasoning and
+  reasoning summaries and supply a prompt-cache hint. Responses upstreams
+  receive these options; other upstream protocols return only what they can
+  actually produce. Unsupported output requests still fail with a clear error.
+
+- Responses clients receive a Chat Completions upstream's reasoning as plain
+  reasoning text in both unary responses and streams. Replaying that reasoning
+  sends it back with the original assistant turn and its tool calls. Encrypted
+  reasoning remains with Responses upstreams; the gateway never invents
+  signatures, encrypted content, or summaries. No migration or configuration
+  changes are required.
+
 ## 2.2.2
 
 - The dashboard's Decisions badge reads the pending decisions each time it
