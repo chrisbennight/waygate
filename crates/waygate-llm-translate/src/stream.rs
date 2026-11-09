@@ -1090,6 +1090,11 @@ impl ChatStreamToResponses {
                 "response.output_item.added",
                 json!({"output_index": oi, "item": item}),
             ));
+            out.push(self.event(
+                "response.content_part.added",
+                json!({"item_id": item_id, "output_index": oi, "content_index": 0,
+                       "part": {"type": "reasoning_text", "text": ""}}),
+            ));
             self.reasoning.push(ResponsesReasoningItem {
                 output_index: oi,
                 item_id,
@@ -1122,6 +1127,11 @@ impl ChatStreamToResponses {
         out.push(self.event(
             "response.reasoning_text.done",
             json!({"item_id": item_id, "output_index": oi, "content_index": 0, "text": text}),
+        ));
+        out.push(self.event(
+            "response.content_part.done",
+            json!({"item_id": item_id, "output_index": oi, "content_index": 0,
+                   "part": {"type": "reasoning_text", "text": text}}),
         ));
         out.push(self.event(
             "response.output_item.done",
@@ -2249,13 +2259,15 @@ mod tests {
 
         let names: Vec<&str> = evs.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
-            names[..7],
+            names[..9],
             [
                 "response.created",
                 "response.output_item.added",
+                "response.content_part.added",
                 "response.reasoning_text.delta",
                 "response.reasoning_text.delta",
                 "response.reasoning_text.done",
+                "response.content_part.done",
                 "response.output_item.done",
                 "response.output_item.added",
             ]
@@ -2264,8 +2276,18 @@ mod tests {
             evs[1].1["item"],
             json!({"type": "reasoning", "id": "rs_0", "summary": [], "content": []})
         );
-        assert_eq!(evs[4].1["text"], "Run ls.");
-        assert_eq!(evs[6].1["item"]["type"], "message");
+        assert_eq!(evs[2].1["content_index"], 0);
+        assert_eq!(
+            evs[2].1["part"],
+            json!({"type": "reasoning_text", "text": ""})
+        );
+        assert_eq!(evs[5].1["text"], "Run ls.");
+        assert_eq!(evs[6].1["content_index"], 0);
+        assert_eq!(
+            evs[6].1["part"],
+            json!({"type": "reasoning_text", "text": "Run ls."})
+        );
+        assert_eq!(evs[8].1["item"]["type"], "message");
         // The completed response lists the reasoning ahead of the answer, as
         // plain reasoning text with no encrypted content.
         let completed = &evs.last().unwrap().1["response"];
