@@ -501,6 +501,31 @@ async fn spawn_responses_stream_provider() -> SocketAddr {
     addr
 }
 
+/// A capturing OpenAI **Responses** provider answering with a minimal unary
+/// completed response.
+async fn responses_capture_handler(
+    State(cap): State<Arc<Mutex<Captured>>>,
+    body: String,
+) -> Response {
+    {
+        let mut c = cap.lock().unwrap();
+        c.called = true;
+        c.body = serde_json::from_str::<Value>(&body).ok();
+    }
+    let resp = json!({
+        "id": "resp_1", "object": "response", "model": "gpt-served-x", "status": "completed",
+        "output": [{"type": "message", "id": "msg_1", "status": "completed", "role": "assistant",
+            "content": [{"type": "output_text", "text": "hi", "annotations": []}]}],
+        "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}
+    })
+    .to_string();
+    Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .body(Body::from(resp))
+        .unwrap()
+}
+
 fn responses_resolver(addr: SocketAddr) -> Arc<dyn LlmModelResolver> {
     Arc::new(StaticModelResolver::new().with_model(
         "llm",
@@ -523,6 +548,78 @@ fn responses_resolver(addr: SocketAddr) -> Arc<dyn LlmModelResolver> {
             cache_ttl: None,
         },
     ))
+}
+
+#[tokio::test]
+async fn responses_agent_fields_reach_a_responses_upstream_and_are_omitted_elsewhere() {
+    // A coding agent asks for encrypted reasoning and summaries and passes a
+    // prompt-cache key. A Responses upstream receives all three; a Chat
+    // Completions upstream has no equivalent, receives none, and still answers.
+    let agent_args = |model: &str| {
+        json!({"model": model, "input": "hi",
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "session-1",
+            "reasoning": {"summary": "auto"}})
+        .as_object()
+        .cloned()
+        .unwrap()
+    };
+    let invoke = |resolver: Arc<dyn LlmModelResolver>, model: &'static str| {
+        let args = agent_args(model);
+        async move {
+            let dispatcher =
+                LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), store());
+            DefaultInvocationService::new(
+                Arc::new(FakeCatalog),
+                Arc::new(AllowAllGate),
+                Arc::new(RecordingSink::default()),
+            )
+            .with_llm(dispatcher, resolver)
+            .invoke(
+                None,
+                InvocationRequest::new("llm", model)
+                    .with_arguments(Some(args))
+                    .with_responses_surface(true),
+            )
+            .await
+            .expect("invoke");
+        }
+    };
+
+    let cap = Arc::new(Mutex::new(Captured::default()));
+    let app = Router::new()
+        .route("/responses", post(responses_capture_handler))
+        .with_state(cap.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    invoke(responses_resolver(addr), "gpt-resp").await;
+    let body = cap
+        .lock()
+        .unwrap()
+        .body
+        .clone()
+        .expect("captured upstream body");
+    assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+    assert_eq!(body["prompt_cache_key"], "session-1");
+    assert_eq!(body["reasoning"]["summary"], "auto");
+
+    let cap = Arc::new(Mutex::new(Captured::default()));
+    invoke(resolver(spawn_provider(cap.clone()).await), "gpt-x").await;
+    let body = cap
+        .lock()
+        .unwrap()
+        .body
+        .clone()
+        .expect("captured upstream body");
+    for absent in ["include", "prompt_cache_key", "reasoning"] {
+        assert!(
+            body.get(absent).is_none(),
+            "chat upstream received `{absent}`"
+        );
+    }
 }
 
 #[tokio::test]

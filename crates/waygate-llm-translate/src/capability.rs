@@ -79,6 +79,8 @@ mod tests {
             store: None,
             stream: false,
             stream_include_usage: false,
+            include_encrypted_reasoning: false,
+            prompt_cache_key: None,
         }
     }
 

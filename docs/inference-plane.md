@@ -162,7 +162,8 @@ struct LlmRequest {
     model_requested: String,                 // alias as the client asked
     messages: Vec<CanonicalMessage>,         // system/user/assistant/tool; content parts incl. ToolUse / ToolResult
                                               //   and replayed reasoning (§14)
-    sampling: Sampling,                       // temperature, top_p, max_tokens, stop, seed, reasoning_effort, …
+    sampling: Sampling,                       // temperature, top_p, max_tokens, stop, seed, reasoning_effort,
+                                              //   reasoning_summary, …
     tools: Vec<CanonicalTool>,                // function/tool defs (name, description, parameters, strict)
     tool_choice: Option<ToolChoice>,          // Auto | None | Required | Function(name)
     parallel_tool_calls: Option<bool>,        // forwarded where the provider supports it
@@ -172,6 +173,8 @@ struct LlmRequest {
     store: Option<bool>,                      // forwarded; store:false is honoured (§14)
     stream: bool,
     stream_include_usage: bool,               // chat stream_options.include_usage (§4.4)
+    include_encrypted_reasoning: bool,        // Responses include: ["reasoning.encrypted_content"] (§14)
+    prompt_cache_key: Option<String>,         // Responses prompt-cache hint (§14)
 }
 enum Surface { ChatCompletions, Responses }
 ```
@@ -1049,6 +1052,15 @@ written (§14).
   reasoning. Responses `reasoning` input items follow the rule above. Replayed reasoning is
   conversation content: it is part of the completion-cache key and stays out of the
   content-free audit ledger.
+- **Responses options from stateless clients.** Coding agents send three options with their
+  Responses requests. `include: ["reasoning.encrypted_content"]` and `reasoning.summary` ask
+  for extra output; both are forwarded to an OpenAI-Responses upstream, which returns it. Other
+  upstream protocols produce neither encrypted reasoning nor reasoning summaries, so their
+  responses carry none and nothing is invented in their place. Any other `include` value asks
+  for output the gateway does not model and is rejected by name. `prompt_cache_key` is a hint
+  for the upstream's prompt cache and does not change the output: it is forwarded to an
+  OpenAI-Responses upstream, left out for other protocols, and ignored by the gateway's own
+  completion-cache key.
 - **Retrieval endpoints are unsupported.** `GET` / `DELETE /v1/responses/{id}` and the cancel
   endpoint are **not** served: they require the server-side response store the gateway
   deliberately does not keep (I9). A client that needs retrieval points `store` at an upstream

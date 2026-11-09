@@ -232,6 +232,8 @@ pub fn parse_chat_completions(body: &Value) -> Result<LlmRequest, TranslateError
             stop,
             seed: req.seed,
             reasoning_effort: req.reasoning_effort,
+            // Reasoning summaries are a Responses-only request.
+            reasoning_summary: None,
         },
         tools,
         tool_choice,
@@ -244,6 +246,8 @@ pub fn parse_chat_completions(body: &Value) -> Result<LlmRequest, TranslateError
         // A unary response always carries usage, so the option only matters
         // on a stream.
         stream_include_usage: req.stream && include_usage,
+        include_encrypted_reasoning: false,
+        prompt_cache_key: None,
     })
 }
 
@@ -840,7 +844,14 @@ struct ResponsesReq {
     store: Option<bool>,
     #[serde(default)]
     stream: bool,
-    /// Any Responses field this parser does not translate (`include`, `metadata`,
+    /// Extra output the client asks for. Only `reasoning.encrypted_content` is
+    /// translated (see [`parse_responses_include`]); other values reject.
+    #[serde(default)]
+    include: Option<Value>,
+    /// Prompt-cache routing hint, carried to the canonical request.
+    #[serde(default)]
+    prompt_cache_key: Option<String>,
+    /// Any Responses field this parser does not translate (`metadata`,
     /// `service_tier`, `truncation`, `user`, `background`, `conversation`, …).
     /// Rejected with `Unsupported` (I6) rather than silently dropped; fields
     /// graduate out of here as support lands.
@@ -903,11 +914,16 @@ pub fn parse_responses(body: &Value) -> Result<LlmRequest, TranslateError> {
         ));
     }
 
-    let reasoning_effort = req
+    let (reasoning_effort, reasoning_summary) = req
         .reasoning
         .map(parse_responses_reasoning)
         .transpose()?
-        .flatten();
+        .unwrap_or_default();
+    let include_encrypted_reasoning = req
+        .include
+        .map(parse_responses_include)
+        .transpose()?
+        .unwrap_or(false);
     let response_format = req
         .text
         .map(parse_responses_text_format)
@@ -942,6 +958,7 @@ pub fn parse_responses(body: &Value) -> Result<LlmRequest, TranslateError> {
             stop: Vec::new(),
             seed: None,
             reasoning_effort,
+            reasoning_summary,
         },
         tools,
         tool_choice,
@@ -951,7 +968,41 @@ pub fn parse_responses(body: &Value) -> Result<LlmRequest, TranslateError> {
         store: req.store,
         stream: req.stream,
         stream_include_usage: false,
+        include_encrypted_reasoning,
+        prompt_cache_key: req.prompt_cache_key,
     })
+}
+
+/// Parse Responses `include`, returning whether the client asked for encrypted
+/// reasoning. That is the one extra output the gateway can deliver faithfully:
+/// an OpenAI-Responses upstream returns it, and other protocols have none to
+/// return. Any other value asks for output the gateway does not model and is
+/// rejected by name (I6).
+fn parse_responses_include(include: Value) -> Result<bool, TranslateError> {
+    if include.is_null() {
+        return Ok(false);
+    }
+    let values = include
+        .as_array()
+        .ok_or_else(|| TranslateError::Invalid("`include` must be an array".into()))?;
+    let mut encrypted_reasoning = false;
+    for value in values {
+        match value.as_str() {
+            Some("reasoning.encrypted_content") => encrypted_reasoning = true,
+            Some(other) => {
+                return Err(TranslateError::Unsupported {
+                    surface: "responses",
+                    param: format!("include `{other}`"),
+                })
+            }
+            None => {
+                return Err(TranslateError::Invalid(
+                    "`include` entries must be strings".into(),
+                ))
+            }
+        }
+    }
+    Ok(encrypted_reasoning)
 }
 
 /// Walk the Responses `input` items into canonical messages. Assistant-side items
@@ -1229,21 +1280,31 @@ fn responses_output_string(output: Option<&Value>) -> Result<String, TranslateEr
     }
 }
 
-/// Extract `reasoning.effort` (→ canonical `reasoning_effort`). `summary` /
-/// `generate_summary` are advisory generation config and dropped (like `stop` /
-/// `seed` on the Responses renderer); unknown keys reject (I6).
-fn parse_responses_reasoning(r: Value) -> Result<Option<String>, TranslateError> {
+/// Extract `reasoning.effort` and `reasoning.summary` (→ canonical
+/// `reasoning_effort` / `reasoning_summary`). `generate_summary` is the older
+/// spelling of `summary`; both at once must agree. Unknown keys reject (I6).
+fn parse_responses_reasoning(r: Value) -> Result<(Option<String>, Option<String>), TranslateError> {
     let obj = r
         .as_object()
         .ok_or_else(|| TranslateError::Invalid("`reasoning` must be an object".into()))?;
     reject_extra_keys_responses(obj, &["effort", "summary", "generate_summary"], "reasoning")?;
-    match obj.get("effort") {
-        None => Ok(None),
+    let string_field = |key: &str| match obj.get(key) {
+        None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.clone())),
-        Some(_) => Err(TranslateError::Invalid(
-            "`reasoning.effort` must be a string".into(),
-        )),
-    }
+        Some(_) => Err(TranslateError::Invalid(format!(
+            "`reasoning.{key}` must be a string"
+        ))),
+    };
+    let effort = string_field("effort")?;
+    let summary = match (string_field("summary")?, string_field("generate_summary")?) {
+        (Some(a), Some(b)) if a != b => {
+            return Err(TranslateError::Invalid(format!(
+                "ambiguous reasoning summary: summary ({a}) and generate_summary ({b}) differ"
+            )))
+        }
+        (a, b) => a.or(b),
+    };
+    Ok((effort, summary))
 }
 
 /// Parse a Responses `text` value (`{format: {...}}`) into the canonical
@@ -2378,8 +2439,22 @@ mod tests {
             "store": true
         }))
         .unwrap();
-        // reasoning.effort → sampling.reasoning_effort; summary dropped (advisory).
+        // reasoning.effort / reasoning.summary → sampling, both forwarded.
         assert_eq!(req.sampling.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(req.sampling.reasoning_summary.as_deref(), Some("auto"));
+        // `generate_summary` is the older spelling; conflicting values reject.
+        let older = parse_responses(&json!({
+            "model": "m", "input": "x", "reasoning": {"generate_summary": "concise"}
+        }))
+        .unwrap();
+        assert_eq!(older.sampling.reasoning_summary.as_deref(), Some("concise"));
+        assert!(matches!(
+            parse_responses(&json!({
+                "model": "m", "input": "x",
+                "reasoning": {"summary": "auto", "generate_summary": "detailed"}
+            })),
+            Err(TranslateError::Invalid(_))
+        ));
         // previous_response_id AND store are both carried and forwarded by the
         // Responses renderer — a `store:false` opt-out must be honored, not dropped.
         assert_eq!(req.previous_response_id.as_deref(), Some("resp_abc"));
@@ -2398,6 +2473,63 @@ mod tests {
             crate::outbound::render_openai_responses(&no_store, "m").unwrap()["store"],
             false
         );
+    }
+
+    #[test]
+    fn responses_accepts_a_coding_agents_default_request() {
+        // The request a coding agent sends with reasoning on: encrypted
+        // reasoning for stateless replay, a prompt-cache key, and a replayed
+        // turn carrying item ids and encrypted reasoning.
+        let req = parse_responses(&json!({
+            "model": "m",
+            "instructions": "You are a coding agent.",
+            "input": [
+                {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "list the files"}]},
+                {"type": "reasoning", "id": "rs_1", "summary": [],
+                    "encrypted_content": "opaque"},
+                {"type": "function_call", "id": "fc_1", "call_id": "c1",
+                    "name": "bash", "arguments": "{\"cmd\":\"ls\"}"},
+                {"type": "function_call_output", "call_id": "c1", "output": "a.txt"}
+            ],
+            "tools": [{"type": "function", "name": "bash",
+                "parameters": {"type": "object"}}],
+            "tool_choice": "auto",
+            "stream": true,
+            "max_output_tokens": 32000,
+            "prompt_cache_key": "session-1",
+            "include": ["reasoning.encrypted_content"],
+            "reasoning": {"effort": "high", "summary": "auto"}
+        }))
+        .unwrap();
+        assert!(req.include_encrypted_reasoning);
+        assert_eq!(req.prompt_cache_key.as_deref(), Some("session-1"));
+        assert_eq!(req.sampling.reasoning_summary.as_deref(), Some("auto"));
+
+        // Absent or null `include` asks for nothing extra.
+        for include in [Value::Null, json!([])] {
+            let plain =
+                parse_responses(&json!({"model": "m", "input": "x", "include": include})).unwrap();
+            assert!(!plain.include_encrypted_reasoning);
+        }
+        // Output the gateway does not model is named, not ignored.
+        assert_eq!(
+            parse_responses(&json!({
+                "model": "m", "input": "x",
+                "include": ["reasoning.encrypted_content", "message.output_text.logprobs"]
+            }))
+            .unwrap_err(),
+            TranslateError::Unsupported {
+                surface: "responses",
+                param: "include `message.output_text.logprobs`".into(),
+            }
+        );
+        for include in [json!("reasoning.encrypted_content"), json!([1])] {
+            assert!(matches!(
+                parse_responses(&json!({"model": "m", "input": "x", "include": include})),
+                Err(TranslateError::Invalid(_))
+            ));
+        }
     }
 
     #[test]
@@ -2442,7 +2574,7 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(&err, TranslateError::Unsupported { surface: "responses", param }
-                if param == "include, metadata"),
+                if param == "metadata"),
             "got {err:?}"
         );
         // A built-in tool-call input item is Unsupported (lands with #4).
@@ -2560,6 +2692,8 @@ mod tests {
             store: None,
             stream: false,
             stream_include_usage: false,
+            include_encrypted_reasoning: false,
+            prompt_cache_key: None,
         }
     }
 

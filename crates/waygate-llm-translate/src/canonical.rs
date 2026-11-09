@@ -181,6 +181,13 @@ pub struct Sampling {
     /// so adding this field does not invalidate existing cache entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Responses `reasoning.summary`: the client asks for summaries of the
+    /// model's reasoning (`auto` / `concise` / `detailed`). Forwarded verbatim to
+    /// an OpenAI-Responses upstream; other protocols produce no such summaries,
+    /// so the response simply carries none. `skip_serializing_if` keeps the
+    /// completion-cache canonical key byte-identical for requests that omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_summary: Option<String>,
 }
 
 /// Structured-output constraint, normalized across surfaces (OpenAI Chat
@@ -299,6 +306,21 @@ pub struct LlmRequest {
     /// requests that do not ask.
     #[serde(default, skip_serializing_if = "is_false")]
     pub stream_include_usage: bool,
+    /// Responses `include: ["reasoning.encrypted_content"]`: the client asks for
+    /// its reasoning in encrypted form so it can send it back on a later turn
+    /// without any server storing the conversation. Forwarded to an
+    /// OpenAI-Responses upstream; other protocols produce no encrypted
+    /// reasoning, and nothing is invented in its place. `skip_serializing_if`
+    /// keeps the completion-cache canonical key byte-identical for requests that
+    /// do not ask.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub include_encrypted_reasoning: bool,
+    /// Responses `prompt_cache_key`: a hint that helps the upstream reuse cached
+    /// prompt prefixes. It does not change the output, so it is forwarded only
+    /// to an OpenAI-Responses upstream, which honors it, and left out elsewhere;
+    /// the completion-cache key ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
