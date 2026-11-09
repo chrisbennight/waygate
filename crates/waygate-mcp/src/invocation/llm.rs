@@ -178,13 +178,16 @@ fn cache_identity(ctx: &InvocationContext<'_>) -> (String, Option<String>, Optio
 }
 
 /// The cache key's canonical request form: the serialized `LlmRequest` with
-/// `stream` normalized to `false`, so the key is transport-agnostic. The cached
-/// *content* is identical whether the caller asked for a unary or a streamed
-/// response — only the delivery transport differs — so both share one entry: a
-/// streaming request can hit a body a unary call stored, and vice versa.
+/// its transport fields (`stream`, `stream_include_usage`) normalized to
+/// `false`, so the key is transport-agnostic. The cached *content* is identical
+/// whether the caller asked for a unary or a streamed response — only the
+/// delivery transport differs — so both share one entry: a streaming request
+/// can hit a body a unary call stored, and vice versa. A streamed replay ends
+/// with the stored usage whenever the body has it.
 fn cache_canonical(llm_req: &waygate_llm_translate::LlmRequest) -> String {
     let mut keyed = llm_req.clone();
     keyed.stream = false;
+    keyed.stream_include_usage = false;
     serde_json::to_string(&keyed).unwrap_or_default()
 }
 
@@ -536,6 +539,7 @@ impl DefaultInvocationService {
                         model_alias: ctx.tool.to_owned(),
                         cache_store,
                         framing,
+                        client_usage: llm_req.stream_include_usage,
                     },
                 );
                 Ok(InvocationResponse::Stream(hold_response_capacity(

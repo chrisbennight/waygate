@@ -345,6 +345,8 @@ pub(super) struct StreamFinalize {
     /// How provider frames are presented to the client. The translator folds
     /// the audit/usage record the same way for every framing.
     pub(super) framing: ClientFraming,
+    /// A chat client asked for a final usage chunk (`stream_options`).
+    pub(super) client_usage: bool,
 }
 
 /// The client transport a streamed inference call is rendered into.
@@ -537,7 +539,8 @@ pub(super) fn finalizing_inference_stream(
         started,
         finished: false,
         telemetry_finished: false,
-        translator: StreamTranslator::for_record(fin.record_base),
+        translator: StreamTranslator::for_record(fin.record_base)
+            .with_client_usage(fin.client_usage),
         pending: VecDeque::new(),
         usage: fin.usage,
         tenant_id: fin.tenant_id,
@@ -689,7 +692,19 @@ pub(super) fn finalizing_inference_stream(
                         // replay (e.g. tool calls), so we never cache a lossy body.
                         // Best-effort and last, like the usage row.
                         if let Some(tee) = &st.cache_store {
-                            if let Some(body) = tee.agg.build_body() {
+                            if let Some(mut body) = tee.agg.build_body() {
+                                // A translated stream forwards usage only when
+                                // the client asked for it, but the folded record
+                                // always holds the provider's counts. Store them,
+                                // so any later hit — unary, or a stream that asks
+                                // for usage — can report usage.
+                                if body.get("usage").is_none() {
+                                    if let Some(usage) =
+                                        waygate_llm_translate::openai_chat_usage(&snapshot.usage)
+                                    {
+                                        body["usage"] = usage;
+                                    }
+                                }
                                 tee.cache
                                     .put(crate::cache::CacheStoreRequest {
                                         canonical_request: tee.canonical.clone(),

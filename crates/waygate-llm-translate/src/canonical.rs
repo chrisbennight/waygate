@@ -291,4 +291,16 @@ pub struct LlmRequest {
     pub store: Option<bool>,
     #[serde(default)]
     pub stream: bool,
+    /// A streaming Chat Completions client asked for a final usage chunk
+    /// (`stream_options.include_usage`). Only ever set together with `stream`;
+    /// the Responses surface always ends its stream with usage, so it never sets
+    /// it. A transport detail like `stream`, so the completion-cache key ignores
+    /// it, and `skip_serializing_if` keeps the canonical form byte-identical for
+    /// requests that do not ask.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stream_include_usage: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }

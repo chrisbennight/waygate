@@ -592,6 +592,59 @@ async fn responses_surface_streaming_relays_named_events_through_egress() {
 }
 
 #[tokio::test]
+async fn chat_stream_ends_with_usage_on_a_translated_route_when_asked() {
+    // A chat client that sets `stream_options.include_usage` gets a final usage
+    // chunk even when the upstream speaks another protocol; a client that does
+    // not ask gets the stream it always did.
+    use futures::StreamExt;
+
+    let addr = spawn_anthropic_stream_provider().await;
+    let collect = |stream_options: Option<Value>| async move {
+        let dispatcher = LlmDispatcher::new(
+            ProviderClient::new(reqwest::Client::new()),
+            anthropic_store(),
+        );
+        let svc = DefaultInvocationService::new(
+            Arc::new(FakeCatalog),
+            Arc::new(AllowAllGate),
+            Arc::new(RecordingSink::default()),
+        )
+        .with_llm(dispatcher, anthropic_resolver(addr));
+        let mut args = json!({"model": "claude-x", "stream": true,
+            "messages": [{"role": "user", "content": "hi"}]})
+        .as_object()
+        .cloned()
+        .unwrap();
+        if let Some(options) = stream_options {
+            args.insert("stream_options".into(), options);
+        }
+        let req = InvocationRequest::new("llm", "claude-x").with_arguments(Some(args));
+        let mut stream = match svc.invoke(None, req).await.expect("invoke") {
+            InvocationResponse::Stream(s) => s,
+            other => panic!("expected Stream, got {other:?}"),
+        };
+        let mut events = Vec::new();
+        while let Some(item) = stream.next().await {
+            events.push(item.expect("chunk").event);
+        }
+        events
+    };
+
+    let asked = collect(Some(json!({"include_usage": true}))).await;
+    let [.., usage, done] = asked.as_slice() else {
+        panic!("too few chunks: {asked:?}");
+    };
+    assert_eq!(done.as_str(), Some("[DONE]"));
+    assert_eq!(usage["choices"], json!([]));
+    assert_eq!(usage["usage"]["completion_tokens"], 2);
+    assert!(usage["usage"]["prompt_tokens"].as_u64().is_some());
+
+    let plain = collect(None).await;
+    assert!(plain.iter().all(|e| e.get("usage").is_none()));
+    assert_eq!(plain.len(), asked.len() - 1);
+}
+
+#[tokio::test]
 async fn responses_surface_streaming_translates_anthropic_to_responses_events() {
     // R3b: a /v1/responses streaming caller on a NON-Responses upstream (Anthropic)
     // has its normalized chat-chunk stream LIFTED into Responses streaming events:
@@ -2152,6 +2205,90 @@ async fn streaming_miss_tees_completion_into_cache_then_a_second_call_hits() {
         "the replay is a flagged cache hit"
     );
     assert!(!rows[2].gateway_cache_hit);
+}
+
+#[tokio::test]
+async fn translated_stream_cache_entry_keeps_usage_for_a_later_request_that_asks() {
+    // A translated stream sends no usage chunk to a client that did not ask, but
+    // the entry it caches still carries the provider's counts, so an identical
+    // request that asks for usage is answered with it from the cache.
+    use futures::StreamExt;
+
+    let addr = spawn_anthropic_stream_provider().await;
+    let cache = Arc::new(MockCache::default());
+    let resolver: Arc<dyn LlmModelResolver> = Arc::new(StaticModelResolver::new().with_model(
+        "llm",
+        "claude-x",
+        ResolvedModel {
+            operation: LlmOperation::Chat,
+            route: ResolvedRoute {
+                provider: LlmProvider::Anthropic,
+                credential_label: "MAIN".into(),
+                base_url: format!("http://{addr}"),
+                path: "messages".into(),
+                upstream_model: "claude-served-x".into(),
+                protocol: UpstreamProtocol::AnthropicMessages,
+                embeddings_no_auth: false,
+                openai_chatgpt: false,
+            },
+            fallbacks: vec![],
+            risk: ModelRisk::High,
+            ttfb: None,
+            cache_ttl: Some(std::time::Duration::from_secs(300)),
+        },
+    ));
+    let dispatcher = LlmDispatcher::new(
+        ProviderClient::new(reqwest::Client::new()),
+        anthropic_store(),
+    );
+    let svc = DefaultInvocationService::new(
+        Arc::new(FakeCatalog),
+        Arc::new(AllowAllGate),
+        Arc::new(RecordingSink::default()),
+    )
+    .with_llm(dispatcher, resolver)
+    .with_llm_cache(cache.clone() as waygate_mcp::cache::SharedLlmCache);
+
+    let events = |stream_options: Option<Value>| {
+        let svc = &svc;
+        async move {
+            let mut args = json!({"model": "claude-x", "stream": true,
+                "messages": [{"role": "user", "content": "hi"}]})
+            .as_object()
+            .cloned()
+            .unwrap();
+            if let Some(options) = stream_options {
+                args.insert("stream_options".into(), options);
+            }
+            let req = InvocationRequest::new("llm", "claude-x").with_arguments(Some(args));
+            let mut stream = match svc.invoke(Some(&principal()), req).await.expect("invoke") {
+                InvocationResponse::Stream(s) => s,
+                other => panic!("expected Stream, got {other:?}"),
+            };
+            let mut events = Vec::new();
+            while let Some(item) = stream.next().await {
+                events.push(item.expect("chunk").event);
+            }
+            events
+        }
+    };
+
+    let miss = events(None).await;
+    assert!(miss.iter().all(|e| e.get("usage").is_none()));
+    assert_eq!(cache.puts(), 1, "the clean close cached the completion");
+    assert!(cache.only_stored_body()["usage"]["completion_tokens"].is_u64());
+
+    let hit = events(Some(json!({"include_usage": true}))).await;
+    assert_eq!(
+        cache.puts(),
+        1,
+        "the second request was served from the cache"
+    );
+    assert!(
+        hit.iter()
+            .any(|e| e["choices"] == json!([]) && e["usage"]["completion_tokens"].is_u64()),
+        "the replay ends with usage: {hit:?}"
+    );
 }
 
 // ---- Embeddings pipeline branch ---------------------------------------------

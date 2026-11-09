@@ -171,6 +171,7 @@ struct LlmRequest {
                                               //   upstream, gated for non-Responses routes (§14)
     store: Option<bool>,                      // forwarded; store:false is honoured (§14)
     stream: bool,
+    stream_include_usage: bool,               // chat stream_options.include_usage (§4.4)
 }
 enum Surface { ChatCompletions, Responses }
 ```
@@ -319,6 +320,16 @@ into the OpenAI `chat.completion.chunk` shape the gateway streams back to a
 `InferenceRecord`. `push(frame) -> StreamStep { chunks: Vec<Value>, done }`; OpenAI/OpenRouter
 frames pass through 1:1, Anthropic / Gemini / Responses events are translated, and each
 non-OpenAI stream synthesizes the terminal `[DONE]` for the chat transport.
+
+A chat client that sets `stream_options.include_usage` receives a final usage-only chunk
+(`choices: []`) before `[DONE]` on every route. OpenAI/OpenRouter routes already send it,
+because the gateway always requests usage upstream for metering and forwards that chunk; the
+translated protocols add one carrying the same prompt and completion counts as the unary chat
+body, with their sum as the total, and add none when the provider reported no counts. Without the option, or
+with `include_usage: false`, each route keeps its existing behavior: OpenAI/OpenRouter
+streams still carry the upstream's usage chunk and translated streams carry none. Other
+`stream_options` keys are rejected by name, and a cache-hit replay ends with the stored
+usage.
 
 For a `/v1/responses` client, this chat-chunk stream is the egress *source*, not the
 client output: an OpenAI-Responses upstream's frames are relayed 1:1 as named Responses
@@ -817,8 +828,9 @@ rolling/daily/weekly/monthly. Cost weighting comes from the `llm_models` costing
   and subject** — exact-match cache
   entries are **per-principal scoped**, so one user's completion is never served to another
   (security invariant; strictly stronger than tenant isolation). The key is
-  **transport-agnostic** (it normalizes `stream`), so a unary call and a streaming call for the
-  same content share one entry, served in whichever transport the request asked for.
+  **transport-agnostic** (it normalizes `stream` and `stream_include_usage`), so a unary call
+  and a streaming call for the same content share one entry, served in whichever transport the
+  request asked for.
   The key format is versioned: entries written before issuer scoping are never
   reused after upgrading. They expire and are swept normally; no database
   migration or manual purge is required. Cache lookups still follow current
@@ -831,7 +843,9 @@ rolling/daily/weekly/monthly. Cost weighting comes from the `llm_models` costing
   model is never cached. (Per-request no-store flag and a `temperature == 0` default-gate are
   not supported.)
 - **Streaming:** on miss, tee the assembled completion into the cache as it streams; on hit,
-  replay as a synthetic SSE stream (client behaviour identical). A cache hit still produces an
+  replay as a synthetic SSE stream (client behaviour identical). The stored completion carries
+  the provider's usage counts even when the client did not ask for usage on its stream, so a
+  later unary hit or a streamed hit that asks for usage can report it. A cache hit still produces an
   `InferenceRecord` (`gateway_cache_hit = true`, zero upstream tokens/cost).
 - **Backend:** a `CacheStore` trait, Postgres-backed in v1, trait admits
   Valkey/semantic later without touching call sites.

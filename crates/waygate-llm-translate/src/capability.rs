@@ -78,6 +78,7 @@ mod tests {
             previous_response_id: None,
             store: None,
             stream: false,
+            stream_include_usage: false,
         }
     }
 

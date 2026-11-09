@@ -69,7 +69,7 @@ pub use response_canonical::{
     IncompleteReason, OutputContentPart, OutputItem, ResponseStatus, Usage,
 };
 pub use stream::{
-    AnthropicStreamTranslator, ChatStreamToResponses, GeminiStreamTranslator,
+    openai_chat_usage, AnthropicStreamTranslator, ChatStreamToResponses, GeminiStreamTranslator,
     OpenAiChatStreamAggregator, ResponsesStreamTranslator, StreamStep, StreamTranslator,
 };
 
