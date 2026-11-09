@@ -784,8 +784,12 @@ fn usage_to_responses(u: &Usage) -> Value {
 pub(crate) fn chat_reasoning_text(message: &Value) -> Option<&str> {
     ["reasoning_content", "reasoning"]
         .into_iter()
-        .find_map(|key| message.get(key).and_then(Value::as_str))
-        .filter(|text| !text.is_empty())
+        .find_map(|key| {
+            message
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+        })
 }
 
 /// A Responses `reasoning` item carrying a chat upstream's reasoning as plain
@@ -1273,6 +1277,7 @@ mod tests {
                         "function": {"name": "bash", "arguments": "{}"}}]
                 }}]
             });
+            chat["choices"][0]["message"]["reasoning_content"] = json!("");
             chat["choices"][0]["message"][field] = json!("Run ls first.");
             let r = canonical_response_to_responses(&openai_chat_to_canonical_response(&chat));
             let output = r["output"].as_array().unwrap();

@@ -2238,7 +2238,7 @@ mod tests {
         let chunk = |delta: Value| json!({"id":"c1","model":"m","choices":[{"delta": delta}]});
         evs.extend(lift.push(&chunk(json!({"role": "assistant"}))));
         evs.extend(lift.push(&chunk(json!({"reasoning_content": "Run "}))));
-        evs.extend(lift.push(&chunk(json!({"reasoning": "ls."}))));
+        evs.extend(lift.push(&chunk(json!({"reasoning_content": "", "reasoning": "ls."}))));
         evs.extend(lift.push(&chunk(json!({"content": "Done."}))));
         evs.extend(
             lift.push(
