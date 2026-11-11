@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
 use futures::StreamExt;
@@ -663,14 +663,16 @@ async fn responses_surface_unary_dispatch_renders_a_responses_body() {
     assert_eq!(body["usage"]["output_tokens"], 4);
 }
 
-/// OpenAI credential (OAuth blob — the store treats OpenAI as OAuth). Far-future
-/// expiry so no refresh is attempted.
+/// Distinct public API and legacy subscription credentials.
 fn responses_store() -> Arc<LlmCredentialStore> {
     let blob = r#"{"tokens":{"access_token":"sk-oai-test","refresh_token":"rt","account_id":"test-codex-account"},"expires_at":"2099-01-01T00:00:00Z"}"#;
-    Arc::new(LlmCredentialStore::from_vars([(
-        "LLM_CRED_OPENAI_MAIN".to_string(),
-        blob.to_string(),
-    )]))
+    Arc::new(LlmCredentialStore::from_vars([
+        (
+            "LLM_CRED_OPENAI_MAIN".to_string(),
+            r#"{"api_key":"sk-oai-test"}"#.to_string(),
+        ),
+        ("LLM_CRED_OPENAI_LEGACY".to_string(), blob.to_string()),
+    ]))
 }
 
 fn responses_route(addr: SocketAddr) -> ResolvedRoute {
@@ -692,6 +694,7 @@ fn responses_route(addr: SocketAddr) -> ResolvedRoute {
 /// must run the Codex body finalizer and use the Codex auth fingerprint.
 fn codex_route(addr: SocketAddr) -> ResolvedRoute {
     ResolvedRoute {
+        credential_label: "LEGACY".to_string(),
         embeddings_no_auth: false,
         openai_chatgpt: true,
         upstream_model: "gpt-5.5".to_string(),
@@ -1657,4 +1660,97 @@ async fn invalid_image_responses_record_account_failures_once() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn api_images_preserve_generation_edits_usage_and_never_replay_failures() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let addr = spawn(Router::new().route("/images/{operation}", post(
+        move |axum::extract::Path(operation): axum::extract::Path<String>, headers: HeaderMap, axum::Json(body): axum::Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(headers["authorization"], "Bearer sk-oai-test");
+                for key in ["originator", "chatgpt-account-id", "session_id"] {
+                    assert!(!headers.contains_key(key));
+                }
+                assert_eq!(body["model"], "gpt-image-2");
+                if body["prompt"] == "fail" {
+                    return (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({}))).into_response();
+                }
+                if operation == "edits" {
+                    assert_eq!(body["images"][0]["image_url"], "data:image/png;base64,aGVsbG8=");
+                }
+                axum::Json(json!({"created":1,"data":[{"b64_json":"YQ=="}],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}})).into_response()
+            }
+        }
+    ))).await;
+    let dispatcher = LlmDispatcher::new(
+        ProviderClient::new(reqwest::Client::new())
+            .with_single_attempt_http(reqwest::Client::builder())
+            .unwrap(),
+        responses_store(),
+    );
+    let mut route = responses_route(addr);
+    route.path = "images".into();
+    route.upstream_model = "gpt-image-2".into();
+    for edit in [false, true] {
+        let mut body = json!({"model":"image-alias","prompt":"a square"});
+        if edit {
+            body["images"] = json!([{"image_url":"data:image/png;base64,aGVsbG8="}]);
+        }
+        let request = waygate_llm_translate::images::parse_images(body, edit).unwrap();
+        let (record, body) = dispatcher.dispatch_images(request, &route).await.unwrap();
+        assert_eq!(body["data"][0]["b64_json"], "YQ==");
+        assert_eq!(record.usage.input, Some(5));
+        assert_eq!(record.usage.output, Some(2));
+        assert!(record.provider_account_id.is_none());
+    }
+    let request = waygate_llm_translate::images::parse_images(
+        json!({"model":"image-alias","prompt":"fail"}),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        dispatcher
+            .dispatch_images(request, &route)
+            .await
+            .unwrap_err()
+            .provider_status(),
+        Some(503)
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn public_openai_routes_refuse_subscription_credentials_before_network_access() {
+    let dispatcher = LlmDispatcher::new(
+        ProviderClient::new(reqwest::Client::new()),
+        responses_store(),
+    );
+    let mut route = responses_route("127.0.0.1:1".parse().unwrap());
+    route.credential_label = "LEGACY".into();
+    let error = dispatcher
+        .dispatch(&responses_req(), &route)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DispatchError::Credential(waygate_llm_credentials::CredentialError::ApiKeyRequired(_))
+    ));
+    route.path = "images".into();
+    let request = waygate_llm_translate::images::parse_images(
+        json!({"model":"image-alias","prompt":"test"}),
+        false,
+    )
+    .unwrap();
+    let error = dispatcher
+        .dispatch_images(request, &route)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DispatchError::Credential(waygate_llm_credentials::CredentialError::ApiKeyRequired(_))
+    ));
 }

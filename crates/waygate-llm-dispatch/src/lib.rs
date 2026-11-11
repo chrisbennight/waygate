@@ -559,10 +559,19 @@ impl LlmDispatcher {
         };
 
         // I4: the bearer is injected and managed by the credential store.
-        let (bearer, credential_account_id) = self
-            .credentials
-            .bearer_with_account(route.provider, &route.credential_label)
-            .await?;
+        let (bearer, credential_account_id) =
+            if route.provider == LlmProvider::OpenAi && !route.openai_chatgpt {
+                (
+                    self.credentials
+                        .api_key(route.provider, &route.credential_label)
+                        .await?,
+                    None,
+                )
+            } else {
+                self.credentials
+                    .bearer_with_account(route.provider, &route.credential_label)
+                    .await?
+            };
         let account_id = if matches!(auth, ProviderAuth::OpenAiChatGpt) {
             credential_account_id
         } else {
@@ -774,9 +783,15 @@ impl LlmDispatcher {
             (String::new(), ProviderAuth::None)
         } else {
             (
-                self.credentials
-                    .bearer(route.provider, &route.credential_label)
-                    .await?,
+                if route.provider == LlmProvider::OpenAi {
+                    self.credentials
+                        .api_key(route.provider, &route.credential_label)
+                        .await?
+                } else {
+                    self.credentials
+                        .bearer(route.provider, &route.credential_label)
+                        .await?
+                },
                 ProviderAuth::Bearer,
             )
         };

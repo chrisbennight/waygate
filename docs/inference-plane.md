@@ -652,6 +652,12 @@ whose token lapses before the next re-read surfaces an `awaiting re-read` error 
 
 ### 7.1 Dynamic model discovery (implemented)
 
+OpenAI API-key discovery uses an explicit `responses_models` selection because
+the provider listing does not identify supported operations. It routes selected
+IDs to the public Responses API without subscription headers or CLI tracking.
+Other operations remain explicit pins. See [OpenAI API upstreams](openai-api-upstreams.md)
+for credential selection, configuration, failure behavior, and migration.
+
 The catalog need not be hand-listed: the gateway can fetch each configured
 provider's live model list and register the models itself. Opt-in via
 `GATEWAY_LLM_DISCOVERY` (a JSON array of `{provider, credential_label, base_url}`
@@ -697,7 +703,7 @@ two fields at parse time, and is mutually exclusive with them.
     dispatch selects the Codex request fingerprint (`ProviderAuth::OpenAiChatGpt`)
     instead of a bare Bearer. `parse_targets` keeps an `openai` target on the
     provider alone; the refresher resolves the credential's kind (OAuth ⇒ Codex,
-    api key ⇒ skipped) since parse time has no credential store.
+    API key ⇒ public API with explicit Responses selection) since parse time has no credential store.
     The backend **scopes the listing to the `client_version` it is asked as**
     (an old CLI version gets that release's model subset; an ancient one an
     empty list), so the refresher resolves a current version per cycle:

@@ -163,8 +163,8 @@ struct ModelDef {
     /// Unset (or `chat`) is a chat/completions model (the default). An embeddings
     /// model must be called on `/v1/embeddings`; the pipeline rejects a
     /// surface/operation mismatch. `surface` (responses/codex) does not apply to
-    /// an embeddings model. `images` selects the direct Codex Images API,
-    /// requires `surface: codex`, and defaults the endpoint prefix to `images`.
+    /// an embeddings model. `images` selects the OpenAI Images API and defaults
+    /// the endpoint prefix to `images`; omit `surface` for API-key access.
     #[serde(default)]
     kind: Option<String>,
     /// Optional ordered cross-provider failover groups (§7). After the primary
@@ -566,7 +566,10 @@ fn build_from_defs(
         let no_auth = embedding_config::no_auth(&def)?;
         if is_img
             && (!def.provider.eq_ignore_ascii_case("openai")
-                || !surface_is_codex(def.surface.as_deref())
+                || def
+                    .surface
+                    .as_deref()
+                    .is_some_and(|surface| !surface.eq_ignore_ascii_case("codex"))
                 || !def.fallbacks.is_empty()
                 || def
                     .credential_labels
@@ -575,7 +578,7 @@ fn build_from_defs(
                 || def.cache_ttl_ms.is_some()
                 || def.ttfb_ms.is_some())
         {
-            anyhow::bail!("image models require one OpenAI Codex credential without fallbacks, caching, or streaming deadlines");
+            anyhow::bail!("image models require one OpenAI credential, no surface (API) or surface codex (legacy), and no fallbacks, caching, or streaming deadlines");
         }
         // Build the primary group's routes (its credential pool), then each
         // cross-provider fallback group's routes, flattened in order. The first

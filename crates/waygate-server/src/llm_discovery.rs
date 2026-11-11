@@ -6,7 +6,8 @@
 //!
 //! Scope today: **OpenRouter** (api-key listing, with pricing — chat models from
 //! `/models` AND embeddings models from the dedicated `/embeddings/models`, each
-//! tagged by operation) and **OpenAI Codex** (subscription OAuth — the
+//! tagged by operation), **OpenAI API** (API-key listing with an explicit
+//! Responses model selection), and legacy **OpenAI Codex** (subscription OAuth — the
 //! ChatGPT-backend `/models` listing, no pricing). Each provider shares one base
 //! URL between discovery and chat: OpenRouter's `/models` + `/embeddings/models`
 //! (discovery) and `/chat/completions` + `/embeddings` (dispatch); Codex's
@@ -62,8 +63,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use waygate_llm_credentials::LlmCredentialStore;
 use waygate_llm_discovery::{
-    is_valid_codex_client_version, list_codex, list_openrouter, list_openrouter_embeddings,
-    CodexVersionTracker, DiscoveredModel, DiscoverySurface,
+    is_valid_codex_client_version, list_codex, list_openai, list_openrouter,
+    list_openrouter_embeddings, CodexVersionTracker, DiscoveredModel, DiscoverySurface,
 };
 use waygate_llm_dispatch::DbModelResolver;
 use waygate_llm_providers::SharedCodexUaVersion;
@@ -91,7 +92,7 @@ pub struct DiscoveryTarget {
     /// The injected credential label (`LLM_CRED_<PROVIDER>_<LABEL>`) whose bearer
     /// authenticates both the listing and the discovered models' chat calls. Its
     /// kind (api-key vs OAuth) also selects the discovery surface for `openai`
-    /// (OAuth ⇒ Codex; an api key ⇒ skipped).
+    /// (OAuth ⇒ legacy Codex; an API key ⇒ public API).
     pub credential_label: String,
     /// Provider base URL shared by the model listing (`/models`) and the chat
     /// route the discovered models point at. OpenRouter:
@@ -105,6 +106,10 @@ pub struct DiscoveryTarget {
     /// release tracker; a pin bypasses the tracker entirely for this target.
     /// Ignored by non-Codex surfaces.
     pub client_version: Option<String>,
+    /// Exact model IDs that may be discovered through the public Responses API.
+    /// Required for API-key OpenAI discovery because `/models` carries no
+    /// operation metadata. Images, audio, and realtime remain explicit pins.
+    pub responses_models: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -114,6 +119,8 @@ struct RawTarget {
     base_url: String,
     #[serde(default)]
     client_version: Option<String>,
+    #[serde(default)]
+    responses_models: Vec<String>,
 }
 
 /// Default discovery interval (3h) and floor (5 min) so a misconfigured interval
@@ -130,7 +137,7 @@ pub(crate) const MIN_INTERVAL_SECS: u64 = 300;
 /// time has no credential store, so it can only gate on whether the provider has
 /// an adapter under *some* auth-kind (see
 /// [`DiscoverySurface::provider_has_adapter`]). An `openai` target backed by an
-/// api key (not Codex OAuth) is kept here but skipped at refresh.
+/// API key uses the public API with an explicit Responses model selection.
 ///
 /// **At most one target per provider** is kept: reconciliation
 /// (`mark_discovered_absent`) is provider-scoped, so two targets sharing a
@@ -195,6 +202,7 @@ pub fn parse_targets(raw: &str) -> Vec<DiscoveryTarget> {
                 credential_label: t.credential_label,
                 base_url: t.base_url,
                 client_version,
+                responses_models: t.responses_models,
             })
         })
         .collect()
@@ -265,14 +273,26 @@ async fn refresh_target(
         tracing::warn!(
             provider = %target.provider,
             credential_label = %target.credential_label,
-            "discovery target's credential maps to no wired surface \
-             (e.g. openai api-key, not Codex OAuth); skipping"
+            "discovery target's credential maps to no wired surface; skipping"
         );
         return Ok(0);
     }
-    let bearer = credentials
-        .bearer(provider, &target.credential_label)
-        .await?;
+    if surface == DiscoverySurface::OpenAiApi {
+        anyhow::ensure!(
+            !target.responses_models.is_empty()
+                && target.responses_models.iter().all(|id| !id.trim().is_empty()),
+            "OpenAI API discovery requires non-empty responses_models IDs; configure the supported Responses models explicitly or use model pins"
+        );
+    }
+    let bearer = if surface == DiscoverySurface::Codex {
+        credentials
+            .bearer(provider, &target.credential_label)
+            .await?
+    } else {
+        credentials
+            .api_key(provider, &target.credential_label)
+            .await?
+    };
     // Fetch the live listing(s) for this surface. OpenRouter additionally exposes a
     // dedicated embeddings catalog (`/embeddings/models`); fetch both and tag each
     // model by operation (`DiscoveredModel::is_embeddings`). Both kinds flow through
@@ -293,7 +313,14 @@ async fn refresh_target(
     // latter is a complete answer that must reconcile, or a previously
     // discovered now-hidden model would stay routable.
     let mut codex_raw_len: Option<usize> = None;
+    let mut api_raw_len: Option<usize> = None;
     let (models, listing_complete): (Vec<DiscoveredModel>, bool) = match surface {
+        DiscoverySurface::OpenAiApi => {
+            let listing =
+                list_openai(http, &target.base_url, &bearer, &target.responses_models).await?;
+            api_raw_len = Some(listing.raw_len);
+            (dedup_keep_last_by_id(listing.models), true)
+        }
         DiscoverySurface::OpenRouter => {
             let mut combined = list_openrouter(http, &target.base_url, &bearer).await?;
             // An empty chat listing is the transient/garble case the empty-result
@@ -397,7 +424,13 @@ async fn refresh_target(
         // (listing_complete = false) — its reconcile is skipped below anyway,
         // so it exits early here with the incompleteness already logged.
         let codex_all_filtered = codex_raw_len.is_some_and(|raw| raw > 0) && listing_complete;
-        if codex_all_filtered {
+        let api_all_filtered = api_raw_len.is_some_and(|raw| raw > 0);
+        if api_all_filtered {
+            tracing::warn!(
+                provider = %target.provider,
+                "OpenAI API listing has no selected Responses models; reconciling discovered rows away"
+            );
+        } else if codex_all_filtered {
             tracing::warn!(
                 provider = %target.provider,
                 raw_models = codex_raw_len.unwrap_or(0),
@@ -447,6 +480,7 @@ async fn refresh_target(
         } else {
             match surface {
                 DiscoverySurface::OpenRouter => ("chat/completions", "chat_completions", false),
+                DiscoverySurface::OpenAiApi => ("responses", "responses", false),
                 DiscoverySurface::Codex => ("responses", "responses", true),
                 DiscoverySurface::Unsupported => unreachable!("Unsupported returned above"),
             }
@@ -590,6 +624,47 @@ mod tests {
     #[cfg(test)]
     fn raw_test_http_client() -> reqwest::Client {
         reqwest::Client::new() // A raw test client isolates discovery reconciliation from gateway policy.
+    }
+
+    #[test]
+    fn parse_targets_preserves_public_api_responses_selection() {
+        let targets = parse_targets(
+            r#"[{"provider":"openai","credential_label":"API","base_url":"https://api.openai.com/v1","responses_models":["qualified-model"]}]"#,
+        );
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].responses_models, vec!["qualified-model"]);
+        assert!(targets[0].client_version.is_none());
+    }
+
+    #[tokio::test]
+    async fn public_api_discovery_requires_explicit_operation_selection_before_io() {
+        let target = DiscoveryTarget {
+            provider: "openai".into(),
+            credential_label: "API".into(),
+            base_url: "http://127.0.0.1:1".into(),
+            client_version: None,
+            responses_models: vec![],
+        };
+        let credentials = LlmCredentialStore::from_vars([(
+            "LLM_CRED_OPENAI_API".into(),
+            r#"{"api_key":"synthetic-api-key"}"#.into(),
+        )]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let error = refresh_target(
+            &target,
+            &raw_test_http_client(),
+            &credentials,
+            &pool,
+            &test_tracker(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("requires non-empty responses_models"));
     }
 
     #[test]
@@ -826,6 +901,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_target_public_openai_reconciles_only_explicit_responses_models() {
+        let Ok(url) = std::env::var("AUDIT_DATABASE_URL") else {
+            eprintln!("skipping OpenAI API discovery pg test: AUDIT_DATABASE_URL not set");
+            return;
+        };
+        let _serial = super::DISCOVERY_PG_LOCK.lock().await;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .unwrap();
+        waygate_storage::PgAuditSink::migrate(&pool).await.unwrap();
+        let tenant = waygate_core::TenantId::default().as_str().to_owned();
+        let id = format!("api-{}", uuid::Uuid::now_v7().simple());
+        let alias = discovered_alias("openai", &id);
+        let body = Arc::new(Mutex::new(body_with(&[&id, "gpt-image-2"])));
+        let base_url = serve_openrouter(body.clone()).await;
+        let credentials = LlmCredentialStore::from_vars([(
+            "LLM_CRED_OPENAI_API".into(),
+            r#"{"api_key":"synthetic-api-key"}"#.into(),
+        )]);
+        let target = DiscoveryTarget {
+            provider: "openai".into(),
+            credential_label: "API".into(),
+            base_url,
+            client_version: None,
+            responses_models: vec![id.clone()],
+        };
+        let http = raw_test_http_client();
+        let tracker = test_tracker();
+        assert_eq!(
+            refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+                .await
+                .unwrap(),
+            1
+        );
+        let row = waygate_storage::get_llm_model(&pool, &tenant, &alias)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.upstream_api, "responses");
+        assert_eq!(row.path, "responses");
+        assert!(!row.openai_chatgpt);
+        assert!(row.input_cost_per_mtok.is_none());
+        assert_eq!(row.credential_label, "API");
+        *body.lock().unwrap() = r#"{"data":[]}"#.into();
+        refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+            .await
+            .unwrap();
+        assert!(present_upstream(&pool, &tenant, &alias).await);
+        *body.lock().unwrap() = body_with(&["gpt-image-2"]);
+        refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+            .await
+            .unwrap();
+        assert!(!present_upstream(&pool, &tenant, &alias).await);
+        sqlx::query("DELETE FROM llm_models WHERE tenant_id=$1 AND alias=$2")
+            .bind(&tenant)
+            .bind(&alias)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn refresh_target_upserts_prices_and_reconciles() {
         let Ok(url) = std::env::var("AUDIT_DATABASE_URL") else {
             eprintln!("skipping refresh_target pg test: AUDIT_DATABASE_URL not set");
@@ -859,6 +998,7 @@ mod tests {
             credential_label: "MAIN".into(),
             base_url,
             client_version: None,
+            responses_models: vec![],
         };
         let tracker = test_tracker();
 
@@ -926,6 +1066,7 @@ mod tests {
             eprintln!("skipping codex refresh_target pg test: AUDIT_DATABASE_URL not set");
             return;
         };
+        let _serial = super::DISCOVERY_PG_LOCK.lock().await;
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)
             .connect(&url)
@@ -962,6 +1103,7 @@ mod tests {
             credential_label: "CODEX".into(),
             base_url: base_url.clone(),
             client_version: Some("0.133.0".into()),
+            responses_models: vec![],
         };
 
         let tracker = test_tracker();
@@ -1170,6 +1312,7 @@ mod tests {
             credential_label: "MAIN".into(),
             base_url,
             client_version: None,
+            responses_models: vec![],
         };
         let tracker = test_tracker();
         let chat_alias = discovered_alias("openrouter", &chat_id);

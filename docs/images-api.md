@@ -1,33 +1,38 @@
-# Images API with a Codex subscription
+# Images API with supported OpenAI API access
 
 The gateway serves `POST /v1/images/generations` and `POST /v1/images/edits`
-using the direct Codex image endpoints and the existing subscription credential
-store. OpenAI SDK clients use the gateway base URL and a gateway API key.
+using the documented OpenAI Images API and the existing credential store.
+OpenAI SDK clients use the gateway base URL and a gateway API key.
 Image models are a separate operation from chat and embeddings.
 
 ## Configuration
 
 Append this entry to the deployment's `GATEWAY_LLM_MODELS` array, using the
-credential label already configured for the subscription:
+label configured with an explicit OpenAI API-key envelope:
 
 ```json
 {
   "alias": "gpt-image-2",
   "provider": "openai",
   "credential_label": "PRIMARY",
-  "base_url": "https://chatgpt.com/backend-api/codex",
-  "surface": "codex",
+  "base_url": "https://api.openai.com/v1",
   "kind": "images"
 }
 ```
 
 The default path prefix is `images`; dispatch appends `generations` or `edits`.
 The alias appears in `/v1/models` with `modality: "text+image->image"`, and
-`/v1/models?type=images` filters image models. Codex chat discovery does not
+`/v1/models?type=images` filters image models. Responses discovery does not
 advertise this separate capability, so the image alias is an explicit operator
-configuration. The gateway does not infer account entitlement from a chat model
+configuration. The gateway does not infer account entitlement from a model
 listing. Deployment repositories own enabling the alias and selecting the
 released image digest.
+
+Use an injected `LLM_CRED_OPENAI_PRIMARY` value with the explicit JSON
+`api_key` envelope described in [OpenAI API upstreams](openai-api-upstreams.md).
+Omit `surface` for Images API access. A subscription token is refused before
+the public API is contacted. The legacy `surface: codex` route remains only
+during migration; this change does not remove or silently convert it.
 
 ## SDK examples
 
@@ -63,7 +68,7 @@ Path("edited.png").write_bytes(base64.b64decode(edited.data[0].b64_json))
 Generation accepts JSON. Edits accept standard multipart form uploads named
 `image` or repeated `image[]`, plus an optional PNG `mask`. Up to 16 images
 fit within the total upload limit. PNG, JPEG and WebP uploads are identified by
-their file signatures and converted to inline data URLs for Codex; the gateway
+their file signatures and converted to inline data URLs for the Images API; the gateway
 does not fetch remote image URLs or resolve provider file IDs.
 
 The adapter forwards `prompt`, `model`, `n`, `size`, `quality`, `background`,
@@ -76,10 +81,12 @@ provider is contacted. Omitted options retain provider defaults.
 
 Responses preserve `created`, `data[].b64_json`, metadata, and reported usage.
 GPT image models return base64; `response_format` is rejected. Streaming and
-`partial_images` are explicitly unsupported until the subscription backend's
-streaming contract has been verified. This implementation follows the direct
-JSON image transport in the Codex source; automated compatibility tests use
-local providers, not live subscription accounts.
+`partial_images` are explicitly unsupported by this gateway adapter. The public
+API supports additional features, including streaming and provider file IDs,
+that this gateway does not expose. Automated compatibility tests use synthetic
+local providers; they do not establish a particular account's model access or
+provider limits. Check the selected model's limits, including image dimensions,
+upload sizes, and organization verification requirements.
 
 Generation bodies are limited to 8 MiB; multipart edit bodies, including all
 files and form overhead, to 64 MiB; provider response bodies to 128 MiB.
@@ -99,8 +106,8 @@ apply. A limit failure never causes an automatic retry.
 Image calls pass the existing model authorization, API-key profile, quota,
 budget, approval, and pre-call audit gates. Usage rows identify generation and
 edit calls separately and record only reported token counts. Missing usage and
-cost remain unknown. Budgets retain the existing lagging semantics; subscription
-allowance is not converted into a fabricated monetary price.
+cost remain unknown. Budgets retain the existing lagging semantics; API access
+does not manufacture missing pricing or turn token counts into a monetary cost.
 
 The gateway performs one image request and does not cache or fail over image
 results. A disconnect or timeout may occur after the provider generated an

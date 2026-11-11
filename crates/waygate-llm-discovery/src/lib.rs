@@ -27,6 +27,9 @@
 //!   version gets an old subset; an ancient one an empty list), so the
 //!   refresher resolves a current version via [`CodexVersionTracker`] rather
 //!   than trusting a compile-time pin.
+//! - **OpenAI API (API key)** lists from `/v1/models`. The listing has no
+//!   endpoint or modality metadata, so operators explicitly select which IDs
+//!   may be discovered as Responses models. Other operations remain pinned.
 //! - **Anthropic (`x-api-key`)** — discovery is unwired; its models stay
 //!   operator-pinned. (`/v1/models` is an `x-api-key` endpoint, so listing is
 //!   technically reachable, but the refresher arm is not built.)
@@ -96,23 +99,25 @@ pub enum DiscoveryError {
 pub enum DiscoverySurface {
     /// OpenRouter `/api/v1/models` (api key); carries pricing.
     OpenRouter,
+    /// OpenAI public API `/v1/models` (API key); no pricing or modality.
+    OpenAiApi,
     /// OpenAI Codex backend `/models` (subscription OAuth); no pricing.
     Codex,
     /// No wired listing endpoint — the refresher skips this credential and its
     /// models stay operator-pinned. Anthropic (first-party `x-api-key`; its
-    /// `/v1/models` adapter is unwired), Google/Gemini OAuth, and a (currently
-    /// unused) plain OpenAI api key all map here.
+    /// `/v1/models` adapter is unwired) and Google/Gemini OAuth map here.
     Unsupported,
 }
 
 impl DiscoverySurface {
     /// Pick the listing surface for a `provider` (lowercase vocabulary:
     /// `openai`/`anthropic`/`google`/`openrouter`) and whether its credential is
-    /// subscription OAuth. The gateway's real combos are OpenRouter-api-key and
-    /// OpenAI-Codex-OAuth; everything else is [`Unsupported`](Self::Unsupported).
+    /// subscription OAuth. API-key OpenAI and OpenRouter credentials use their
+    /// public APIs; legacy OpenAI OAuth selects Codex.
     pub fn for_provider(provider: &str, is_oauth: bool) -> Self {
         match (provider.to_ascii_lowercase().as_str(), is_oauth) {
             ("openrouter", false) => Self::OpenRouter,
+            ("openai", false) => Self::OpenAiApi,
             ("openai", true) => Self::Codex,
             _ => Self::Unsupported,
         }
@@ -125,7 +130,7 @@ impl DiscoverySurface {
     /// it keep a potentially-discoverable target; the refresher then resolves the
     /// credential's actual kind and calls [`Self::for_provider`] to pick the
     /// concrete surface. A target that passes this gate but whose credential maps
-    /// to [`Self::Unsupported`] (e.g. `openai` with an api key, not Codex OAuth)
+    /// to [`Self::Unsupported`] (e.g. OpenRouter with an OAuth credential)
     /// is skipped at refresh time, not here.
     pub fn provider_has_adapter(provider: &str) -> bool {
         matches!(
@@ -133,6 +138,65 @@ impl DiscoverySurface {
             "openrouter" | "openai"
         )
     }
+}
+
+/// Public API listing after applying an operator's Responses model selection.
+pub struct OpenAiListing {
+    pub models: Vec<DiscoveredModel>,
+    /// Distinguishes a transient empty provider response from a complete
+    /// listing in which none of the configured Responses models remain.
+    pub raw_len: usize,
+}
+
+/// List official API models with ordinary Bearer authentication. Selection is
+/// explicit because the API does not identify a model's supported operations.
+pub async fn list_openai(
+    http: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    responses_models: &[String],
+) -> Result<OpenAiListing, DiscoveryError> {
+    let response = http
+        .get(format!("{}/models", base_url.trim_end_matches('/')))
+        .bearer_auth(api_key)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|error| DiscoveryError::Transport(error.to_string()))?;
+    let body = read_2xx_body(response).await.map_err(|error| match error {
+        DiscoveryError::Status { status, .. } => DiscoveryError::Status {
+            status,
+            body: "response body withheld".into(),
+        },
+        other => other,
+    })?;
+    let listing: OpenAiModels =
+        serde_json::from_str(&body).map_err(|error| DiscoveryError::Decode(error.to_string()))?;
+    if listing.data.iter().any(|model| model.id.trim().is_empty()) {
+        return Err(DiscoveryError::Decode("model ID is empty".into()));
+    }
+    let raw_len = listing.data.len();
+    let models = listing
+        .data
+        .into_iter()
+        .filter(|model| responses_models.contains(&model.id))
+        .map(|model| DiscoveredModel {
+            id: model.id,
+            pricing: None,
+            is_embeddings: false,
+        })
+        .collect();
+    Ok(OpenAiListing { models, raw_len })
+}
+
+#[derive(Deserialize)]
+struct OpenAiModels {
+    data: Vec<OpenAiModel>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiModel {
+    id: String,
 }
 
 /// Base URL of the OpenAI Codex CLI backend (the subscription-OAuth model
@@ -495,9 +559,7 @@ mod tests {
             "case-insensitive"
         );
         assert_eq!(S::for_provider("openai", true), S::Codex);
-        // OpenAI *api key* (not OAuth) has no wired adapter; Anthropic (api key),
-        // Google OAuth, and unknown providers are Unsupported.
-        assert_eq!(S::for_provider("openai", false), S::Unsupported);
+        assert_eq!(S::for_provider("openai", false), S::OpenAiApi);
         assert_eq!(S::for_provider("anthropic", false), S::Unsupported);
         assert_eq!(S::for_provider("google", true), S::Unsupported);
         assert_eq!(S::for_provider("whatever", false), S::Unsupported);
@@ -535,6 +597,69 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn openai_listing_selects_only_configured_responses_models_without_cli_identity() {
+        let base = serve(Router::new().route(
+            "/v1/models",
+            get(
+                |headers: HeaderMap,
+                 Query(query): Query<std::collections::HashMap<String, String>>| async move {
+                    assert_eq!(headers["authorization"], "Bearer synthetic-api-key");
+                    assert!(!headers.contains_key("originator"));
+                    assert!(!headers.contains_key("chatgpt-account-id"));
+                    assert!(query.is_empty());
+                    axum::Json(serde_json::json!({"data":[
+                        {"id":"selected-response-model"}, {"id":"gpt-image-2"},
+                        {"id":"an-unknown-future-model"}
+                    ]}))
+                },
+            ),
+        ))
+        .await;
+        let selected = vec!["selected-response-model".into()];
+        let listing = list_openai(
+            &raw_test_http_client(),
+            &format!("{base}/v1"),
+            "synthetic-api-key",
+            &selected,
+        )
+        .await
+        .unwrap();
+        assert_eq!(listing.raw_len, 3);
+        assert_eq!(listing.models.len(), 1);
+        assert_eq!(listing.models[0].id, selected[0]);
+        assert!(listing.models[0].pricing.is_none());
+        assert!(!listing.models[0].is_embeddings);
+    }
+
+    #[tokio::test]
+    async fn openai_listing_distinguishes_empty_selection_and_rejects_malformed_lists() {
+        for (body, expected) in [
+            (r#"{"data":[{"id":"other-model"}]}"#, Some(1)),
+            (r#"{"data":[]}"#, Some(0)),
+            (r#"{"data":[{"id":""}]}"#, None),
+            (r#"{"data":[{}]}"#, None),
+            (r#"{}"#, None),
+        ] {
+            let base =
+                serve(Router::new().route("/models", get(move || async move { body }))).await;
+            let result = list_openai(
+                &raw_test_http_client(),
+                &base,
+                "synthetic-api-key",
+                &["selected".into()],
+            )
+            .await;
+            if let Some(raw_len) = expected {
+                let listing = result.unwrap();
+                assert_eq!(listing.raw_len, raw_len);
+                assert!(listing.models.is_empty());
+            } else {
+                assert!(matches!(result, Err(DiscoveryError::Decode(_))));
+            }
+        }
     }
 
     const OPENROUTER_BODY: &str = r#"{

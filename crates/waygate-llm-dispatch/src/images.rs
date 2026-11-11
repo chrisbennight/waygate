@@ -1,4 +1,4 @@
-//! Direct Codex Images dispatch using the shared subscription credential store.
+//! Images dispatch using the shared provider transport and credential store.
 
 use super::*;
 use waygate_llm_translate::images::{extract_images, ImagesRequest};
@@ -24,20 +24,32 @@ impl LlmDispatcher {
         req: ImagesRequest,
         route: &ResolvedRoute,
     ) -> Result<(InferenceRecord, Value), DispatchError> {
-        if route.provider != LlmProvider::OpenAi || !route.openai_chatgpt {
+        if route.provider != LlmProvider::OpenAi || route.embeddings_no_auth {
             return Err(ProviderError::Protocol(
-                "image route requires OpenAI Codex authentication".into(),
+                "image route requires an authenticated OpenAI credential".into(),
             )
             .into());
         }
-        let (bearer, account_id) = self
-            .credentials
-            .bearer_with_account(route.provider, &route.credential_label)
-            .await?;
-        let version = self
-            .codex_ua_version
-            .as_ref()
-            .map(|h| h.read().expect("codex ua version lock").clone());
+        let (bearer, account_id, auth, version) = if route.openai_chatgpt {
+            let (bearer, account_id) = self
+                .credentials
+                .bearer_with_account(route.provider, &route.credential_label)
+                .await?;
+            let version = self
+                .codex_ua_version
+                .as_ref()
+                .map(|h| h.read().expect("codex ua version lock").clone());
+            (bearer, account_id, ProviderAuth::OpenAiChatGpt, version)
+        } else {
+            (
+                self.credentials
+                    .api_key(route.provider, &route.credential_label)
+                    .await?,
+                None,
+                ProviderAuth::Bearer,
+                None,
+            )
+        };
         let mut record = InferenceRecord::new(
             route.provider,
             &route.credential_label,
@@ -62,7 +74,7 @@ impl LlmDispatcher {
                         if req.edit { "edits" } else { "generations" }
                     ),
                     bearer,
-                    auth: ProviderAuth::OpenAiChatGpt,
+                    auth,
                     body: req.render(&route.upstream_model),
                     stream: false,
                     account_id,
