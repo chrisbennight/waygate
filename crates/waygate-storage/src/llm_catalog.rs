@@ -33,9 +33,8 @@ pub struct LlmModelRow {
     pub base_url: String,
     pub path: String,
     pub upstream_api: String,
-    /// `true` selects the Codex (ChatGPT-backend) auth fingerprint at dispatch —
-    /// see `migrations/0055_llm_models_codex_auth.sql`. Maps to
-    /// `ResolvedRoute.openai_chatgpt`.
+    /// Historical consumer marker from the catalog schema. Kept on the
+    /// resolved route so invocation refuses unmigrated rows before dispatch.
     pub openai_chatgpt: bool,
     pub risk: String,
     pub requires_approval: bool,
@@ -93,7 +92,7 @@ pub struct LlmModelUpsert {
     pub base_url: String,
     pub path: String,
     pub upstream_api: String,
-    /// `true` ⇒ Codex (ChatGPT-backend) auth (a `surface: codex` pin).
+    /// Retained legacy consumer marker. Invocation refuses marked routes; new API rows use false.
     pub openai_chatgpt: bool,
     pub risk: String,
     pub requires_approval: bool,
@@ -384,15 +383,8 @@ pub struct LlmDiscoveredModelUpsert {
     pub base_url: String,
     pub path: String,
     pub upstream_api: String,
-    /// Codex (ChatGPT-backend) auth variant. `true` only for OpenAI Codex
-    /// discovery (the OpenAI *Responses* shape spoken against the ChatGPT
-    /// backend); `false` for every other discovered model. Routes to
-    /// [`crate::llm_catalog::LlmModelRow::openai_chatgpt`] and on into
-    /// `ResolvedRoute.openai_chatgpt`, so dispatch selects the Codex request
-    /// fingerprint (`ProviderAuth::OpenAiChatGpt`) instead of a plain Bearer.
-    /// It is a routing fact of the adapter, not an operator-governed field, so
-    /// (unlike `risk`/`enabled`) the refresher *does* keep it current on every
-    /// cycle.
+    /// Historical consumer marker retained for catalog compatibility. API
+    /// discovery always writes false; marked routes cannot dispatch.
     pub openai_chatgpt: bool,
     /// Per-MILLION-token rates from the provider's model listing (only
     /// OpenRouter publishes these today). `None` ⇒ unknown; filled into a

@@ -94,12 +94,12 @@ Aliases are `google:<id>`, and only one target per provider is supported.
 
 Add a separate API credential and qualified API aliases, verify the client
 conversation flow, then move callers and retire unused subscription
-configuration. Credentials loaded as legacy subscription material are refused
-on the Developer API path before provider contact. Raw token strings are not
+configuration. Subscription material is refused at startup and reload,
+before provider contact. Raw token strings are not
 API-key envelopes; the provider validates explicitly selected API-key values.
 Do not put an OAuth blob inside the `api_key` member; malformed or mixed
-envelopes are rejected. Subscription loading and refresh support are removed
-separately after operator migration.
+envelopes are rejected. Subscription loading and refresh support are removed. See the
+[API-only upgrade guide](api-only-inference-migration.md).
 
 Supported here: the Developer API's `v1beta` generateContent methods with API-key
 authentication. Vertex AI, ADC/workload OAuth, Code Assist endpoints, the

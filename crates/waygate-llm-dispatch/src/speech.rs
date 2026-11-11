@@ -30,8 +30,6 @@ impl LlmDispatcher {
                     auth: ProviderAuth::Bearer,
                     body: request.render(&route.upstream_model),
                     stream: sse,
-                    account_id: None,
-                    codex_ua_version: None,
                 },
                 media_type,
             )

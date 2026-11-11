@@ -5,28 +5,16 @@
 //! Transport + parse only: given an HTTP client, a resolved bearer, and the
 //! target's base URL, an adapter GETs the provider's model listing and
 //! normalizes it to [`DiscoveredModel`]s. It does NOT acquire or refresh
-//! credentials (that is `waygate-llm-credentials`' job), and it does NOT touch
+//! credentials (the injected API-key store owns that boundary), and it does NOT touch
 //! the catalog (the discovery refresher upserts the results). It is the thing
 //! the refresher calls per credential, after a bearer has been resolved.
 //!
-//! ## The listing surface is keyed on (provider, auth-kind), not provider
-//!
-//! The model-listing endpoint, its parameters, and even its *existence* differ
-//! by auth-kind — this is the crux of the inference plane's "OAuth paths are
-//! different" reality:
+//! ## Supported provider API listing surfaces
 //!
 //! - **OpenRouter (api key)** lists chat models from `/api/v1/models` and
 //!   embeddings models from the dedicated `/api/v1/embeddings/models`
 //!   ([`list_openrouter_embeddings`]); it is the only provider whose listing
 //!   carries pricing.
-//! - **OpenAI Codex (subscription OAuth)** lists from the Codex CLI backend
-//!   (`chatgpt.com/backend-api/codex/models`), which requires the Codex CLI
-//!   fingerprint (`Originator` + `User-Agent`) and a `client_version` — NOT the
-//!   public `api.openai.com/v1/models` an OpenAI api-key would use. The backend
-//!   scopes the returned models to what that CLI release may see (an old
-//!   version gets an old subset; an ancient one an empty list), so the
-//!   refresher resolves a current version via [`CodexVersionTracker`] rather
-//!   than trusting a compile-time pin.
 //! - **OpenAI API (API key)** lists from `/v1/models`. The listing has no
 //!   endpoint or modality metadata, so operators explicitly select which IDs
 //!   may be discovered as Responses models. Other operations remain pinned.
@@ -45,8 +33,6 @@ use std::str::FromStr;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-pub mod codex_version;
-pub use codex_version::{is_valid_codex_client_version, CodexVersionTracker};
 mod gemini;
 pub use gemini::{list_gemini, GeminiListing};
 
@@ -104,38 +90,25 @@ pub enum DiscoverySurface {
     OpenAiApi,
     /// Documented Gemini Developer API `/v1beta/models`, with an API key.
     GoogleApi,
-    /// OpenAI Codex backend `/models` (subscription OAuth); no pricing.
-    Codex,
     /// No wired listing endpoint — the refresher skips this credential and its
     /// models stay operator-pinned. Anthropic (first-party `x-api-key`; its
-    /// `/v1/models` adapter is unwired) and Google/Gemini OAuth map here.
+    /// `/v1/models` adapter is unwired) maps here.
     Unsupported,
 }
 
 impl DiscoverySurface {
-    /// Pick the listing surface for a `provider` (lowercase vocabulary:
-    /// `openai`/`anthropic`/`google`/`openrouter`) and whether its credential is
-    /// subscription OAuth. API-key OpenAI and OpenRouter credentials use their
-    /// public APIs, as do Google API keys; legacy OpenAI OAuth selects Codex.
-    pub fn for_provider(provider: &str, is_oauth: bool) -> Self {
-        match (provider.to_ascii_lowercase().as_str(), is_oauth) {
-            ("openrouter", false) => Self::OpenRouter,
-            ("openai", false) => Self::OpenAiApi,
-            ("google", false) => Self::GoogleApi,
-            ("openai", true) => Self::Codex,
+    /// Pick the supported provider API listing. Consumer credentials are
+    /// rejected by credential loading, not negotiated as another surface.
+    pub fn for_provider(provider: &str) -> Self {
+        match provider.to_ascii_lowercase().as_str() {
+            "openrouter" => Self::OpenRouter,
+            "openai" => Self::OpenAiApi,
+            "google" => Self::GoogleApi,
             _ => Self::Unsupported,
         }
     }
 
-    /// Whether `provider` has a wired discovery adapter under *some* auth-kind.
-    /// The discovery refresher's `parse_targets` runs before any credential is
-    /// resolved — it has only the env config, not the credential store — so it
-    /// cannot call [`Self::for_provider`] with the real `is_oauth`. This gate lets
-    /// it keep a potentially-discoverable target; the refresher then resolves the
-    /// credential's actual kind and calls [`Self::for_provider`] to pick the
-    /// concrete surface. A target that passes this gate but whose credential maps
-    /// to [`Self::Unsupported`] (e.g. OpenRouter with an OAuth credential)
-    /// is skipped at refresh time, not here.
+    /// Whether the provider has a supported API discovery adapter.
     pub fn provider_has_adapter(provider: &str) -> bool {
         matches!(
             provider.to_ascii_lowercase().as_str(),
@@ -201,26 +174,6 @@ struct OpenAiModels {
 #[derive(Deserialize)]
 struct OpenAiModel {
     id: String,
-}
-
-/// Base URL of the OpenAI Codex CLI backend (the subscription-OAuth model
-/// listing lives at `{base}/models`). Mirrors the Codex CLI itself; the gateway
-/// uses the same so the backend accepts its subscription token.
-pub const CODEX_MODELS_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
-/// Compiled fallback for the `client_version` the Codex backend requires on
-/// its model listing. The backend scopes the returned models to what that CLI
-/// release may see, so this is a **last resort**: the refresher normally
-/// resolves a current version via [`CodexVersionTracker`], and an operator can
-/// pin one per target. Bump alongside notable CLI releases so the floor stays
-/// useful.
-pub const CODEX_DEFAULT_CLIENT_VERSION: &str = "0.144.0";
-/// The Codex CLI `Originator` the backend gates the listing on.
-const CODEX_ORIGINATOR: &str = "codex_cli_rs";
-/// The Codex CLI `User-Agent` for a given `client_version` — the backend
-/// expects the `codex_cli_rs/<ver>` prefix alongside the originator, and the
-/// UA version must agree with the `client_version` query it accompanies.
-fn codex_user_agent(client_version: &str) -> String {
-    format!("codex_cli_rs/{client_version} (mcp-gateway model discovery)")
 }
 
 /// OpenRouter model listing: `GET {base_url}/models` with api-key Bearer auth
@@ -289,96 +242,6 @@ pub async fn list_openrouter_embeddings(
             is_embeddings: true,
         })
         .collect())
-}
-
-/// The Codex model listing: the picker-visible models plus what the raw
-/// response looked like before filtering. The refresher needs the extra
-/// signals to tell apart three empty-`models` cases:
-///
-/// - `raw_len == 0` — the backend returned nothing (the transient /
-///   too-old-`client_version` case): fail-open, skip reconcile.
-/// - `raw_len > 0`, `malformed_len > 0` — the payload parsed but carries
-///   entries with a missing/empty `slug`: the listing cannot be trusted as
-///   the complete model universe, so reconcile must be skipped (garbled
-///   responses never mass-soft-disable last-good rows).
-/// - `raw_len > 0`, `malformed_len == 0` — every entry was well-formed and
-///   none are picker-visible: a complete answer that must reconcile,
-///   soft-disabling previously discovered rows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodexListing {
-    pub models: Vec<DiscoveredModel>,
-    /// Entries in the raw response, before any filtering.
-    pub raw_len: usize,
-    /// Raw entries without a usable (non-empty) `slug`.
-    pub malformed_len: usize,
-}
-
-/// OpenAI Codex backend model listing: `GET {base_url}/models?client_version=…`
-/// with subscription-OAuth Bearer auth (`base_url` defaults to
-/// [`CODEX_MODELS_BASE_URL`] in production). Sends the Codex CLI fingerprint
-/// (`Originator` + `User-Agent`) the backend requires, plus `Chatgpt-Account-Id`
-/// when `account_id` is known. Parses `models[].slug`; the Codex listing carries
-/// no pricing.
-pub async fn list_codex(
-    http: &reqwest::Client,
-    base_url: &str,
-    bearer: &str,
-    account_id: Option<&str>,
-    client_version: &str,
-) -> Result<CodexListing, DiscoveryError> {
-    let url = reqwest::Url::parse_with_params(
-        &format!("{}/models", base_url.trim_end_matches('/')),
-        &[("client_version", client_version)],
-    )
-    .map_err(|e| DiscoveryError::Transport(e.to_string()))?;
-    let mut req = http
-        .get(url)
-        .bearer_auth(bearer)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .header("Originator", CODEX_ORIGINATOR)
-        .header(
-            reqwest::header::USER_AGENT,
-            codex_user_agent(client_version),
-        );
-    if let Some(acct) = account_id {
-        req = req.header("Chatgpt-Account-Id", acct);
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| DiscoveryError::Transport(e.to_string()))?;
-    let body = read_2xx_body(resp).await?;
-    let parsed: CodexList =
-        serde_json::from_str(&body).map_err(|e| DiscoveryError::Decode(e.to_string()))?;
-    let raw_len = parsed.models.len();
-    // An entry without a usable slug is MALFORMED, not merely filtered: it is
-    // counted separately so the refresher can treat the whole listing as
-    // incomplete (garbled) rather than as an authoritative "no visible
-    // models" answer.
-    let malformed_len = parsed.models.iter().filter(|m| m.slug.is_empty()).count();
-    let models = parsed
-        .models
-        .into_iter()
-        // Only picker-visible models become catalog rows: `visibility` values
-        // other than "list" (e.g. "hide" on internal models like
-        // codex-auto-review, or a future value with unknown semantics) mark
-        // models the vendor does not offer to users, and exposing them as
-        // routable aliases would surface internal/unsupported models. Mirrors
-        // the reference CLI's picker (`visibility == list`). A previously
-        // discovered model that turns hidden drops out of the seen-set and is
-        // soft-disabled by the normal reconcile — never deleted.
-        .filter(|m| !m.slug.is_empty() && m.visibility == "list")
-        .map(|m| DiscoveredModel {
-            id: m.slug,
-            pricing: None,
-            is_embeddings: false,
-        })
-        .collect();
-    Ok(CodexListing {
-        models,
-        raw_len,
-        malformed_len,
-    })
 }
 
 /// Hard cap on the bytes buffered from a provider's listing response. A real
@@ -500,28 +363,6 @@ struct OpenRouterPricing {
     input_cache_write: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct CodexList {
-    #[serde(default)]
-    models: Vec<CodexModel>,
-}
-
-#[derive(Deserialize)]
-struct CodexModel {
-    #[serde(default)]
-    slug: String,
-    /// The backend's picker visibility for this model. `"list"` is the only
-    /// value that means "offer this to users" — the reference CLI shows a
-    /// model in its picker iff `visibility == list`. Absent defaults to
-    /// `"list"` (a listing shape without the field hides nothing).
-    #[serde(default = "codex_visibility_list")]
-    visibility: String,
-}
-
-fn codex_visibility_list() -> String {
-    "list".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,20 +395,18 @@ mod tests {
     }
 
     #[test]
-    fn surface_maps_provider_and_auth_kind() {
+    fn surface_maps_supported_provider_apis() {
         use DiscoverySurface as S;
-        assert_eq!(S::for_provider("openrouter", false), S::OpenRouter);
+        assert_eq!(S::for_provider("openrouter"), S::OpenRouter);
         assert_eq!(
-            S::for_provider("OpenRouter", false),
+            S::for_provider("OpenRouter"),
             S::OpenRouter,
             "case-insensitive"
         );
-        assert_eq!(S::for_provider("openai", true), S::Codex);
-        assert_eq!(S::for_provider("openai", false), S::OpenAiApi);
-        assert_eq!(S::for_provider("anthropic", false), S::Unsupported);
-        assert_eq!(S::for_provider("google", true), S::Unsupported);
-        assert_eq!(S::for_provider("google", false), S::GoogleApi);
-        assert_eq!(S::for_provider("whatever", false), S::Unsupported);
+        assert_eq!(S::for_provider("openai"), S::OpenAiApi);
+        assert_eq!(S::for_provider("anthropic"), S::Unsupported);
+        assert_eq!(S::for_provider("google"), S::GoogleApi);
+        assert_eq!(S::for_provider("whatever"), S::Unsupported);
     }
 
     #[test]
@@ -587,9 +426,8 @@ mod tests {
     // --- loopback adapter tests (no real network / credentials) --------------
 
     use std::net::SocketAddr;
-    use std::sync::{Arc, Mutex};
 
-    use axum::extract::{Query, State};
+    use axum::extract::Query;
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::get;
     use axum::Router;
@@ -821,160 +659,5 @@ mod tests {
             .unwrap();
         let body = read_body_capped(resp, 1024).await.expect("ok body");
         assert_eq!(body.len(), 1024, "the body read is bounded at the cap");
-    }
-
-    /// Records the headers + query of the last request the codex fake saw.
-    #[derive(Default)]
-    struct Seen {
-        originator: Option<String>,
-        user_agent: Option<String>,
-        account: Option<String>,
-        client_version: Option<String>,
-        authorization: Option<String>,
-    }
-
-    #[tokio::test]
-    async fn codex_sends_cli_fingerprint_and_parses_slugs() {
-        let seen = Arc::new(Mutex::new(Seen::default()));
-        let app = Router::new()
-            .route(
-                "/models",
-                get(
-                    |State(seen): State<Arc<Mutex<Seen>>>,
-                     headers: HeaderMap,
-                     Query(q): Query<std::collections::HashMap<String, String>>| async move {
-                        let hv = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).map(String::from);
-                        *seen.lock().unwrap() = Seen {
-                            originator: hv("originator"),
-                            user_agent: hv("user-agent"),
-                            account: hv("chatgpt-account-id"),
-                            client_version: q.get("client_version").cloned(),
-                            authorization: hv("authorization"),
-                        };
-                        (
-                            [(axum::http::header::CONTENT_TYPE, "application/json")],
-                            r#"{"models":[{"slug":"gpt-5.5"},{"slug":"gpt-5.5-codex"},{"slug":""}]}"#,
-                        )
-                    },
-                ),
-            )
-            .with_state(seen.clone());
-        let base = serve(app).await;
-
-        let listing = list_codex(
-            &raw_test_http_client(),
-            &base,
-            "oauth-token",
-            Some("acct-123"),
-            CODEX_DEFAULT_CLIENT_VERSION,
-        )
-        .await
-        .expect("list");
-
-        // Empty slug filtered; ids come from `slug`. raw_len counts the
-        // pre-filter listing (including the empty-slug entry).
-        let ids: Vec<&str> = listing.models.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["gpt-5.5", "gpt-5.5-codex"]);
-        assert_eq!(listing.raw_len, 3);
-        assert_eq!(
-            listing.malformed_len, 1,
-            "the empty-slug entry counts as malformed, not merely filtered"
-        );
-        assert!(
-            listing.models.iter().all(|m| m.pricing.is_none()),
-            "codex listing has no pricing"
-        );
-
-        // The request carried the Codex CLI fingerprint the backend gates on —
-        // this is the contract that distinguishes the OAuth path from a plain
-        // api-key GET.
-        let s = seen.lock().unwrap();
-        assert_eq!(s.originator.as_deref(), Some(CODEX_ORIGINATOR));
-        // The UA version agrees with the client_version query it accompanies.
-        assert_eq!(
-            s.user_agent.as_deref(),
-            Some(codex_user_agent(CODEX_DEFAULT_CLIENT_VERSION).as_str())
-        );
-        assert_eq!(s.account.as_deref(), Some("acct-123"));
-        assert_eq!(
-            s.client_version.as_deref(),
-            Some(CODEX_DEFAULT_CLIENT_VERSION)
-        );
-        assert_eq!(s.authorization.as_deref(), Some("Bearer oauth-token"));
-    }
-
-    #[tokio::test]
-    async fn codex_listing_keeps_only_picker_visible_models() {
-        // The live listing mixes picker-visible models with internal ones
-        // (`visibility: "hide"`, e.g. codex-auto-review). Only `"list"`
-        // becomes a catalog row; an unknown future visibility value is
-        // conservatively skipped, and an ABSENT field defaults to visible
-        // (a listing shape without the field hides nothing).
-        const BODY: &str = r#"{"models":[
-            {"slug":"gpt-visible","visibility":"list"},
-            {"slug":"codex-auto-review","visibility":"hide"},
-            {"slug":"gpt-mystery","visibility":"beta"},
-            {"slug":"gpt-no-visibility-field"}
-        ]}"#;
-        let app = Router::new().route(
-            "/models",
-            get(|| async {
-                (
-                    [(axum::http::header::CONTENT_TYPE, "application/json")],
-                    BODY,
-                )
-            }),
-        );
-        let base = serve(app).await;
-        let listing = list_codex(
-            &raw_test_http_client(),
-            &base,
-            "oauth-token",
-            None,
-            CODEX_DEFAULT_CLIENT_VERSION,
-        )
-        .await
-        .expect("list");
-        let ids: Vec<&str> = listing.models.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["gpt-visible", "gpt-no-visibility-field"]);
-        assert_eq!(
-            listing.raw_len, 4,
-            "raw_len counts the whole upstream listing, so an all-filtered \
-             response is distinguishable from an empty one"
-        );
-        assert_eq!(
-            listing.malformed_len, 0,
-            "visibility-filtered entries are well-formed, not malformed"
-        );
-    }
-
-    #[tokio::test]
-    async fn codex_listing_counts_slugless_entries_as_malformed() {
-        // A payload that PARSES but carries no usable slugs (`{"models":[{}]}`)
-        // is a garbled response, not an authoritative "no models" answer — the
-        // malformed count is what lets the refresher keep last-good rows
-        // instead of mass-soft-disabling on it.
-        let app = Router::new().route(
-            "/models",
-            get(|| async {
-                (
-                    [(axum::http::header::CONTENT_TYPE, "application/json")],
-                    r#"{"models":[{}]}"#,
-                )
-            }),
-        );
-        let base = serve(app).await;
-        let listing = list_codex(
-            &raw_test_http_client(),
-            &base,
-            "oauth-token",
-            None,
-            CODEX_DEFAULT_CLIENT_VERSION,
-        )
-        .await
-        .expect("list");
-        assert!(listing.models.is_empty());
-        assert_eq!(listing.raw_len, 1);
-        assert_eq!(listing.malformed_len, 1);
     }
 }

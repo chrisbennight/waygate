@@ -25,10 +25,7 @@ use tokio::net::TcpListener;
 
 use waygate_llm_credentials::{LlmCredentialStore, LlmProvider};
 use waygate_llm_dispatch::{DispatchError, DispatchOutcome, LlmDispatcher, ResolvedRoute};
-use waygate_llm_providers::{
-    codex_fp_user_agent, ProviderClient, ProviderError, SharedCodexUaVersion,
-    CODEX_FP_DEFAULT_VERSION,
-};
+use waygate_llm_providers::{ProviderClient, ProviderError};
 use waygate_llm_translate::{
     parse_chat_completions, parse_embeddings, parse_responses, EmbeddingsRequest, FinishReason,
     LlmRequest, OpenAiChatStreamAggregator, Surface, UpstreamProtocol,
@@ -43,12 +40,8 @@ struct Captured {
     model: Option<String>,
     max_tokens: Option<u64>,
     stream_options_include_usage: Option<bool>,
-    /// The full request body as seen on the wire (used by the Codex body-contract
-    /// test to assert the exact shape the ChatGPT backend requires).
+    /// Provider request body captured by the loopback fixture.
     body: Option<Value>,
-    /// The `User-Agent` seen on the wire (used by the Codex fingerprint test to
-    /// assert dispatch threads the shared UA version through to the header).
-    user_agent: Option<String>,
 }
 
 async fn unary_handler(
@@ -535,22 +528,6 @@ async fn gemini_streaming_dispatch_templates_sse_path_and_returns_frames() {
 }
 
 #[tokio::test]
-async fn gemini_developer_api_refuses_subscription_credentials_before_network_access() {
-    let store = LlmCredentialStore::from_vars([("LLM_CRED_GOOGLE_MAIN".into(),
-        r#"{"tokens":{"access_token":"consumer-session","refresh_token":"refresh"},"expires_at":"2099-01-01T00:00:00Z"}"#.into())]);
-    let dispatcher =
-        LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), Arc::new(store));
-    let error = dispatcher
-        .dispatch(&chat(false), &gemini_route("127.0.0.1:1".parse().unwrap()))
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        DispatchError::Credential(waygate_llm_credentials::CredentialError::ApiKeyRequired(_))
-    ));
-}
-
-#[tokio::test]
 async fn gemini_api_errors_retain_provider_http_status() {
     for status in [429, 503] {
         let addr = spawn(Router::new().route(
@@ -719,16 +696,11 @@ async fn responses_surface_unary_dispatch_renders_a_responses_body() {
     assert_eq!(body["usage"]["output_tokens"], 4);
 }
 
-/// Distinct public API and legacy subscription credentials.
 fn responses_store() -> Arc<LlmCredentialStore> {
-    let blob = r#"{"tokens":{"access_token":"sk-oai-test","refresh_token":"rt","account_id":"test-codex-account"},"expires_at":"2099-01-01T00:00:00Z"}"#;
-    Arc::new(LlmCredentialStore::from_vars([
-        (
-            "LLM_CRED_OPENAI_MAIN".to_string(),
-            r#"{"api_key":"sk-oai-test"}"#.to_string(),
-        ),
-        ("LLM_CRED_OPENAI_LEGACY".to_string(), blob.to_string()),
-    ]))
+    Arc::new(LlmCredentialStore::from_vars([(
+        "LLM_CRED_OPENAI_MAIN".to_string(),
+        r#"{"api_key":"sk-oai-test"}"#.to_string(),
+    )]))
 }
 
 fn responses_route(addr: SocketAddr) -> ResolvedRoute {
@@ -758,177 +730,9 @@ fn codex_route(addr: SocketAddr) -> ResolvedRoute {
     }
 }
 
-/// A streaming chat request that carries the fields a Codex call must NOT forward
-/// (temperature/top_p/max_tokens) plus a system message — exercises both the
-/// strip and the instructions normalization in one shot.
-fn codex_chat() -> LlmRequest {
-    parse_chat_completions(&json!({
-        "model": "alias",
-        "messages": [
-            {"role": "system", "content": "be terse"},
-            {"role": "user", "content": "hi"}
-        ],
-        "temperature": 0.7,
-        "top_p": 0.9,
-        "max_tokens": 256,
-        "stream": true
-    }))
-    .unwrap()
-}
-
-/// Loopback Codex backend: records the full request body, then returns a minimal
-/// Responses SSE stream so dispatch settles a `Stream` outcome cleanly.
-async fn codex_capture_handler(
-    State(captured): State<Arc<Mutex<Captured>>>,
-    headers: HeaderMap,
-    body: String,
-) -> Response {
-    {
-        let mut c = captured.lock().unwrap();
-        if let Ok(v) = serde_json::from_str::<Value>(&body) {
-            c.body = Some(v);
-        }
-        c.user_agent = headers
-            .get(axum::http::header::USER_AGENT)
-            .and_then(|h| h.to_str().ok())
-            .map(str::to_string);
-    }
-    Response::builder()
-        .status(200)
-        .header("content-type", "text/event-stream")
-        .body(Body::from(concat!(
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",",
-            "\"model\":\"gpt-5.5\",\"status\":\"completed\",",
-            "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
-        )))
-        .unwrap()
-}
-
 #[tokio::test]
-async fn codex_backend_dispatch_sends_a_codex_valid_body() {
-    // Regression for the "Instructions are required" 400 and the
-    // unsupported-parameter 400s: a Codex route (openai_chatgpt=true) must put a
-    // body the ChatGPT backend accepts on the wire — `instructions` present,
-    // `stream:true`, `store:false`, `include` set, and NONE of the sampling/token
-    // fields that `render_openai_responses` would otherwise have set.
-    let captured = Arc::new(Mutex::new(Captured::default()));
-    let app = Router::new()
-        .route("/responses", post(codex_capture_handler))
-        .with_state(captured.clone());
-    let addr = spawn(app).await;
-
-    let dispatcher = LlmDispatcher::new(
-        ProviderClient::new(reqwest::Client::new()),
-        responses_store(),
-    );
-    let outcome = dispatcher
-        .dispatch(&codex_chat(), &codex_route(addr))
-        .await
-        .expect("streaming codex dispatch");
-    match outcome {
-        DispatchOutcome::Stream { record_base, .. } => {
-            assert_eq!(
-                record_base.provider_account_id.as_deref(),
-                Some("test-codex-account")
-            );
-        }
-        _ => panic!("a streaming Codex call yields a Stream outcome"),
-    }
-
-    let body = captured
-        .lock()
-        .unwrap()
-        .body
-        .clone()
-        .expect("body captured");
-    // Required-present fields.
-    assert_eq!(
-        body["instructions"], "be terse",
-        "the system message renders to `instructions` (present is mandatory)"
-    );
-    assert_eq!(body["stream"], true);
-    assert_eq!(body["store"], false);
-    assert_eq!(body["parallel_tool_calls"], true);
-    assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
-    assert_eq!(
-        body["model"], "gpt-5.5",
-        "the resolved upstream model is on the wire"
-    );
-    // Backend-rejected fields stripped.
-    for f in [
-        "temperature",
-        "top_p",
-        "max_output_tokens",
-        "max_completion_tokens",
-    ] {
-        assert!(
-            body.get(f).is_none(),
-            "`{f}` must be stripped for the Codex backend"
-        );
-    }
-}
-
-#[tokio::test]
-async fn codex_dispatch_user_agent_tracks_the_shared_version() {
-    // Dispatch reads the shared Codex UA version handle PER REQUEST, so the
-    // /responses fingerprint follows the version the discovery refresher
-    // hot-swaps in — and without a wired handle it falls back to the compiled
-    // default. This is the seam that keeps /models and /responses presenting
-    // one client identity.
-    let captured = Arc::new(Mutex::new(Captured::default()));
-    let app = Router::new()
-        .route("/responses", post(codex_capture_handler))
-        .with_state(captured.clone());
-    let addr = spawn(app).await;
-
-    // No handle wired ⇒ the compiled default drives the UA.
-    let bare = LlmDispatcher::new(
-        ProviderClient::new(reqwest::Client::new()),
-        responses_store(),
-    );
-    bare.dispatch(&codex_chat(), &codex_route(addr))
-        .await
-        .expect("codex dispatch without a handle");
-    assert_eq!(
-        captured.lock().unwrap().user_agent.as_deref(),
-        Some(codex_fp_user_agent(CODEX_FP_DEFAULT_VERSION).as_str()),
-        "unwired handle falls back to the compiled default"
-    );
-
-    // A wired handle drives the UA — and a hot-swap between requests is
-    // visible on the very next call (per-request read, no caching).
-    let handle: SharedCodexUaVersion = Arc::new(std::sync::RwLock::new("9.8.7".to_string()));
-    let dispatcher = LlmDispatcher::new(
-        ProviderClient::new(reqwest::Client::new()),
-        responses_store(),
-    )
-    .with_codex_ua_version(handle.clone());
-    dispatcher
-        .dispatch(&codex_chat(), &codex_route(addr))
-        .await
-        .expect("codex dispatch with a handle");
-    assert_eq!(
-        captured.lock().unwrap().user_agent.as_deref(),
-        Some(codex_fp_user_agent("9.8.7").as_str()),
-    );
-    *handle.write().unwrap() = "9.8.8".to_string();
-    dispatcher
-        .dispatch(&codex_chat(), &codex_route(addr))
-        .await
-        .expect("codex dispatch after the hot-swap");
-    assert_eq!(
-        captured.lock().unwrap().user_agent.as_deref(),
-        Some(codex_fp_user_agent("9.8.8").as_str()),
-        "the refreshed version reaches the next request's User-Agent"
-    );
-}
-
-#[tokio::test]
-async fn codex_backend_rejects_a_non_streaming_call_before_dispatch() {
-    // The ChatGPT backend is streaming-only and this slice does not aggregate an
-    // upstream stream into a unary body, so a non-streaming Codex request must
-    // fail closed with a clear, non-retryable error rather than sending a body
-    // whose `stream:true` contradicts a unary transport. No provider is contacted.
+async fn retired_consumer_routes_are_refused_before_dispatch() {
+    // The retained catalog marker refuses a consumer route before any network call.
     let unreachable = ResolvedRoute {
         base_url: "http://127.0.0.1:1".to_string(),
         ..codex_route("127.0.0.1:1".parse().unwrap())
@@ -1664,7 +1468,7 @@ async fn private_embeddings_preserve_base64_options_without_sending_credentials(
 }
 
 #[tokio::test]
-async fn invalid_image_responses_record_account_failures_once() {
+async fn invalid_api_image_responses_record_failures_once() {
     for (name, response) in [
         (
             "image-missing-created",
@@ -1684,7 +1488,7 @@ async fn invalid_image_responses_record_account_failures_once() {
             }),
         ))
         .await;
-        let mut route = codex_route(addr);
+        let mut route = responses_route(addr);
         route.path = "images".into();
         let dispatcher = LlmDispatcher::new(
             ProviderClient::new(reqwest::Client::new())
@@ -1711,7 +1515,7 @@ async fn invalid_image_responses_record_account_failures_once() {
                 assert!(line.is_none());
             } else {
                 let line = line.expect("failed image metric");
-                assert!(line.contains("user_account_id=\"test-codex-account\""));
+                assert!(line.contains("user_account_id=\"unknown\""));
                 assert!(line.ends_with(" 1"), "{line}");
             }
         }
@@ -1777,36 +1581,4 @@ async fn api_images_preserve_generation_edits_usage_and_never_replay_failures() 
         Some(503)
     );
     assert_eq!(calls.load(Ordering::SeqCst), 3);
-}
-
-#[tokio::test]
-async fn public_openai_routes_refuse_subscription_credentials_before_network_access() {
-    let dispatcher = LlmDispatcher::new(
-        ProviderClient::new(reqwest::Client::new()),
-        responses_store(),
-    );
-    let mut route = responses_route("127.0.0.1:1".parse().unwrap());
-    route.credential_label = "LEGACY".into();
-    let error = dispatcher
-        .dispatch(&responses_req(), &route)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        DispatchError::Credential(waygate_llm_credentials::CredentialError::ApiKeyRequired(_))
-    ));
-    route.path = "images".into();
-    let request = waygate_llm_translate::images::parse_images(
-        json!({"model":"image-alias","prompt":"test"}),
-        false,
-    )
-    .unwrap();
-    let error = dispatcher
-        .dispatch_images(request, &route)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        DispatchError::Credential(waygate_llm_credentials::CredentialError::ApiKeyRequired(_))
-    ));
 }

@@ -1,21 +1,7 @@
-//! In-process re-read of externally-refreshed LLM credentials from
-//! Infisical.
-//!
-//! An external credential refresher owns token rotation and publishes updated
-//! credential blobs to Infisical. The gateway loads credentials once at boot
-//! (env is static), and it must NOT refresh externally managed tokens itself:
-//! a single-use refresh token may already have rotated, so a competing
-//! in-process refresh would fail and fight the designated owner
-//! (see `waygate_llm_credentials`). This module closes the gap WITHOUT a sidecar:
-//! a small read-only Infisical client + a periodic poller that re-fetches each
-//! managed secret and swaps the fresh access token into the live store via
-//! [`LlmCredentialStore::reload`].
-//!
-//! Security: the poller authenticates with a **scoped, read-only** Infisical
-//! service token (`GATEWAY_INFISICAL_TOKEN`) — NOT the host's universal-auth
-//! machine identity — so the gateway's blast radius is exactly the credential
-//! path it must re-read, preserving the I4 "credentials injected, never sourced
-//! broadly" posture.
+//! Scoped, read-only API-key rotation from an injected secret provider.
+//! Only configured credential references are read. Replacement values pass the
+//! API-only parser; rejected values preserve the prior key. The existing
+//! scheduler owns cancellation and never refreshes consumer access tokens.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -181,11 +167,7 @@ fn non_empty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
 
-/// One re-read pass: fetch each managed secret and swap it into the store.
-/// Best-effort — a fetch or reload error for one credential is logged and the
-/// others still proceed; a stale credential simply keeps its prior token until
-/// the next pass succeeds (its `bearer()` surfaces `AwaitingReread` if it
-/// lapses meanwhile). Never panics.
+/// Reload configured API keys; a failed fetch or parse retains the prior key.
 pub async fn reload_once(
     client: &InfisicalReadClient,
     store: &LlmCredentialStore,
@@ -199,7 +181,7 @@ pub async fn reload_once(
                         provider = e.provider.as_str(),
                         label = %e.label,
                         error = %err,
-                        "llm credential re-read: reload failed (keeping prior token)",
+                        "llm credential re-read: reload failed (keeping prior API key)",
                     );
                 }
             }
@@ -208,35 +190,15 @@ pub async fn reload_once(
                 label = %e.label,
                 secret = %e.secret,
                 error = %err,
-                "llm credential re-read: Infisical fetch failed (keeping prior token)",
+                "llm credential re-read: Infisical fetch failed (keeping prior API key)",
             ),
-        }
-    }
-}
-
-/// Mark every managed credential externally-refreshed. The caller MUST `await`
-/// this **synchronously, before the server starts accepting traffic** — their
-/// boot refresh token is already stale, so `bearer()` must re-read rather than
-/// refresh, and the suppression only takes effect once the flag is set. Doing it
-/// here (not inside the spawned scheduler) closes the race where a request lands
-/// in the window between the listener opening and the spawned task running.
-/// A configured-but-unloaded credential is a non-fatal warning.
-pub async fn mark_external(store: &LlmCredentialStore, entries: &[CredReloadEntry]) {
-    for e in entries {
-        if !store.mark_externally_refreshed(e.provider, &e.label).await {
-            tracing::warn!(
-                provider = e.provider.as_str(),
-                label = %e.label,
-                "llm credential re-read: configured to reload a credential that isn't loaded",
-            );
         }
     }
 }
 
 /// Run the periodic re-read until `shutdown`. Mirrors the cache-sweep scheduler:
 /// skip the t=0 tick, then re-read every `interval_period`. The managed
-/// credentials must already be marked externally-refreshed via [`mark_external`]
-/// (the caller does this synchronously before serving traffic).
+/// keys are replaced only after successful API-key validation.
 pub async fn run_reload_scheduler(
     client: InfisicalReadClient,
     store: Arc<LlmCredentialStore>,
@@ -345,7 +307,7 @@ mod tests {
     fn parse_reload_config_maps_known_providers_and_drops_unknown() {
         let raw = r#"[
             {"provider":"ANTHROPIC","label":"PRIMARY","secret":"ANTHROPIC_API_KEY"},
-            {"provider":"openai","label":"PRIMARY","secret":"CODEX_AUTH_JSON"},
+            {"provider":"openai","label":"PRIMARY","secret":"OPENAI_API_KEY"},
             {"provider":"GEMINI","label":"PRIMARY","secret":"GEMINI_CREDENTIALS_JSON"},
             {"provider":"bogus","label":"X","secret":"Y"}
         ]"#;
@@ -411,7 +373,7 @@ mod tests {
         );
 
         let error = client
-            .read_secret("CODEX_AUTH_JSON")
+            .read_secret("OPENAI_API_KEY")
             .await
             .expect_err("stalled Infisical read must time out");
 
@@ -435,7 +397,7 @@ mod tests {
 
         let read = tokio::spawn(async move {
             client
-                .read_secret("CODEX_AUTH_JSON")
+                .read_secret("OPENAI_API_KEY")
                 .await
                 .expect_err("stalled Infisical read must time out")
         });
@@ -450,22 +412,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reload_once_swaps_in_the_fresh_token_from_infisical() {
-        // Store boots with an EXPIRED OpenAI token (externally refreshed), so
-        // bearer() initially fails with AwaitingReread — proving the token is
-        // stale and not refreshed in-process.
+    async fn reload_once_rotates_the_api_key_from_infisical() {
         let store = Arc::new(LlmCredentialStore::from_vars([(
             "LLM_CRED_OPENAI_PRIMARY".to_string(),
-            r#"{"tokens":{"access_token":"at-stale","refresh_token":"rt"},"expires_at":"2000-01-01T00:00:00Z"}"#
-                .to_string(),
+            r#"{"api_key":"prior-api-key"}"#.to_string(),
         )]));
-        store
-            .mark_externally_refreshed(LlmProvider::OpenAi, "PRIMARY")
-            .await;
-        assert!(store.bearer(LlmProvider::OpenAi, "PRIMARY").await.is_err());
-
-        // Infisical now has a fresh (future-expiry) blob.
-        let fresh = r#"{"tokens":{"access_token":"at-fresh","refresh_token":"rt2"},"expires_at":"2100-01-01T00:00:00Z"}"#;
+        assert_eq!(
+            store.api_key(LlmProvider::OpenAi, "PRIMARY").await.unwrap(),
+            "prior-api-key"
+        );
+        let fresh = r#"{"api_key":"rotated-api-key"}"#;
         let addr = spawn_fake_infisical(fresh).await;
         let client = InfisicalReadClient::new(
             raw_test_http_client(),
@@ -478,48 +434,15 @@ mod tests {
         let entries = vec![CredReloadEntry {
             provider: LlmProvider::OpenAi,
             label: "PRIMARY".to_string(),
-            secret: "CODEX_AUTH_JSON".to_string(),
+            secret: "OPENAI_API_KEY".to_string(),
         }];
 
         reload_once(&client, &store, &entries).await;
 
-        // The store now serves the fresh token — re-read picked it up, no
-        // in-process OAuth refresh involved.
+        // The selected key changes only after the replacement passes parsing.
         assert_eq!(
             store.bearer(LlmProvider::OpenAi, "PRIMARY").await.unwrap(),
-            "at-fresh",
+            "rotated-api-key",
         );
-    }
-
-    #[tokio::test]
-    async fn mark_external_suppresses_refresh_and_tolerates_unloaded() {
-        // A loaded OpenAI cred with an EXPIRED token, NOT yet marked external.
-        let store = LlmCredentialStore::from_vars([(
-            "LLM_CRED_OPENAI_PRIMARY".to_string(),
-            r#"{"tokens":{"access_token":"at","refresh_token":"rt"},"expires_at":"2000-01-01T00:00:00Z"}"#
-                .to_string(),
-        )]);
-        let entries = vec![
-            CredReloadEntry {
-                provider: LlmProvider::OpenAi,
-                label: "PRIMARY".to_string(),
-                secret: "CODEX_AUTH_JSON".to_string(),
-            },
-            // A configured-but-unloaded credential: mark_external must not panic.
-            CredReloadEntry {
-                provider: LlmProvider::OpenAi,
-                label: "ABSENT".to_string(),
-                secret: "CODEX_AUTH_JSON".to_string(),
-            },
-        ];
-
-        mark_external(&store, &entries).await;
-
-        // The loaded cred is now externally refreshed: an expired token yields
-        // AwaitingReread (no in-process refresh / network), proving the mark took.
-        match store.bearer(LlmProvider::OpenAi, "PRIMARY").await {
-            Err(waygate_llm_credentials::CredentialError::AwaitingReread { .. }) => {}
-            other => panic!("expected AwaitingReread after mark_external, got {other:?}"),
-        }
     }
 }

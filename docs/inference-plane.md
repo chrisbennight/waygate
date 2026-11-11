@@ -28,13 +28,10 @@
   sentinel on the Responses transport. As on the unary path, the translated providers carry
   text + function calls; reasoning is carried in full for the native-protocol
   (OpenAI-Responses) upstream, and as plain reasoning text for an OpenAI-chat upstream that
-  returns it (§14). **Exception — the ChatGPT/Codex subscription backend is
-  streaming-only:** a non-streaming call to a Codex-backed model is rejected fail-closed
-  (`use stream=true`) because that backend streams-only and the gateway does not aggregate the
-  upstream SSE back into a unary body (§13.1). Every other route serves both transports.
+  returns it (§14).
 - **Images surface:** `POST /v1/images/generations` and `POST /v1/images/edits`
   serve explicitly configured OpenAI API image models through the same model
-  gates. Legacy Codex image routes remain during [API migration](openai-api-upstreams.md).
+  gates. Consumer subscription image routes are refused; see [API migration](api-only-inference-migration.md).
   See [Images API](images-api.md) for SDK examples, limits, and supported options.
 - **Embeddings surface:** `POST /v1/embeddings` is also mounted (**unary only** — embeddings
   have no streaming form), routing an OpenAI-compatible embeddings model through the **same**
@@ -57,7 +54,7 @@
 - Four providers: **OpenAI** (API-key Chat/Responses and configured image/audio operations),
   **Google Gemini** (Developer API key → `generateContent`), **Anthropic** (first-party
   `x-api-key` → Messages API), and **OpenRouter** (API key → compatible Chat Completions).
-  Legacy Codex subscription routes remain during migration. See the [OpenAI](openai-api-upstreams.md)
+  Consumer subscription upstreams are removed. See the [OpenAI](openai-api-upstreams.md)
   and [Gemini](gemini-api-upstreams.md) API guides for supported configuration.
 - Fully-unified streaming invocation; credentials **injected** by Infisical; **lagging**
   per-user token/cost budgets; routing + credential pooling/failover; exact-match cache
@@ -80,7 +77,7 @@ These are the rules the implementation may not violate. Tests assert them.
   LLM-specific arms inside that service; there is no second authorization or quota
   implementation.
 - **I2 — Validate before the irreversible call.** The upstream provider request costs money
-  and consumes subscription quota; it is the irreversible side effect. Authorization,
+  and consumes provider quota; it is the irreversible side effect. Authorization,
   budget-not-exhausted, profile allow-list, and (where configured) approval are all checked
   **before** dispatch. No "validate by failing through the provider call."
 - **I3 — Lagging budgets, no reservation.** Token/cost budgets are enforced from *recorded*
@@ -88,16 +85,13 @@ These are the rules the implementation may not violate. Tests assert them.
   usage is attempted best-effort after completion or at stream close. The gateway makes no
   pre-dispatch reservation, so concurrency or a dropped usage write can exceed the nominal
   budget by more than one request. A hard overrun bound is not currently provided.
-- **I4 — Credentials are injected, never minted or written back.** The gateway reads
-  `LLM_CRED_*` values injected by Infisical, refreshes OAuth access tokens **in-process and
-  in-memory**, and never mints a credential nor writes back to Infisical or to disk. The
-  `waygate-llm-credentials` crate itself holds no Infisical client. **Scoped read exception:**
-  for credentials kept fresh by an out-of-band refresher (`ai-credential-refresh`),
-  `waygate-server` runs a **read-only** Infisical re-read poller (scoped service token, single
-  secret path) that re-fetches the refresher's *current access token* into the in-memory store.
-  Those credentials are **not** refreshed in-process (their seed refresh token rotates away),
-  and the re-read is read-only — still never minted, never written back. See the rotation edge
-  below.
+- **I4 — Provider API credentials are injected, never minted or written back.**
+  `waygate-llm-credentials` accepts injected API keys and holds them in memory.
+  It does not perform consumer sign-in or token refresh. The optional scoped,
+  read-only Infisical reloader in `waygate-server` reads only configured secret
+  references and applies replacements through the same API-key parser. A failed
+  read or invalid replacement retains the prior key. MCP authorization and its
+  separate upstream-session refresh remain independent of inference credentials.
 - **I5 — Streaming is first-class.** Responses stream and the canonical usage/outcome record
   is finalized at stream close. The generic MCP response-inspector and output-schema stages
   are not wired into the LLM arm today; provider translation normalizes content-filter and
@@ -131,7 +125,7 @@ InvocationService  (waygate-invocation trait / waygate-mcp impl — SHARED with 
    resolve → validate_input → extract_facts → authorize(Cedar) → profile →
    prepare_output_validation → check_quota(lagging) → check_approval → record_pre_call →
    dispatch ──► waygate-llm-dispatch → waygate-llm-credentials → waygate-llm-providers
-   │                                   (model→pool, failover)   (in-proc OAuth refresh)   (HTTP+SSE)
+   │                                   (model→pool, failover)   (in-memory API keys)   (HTTP+SSE)
    │                                                            waygate-llm-translate
    │                                                            (canonical ↔ provider, SSE frames)
    inspect_response → validate_output → record_outcome
@@ -593,51 +587,28 @@ token class only.
 
 ## 6. Credentials
 
-**Injection contract.** Infisical injects each credential into the container as an env var (or
-mounted file). Naming is semantic — `LLM_CRED_<PROVIDER>_<LABEL>`, where `<LABEL>` names the
-account (`PRIMARY`, `FAMILY`, …). The set of labels for a provider is its pool (§7). Blob:
+Inject `LLM_CRED_<PROVIDER>_<LABEL>` at startup. Labels identify an operator's
+credential pool. OpenAI and Google require a JSON envelope containing only
+`api_key`; Anthropic and OpenRouter retain their bare API-key format. Values
+must be nonempty and contain no control characters. Consumer token blobs,
+malformed envelopes and nonempty `LLM_OAUTH_*` settings fail configuration with
+an actionable error that does not reproduce credential values.
 
-```jsonc
-// legacy subscription material retained during migration (OpenAI, Google)
-{ "tokens": { "access_token": "…", "refresh_token": "…", "id_token": "…" },
-  "expires_at": "2026-06-13T18:00:00Z" }
-// api-key providers (Anthropic, OpenRouter) — a bare key string
-"sk-ant-api03-…"   // Anthropic;  "sk-or-…" for OpenRouter
-// OpenAI and Gemini Developer API keys use explicit envelopes
-{ "api_key": "…" }
-```
-
-**In-process lifecycle (I4).** `waygate-llm-credentials` loads each `LLM_CRED_*` at startup
-into an in-memory cache (optionally encrypted at rest with
-`waygate_oidc::upstream_crypto::UpstreamCrypto` if any copy is persisted). API-key routes read the selected key under the credential lock without OAuth refresh.
-For retained legacy OAuth routes, `bearer()` refreshes near-expiry material on demand
-under that lock, coalescing concurrent calls. No per-credential refresh worker is added.
-**No write-back.** The legacy refresh behavior below does not apply to Developer API keys.
-
-**Credential health states** (consumed by routing and the dashboard):
-
-```
-Healthy ──token near expiry──► Refreshing ──ok──► Healthy
-                                   └──fail──► Failing ──threshold──► Stale (skipped by routing)
-```
-
-**Restart semantics & rotation edge.** On restart Infisical re-injects the seed blob. While a
-provider's `refresh_token` is **stable**, the gateway refreshes in-process from it. Providers
-that **rotate** their refresh token single-use (the subscription harness — Codex —
-kept fresh by `ai-credential-refresh`) can't be refreshed in-process: the seed refresh token
-rotates away within minutes. Those credentials are instead marked **externally-refreshed** —
-the gateway serves the current access token and never refreshes it itself — and the scoped
-read-only re-read poller (the I4 exception) pulls the refresher's *current* access token
-from Infisical on a cadence (`GATEWAY_LLM_CRED_RELOAD*`). An externally-refreshed credential
-whose token lapses before the next re-read surfaces an `awaiting re-read` error and a
-"failing / stale" dashboard state (§10) rather than attempting a doomed in-process refresh.
+The store keeps keys in memory and never refreshes or writes them back.
+The optional `GATEWAY_LLM_CRED_RELOAD` scheduler supports scoped, read-only
+API-key rotation through Infisical; a rejected replacement leaves the prior
+key intact. Restart re-injects the configured key. Local credential health
+means a key is loaded, not that provider access has been tested. Historical
+usage and account metadata remain readable. Follow the
+[API-only migration guide](api-only-inference-migration.md) before upgrading
+an installation that used subscription credentials or consumer routes.
 
 ---
 
 ## 7. Routing & failover
 
 - **Model alias → ordered target groups**, each a list of `(provider, credential_label)`
-  targets (e.g. a "subscription" group falling back to an "api-key" group).
+  targets using supported provider API credentials.
 - **Selector (v1):** `in_order` and `least-recently-used`; reserve `cost`/`latency`/
   `performance` (the catalog carries costing already).
 - **Cooldown:** per `(provider, credential_label)` exponential backoff on consecutive
@@ -665,8 +636,8 @@ for credential selection, configuration, failure behavior, and migration.
 The catalog need not be hand-listed: the gateway can fetch each configured
 provider's live model list and register the models itself. Opt-in via
 `GATEWAY_LLM_DISCOVERY` (a JSON array of `{provider, credential_label, base_url}`
-targets, at most one per provider, plus an optional `client_version` pin for the
-Codex surface — see below); off by default. The discovered catalog and
+targets, at most one per provider); off by default. Retired `client_version`
+settings fail configuration instead of selecting a consumer backend. The discovered catalog and
 the env pins (`GATEWAY_LLM_MODELS`) coexist — discovery only *adds* to what an
 operator pins.
 
@@ -679,10 +650,8 @@ whole upstream identity (`"model":"${EMBEDDING_MODEL}"`) while the client-facing
 change when the backend does). It is split on the first `:` and resolved to the
 two fields at parse time, and is mutually exclusive with them.
 
-- **The listing surface is keyed on `(provider, auth-kind)`, not provider**
-  (crate `waygate-llm-discovery`). The endpoint, its parameters, and even its
-  existence differ by auth-kind — this is the inference plane's "OAuth paths are
-  different" reality:
+- **Listing surfaces use supported provider APIs**
+  (crate `waygate-llm-discovery`):
   - **OpenRouter** (api key) — `GET {base}/api/v1/models` for chat models AND the
     dedicated `GET {base}/api/v1/embeddings/models` for embeddings models, each tagged
     by operation (catalog `upstream_api = chat_completions` vs `embeddings`). The only
@@ -697,39 +666,10 @@ two fields at parse time, and is mutually exclusive with them.
     primary chat `/models` listing returns empty (the transient/garble case); a *successful
     empty* embeddings listing is not degenerate (the provider has no embeddings models) and
     still reconciles them away.
-  - **OpenAI Codex** (subscription OAuth) — the Codex CLI backend
-    (`GET {base}/models?client_version=…` at `chatgpt.com/backend-api/codex`, with
-    the Codex CLI fingerprint — `Originator` + `User-Agent` — and the OAuth
-    `chatgpt-account-id`), NOT `api.openai.com`. **Wired.** No pricing in the
-    listing. A discovered Codex model routes chat via the OpenAI *Responses* shape
-    against the same ChatGPT backend (`{base}/responses`); the catalog row carries
-    an `openai_chatgpt` flag (`migrations/0055_llm_models_codex_auth.sql`) so
-    dispatch selects the Codex request fingerprint (`ProviderAuth::OpenAiChatGpt`)
-    instead of a bare Bearer. `parse_targets` keeps an `openai` target on the
-    provider alone; the refresher resolves the credential's kind (OAuth ⇒ Codex,
-    API key ⇒ public API with explicit Responses selection) since parse time has no credential store.
-    The backend **scopes the listing to the `client_version` it is asked as**
-    (an old CLI version gets that release's model subset; an ancient one an
-    empty list), so the refresher resolves a current version per cycle:
-    the target's optional `client_version` pin (operator override, validated
-    as `MAJOR.MINOR.PATCH` — a malformed pin is dropped with a `WARN`, not the
-    target) → `waygate_llm_discovery::CodexVersionTracker` (latest released
-    CLI version from the npm registry, GitHub releases as fallback, cached
-    24h, falling back through last-good to the compiled
-    `CODEX_DEFAULT_CLIENT_VERSION`). The tracker never fails, so a registry
-    outage degrades to a possibly-stale version — never a skipped cycle — and
-    the `User-Agent` version always agrees with the `client_version` sent.
-    Only **picker-visible** models become catalog rows: the listing tags each
-    model with a `visibility`, and anything other than `"list"` (e.g. `"hide"`
-    on internal models like `codex-auto-review`, or an unknown future value)
-    is skipped — mirroring the reference CLI's picker — so internal models
-    never become routable aliases. A model that turns hidden drops out of the
-    seen-set and is soft-disabled by the normal reconcile — and a listing whose
-    every model is filtered (none picker-visible) is a *complete* answer that
-    reconciles with an empty seen-set, soft-disabling all previously discovered
-    rows. Only a **raw-empty** listing (the too-old-`client_version` signature —
-    the backend returns empty, not an error, below its supported range) skips
-    reconcile per the fail-open rule, and its `WARN` names the version sent.
+  - **OpenAI API** — bounded `/models` listing with an explicit
+    `responses_models` selection. Selected IDs use the Responses API; operation
+    support and account access must be qualified by the operator. No consumer
+    backend, CLI version tracking or subscription headers are used.
   - **Anthropic** (`x-api-key`) — discovery unwired: stays operator-pinned
     (`DiscoverySurface::Unsupported`). (`/v1/models` is an `x-api-key` endpoint, so
     listing is now technically reachable, but the refresher arm is not built.)
@@ -767,23 +707,19 @@ two fields at parse time, and is mutually exclusive with them.
   activates and the refresher populates everything — the "no hand-listing" goal.
 - **The refresher** (`waygate-server::llm_discovery`) runs on boot and every
   `GATEWAY_LLM_DISCOVERY_INTERVAL_SECS` (default 3h; values below the 5-min
-  floor, or unparseable, reject at boot; bounded HTTP client). Each cycle, per target: resolve the credential kind + bearer,
+  floor, or unparseable, reject at boot; bounded HTTP client). Each cycle, per target: read the selected API key,
   fetch the list(s), upsert the discovered models (provider-namespaced alias
   `openrouter:<id>` / `openai:<id>`, with per-model routing — OpenRouter's
-  chat-completions or embeddings, vs Codex's Responses+`openai_chatgpt` — and pricing
+  chat-completions or embeddings, OpenAI Responses, or Gemini generateContent — and pricing
   filled when the listing carries it) and reconcile — **all in one transaction** (all-or-nothing per
   target) — then reload the resolver. **Fail-open:** a failed target keeps the
   last-good catalog (`WARN`); an **empty** result skips reconcile so a transient
   empty/garbled response can never mass-soft-disable a provider. Persisted
   discovered rows are loaded into the resolver at boot, so a restart routes them
   immediately (before the first refresh).
-- **Credential HTTP policy.** In-process OAuth refresh uses the shared `Slow`
-  30-second total-timeout profile. The optional read-only Infisical re-read
-  client preserves its explicit 15-second total timeout. Both clients are built
-  once during LLM-path startup; a transport/TLS initialization failure aborts
-  that configured path instead of silently replacing the bounded client with an
-  unconfigured default. MCP-only startup does not initialize either optional
-  credential transport.
+- **Credential HTTP policy.** The optional read-only Infisical reloader uses
+  its bounded HTTP client. A transport initialization failure aborts that
+  configured path. MCP-only startup does not initialize it.
 - **Discovery surface for clients.** `GET /v1/models` (OpenAI-compatible) lists
   the caller's tenant's effective-live models, filtered to those the resolver can
   actually dispatch — a **combined** listing of chat, embeddings, and image models,
@@ -921,13 +857,11 @@ rolling/daily/weekly/monthly. Cost weighting comes from the `llm_models` costing
   when fail-closed mode is active. Final LLM outcomes use chained best effort and can be
   dropped on contention or storage failure without failing the response. Records carry
   metadata only (I9).
-- **Grafana panels** (`dashboards/`): tokens & cost per model/principal/tenant; cache hit-rate;
-  failover/cooldown counts; TTFT; and a **Provider credential status** panel — per credential:
-  provider, label, health state, **access-token expiry countdown**, last-refresh time/outcome,
-  pool position. *This panel is where token/credential expiration visibility lives.*
-- **Admin UI inference dashboard** (`waygate-admin`): the same credential-status view as an ops
-  page (provider/credential health + expiry + "refresh now"), plus the model catalog and
-  per-user usage/budget views.
+- **Grafana panels** (`dashboards/`): tokens and cost per model/principal/tenant,
+  cache hit-rate, failover/cooldown counts and TTFT.
+- **Admin UI inference dashboard** (`waygate-admin`): model catalog, usage and
+  budgets, plus locally loaded API credential status. It does not probe provider
+  access, refresh consumer tokens or expose credential values.
 
 ---
 
@@ -950,8 +884,8 @@ Postgres stores the inference configuration and usage records:
 - `llm_models` — provider, model, upstream_api, risk, requires_approval, **optional costing**
   (input / output / cached-read / cache-write price), routing group membership; **+ a
   catalog-compatible view** projecting `ToolDefinition` rows.
-- `llm_credentials` — **runtime state only** (per-credential health/cooldown, current
-  access-token expiry); credential material is injected, never stored.
+- Credential material remains injected and in memory; historical credential
+  metadata is retained without reactivating removed consumer refresh behavior.
 - `llm_usage` — the persisted `InferenceRecord` (metadata, no content) + rollup tables.
 - `llm_budgets` — per-principal/tenant/model token & cost budgets + windows.
 - `llm_cache` — key (incl. principal), canonical-request hash, response blob, TTL.
@@ -972,71 +906,18 @@ Postgres stores the inference configuration and usage records:
   inspection/redaction before persistence; the current LLM path has no such content-logging
   mode (I9).
 
-### 13.1 OAuth-backend fingerprint (Codex)
+### 13.1 Supported API upstreams
 
-The OpenAI **Codex** backend (`chatgpt.com/backend-api/codex`) gates a subscription OAuth token
-to the *Codex CLI identity* and flags requests whose shape diverges from the real CLI's. (Anthropic
-is **not** in this picture: the gateway authenticates Anthropic with a first-party `x-api-key` —
-the sanctioned path — having removed the prior subscription-OAuth / Claude-Code impersonation;
-api-key requests carry no CLI fingerprint.) The gateway presents the Codex CLI identity across two
-layers; they are independent, and detection can key on either:
+Inference uses supported provider API endpoints and credentials. Consumer CLI
+fingerprints, subscription token refresh and consumer model listing are removed.
+Retired configured selectors fail startup; historical catalog rows keep their
+legacy marker so invocation refuses them before cache or provider access.
+Migration requires an explicit endpoint, model and credential choice; Waygate
+does not infer equivalent entitlements or silently reroute a legacy alias.
 
-1. **Headers** — `originator: codex_cli_rs`, the Codex `User-Agent`, a per-credential
-   `session_id` (§6: keyed on `sha256(bearer)`, so a pooled credential never shares one session
-   across tokens), `x-codex-window-id`, the residency header, and `chatgpt-account-id`.
-   The `User-Agent`'s CLI *version* is not a compile-time pin: dispatch reads a shared handle
-   (`waygate_llm_providers::SharedCodexUaVersion`) the discovery refresher hot-swaps to the
-   `client_version` it fetched the model listing as (§7.1), so `/models` and `/responses`
-   present one, current client identity. Without a running Codex discovery target the handle
-   keeps the compiled default (`CODEX_FP_DEFAULT_VERSION`, pinned equal to discovery's
-   `CODEX_DEFAULT_CLIENT_VERSION` by a `waygate-server` test).
-2. **Transport (TLS/JA3·JA4)** — the ClientHello fingerprint. This is the one layer header
-   fidelity **cannot** address: the gateway's HTTP client (`reqwest`/`rustls`) presents a TLS
-   fingerprint distinct from the real CLI's stack (Codex = a Rust stack), so a sufficiently strict
-   backend could flag the gateway on JA3/JA4 alone. (This also applies to any upstream behind a
-   TLS-fingerprinting CDN — e.g. `api.anthropic.com` sits behind Cloudflare — independent of the
-   header/identity layer.)
-
-   **Why not impersonate TLS in-process:** a BoringSSL-impersonating client (`rquest` and the like)
-   could match a target JA3, but swapping the workspace's pinned `reqwest` is high-blast-radius
-   (every crate uses it) and — critically — **unverifiable from here without a real CLI capture**,
-   so it is deliberately *not* done. A wrong impersonation is no better than none.
-
-   **What is shipped:** `GATEWAY_LLM_EGRESS_PROXY` routes *only* the LLM provider client through an
-   operator-provided egress proxy. The intended target is a **uTLS-terminating sidecar** that
-   terminates the gateway's TLS and **re-originates** the upstream connection with a CLI-like
-   ClientHello. Note a *plain* forwarding/HTTP-CONNECT proxy does **not** help — it tunnels the
-   gateway's own TLS end-to-end, leaving JA3 unchanged; the sidecar must terminate and re-originate.
-   This keeps the in-process TLS stack untouched (no blast radius) while giving an operator a
-   verified path to a CLI-like handshake.
-
-   **Verification method (before investing further):** capture one real `claude`/`codex` CLI
-   request through `mitmproxy` and the gateway's outbound equivalent, diff headers + body, and
-   compare JA4 (e.g. with a JA4 fingerprinter). Only escalate the TLS work if the JA4 delta is
-   what is actually getting tokens flagged — header/body parity may already suffice for a given
-   backend, and the sidecar closes the rest without touching the gateway binary.
-
-**Codex Responses request-shape contract.** Beyond identity, the ChatGPT/Codex backend is
-strict about the request *body* and rejects a generic Responses body. A Codex route
-(`ResolvedRoute::openai_chatgpt`) therefore normalizes the rendered Responses body through
-`finalize_codex_responses_body`, mirroring the Codex CLI's own request shape:
-
-- **Streaming-only.** A non-streaming (`stream:false`) call is rejected **before dispatch**
-  with a clear, non-retryable error (`use stream=true`) — the backend streams-only and the gateway
-  does not aggregate the upstream SSE back into a unary body. The finalizer also forces
-  `stream:true` on the body it sends.
-- **Stateless.** Requests with `previous_response_id` are refused before credential
-  access or provider contact because the subscription backend has no response store.
-  Normalization forces `store:false` and requests
-  `include: ["reasoning.encrypted_content"]` so a reasoning loop round-trips statelessly.
-- **Normalized fields.** `parallel_tool_calls:true`, a non-null `instructions` (defaulted to
-  `""` when absent — the backend treats present-but-null as absent), and it strips the
-  sampling / control fields the CLI never sends (`max_output_tokens`, `temperature`, `top_p`,
-  `truncation`, `user`, `prompt_cache_retention`, `stream_options`, …).
-
-The **standard** api-key OpenAI Responses upstream (`ProviderAuth::Bearer`) has none of these
-constraints — it serves unary + streaming and forwards `store` / `previous_response_id` as
-written (§14).
+`GATEWAY_LLM_EGRESS_PROXY` remains a general operator-controlled proxy for
+provider requests, with the existing TLS and timeout policy. Proxy credentials
+must not appear in logs. See [migration](api-only-inference-migration.md).
 
 ---
 
@@ -1055,8 +936,6 @@ written (§14).
   response inspectors. A future streaming inspector cannot un-send bytes already forwarded;
   it must define rolling-buffer, terminal-error, audit, and pre-flight semantics before being
   enabled.
-- **Refresh-token rotation across restarts.** Out of scope for the gateway; re-seeded
-  out-of-band; surfaced as a credential-health state (§6, §10).
 - **Multi-turn.** v1 is stateless — clients carry conversation history; `context_id` reserved.
 - **Responses statefulness (`previous_response_id` / `store`).** The gateway is stateless and
   its audit ledger is content-free (I9), so it keeps **no** conversation/response store.
@@ -1064,7 +943,7 @@ written (§14).
   OpenAI-Responses upstream (whose own store provides continuity); the pre-dispatch capability
   gate (`check_provider_support`, §4.1) **rejects** it when the resolved **primary** route is
   not a Responses upstream (there is no store to resolve it against). Dispatch also
-  checks the selected route and refuses stateless subscription profiles. A request
+  checks the selected route and refuses retired consumer profiles. A request
   with this handle stays on the primary provider context and never fails over to
   another credential, endpoint, or protocol. Configure a stable primary backend and
   account for a chained conversation. The gateway does not record which route issued
@@ -1075,15 +954,9 @@ written (§14).
   `store:false` stops the *provider* from persisting the response. **Caveat:** this does
   **not** suppress the gateway's own opt-in exact-match cache (§9) — when caching is enabled
   for a model (the system flag *and* a per-model TTL), a `store:false` request's completion
-  can still be persisted in that cache (§9, §15). This forwarding describes the **standard**
-  api-key OpenAI Responses upstream; the **ChatGPT/Codex subscription** backend is
-  stateless-by-design: it rejects `previous_response_id`, and its finalizer
-  (`finalize_codex_responses_body`) forces `store:false` (§13.1), because the subscription
-  backend exposes no server-side store. Reasoning *input* items are carried opaquely and
-  forwarded to a Responses upstream; an OpenAI-chat upstream receives their plain text (see
-  replayed model output below), and Anthropic / Gemini receive nothing; on the Codex backend the gateway requests `include:
-  ["reasoning.encrypted_content"]` so a **stateless** reasoning loop round-trips the
-  encrypted reasoning without the gateway (or the backend's store) holding content.
+  can still be persisted in that cache (§9, §15). Reasoning input items are
+  forwarded opaquely to a Responses upstream. An OpenAI-chat upstream receives
+  their plain text (see below); Anthropic and Gemini receive none of it.
 - **Replayed model output.** Clients that keep their own history send the model's earlier
   output back with each request, including its reasoning. The canonical surfaces treat that
   differently from client instructions. An instruction the gateway cannot translate is

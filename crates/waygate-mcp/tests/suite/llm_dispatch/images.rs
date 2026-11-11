@@ -4,10 +4,6 @@ use std::time::Duration;
 use waygate_invocation::ImagesSurface;
 
 fn image_resolver(addr: SocketAddr) -> Arc<dyn LlmModelResolver> {
-    image_resolver_with_auth(addr, true)
-}
-
-fn image_resolver_with_auth(addr: SocketAddr, codex: bool) -> Arc<dyn LlmModelResolver> {
     Arc::new(StaticModelResolver::new().with_model(
         "llm",
         "image-alias",
@@ -21,7 +17,7 @@ fn image_resolver_with_auth(addr: SocketAddr, codex: bool) -> Arc<dyn LlmModelRe
                 upstream_model: "gpt-image-2".into(),
                 protocol: UpstreamProtocol::OpenAiResponses,
                 embeddings_no_auth: false,
-                openai_chatgpt: codex,
+                openai_chatgpt: false,
             },
             fallbacks: vec![],
             risk: ModelRisk::Low,
@@ -36,15 +32,7 @@ fn dispatcher() -> LlmDispatcher {
 }
 
 fn dispatcher_with_client(builder: reqwest::ClientBuilder) -> LlmDispatcher {
-    dispatcher_with_auth(builder, true)
-}
-
-fn dispatcher_with_auth(builder: reqwest::ClientBuilder, codex: bool) -> LlmDispatcher {
-    let material = if codex {
-        json!({"tokens":{"access_token":"fixture-access","refresh_token":"fixture-refresh","account_id":"fixture-account"},"expires_at":"2099-01-01T00:00:00Z"})
-    } else {
-        json!({"api_key":"fixture-access"})
-    };
+    let material = json!({"api_key":"fixture-access"});
     let credentials =
         LlmCredentialStore::from_vars([("LLM_CRED_OPENAI_TEST".into(), material.to_string())]);
     LlmDispatcher::new(
@@ -66,23 +54,14 @@ fn image_request() -> InvocationRequest {
 }
 
 async fn image_provider(calls: Arc<AtomicUsize>, status: u16) -> SocketAddr {
-    image_provider_with_auth(calls, status, true).await
-}
-
-async fn image_provider_with_auth(calls: Arc<AtomicUsize>, status: u16, codex: bool) -> SocketAddr {
     let handler = post(
         move |headers: HeaderMap, axum::Json(body): axum::Json<Value>| {
             let calls = calls.clone();
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(headers["authorization"], "Bearer fixture-access");
-                if codex {
-                    assert_eq!(headers["chatgpt-account-id"], "fixture-account");
-                    assert_eq!(headers["originator"], "codex_cli_rs");
-                } else {
-                    assert!(!headers.contains_key("chatgpt-account-id"));
-                    assert!(!headers.contains_key("originator"));
-                }
+                assert!(!headers.contains_key("chatgpt-account-id"));
+                assert!(!headers.contains_key("originator"));
                 assert_eq!(body["model"], "gpt-image-2");
                 assert_eq!(body["quality"], "low");
                 let body = if status == 200 {
@@ -112,14 +91,14 @@ async fn image_provider_with_auth(calls: Arc<AtomicUsize>, status: u16, codex: b
 #[tokio::test]
 async fn api_images_cross_invocation_gates_and_record_both_usage_surfaces() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let addr = image_provider_with_auth(calls.clone(), 200, false).await;
+    let addr = image_provider(calls.clone(), 200).await;
     let audit = Arc::new(RecordingSink::default());
     let usage = Arc::new(RecordingUsage::default());
     let svc =
         DefaultInvocationService::new(Arc::new(FakeCatalog), Arc::new(AllowAllGate), audit.clone())
             .with_llm(
-                dispatcher_with_auth(reqwest::Client::builder(), false),
-                image_resolver_with_auth(addr, false),
+                dispatcher_with_client(reqwest::Client::builder()),
+                image_resolver(addr),
             )
             .with_llm_usage_store(usage.clone());
     for surface in [ImagesSurface::Generations, ImagesSurface::Edits] {
@@ -156,43 +135,14 @@ async fn api_images_cross_invocation_gates_and_record_both_usage_surfaces() {
         Arc::new(RecordingSink::default()),
     )
     .with_llm(
-        dispatcher_with_auth(reqwest::Client::builder(), false),
-        image_resolver_with_auth(addr, false),
+        dispatcher_with_client(reqwest::Client::builder()),
+        image_resolver(addr),
     );
     assert!(matches!(
         denied.invoke(Some(&principal()), image_request()).await,
         Err(InvocationError::Forbidden { .. })
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-}
-
-#[tokio::test]
-async fn images_use_subscription_auth_and_record_metadata_only_usage() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let addr = image_provider(calls.clone(), 200).await;
-    let audit = Arc::new(RecordingSink::default());
-    let usage = Arc::new(RecordingUsage::default());
-    let svc =
-        DefaultInvocationService::new(Arc::new(FakeCatalog), Arc::new(AllowAllGate), audit.clone())
-            .with_llm(dispatcher(), image_resolver(addr))
-            .with_llm_usage_store(usage.clone());
-    let response = svc
-        .invoke(Some(&principal()), image_request())
-        .await
-        .unwrap();
-    let InvocationResponse::UnaryValue(body) = response else {
-        panic!("expected image JSON")
-    };
-    assert_eq!(body["data"][0]["b64_json"], "aW1hZ2U=");
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let rows = usage.rows.lock().unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].input_tokens, Some(5));
-    assert_eq!(rows[0].output_tokens, Some(20));
-    assert_eq!(rows[0].inbound_surface, "images_generations");
-    let events = audit.best_effort.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].category, EvidenceCategory::LlmCompletion);
 }
 
 #[tokio::test]

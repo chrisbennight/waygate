@@ -14,8 +14,8 @@
 //!   failover with per-credential cooldown lives in
 //!   [`dispatch_with_failover`](LlmDispatcher::dispatch_with_failover).
 //! - **No credential I/O.** The bearer comes from the injected credential store
-//!   (`waygate-llm-credentials`), which owns in-process OAuth refresh; this
-//!   crate is a pure consumer (invariant I4).
+//!   (`waygate-llm-credentials`), which accepts API keys and scoped rotation;
+//!   this crate is a pure consumer (invariant I4).
 //!
 //! Supports all four upstream protocols — OpenAI-chat, Anthropic-Messages,
 //! Gemini, and OpenAI-Responses — for both unary and streaming. The
@@ -42,14 +42,13 @@ pub use resolver::{
     DbModelResolver, LlmModelResolver, LlmOperation, ModelRisk, ResolvedModel, StaticModelResolver,
 };
 use waygate_llm_providers::{
-    ProviderAuth, ProviderClient, ProviderRequest, ProviderResponse, SharedCodexUaVersion,
-    SseStream,
+    ProviderAuth, ProviderClient, ProviderRequest, ProviderResponse, SseStream,
 };
 use waygate_llm_translate::{
     anthropic_to_canonical_response, canonical_response_to_openai_chat,
     canonical_response_to_responses, extract_anthropic_messages, extract_gemini,
     extract_openai_chat, extract_openai_embeddings, extract_openai_responses,
-    finalize_codex_responses_body, gemini_to_canonical_response, openai_chat_to_canonical_response,
+    gemini_to_canonical_response, openai_chat_to_canonical_response,
     openai_responses_to_canonical_response, render_anthropic_messages, render_gemini,
     render_openai_chat, render_openai_embeddings, render_openai_responses, CanonicalResponse,
     EmbeddingsRequest, InferenceRecord, LlmRequest, Surface, TranslateError, UpstreamProtocol,
@@ -84,13 +83,8 @@ pub struct ResolvedRoute {
     /// four variants (`OpenAiChat`, `AnthropicMessages`, `Gemini`,
     /// `OpenAiResponses`) are supported for both unary and streaming.
     pub protocol: UpstreamProtocol,
-    /// When `true`, this route targets the ChatGPT backend
-    /// (`chatgpt.com/backend-api/codex`) rather than a standard OpenAI Responses
-    /// endpoint: dispatch sends the Codex auth fingerprint
-    /// ([`ProviderAuth::OpenAiChatGpt`]) instead of a plain `Bearer`, including
-    /// the credential's `chatgpt-account-id`. Applies to Responses chat routes
-    /// and the separate Images operation. Set by the server from a model's
-    /// `surface: codex`; image configuration requires it.
+    /// Marker retained from legacy catalog rows for an actionable refusal.
+    /// Consumer subscription routes are never dispatched or reinterpreted as API routes.
     pub openai_chatgpt: bool,
 }
 
@@ -215,12 +209,6 @@ pub struct LlmDispatcher {
     /// correct here: every critical section is synchronous (no `.await` is held
     /// across the lock — the provider call happens outside it).
     cooldowns: Arc<Mutex<HashMap<(LlmProvider, String), Cooldown>>>,
-    /// Shared Codex CLI version for the ChatGPT-backend `User-Agent`
-    /// fingerprint. The composition root wires the same handle the discovery
-    /// refresher updates with the version it fetched the model listing as, so
-    /// `/responses` and `/models` present one client identity. `None` (or an
-    /// unwired handle) falls back to the providers crate's compiled default.
-    codex_ua_version: Option<SharedCodexUaVersion>,
     response_capacity: Arc<tokio::sync::Semaphore>,
     realtime_capacity: Arc<tokio::sync::Semaphore>,
     realtime_shutdown: tokio_util::sync::CancellationToken,
@@ -236,7 +224,6 @@ impl LlmDispatcher {
             providers,
             credentials,
             cooldowns: Arc::new(Mutex::new(HashMap::new())),
-            codex_ua_version: None,
             response_capacity: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_RESPONSES)),
             realtime_capacity: Arc::new(tokio::sync::Semaphore::new(32)),
             realtime_shutdown: tokio_util::sync::CancellationToken::new(),
@@ -271,20 +258,6 @@ impl LlmDispatcher {
     }
     pub fn realtime_tasks(&self) -> tokio_util::task::TaskTracker {
         self.realtime_tasks.clone()
-    }
-
-    /// Wire the shared Codex CLI version handle (see the field docs). Builder
-    /// style so existing constructors stay unchanged.
-    pub fn with_codex_ua_version(mut self, handle: SharedCodexUaVersion) -> Self {
-        self.codex_ua_version = Some(handle);
-        self
-    }
-
-    /// The shared Codex UA version handle, when wired — exposed (cloning the
-    /// `Arc`) so the composition root can hand the SAME handle to the
-    /// discovery refresher that keeps it current.
-    pub fn codex_ua_version(&self) -> Option<SharedCodexUaVersion> {
-        self.codex_ua_version.clone()
     }
 
     /// The shared credential store this dispatcher resolves bearers from.
@@ -461,8 +434,8 @@ impl LlmDispatcher {
         Err(last_err.expect("the candidate order is non-empty"))
     }
 
-    /// Dispatch `req` to `route`: resolve the bearer (the store handles in-proc
-    /// OAuth refresh), render the provider body, call the provider, and return
+    /// Dispatch `req` to `route`: read the API key, render the provider body,
+    /// call the provider, and return
     /// the unary record+body or the streaming frames+base-record.
     pub async fn dispatch(
         &self,
@@ -470,15 +443,7 @@ impl LlmDispatcher {
         route: &ResolvedRoute,
     ) -> Result<DispatchOutcome, DispatchError> {
         waygate_llm_translate::check_provider_support(req, route.protocol)?;
-        if req.previous_response_id.is_some() && route.openai_chatgpt {
-            return Err(TranslateError::Unsupported {
-                surface: "openai_responses_codex",
-                param: "previous_response_id (the ChatGPT backend has no response store; \
-                        send the conversation history explicitly)"
-                    .into(),
-            }
-            .into());
-        }
+        ensure_api_route(route)?;
         // Select the protocol adapter (render + auth scheme + endpoint path)
         // before resolving a credential or making any call. All four upstream
         // protocols — OpenAI-chat, Anthropic Messages, Gemini, and OpenAI
@@ -520,84 +485,24 @@ impl LlmDispatcher {
                     format!("v1beta/models/{}:{}", route.upstream_model, method),
                 )
             }
-            UpstreamProtocol::OpenAiResponses => {
-                // Both unary and streaming are supported. The Responses surface
-                // lives at the configured `route.path` (`responses`) — the server
-                // wires it from a model's `surface: responses` (or `surface:
-                // codex` for the ChatGPT backend). Streaming is body-driven
-                // (`stream: true`, set by render_openai_responses); the streaming
-                // egress selects the Responses SSE translator from record_base's
-                // protocol. Auth is `Bearer` for a standard Responses endpoint, or
-                // the Codex fingerprint (`OpenAiChatGpt`) for the ChatGPT backend.
-                let auth = if route.openai_chatgpt {
-                    ProviderAuth::OpenAiChatGpt
-                } else {
-                    ProviderAuth::Bearer
-                };
-                let mut body = render_openai_responses(req, &route.upstream_model)?;
-                if route.openai_chatgpt {
-                    // The ChatGPT (Codex) backend is streaming-only and rejects a
-                    // generic Responses body. A non-streaming client call would
-                    // require streaming upstream and aggregating the SSE back into
-                    // a unary body (the reference always streams upstream); this
-                    // slice does not, so rather than send a body (`stream:true`)
-                    // that contradicts a unary transport, fail closed with a clear,
-                    // non-retryable message. Streaming Codex calls (the common
-                    // path) are fully supported.
-                    if !req.stream {
-                        return Err(DispatchError::Translate(TranslateError::Unsupported {
-                            surface: "openai_responses_codex",
-                            param: "non-streaming request to the ChatGPT (Codex) backend; \
-                                    use stream=true"
-                                .into(),
-                        }));
-                    }
-                    body = finalize_codex_responses_body(body);
-                }
-                (body, auth, route.path.clone())
-            }
+            UpstreamProtocol::OpenAiResponses => (
+                render_openai_responses(req, &route.upstream_model)?,
+                ProviderAuth::Bearer,
+                route.path.clone(),
+            ),
         };
 
-        // I4: the bearer is injected and managed by the credential store.
-        let (bearer, credential_account_id) = if route.provider == LlmProvider::Google
-            || (route.provider == LlmProvider::OpenAi && !route.openai_chatgpt)
-        {
-            (
-                self.credentials
-                    .api_key(route.provider, &route.credential_label)
-                    .await?,
-                None,
-            )
-        } else {
-            self.credentials
-                .bearer_with_account(route.provider, &route.credential_label)
-                .await?
-        };
-        let account_id = if matches!(auth, ProviderAuth::OpenAiChatGpt) {
-            credential_account_id
-        } else {
-            None
-        };
-
-        // The Codex fingerprint's User-Agent version: read the shared handle
-        // per request (the discovery refresher hot-swaps it), only for the
-        // ChatGPT-backend auth path.
-        let codex_ua_version = if matches!(auth, ProviderAuth::OpenAiChatGpt) {
-            self.codex_ua_version
-                .as_ref()
-                .map(|h| h.read().expect("codex ua version lock").clone())
-        } else {
-            None
-        };
-
-        let mut record_base = InferenceRecord::new(
+        let bearer = self
+            .credentials
+            .api_key(route.provider, &route.credential_label)
+            .await?;
+        let record_base = InferenceRecord::new(
             route.provider,
             route.credential_label.as_str(),
             req.model_requested.as_str(),
             req.inbound_surface,
             route.protocol,
         );
-        record_base.provider_account_id = account_id.clone();
         let started = std::time::Instant::now();
 
         let response = self
@@ -609,8 +514,6 @@ impl LlmDispatcher {
                 auth,
                 body,
                 stream: req.stream,
-                account_id,
-                codex_ua_version,
             })
             .await
             .inspect_err(|_| {
@@ -695,6 +598,7 @@ impl LlmDispatcher {
         req: &NativeMessagesRequest,
         route: &ResolvedRoute,
     ) -> Result<DispatchOutcome, DispatchError> {
+        ensure_api_route(route)?;
         // Backstop for the caller's route filter: a native Messages body has no
         // rendering for another protocol. Not retryable, so failover stops here.
         if route.protocol != UpstreamProtocol::AnthropicMessages {
@@ -731,8 +635,6 @@ impl LlmDispatcher {
                     auth: ProviderAuth::Anthropic,
                     body: Value::Object(body),
                     stream: req.stream,
-                    account_id: None,
-                    codex_ua_version: None,
                 },
                 &req.headers,
             )
@@ -778,21 +680,16 @@ impl LlmDispatcher {
         req: &EmbeddingsRequest,
         route: &ResolvedRoute,
     ) -> Result<(InferenceRecord, Value), DispatchError> {
+        ensure_api_route(route)?;
         let body = render_openai_embeddings(req, &route.upstream_model);
         // I4: the bearer is injected and managed by the credential store.
         let (bearer, auth) = if route.embeddings_no_auth {
             (String::new(), ProviderAuth::None)
         } else {
             (
-                if route.provider == LlmProvider::OpenAi {
-                    self.credentials
-                        .api_key(route.provider, &route.credential_label)
-                        .await?
-                } else {
-                    self.credentials
-                        .bearer(route.provider, &route.credential_label)
-                        .await?
-                },
+                self.credentials
+                    .api_key(route.provider, &route.credential_label)
+                    .await?,
                 ProviderAuth::Bearer,
             )
         };
@@ -817,8 +714,6 @@ impl LlmDispatcher {
                     body,
                     // Embeddings are unary only — no SSE.
                     stream: false,
-                    account_id: None,
-                    codex_ua_version: None,
                 },
                 waygate_llm_providers::MAX_EMBEDDING_RESPONSE_BYTES,
             )
@@ -889,6 +784,16 @@ impl LlmDispatcher {
         // through, so `last_err` is set.
         Err(last_err.expect("the candidate order is non-empty"))
     }
+}
+
+fn ensure_api_route(route: &ResolvedRoute) -> Result<(), DispatchError> {
+    if route.openai_chatgpt {
+        return Err(TranslateError::Unsupported {
+            surface: "api_only_inference",
+            param: "consumer subscription routes are no longer supported; migrate the model to a supported provider API".into(),
+        }.into());
+    }
+    Ok(())
 }
 
 /// Render a [`CanonicalResponse`] to the inbound client surface: the Responses

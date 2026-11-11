@@ -30,27 +30,15 @@ impl LlmDispatcher {
             )
             .into());
         }
-        let (bearer, account_id, auth, version) = if route.openai_chatgpt {
-            let (bearer, account_id) = self
-                .credentials
-                .bearer_with_account(route.provider, &route.credential_label)
-                .await?;
-            let version = self
-                .codex_ua_version
-                .as_ref()
-                .map(|h| h.read().expect("codex ua version lock").clone());
-            (bearer, account_id, ProviderAuth::OpenAiChatGpt, version)
-        } else {
-            (
-                self.credentials
-                    .api_key(route.provider, &route.credential_label)
-                    .await?,
-                None,
-                ProviderAuth::Bearer,
-                None,
-            )
-        };
-        let mut record = InferenceRecord::new(
+        if route.openai_chatgpt {
+            return Err(ProviderError::Protocol("consumer subscription image routes are no longer supported; migrate this model to the OpenAI Images API".into()).into());
+        }
+        let bearer = self
+            .credentials
+            .api_key(route.provider, &route.credential_label)
+            .await?;
+        let auth = ProviderAuth::Bearer;
+        let record = InferenceRecord::new(
             route.provider,
             &route.credential_label,
             &req.model_requested,
@@ -61,7 +49,6 @@ impl LlmDispatcher {
             },
             route.protocol,
         );
-        record.provider_account_id = account_id.clone();
         let started = std::time::Instant::now();
         let response = self
             .providers
@@ -77,8 +64,6 @@ impl LlmDispatcher {
                     auth,
                     body: req.render(&route.upstream_model),
                     stream: false,
-                    account_id,
-                    codex_ua_version: version,
                 },
                 MAX_IMAGE_RESPONSE_BYTES,
             )
