@@ -33,7 +33,8 @@
   (`use stream=true`) because that backend streams-only and the gateway does not aggregate the
   upstream SSE back into a unary body (§13.1). Every other route serves both transports.
 - **Images surface:** `POST /v1/images/generations` and `POST /v1/images/edits`
-  serve explicitly configured Codex image models through the same model gates.
+  serve explicitly configured OpenAI API image models through the same model
+  gates. Legacy Codex image routes remain during [API migration](openai-api-upstreams.md).
   See [Images API](images-api.md) for SDK examples, limits, and supported options.
 - **Embeddings surface:** `POST /v1/embeddings` is also mounted (**unary only** — embeddings
   have no streaming form), routing an OpenAI-compatible embeddings model through the **same**
