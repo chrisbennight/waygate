@@ -437,8 +437,8 @@ impl DefaultInvocationService {
         }
 
         // Irreversible provider call — only after every gate passed (I2) and the
-        // cache missed. Fails over across the model's credential pool (§7) on a
-        // retryable initial failure; a single-credential model has no fallbacks.
+        // cache missed. Stateless requests may fail over across the credential
+        // pool; requests with a provider-owned response handle stay on primary.
         let result = dispatcher
             .dispatch_with_failover(&llm_req, &model.route, &model.fallbacks, model.ttfb)
             .await;

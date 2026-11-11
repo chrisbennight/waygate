@@ -899,6 +899,7 @@ async fn responses_handler(
             .and_then(|h| h.to_str().ok())
             .map(str::to_string);
         c.model = v.get("model").and_then(Value::as_str).map(str::to_string);
+        c.body = Some(v);
     }
     let resp = json!({
         "id": "resp_1",
@@ -957,6 +958,114 @@ async fn responses_unary_dispatch_renders_responses_body_and_extracts() {
 }
 
 // ---- Credential-pool failover ---------------------------------------------
+
+#[tokio::test]
+async fn response_continuations_never_cross_fallback_contexts() {
+    for stream in [false, true] {
+        let primary_calls = Arc::new(AtomicUsize::new(0));
+        let calls = primary_calls.clone();
+        let primary_addr = spawn(Router::new().route(
+            "/responses",
+            post(move |axum::Json(body): axum::Json<Value>| {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(body["previous_response_id"], "resp_existing");
+                    assert_eq!(
+                        body.get("stream").and_then(Value::as_bool).unwrap_or(false),
+                        stream
+                    );
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                }
+            }),
+        ))
+        .await;
+        let fallback_calls = Arc::new(AtomicUsize::new(0));
+        let calls = fallback_calls.clone();
+        let fallback_addr = spawn(Router::new().fallback(move || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            }
+        }))
+        .await;
+        let mut primary = route(primary_addr, "MAIN");
+        primary.protocol = UpstreamProtocol::OpenAiResponses;
+        primary.path = "responses".into();
+        let mut other_credential = primary.clone();
+        other_credential.credential_label = "BACKUP".into();
+        let mut other_endpoint = other_credential.clone();
+        other_endpoint.base_url = format!("http://{fallback_addr}");
+        let other_protocol = route(fallback_addr, "BACKUP");
+        let mut request = responses_req();
+        request.previous_response_id = Some("resp_existing".into());
+        request.stream = stream;
+        let dispatcher =
+            LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), pool_store());
+        let error = dispatcher
+            .dispatch_with_failover(
+                &request,
+                &primary,
+                &[other_credential, other_endpoint, other_protocol],
+                None,
+            )
+            .await
+            .expect_err("continuations stay on their primary provider context");
+        assert!(matches!(
+            error,
+            DispatchError::Provider(ProviderError::Status { status: 503, .. })
+        ));
+        assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn response_continuation_keeps_the_handle_on_a_successful_primary() {
+    let captured = Arc::new(Mutex::new(Captured::default()));
+    let addr = spawn(
+        Router::new()
+            .route("/responses", post(responses_handler))
+            .with_state(captured.clone()),
+    )
+    .await;
+    let dispatcher = LlmDispatcher::new(
+        ProviderClient::new(reqwest::Client::new()),
+        responses_store(),
+    );
+    let mut request = responses_req();
+    request.previous_response_id = Some("resp_existing".into());
+    dispatcher
+        .dispatch_with_failover(&request, &responses_route(addr), &[], None)
+        .await
+        .expect("the provider resolves its own response handle");
+    assert_eq!(
+        captured.lock().unwrap().body.as_ref().unwrap()["previous_response_id"],
+        "resp_existing"
+    );
+}
+
+#[tokio::test]
+async fn response_continuation_rejects_stateless_profiles_before_credential_access() {
+    let dispatcher = LlmDispatcher::new(
+        ProviderClient::new(reqwest::Client::new()),
+        Arc::new(LlmCredentialStore::from_vars([])),
+    );
+    let mut request = responses_req();
+    request.previous_response_id = Some("resp_existing".into());
+    request.stream = true;
+    for primary in [
+        route("127.0.0.1:1".parse().unwrap(), "MISSING"),
+        codex_route("127.0.0.1:1".parse().unwrap()),
+    ] {
+        let error = dispatcher
+            .dispatch_with_failover(&request, &primary, &[], None)
+            .await
+            .expect_err("this profile cannot resolve stored Responses state");
+        assert!(matches!(error, DispatchError::Translate(_)));
+    }
+}
 
 async fn bad_request_handler() -> Response {
     Response::builder()

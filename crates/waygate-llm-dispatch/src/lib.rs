@@ -345,8 +345,11 @@ impl LlmDispatcher {
     /// request against another credential of the same provider would fail
     /// identically. The first success wins; if every candidate fails, the last
     /// error is returned.
+    /// Requests carrying `previous_response_id` use the primary route once:
+    /// alternate credentials and endpoints cannot establish ownership of its
+    /// provider-side history. They retain the same first-frame deadline.
     ///
-    /// For a streamed call this fails over on the INITIAL dispatch error and —
+    /// For a stateless streamed call this fails over on the INITIAL dispatch error and —
     /// when `ttfb` is set (§7 stall detection) — on a time-to-first-byte stall:
     /// it waits for the first SSE frame, and a stall (or a pre-first-frame stream
     /// error) is retryable, so a dead-on-arrival stream fails over before any
@@ -369,6 +372,15 @@ impl LlmDispatcher {
         fallbacks: &[ResolvedRoute],
         ttfb: Option<Duration>,
     ) -> Result<DispatchOutcome, DispatchError> {
+        // A provider-owned response handle belongs to the selected route's
+        // account and endpoint. A configured fallback is not evidence that it
+        // can resolve that handle, so continuation requests make one attempt
+        // on the primary route, even when its credential is cooling down.
+        let fallbacks = if req.previous_response_id.is_some() {
+            &[]
+        } else {
+            fallbacks
+        };
         self.failover(primary, fallbacks, ttfb, |route| self.dispatch(req, route))
             .await
     }
@@ -454,6 +466,16 @@ impl LlmDispatcher {
         req: &LlmRequest,
         route: &ResolvedRoute,
     ) -> Result<DispatchOutcome, DispatchError> {
+        waygate_llm_translate::check_provider_support(req, route.protocol)?;
+        if req.previous_response_id.is_some() && route.openai_chatgpt {
+            return Err(TranslateError::Unsupported {
+                surface: "openai_responses_codex",
+                param: "previous_response_id (the ChatGPT backend has no response store; \
+                        send the conversation history explicitly)"
+                    .into(),
+            }
+            .into());
+        }
         // Select the protocol adapter (render + auth scheme + endpoint path)
         // before resolving a credential or making any call. All four upstream
         // protocols — OpenAI-chat, Anthropic Messages, Gemini, and OpenAI
