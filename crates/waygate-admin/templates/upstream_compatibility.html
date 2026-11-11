@@ -3,9 +3,10 @@
     <p>Observed {{ report.observed_at }} · {{ report.evidence_status }}.</p>
     <p>Configured transport: {% match report.configured_transport %}{% when Some with (value) %}<code>{{ value }}</code>{% when None %}unavailable while busy{% endmatch %}.
     Configured protocol: {% match report.configured_protocol %}{% when Some with (value) %}<code>{{ value }}</code>{% when None %}unavailable while busy{% endmatch %}.</p>
-    {% if report.lanes.is_empty() %}<p class="muted">No live peer declarations are available. This does not establish whether an upstream supports a capability. Retry after connection recovery or after the busy operation finishes.</p>{% endif %}
+    {% if report.lanes.is_empty() %}<p class="muted">No peer declarations are retained. This does not establish whether an upstream supports a capability. Retry after connection recovery or after the busy operation finishes.</p>{% endif %}
     {% for lane in report.lanes %}
     <h4>Lane {{ lane.lane }}</h4>
+    {% if !lane.current %}<p class="chip chip--warn">Stale connection evidence. These cached declarations do not establish current support.</p>{% endif %}
     <dl class="cfg-dl">
         <dt>Peer declaration observed</dt><dd>{{ lane.connection_observed_at }}</dd>
         <dt>Catalog observation age</dt><dd>{{ lane.catalog_age_seconds }} seconds</dd>
@@ -18,7 +19,7 @@
         <dt>Strict-client input-schema warnings</dt><dd>{{ lane.input_schema_warning_count }}</dd>
     </dl>
     {% endfor %}
-    {% if report.lanes_truncated %}<p class="chip chip--warn">Only the first 32 live lanes are shown. Additional lanes may declare different capabilities.</p>{% endif %}
+    {% if report.lanes_truncated %}<p class="chip chip--warn">Only the first 32 retained lanes are shown. Additional lanes may declare different capabilities.</p>{% endif %}
     <dl class="cfg-dl">
         <dt>Runtime availability</dt><dd>{% match report.runtime_status %}{% when Some with (value) %}{{ value }}{% when None %}unknown{% endmatch %}</dd>
         <dt>Resource ownership configured</dt><dd>{% match report.resource_prefixes_configured %}{% when Some with (value) %}{{ value }}{% when None %}unknown{% endmatch %}</dd>

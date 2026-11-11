@@ -238,7 +238,7 @@ pub struct UpstreamStatus {
     /// the health count. A tool appears once; the first rejecting lane's root
     /// type is retained when connected lanes disagree.
     pub rejected_output_schemas: Vec<super::tool_listing::RejectedOutputSchema>,
-    /// Allowlisted peer declarations from the same live-lane snapshot. These
+    /// Allowlisted peer declarations from the same retained-lane snapshot. These
     /// are upstream claims, not conformance or successful operation evidence.
     pub compatibility: Vec<LaneCompatibility>,
 }
@@ -246,6 +246,9 @@ pub struct UpstreamStatus {
 #[derive(Debug, Clone)]
 pub struct LaneCompatibility {
     pub lane: usize,
+    /// False when the SDK has observed closure or the breaker is open. Cached
+    /// declarations remain diagnostic evidence, never current support claims.
+    pub current: bool,
     pub connected_at: time::OffsetDateTime,
     pub catalog_age_seconds: u64,
     pub protocol_version: Option<String>,
@@ -615,6 +618,9 @@ async fn entry_status(name: &str, entry: &UpstreamEntry) -> UpstreamStatus {
             let label = |value: &str| value.chars().take(256).collect::<String>();
             Some(LaneCompatibility {
                 lane,
+                current: !conn.client.is_closed()
+                    && !conn.client.is_transport_closed()
+                    && breaker != BreakerState::Open,
                 connected_at: conn.connected_at,
                 catalog_age_seconds: conn.dialed_at.elapsed().as_secs(),
                 protocol_version: conn.negotiated_protocol.as_deref().map(label),
@@ -1461,6 +1467,7 @@ mod bounded_snapshot_tests {
             assert_eq!(lane.resources_advertised, Some(version == "first"));
             assert_eq!(lane.tasks_advertised, Some(false));
             assert!(lane.protocol_version.is_some());
+            assert!(lane.current);
             assert_eq!(lane.input_schema_warning_count, 1);
             if let Some(before) = prior_connection {
                 assert!(lane.connected_at >= before);
@@ -1498,6 +1505,40 @@ mod bounded_snapshot_tests {
             panic!("available snapshot")
         };
         assert_eq!(released.compatibility[0].input_schema_warning_count, 1);
+        for _ in 0..crate::BreakerConfig::default().failure_threshold {
+            entry.breaker.acquire().unwrap().failure();
+        }
+        let Some(UpstreamStatusObservation::Observed(unavailable)) = pool
+            .server_status_within("fixture", Duration::from_secs(1))
+            .await
+        else {
+            panic!("available snapshot")
+        };
+        assert_eq!(
+            unavailable.health.runtime_state,
+            UpstreamRuntimeState::Disconnected
+        );
+        assert!(!unavailable.compatibility[0].current);
+        entry.breaker.reset();
+        entry.slots[0]
+            .conn
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .client
+            .cancellation_token()
+            .cancel();
+        let Some(UpstreamStatusObservation::Observed(closed)) = pool
+            .server_status_within("fixture", Duration::from_secs(1))
+            .await
+        else {
+            panic!("available snapshot")
+        };
+        assert!(
+            !closed.compatibility[0].current,
+            "an SDK-closed connection remains explicitly stale even before recovery evicts it"
+        );
         pool.reload_manifests(&BTreeMap::new()).await;
         assert!(pool
             .server_status_within("fixture", Duration::from_secs(1))

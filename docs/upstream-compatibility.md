@@ -12,7 +12,7 @@ The report distinguishes:
 - **Configured:** transport, protocol selection, resource ownership, and
   gateway-run task configuration.
 - **Advertised:** implementation name/version and selected capability flags
-  retained by the MCP library, separately for each connected lane. These are
+  retained by the MCP library, separately for each retained connection. These are
   upstream declarations, not independently verified facts.
 - **Observed:** the protocol that connection negotiated and the age of its
   successful catalog observation, plus schema warnings and runtime availability.
@@ -25,12 +25,16 @@ that replaces the connection gets new declarations; reading a report does not
 refresh them. Old observations remain visibly old rather than acquiring the
 report's timestamp. Catalog age is separate from the declaration timestamp.
 Neither an old declaration nor a healthy connection proves current conformance.
-After disconnection, peer declarations are unavailable rather than retained as
-current support. The last successful connection time is availability history
-only. A busy lane returns `busy` within a bounded wait instead of guessing or
+Known-closed SDK connections and open breakers mark retained declarations
+stale, with their original timestamps. Current and stale lanes are distinct,
+including a mixed report during recovery. Eviction makes their declarations
+unavailable. Current means the SDK has not observed closure and the breaker is
+not open; it is not an independent liveness or conformance test. The last
+successful connection time is availability history only. A busy lane returns
+`busy` within a bounded wait instead of guessing or
 holding the operator page behind a long call.
 
-Reports cover one explicitly selected upstream. At most 32 live lanes are
+Reports cover one explicitly selected upstream. At most 32 retained lanes are
 returned, with an explicit truncation signal; peer-controlled display labels
 are bounded. No endpoint URLs, headers, credential values, arbitrary extension
 settings, or tool payloads are included. No new history or worker is created.

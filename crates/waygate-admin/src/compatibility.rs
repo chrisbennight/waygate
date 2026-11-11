@@ -24,7 +24,7 @@ use crate::{
 pub struct UpstreamCompatibilityReport {
     pub server: String,
     pub observed_at: String,
-    /// Live connection declarations, unavailable, or temporarily busy.
+    /// Current, stale, mixed, unavailable, or temporarily busy evidence.
     pub evidence_status: String,
     pub configured_transport: Option<String>,
     pub configured_protocol: Option<String>,
@@ -44,6 +44,7 @@ pub struct UpstreamCompatibilityReport {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct LaneCompatibilityView {
     pub lane: usize,
+    pub current: bool,
     pub connection_observed_at: String,
     pub catalog_age_seconds: u64,
     pub protocol_version: Option<String>,
@@ -114,7 +115,7 @@ fn from_observation(observation: UpstreamStatusObservation) -> UpstreamCompatibi
         fill_observed(&mut result, *status);
     }
     for (capability, explanation) in [
-        ("Evidence", "Peer names, versions and capabilities are self-reported declarations on current connections. A successful tools/list is catalog evidence, not conformance. Connection timestamps and catalog age describe different observations. Old declarations are not revalidated by reading this report. Disconnected declarations are unavailable; last success is availability history only."),
+        ("Evidence", "Peer names, versions and capabilities are self-reported declarations. A successful tools/list is catalog evidence, not conformance. Connection timestamps and catalog age describe different observations. Old declarations are not revalidated by reading this report. Known-closed connections and open breakers mark retained declarations stale; eviction makes them unavailable. Last success is availability history only."),
         ("Tasks", "An advertised tasks extension does not prove task delivery. Native task access requires current bindings and caller capabilities. Gateway-run tasks additionally require configured long_running_tools. Subscription completion delivery remains limited by released SDK support."),
         ("Elicitation", "Elicitation is a caller capability, not a server declaration. The gateway mirrors permitted request input capabilities on compatible modern dials; legacy or undeclared input flows are refused. This report does not exercise an elicitation."),
         ("Files", "Draft file authorization support cannot be established from the SDK's retained server declarations. File operations still require governed authorization and matching caller capabilities. Actual transfer compatibility is unknown here."),
@@ -144,9 +145,18 @@ fn fill_observed(report: &mut UpstreamCompatibilityReport, status: UpstreamStatu
     report.gateway_long_running_tools_configured =
         Some(!status.manifest.long_running_tools.is_empty());
     report.output_schema_refusal_count = Some(status.health.rejected_output_schema_count);
-    if !status.compatibility.is_empty() {
-        report.evidence_status = "live_connection".into();
+    let current = status
+        .compatibility
+        .iter()
+        .filter(|lane| lane.current)
+        .count();
+    report.evidence_status = match (status.compatibility.len(), current) {
+        (0, _) => "unavailable",
+        (_, 0) => "stale_connection",
+        (total, current) if total == current => "current_connection",
+        _ => "mixed_connections",
     }
+    .into();
     report.lanes_truncated = status.compatibility.len() > 32;
     report.lanes = status
         .compatibility
@@ -154,6 +164,7 @@ fn fill_observed(report: &mut UpstreamCompatibilityReport, status: UpstreamStatu
         .take(32)
         .map(|lane| LaneCompatibilityView {
             lane: lane.lane,
+            current: lane.current,
             connection_observed_at: format_ts_rfc3339(lane.connected_at),
             catalog_age_seconds: lane.catalog_age_seconds,
             protocol_version: lane.protocol_version,
@@ -216,5 +227,54 @@ pub(crate) async fn report_fragment(
     match report(&state, &query.server).await {
         Ok(report) => crate::dashboard::render(&CompatibilityFragment { report }),
         Err(error) => error.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn report_distinguishes_current_stale_mixed_and_unavailable_declarations() {
+        let manifest: waygate_upstream::UpstreamManifest = serde_json::from_value(
+            serde_json::json!({"name":"fixture","transport":"http","url":"http://127.0.0.1:9/mcp","trust":"internal"}),
+        )
+        .unwrap();
+        let pool = waygate_upstream::UpstreamPool::from_manifests_disconnected(
+            std::collections::BTreeMap::from([("fixture".into(), manifest)]),
+        );
+        let mut status = pool.status_snapshot().await.remove(0);
+        let convert =
+            |status| from_observation(UpstreamStatusObservation::Observed(Box::new(status)));
+        assert_eq!(convert(status.clone()).evidence_status, "unavailable");
+        let lane = waygate_upstream::pool::health::LaneCompatibility {
+            lane: 0,
+            current: false,
+            connected_at: time::OffsetDateTime::UNIX_EPOCH,
+            catalog_age_seconds: 100,
+            protocol_version: Some("2026-07-28".into()),
+            implementation_name: None,
+            implementation_version: None,
+            tools_advertised: Some(true),
+            resources_advertised: None,
+            tasks_advertised: None,
+            skills_advertised: None,
+            input_schema_warning_count: 0,
+        };
+        status.compatibility.push(lane.clone());
+        let stale = convert(status.clone());
+        assert_eq!(stale.evidence_status, "stale_connection");
+        assert!(!stale.lanes[0].current);
+        assert_eq!(
+            stale.lanes[0].connection_observed_at,
+            "1970-01-01T00:00:00Z"
+        );
+        status.compatibility[0].current = true;
+        assert_eq!(
+            convert(status.clone()).evidence_status,
+            "current_connection"
+        );
+        status.compatibility.push(lane);
+        assert_eq!(convert(status).evidence_status, "mixed_connections");
     }
 }

@@ -1873,10 +1873,7 @@ pub(crate) async fn compatibility_report_is_reachable_from_tenant_server_overvie
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(
-        body.contains("No live peer declarations are available"),
-        "{body}"
-    );
+    assert!(body.contains("No peer declarations are retained"), "{body}");
     assert!(body.contains("not_recorded"), "{body}");
     assert!(body.contains("No conformance probes"), "{body}");
 }
