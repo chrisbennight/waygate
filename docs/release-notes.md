@@ -1,5 +1,40 @@
 # Release notes
 
+## 2.4.0
+
+- Skills discovery and delivery match the finalized extension, including modern
+  cache hints. Dynamic Git-backed skills do not claim verified static manifests
+  or directory reads. The official Rust MCP SDK is upgraded to rmcp 3.9.0;
+  typed Skills requests retain the gateway's approval and authorization path.
+
+- Native Anthropic Messages support preserves version and feature headers,
+  provider error status and retry metadata, and incremental Messages streams
+  for Claude Code. The upstream uses an Anthropic API key; clients continue to
+  authenticate to the gateway. See [the native Messages profile](inference-plane.md#48-native-anthropic-messages-profile).
+
+- Responses requests carrying `previous_response_id` stay on their stable
+  primary credential and endpoint, with one attempt. Provider-owned
+  conversation state is never moved to a fallback backend. Stateless requests
+  retain their configured failover behavior.
+
+- OpenAI API routes require an explicit API-key credential envelope. Supported
+  image generation and editing now work through the official API while keeping
+  existing admission, policy, usage, size limits, and single-attempt delivery.
+  API model discovery uses an explicit qualified Responses selection. Follow
+  [API migration](openai-api-upstreams.md) before changing existing aliases or
+  credentials; legacy subscription routes remain during that transition.
+
+- The SDK compatibility report records adopted fixes, retained gateway
+  boundaries, and independent client evidence. Dormant MCP log-level parsing is
+  removed; Roots, Sampling, and Logging remain unadvertised or refused as
+  documented. Ordinary logs, files, resources, and inference remain available.
+
+- Legacy HTTP+SSE migration guidance now reflects finalized SEP-2596. Transport
+  removal remains gated on dependency migration. Task notification delivery
+  still awaits released SDK support; this release does not add a second
+  transport or background polling worker. See [SDK compatibility](mcp-sdk-compatibility.md)
+  and [legacy transport migration](legacy-sse-migration.md).
+
 ## 2.3.0
 
 - Chat Completions clients can send the model's earlier reasoning back on
