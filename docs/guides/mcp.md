@@ -114,6 +114,15 @@ months after Final, following the older deprecation notice. Eligibility is not
 specification removal: Core Maintainers decide removal during release
 preparation. Waygate's own support policy and migration gates are separate.
 
+Roots, Sampling, and MCP Logging remain deprecated specification features, not
+removed protocol methods. Their earliest removal is the first revision on or
+after 2027-07-28; eligibility does not itself remove a feature. The gateway has
+no Roots or Sampling relay to retire and ignores per-request MCP log-level
+metadata. Use explicit file parameters, resource URIs, or server configuration
+for files and directories; use the inference API for model calls; use ordinary
+application logs and OpenTelemetry for observability. SDK model types and
+legacy refusal behavior remain for wire compatibility.
+
 ### Restarts and `2025-11-25` sessions
 
 A restart ends every `2025-11-25` session held by that process, and a request

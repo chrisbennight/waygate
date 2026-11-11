@@ -2986,6 +2986,8 @@
               "required": [
                 "action_type",
                 "params_schema",
+                "params_example",
+                "context",
                 "file_params"
               ]
             },
@@ -3256,6 +3258,10 @@
             "action_type",
             "expires_at",
             "interval",
+            "approver",
+            "denied_reason",
+            "execution_result",
+            "error_message",
             "approval_url"
           ],
           "type": "object"
@@ -3376,6 +3382,10 @@
                 "action_type",
                 "expires_at",
                 "interval",
+                "approver",
+                "denied_reason",
+                "execution_result",
+                "error_message",
                 "approval_url"
               ]
             }
@@ -3445,7 +3455,10 @@
             "required_approvals",
             "eligible_role",
             "factors",
-            "params_schema"
+            "cooldown_seconds",
+            "params_schema",
+            "params_example",
+            "effect"
           ],
           "properties": {
             "action_type": {
@@ -4775,7 +4788,8 @@
                 "tool",
                 "total",
                 "errors",
-                "denied"
+                "denied",
+                "p95_latency_ms"
               ]
             }
           },
@@ -5426,7 +5440,10 @@
           "required": [
             "decision",
             "reasons",
-            "policy_ids"
+            "policy_ids",
+            "determinative_policy_id",
+            "required_scope",
+            "trace"
           ],
           "$defs": {
             "SimTraceEntry": {
@@ -5729,6 +5746,7 @@
                 "uri",
                 "name",
                 "description",
+                "version",
                 "revision"
               ]
             },
@@ -5769,7 +5787,8 @@
                 "path",
                 "media_type",
                 "size",
-                "execution"
+                "execution",
+                "code_mode_tested"
               ]
             }
           },
@@ -5844,7 +5863,10 @@
           },
           "required": [
             "uri",
-            "revision"
+            "revision",
+            "media_type",
+            "text",
+            "base64"
           ],
           "type": "object"
         },
@@ -5924,7 +5946,8 @@
         },
         "outputSchema": {
           "required": [
-            "skills"
+            "skills",
+            "next_cursor"
           ],
           "$defs": {
             "SearchSummary": {
@@ -5959,6 +5982,7 @@
                 "uri",
                 "name",
                 "description",
+                "version",
                 "revision"
               ]
             }

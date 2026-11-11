@@ -652,6 +652,7 @@ fn notification_method(notification: &ClientNotification) -> &str {
 fn failure(error: &StreamableHttpError<reqwest::Error>) -> Outcome {
     let (status, detail) = match error {
         StreamableHttpError::Client(error) => client_failure(error),
+        StreamableHttpError::HttpStatus(error) => (Some(error.status), None),
         StreamableHttpError::AuthRequired(_) => (Some(401), None),
         StreamableHttpError::InsufficientScope(_) => (Some(403), None),
         StreamableHttpError::SessionExpired => (Some(404), Some("session expired".to_owned())),
@@ -1134,6 +1135,12 @@ mod tests {
         let trace = DialTrace::new();
         let recorder = trace.recorder();
         let failures = [
+            StreamableHttpError::HttpStatus(
+                rmcp::transport::streamable_http_client::HttpStatusError::new(
+                    503,
+                    Some("upstream header text".into()),
+                ),
+            ),
             StreamableHttpError::UnexpectedServerResponse(Cow::Borrowed(
                 "HTTP 401 Unauthorized: upstream body text",
             )),
@@ -1159,7 +1166,8 @@ mod tests {
         let summary = summary(&trace);
         assert_eq!(
             summary,
-            "HTTP exchanges on this dial: POST tools/list -> HTTP 401 after T; \
+            "HTTP exchanges on this dial: POST tools/list -> HTTP 503 after T; \
+             POST tools/list -> HTTP 401 after T; \
              POST tools/list -> failed after T: unexpected server response; \
              POST tools/list -> HTTP 405 after T; \
              POST tools/list -> HTTP 404 after T: session expired; \
