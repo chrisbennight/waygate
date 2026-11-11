@@ -39,6 +39,12 @@
         <dd>{{ published_tool_count }} published / {{ tool_count }} classified — <span class="mono">{{ risk_high }} high / {{ risk_medium }} medium / {{ risk_low }} low</span>{% if quarantined > 0 %} · <span class="chip chip--warn">{{ quarantined }} quarantined</span>{% endif %}</dd>
     </dl>
 
+    {% match compatibility_url %}{% when Some with (url) %}
+    <button type="button" class="btn btn--sm btn-secondary" hx-get="{{ url }}"
+            hx-target="next .compatibility-report" hx-swap="innerHTML">Show compatibility evidence</button>
+    <div class="compatibility-report" aria-live="polite"></div>
+    {% when None %}{% endmatch %}
+
     {% if is_admin %}
     {# Recovery actions relocated here from the table. Plain POSTs that
        redirect back to /servers — the same handlers the table used. #}

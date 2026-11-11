@@ -55,6 +55,7 @@ pub mod change_requests;
 pub mod chrome;
 pub mod client_compatibility;
 pub mod codemode_executions;
+pub mod compatibility;
 pub mod confidential_clients;
 pub mod config_reload;
 mod contract_summary;

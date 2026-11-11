@@ -310,11 +310,17 @@ struct Connection {
     /// discoverable, newly unclassified ones are quarantined out of search and
     /// `call_tool`, all without a reconnect or restart.
     live_tools: Vec<Tool>,
+    /// Computed from the raw dial catalog before classification and lane
+    /// intersection. Status reads never rescan tool schemas.
+    raw_input_schema_warning_count: usize,
     /// Protocol generation this lane's dial negotiated (the version string
     /// from the service's peer info). Per-lane state, fresh as of the dial:
     /// lanes may legitimately diverge during a partial heal while the
     /// upstream migrates. `None` only if the SDK exposed no peer info.
     negotiated_protocol: Option<String>,
+    /// Wall-clock observation for this connection's peer declaration. Catalog
+    /// refreshes do not make an older peer declaration look newly observed.
+    connected_at: time::OffsetDateTime,
     /// Whether this lane's initialize result advertised MCP Resources.
     resource_capability_advertised: bool,
     /// SEP-2549 `ttlMs` hint observed on this lane's dial-time `tools/list`
@@ -1234,6 +1240,7 @@ async fn dial(
         network_destination: connected.network_destination,
         cleartext_control_plane: connected.cleartext_control_plane,
         negotiated_protocol,
+        connected_at: time::OffsetDateTime::now_utc(),
         resource_capability_advertised,
         identity_cell,
         // `tools` is the manifest-filtered, published view; the caller
@@ -1241,6 +1248,7 @@ async fn dial(
         // before installing the connection. Empty here is the
         // pre-publish placeholder, never observed by readers.
         tools: Vec::new(),
+        raw_input_schema_warning_count: tool_listing::raw_input_schema_warning_count(&listed.tools),
         live_tools: listed.tools,
         ttl_hint_ms: listed.ttl_hint_ms,
         dialed_at: listed.listed_at,

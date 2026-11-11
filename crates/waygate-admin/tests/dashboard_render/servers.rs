@@ -1853,3 +1853,27 @@ pub(crate) async fn servers_page_without_catalog_store_shows_no_lifecycle() {
     assert_eq!(status, StatusCode::OK);
     assert!(!server_row(&body, "example-messages").contains("catalog:"));
 }
+
+#[tokio::test]
+pub(crate) async fn compatibility_report_is_reachable_from_tenant_server_overview() {
+    let app = dashboard_router(state_with_manifests().await, DashboardAuth::Disabled);
+    let (status, body) = body_of(
+        app.clone(),
+        "/t/default/servers/config?server=example-messages&tab=overview",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("/admin/t/default/servers/compatibility?server=example-messages"),
+        "{body}"
+    );
+    let (status, body) = body_of(
+        app,
+        "/t/default/servers/compatibility?server=example-messages",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("No peer declarations are retained"), "{body}");
+    assert!(body.contains("not_recorded"), "{body}");
+    assert!(body.contains("No conformance probes"), "{body}");
+}

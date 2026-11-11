@@ -46,6 +46,7 @@ use crate::upstream_sessions;
     ),
     paths(
         servers::list_servers,
+        crate::compatibility::get_report,
         builtins::list_builtins,
         servers::get_server,
         servers::list_tools,
@@ -147,6 +148,9 @@ use crate::upstream_sessions;
     components(schemas(
         ApiErrorBody,
         servers::ServerSummary,
+        crate::compatibility::UpstreamCompatibilityReport,
+        crate::compatibility::LaneCompatibilityView,
+        crate::compatibility::CompatibilityExplanation,
         servers::OutputSchemaRejectionView,
         builtins::BuiltinSurfaceView,
         builtins::BuiltinToolView,

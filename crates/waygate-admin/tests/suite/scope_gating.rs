@@ -445,3 +445,77 @@ async fn simulate_503s_without_cedar_engine() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+#[tokio::test]
+async fn compatibility_report_is_admin_and_tenant_confined_and_keeps_unavailable_evidence_unknown()
+{
+    let mut manifest = disconnected_manifest("legacy-fixture");
+    manifest.transport = Transport::Sse;
+    let pool = Arc::new(UpstreamPool::from_manifests_disconnected(BTreeMap::from([
+        (manifest.name.clone(), manifest),
+    ])));
+    let state = Arc::new(AdminState::new(
+        pool,
+        None,
+        None,
+        AdminState::null_evidence(),
+        None,
+        None,
+        None,
+        None,
+        "http://127.0.0.1:0".into(),
+    ));
+    let app = api_router(state);
+    let mut foreign = principal_with(&["mcp:admin"]);
+    foreign.tenant = waygate_core::TenantId::parse("other").unwrap();
+    let mut peer = principal_with(&["mcp:admin"]);
+    peer.auth_method = waygate_oidc::AuthMethod::PeerAssertion;
+    for (actor, expected) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some(principal_with(&["mcp:read"])), StatusCode::FORBIDDEN),
+        (Some(foreign), StatusCode::FORBIDDEN),
+        (Some(peer), StatusCode::FORBIDDEN),
+        (Some(principal_with(&["mcp:admin"])), StatusCode::OK),
+    ] {
+        let mut request = Request::builder()
+            .uri("/api/v1/servers/legacy-fixture/compatibility")
+            .body(Body::empty())
+            .unwrap();
+        if let Some(actor) = actor {
+            request.extensions_mut().insert(actor);
+        }
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), expected);
+        if expected == StatusCode::OK {
+            let bytes = axum::body::to_bytes(response.into_body(), 16384)
+                .await
+                .unwrap();
+            let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(report["configured_transport"], "sse");
+            assert_eq!(report["evidence_status"], "unavailable");
+            assert_eq!(report["lanes"], serde_json::json!([]));
+            assert_eq!(report["explicitly_tested_behavior"], "not_recorded");
+            assert!(report["last_success_at"].is_null());
+            assert!(report["explanations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["capability"] == "Legacy transport"));
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("127.0.0.1"),
+                "report excludes endpoint data"
+            );
+        }
+    }
+    let mut request = Request::builder()
+        .uri("/api/v1/servers/missing/compatibility")
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(principal_with(&["mcp:admin"]));
+    assert_eq!(
+        app.oneshot(request).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+}
