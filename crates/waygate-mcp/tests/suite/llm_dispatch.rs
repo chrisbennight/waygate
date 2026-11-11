@@ -2828,6 +2828,7 @@ async fn embeddings_cache_is_per_principal() {
 }
 
 mod audio_resources;
+mod gemini;
 mod images;
 mod native_messages;
 mod realtime;

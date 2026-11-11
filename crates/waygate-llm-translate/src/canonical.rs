@@ -102,6 +102,10 @@ pub enum ContentPart {
         id: String,
         name: String,
         arguments: String,
+        /// Opaque context returned with a Gemini function call. Only the Gemini
+        /// renderer replays it; it grants no gateway authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        google_thought_signature: Option<String>,
     },
     /// A tool-result, carried on a `Tool` message. `tool_call_id` correlates it
     /// with the [`ContentPart::ToolUse`] it answers; `content` is the result text.

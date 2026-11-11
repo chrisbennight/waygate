@@ -29,7 +29,7 @@
 //!   - Codex (`~/.codex/auth.json`) — the same `tokens` object with the expiry in
 //!     the access-token JWT `exp` instead of a top-level `expires_at`.
 //! - **API-key providers** (Anthropic, OpenRouter) inject the bare key string.
-//! - **OpenAI API keys** use an explicit `{"api_key":"…"}` envelope, distinct
+//! - **OpenAI and Gemini API keys** use an explicit `{"api_key":"…"}` envelope, distinct
 //!   from subscription OAuth credentials. Unknown envelope fields are rejected.
 //!
 //! ## Refresh
@@ -129,9 +129,8 @@ impl LlmProvider {
         }
     }
 
-    /// Whether this provider authenticates with a subscription-OAuth token
-    /// blob (`true`) or a bare API key (`false`). Determines how an injected
-    /// credential value is parsed and validated.
+    /// Whether this provider retains legacy OAuth-blob parsing. Explicit
+    /// API-key envelopes are selected before this compatibility fallback.
     fn is_oauth(self) -> bool {
         // Anthropic is a bare API-key provider (`x-api-key`); the prior
         // subscription-OAuth/Claude-Code path was removed (ToS/ban risk).
@@ -543,7 +542,7 @@ fn parse_material(provider: LlmProvider, value: &str) -> Option<Material> {
     let value = value.trim();
     // Explicit API-key envelopes cannot be confused with malformed subscription
     // token blobs, which may contain refresh credentials and must stay private.
-    if provider == LlmProvider::OpenAi {
+    if matches!(provider, LlmProvider::OpenAi | LlmProvider::Google) {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct ApiKeyEnvelope {
@@ -1192,8 +1191,31 @@ mod tests {
             r#"{"api_key":"fixture","tokens":{"access_token":"fixture-subscription","refresh_token":"fixture-refresh"},"expires_at":"2099-01-01T00:00:00Z"}"#,
             r#"{"api_key":null,"tokens":{"access_token":"fixture-subscription","refresh_token":"fixture-refresh"},"expires_at":"2099-01-01T00:00:00Z"}"#,
         ] {
-            assert!(parse_material(LlmProvider::OpenAi, value).is_none());
+            for provider in [LlmProvider::OpenAi, LlmProvider::Google] {
+                assert!(parse_material(provider, value).is_none());
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn google_api_key_selection_is_explicit_and_refuses_reloaded_subscription_material() {
+        let store = LlmCredentialStore::from_vars([(
+            "LLM_CRED_GOOGLE_API".into(),
+            r#"{"api_key":"fixture-google-key"}"#.into(),
+        )]);
+        assert_eq!(
+            store.credential_is_oauth(LlmProvider::Google, "API").await,
+            Some(false)
+        );
+        assert_eq!(
+            store.api_key(LlmProvider::Google, "API").await.unwrap(),
+            "fixture-google-key"
+        );
+        store.reload(LlmProvider::Google,"API",r#"{"tokens":{"access_token":"fixture-subscription","refresh_token":"fixture-refresh"},"expires_at":"2099-01-01T00:00:00Z"}"#).await.unwrap();
+        assert!(matches!(
+            store.api_key(LlmProvider::Google, "API").await,
+            Err(CredentialError::ApiKeyRequired(_))
+        ));
     }
 
     #[tokio::test]

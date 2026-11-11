@@ -64,6 +64,8 @@ consult [OpenAI Responses](https://developers.openai.com/api/reference/resources
 [Anthropic Messages](https://platform.claude.com/docs/en/api/messages), and
 [Gemini content generation](https://ai.google.dev/api/generate-content).
 An upstream API's feature list does not establish gateway translation support.
+For Gemini Developer API credentials, qualified model discovery, and function-call
+context replay, follow [the Gemini API guide](../gemini-api-upstreams.md).
 
 ## Routing, accounting, and data handling
 

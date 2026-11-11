@@ -193,7 +193,7 @@ fn reduce_to_turn(resp: CanonicalResponse) -> ModelTurn {
                 call_id,
                 name,
                 arguments,
-                ..
+                extra,
             } => {
                 tool_calls.push(AgentToolCall {
                     id: call_id.clone(),
@@ -204,6 +204,12 @@ fn reduce_to_turn(resp: CanonicalResponse) -> ModelTurn {
                     id: call_id.clone(),
                     name: name.clone(),
                     arguments: arguments.clone(),
+                    google_thought_signature: extra
+                        .get("extra_content")
+                        .and_then(|value| value.get("google"))
+                        .and_then(|value| value.get("thought_signature"))
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
                 });
             }
             // Reasoning / unknown items carry no chat-visible content.
@@ -283,11 +289,18 @@ fn canonical_messages_to_openai(messages: &[CanonicalMessage]) -> Vec<Value> {
                     id,
                     name,
                     arguments,
-                } => tool_calls.push(json!({
-                    "id": id,
-                    "type": "function",
-                    "function": { "name": name, "arguments": arguments },
-                })),
+                    google_thought_signature,
+                } => {
+                    let mut call = json!({
+                        "id": id,
+                        "type": "function",
+                        "function": { "name": name, "arguments": arguments },
+                    });
+                    if let Some(signature) = google_thought_signature {
+                        call["extra_content"] = json!({"google":{"thought_signature":signature}});
+                    }
+                    tool_calls.push(call);
+                }
                 // ImageUrl / Reasoning are not produced on the agent path.
                 _ => {}
             }
@@ -1490,6 +1503,21 @@ mod tests {
     }
 
     #[test]
+    fn google_function_context_survives_agent_turn_replay() {
+        let body = json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{
+            "id":"provider-call","type":"function","function":{"name":"weather","arguments":"{}"},
+            "extra_content":{"google":{"thought_signature":"opaque-context"}}
+        }]}}]});
+        let turn = reduce_to_turn(openai_chat_to_canonical_response(&body));
+        assert_eq!(turn.tool_calls[0].id, "provider-call");
+        let rendered = canonical_messages_to_openai(&[turn.assistant]);
+        assert_eq!(
+            rendered[0].pointer("/tool_calls/0/extra_content/google/thought_signature"),
+            Some(&json!("opaque-context"))
+        );
+    }
+
+    #[test]
     fn canonical_messages_render_tool_roundtrip() {
         let msgs = vec![
             CanonicalMessage {
@@ -1498,6 +1526,7 @@ mod tests {
                     id: "c1".to_owned(),
                     name: "t".to_owned(),
                     arguments: "{}".to_owned(),
+                    google_thought_signature: None,
                 }],
             },
             CanonicalMessage {
