@@ -1,0 +1,11 @@
+[
+  {"tool":"flat_ok","valid":{"name":"Ada"},"invalid":{"name":7},"adapted":false},
+  {"tool":"nested_oneof_ok","valid":{"target":{"id":"one"}},"invalid":{"target":{"id":"one","slug":"two"}},"adapted":false},
+  {"tool":"conditional_dropped","valid":{"mode":"large","size":1500000000},"invalid":{"mode":"small","size":1500000000},"adapted":true},
+  {"tool":"root_anyof","valid":{"id":"one"},"invalid":{},"adapted":true},
+  {"tool":"root_oneof","valid":{"slug":"one"},"invalid":{"id":"one","slug":"two"},"adapted":true},
+  {"tool":"root_allof","valid":{"first":"one","second":"two"},"invalid":{"first":"one"},"adapted":true},
+  {"tool":"root_conditional","valid":{"mode":"large","size":1500000000},"invalid":{"mode":"small","size":1500000000},"adapted":true},
+  {"tool":"root_not","valid":{"id":"one"},"invalid":{"id":"one","forbidden":true},"adapted":true},
+  {"tool":"root_reference","valid":{"id":"one"},"invalid":{},"adapted":false}
+]

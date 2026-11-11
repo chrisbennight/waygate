@@ -1,0 +1,564 @@
+{
+  "observed_on": "2026-11-11",
+  "conditions": [
+    "fresh isolated subprocess configuration",
+    "local MCP fixture and model stub",
+    "no paid provider calls",
+    "remote feature configuration not fetched"
+  ],
+  "real_provider_api_acceptance": "not tested",
+  "rows": [
+    {
+      "client": "claude",
+      "cli_version": "2.1.322 (Claude Code)",
+      "legacy_only_offered": false,
+      "adaptation": true,
+      "observed_peer": [
+        {
+          "protocol": "2026-07-28",
+          "client_name": "claude-code",
+          "client_version": "2.1.322"
+        }
+      ],
+      "provider_tool_names": [
+        "conditional_dropped",
+        "flat_ok",
+        "nested_oneof_ok",
+        "root_allof",
+        "root_anyof",
+        "root_conditional",
+        "root_not",
+        "root_oneof"
+      ],
+      "root_schema_keywords": {
+        "conditional_dropped": [],
+        "flat_ok": [],
+        "nested_oneof_ok": [],
+        "root_allof": [],
+        "root_anyof": [],
+        "root_conditional": [],
+        "root_not": [],
+        "root_oneof": []
+      },
+      "call_outcomes": {
+        "conditional_dropped": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "flat_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "nested_oneof_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_allof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_anyof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_conditional": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_not": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_oneof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        }
+      }
+    },
+    {
+      "client": "codex",
+      "cli_version": "codex-cli 0.167.1",
+      "legacy_only_offered": false,
+      "adaptation": false,
+      "observed_peer": [
+        {
+          "protocol": "2025-11-25",
+          "client_name": "rmcp",
+          "client_version": "3.9.0"
+        }
+      ],
+      "provider_tool_names": [
+        "conditional_dropped",
+        "flat_ok",
+        "nested_oneof_ok",
+        "root_allof",
+        "root_anyof",
+        "root_conditional",
+        "root_not",
+        "root_oneof",
+        "root_reference"
+      ],
+      "root_schema_keywords": {
+        "conditional_dropped": [
+          "allOf"
+        ],
+        "flat_ok": [],
+        "nested_oneof_ok": [],
+        "root_allof": [
+          "allOf"
+        ],
+        "root_anyof": [
+          "anyOf"
+        ],
+        "root_conditional": [],
+        "root_not": [],
+        "root_oneof": [
+          "oneOf"
+        ],
+        "root_reference": [
+          "allOf",
+          "$defs"
+        ]
+      },
+      "call_outcomes": {
+        "conditional_dropped": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "flat_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "nested_oneof_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_allof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_anyof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_conditional": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_not": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_oneof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_reference": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        }
+      }
+    },
+    {
+      "client": "claude",
+      "cli_version": "2.1.322 (Claude Code)",
+      "legacy_only_offered": false,
+      "adaptation": false,
+      "observed_peer": [
+        {
+          "protocol": "2026-07-28",
+          "client_name": "claude-code",
+          "client_version": "2.1.322"
+        }
+      ],
+      "provider_tool_names": [
+        "flat_ok",
+        "nested_oneof_ok",
+        "root_conditional",
+        "root_not"
+      ],
+      "root_schema_keywords": {
+        "flat_ok": [],
+        "nested_oneof_ok": [],
+        "root_conditional": [
+          "else",
+          "if",
+          "then"
+        ],
+        "root_not": [
+          "not"
+        ]
+      },
+      "call_outcomes": {
+        "flat_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "nested_oneof_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_conditional": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_not": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        }
+      }
+    },
+    {
+      "client": "claude",
+      "cli_version": "2.1.322 (Claude Code)",
+      "legacy_only_offered": true,
+      "adaptation": false,
+      "observed_peer": [
+        {
+          "protocol": "2025-11-25",
+          "client_name": "claude-code",
+          "client_version": "2.1.322"
+        }
+      ],
+      "provider_tool_names": [
+        "flat_ok",
+        "nested_oneof_ok",
+        "root_conditional",
+        "root_not"
+      ],
+      "root_schema_keywords": {
+        "flat_ok": [],
+        "nested_oneof_ok": [],
+        "root_conditional": [
+          "else",
+          "if",
+          "then"
+        ],
+        "root_not": [
+          "not"
+        ]
+      },
+      "call_outcomes": {
+        "flat_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "nested_oneof_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_conditional": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_not": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        }
+      }
+    },
+    {
+      "client": "claude",
+      "cli_version": "2.1.322 (Claude Code)",
+      "legacy_only_offered": true,
+      "adaptation": true,
+      "observed_peer": [
+        {
+          "protocol": "2025-11-25",
+          "client_name": "claude-code",
+          "client_version": "2.1.322"
+        }
+      ],
+      "provider_tool_names": [
+        "conditional_dropped",
+        "flat_ok",
+        "nested_oneof_ok",
+        "root_allof",
+        "root_anyof",
+        "root_conditional",
+        "root_not",
+        "root_oneof"
+      ],
+      "root_schema_keywords": {
+        "conditional_dropped": [],
+        "flat_ok": [],
+        "nested_oneof_ok": [],
+        "root_allof": [],
+        "root_anyof": [],
+        "root_conditional": [],
+        "root_not": [],
+        "root_oneof": []
+      },
+      "call_outcomes": {
+        "conditional_dropped": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "flat_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "nested_oneof_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_allof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_anyof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_conditional": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_not": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_oneof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        }
+      }
+    },
+    {
+      "client": "codex",
+      "cli_version": "codex-cli 0.167.1",
+      "legacy_only_offered": false,
+      "adaptation": true,
+      "observed_peer": [
+        {
+          "protocol": "2025-11-25",
+          "client_name": "rmcp",
+          "client_version": "3.9.0"
+        }
+      ],
+      "provider_tool_names": [
+        "conditional_dropped",
+        "flat_ok",
+        "nested_oneof_ok",
+        "root_allof",
+        "root_anyof",
+        "root_conditional",
+        "root_not",
+        "root_oneof",
+        "root_reference"
+      ],
+      "root_schema_keywords": {
+        "conditional_dropped": [],
+        "flat_ok": [],
+        "nested_oneof_ok": [],
+        "root_allof": [],
+        "root_anyof": [],
+        "root_conditional": [],
+        "root_not": [],
+        "root_oneof": [],
+        "root_reference": [
+          "allOf",
+          "$defs"
+        ]
+      },
+      "call_outcomes": {
+        "conditional_dropped": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "flat_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "nested_oneof_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_allof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_anyof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_conditional": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_not": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_oneof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_reference": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        }
+      }
+    },
+    {
+      "client": "codex",
+      "cli_version": "codex-cli 0.167.1",
+      "legacy_only_offered": true,
+      "adaptation": false,
+      "observed_peer": [
+        {
+          "protocol": "2025-11-25",
+          "client_name": "codex-mcp-client",
+          "client_version": "0.167.1"
+        }
+      ],
+      "provider_tool_names": [
+        "conditional_dropped",
+        "flat_ok",
+        "nested_oneof_ok",
+        "root_allof",
+        "root_anyof",
+        "root_conditional",
+        "root_not",
+        "root_oneof",
+        "root_reference"
+      ],
+      "root_schema_keywords": {
+        "conditional_dropped": [
+          "allOf"
+        ],
+        "flat_ok": [],
+        "nested_oneof_ok": [],
+        "root_allof": [
+          "allOf"
+        ],
+        "root_anyof": [
+          "anyOf"
+        ],
+        "root_conditional": [],
+        "root_not": [],
+        "root_oneof": [
+          "oneOf"
+        ],
+        "root_reference": [
+          "allOf",
+          "$defs"
+        ]
+      },
+      "call_outcomes": {
+        "conditional_dropped": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "flat_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "nested_oneof_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_allof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_anyof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_conditional": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_not": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_oneof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_reference": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        }
+      }
+    },
+    {
+      "client": "codex",
+      "cli_version": "codex-cli 0.167.1",
+      "legacy_only_offered": true,
+      "adaptation": true,
+      "observed_peer": [
+        {
+          "protocol": "2025-11-25",
+          "client_name": "codex-mcp-client",
+          "client_version": "0.167.1"
+        }
+      ],
+      "provider_tool_names": [
+        "conditional_dropped",
+        "flat_ok",
+        "nested_oneof_ok",
+        "root_allof",
+        "root_anyof",
+        "root_conditional",
+        "root_not",
+        "root_oneof",
+        "root_reference"
+      ],
+      "root_schema_keywords": {
+        "conditional_dropped": [],
+        "flat_ok": [],
+        "nested_oneof_ok": [],
+        "root_allof": [],
+        "root_anyof": [],
+        "root_conditional": [],
+        "root_not": [],
+        "root_oneof": [],
+        "root_reference": [
+          "allOf",
+          "$defs"
+        ]
+      },
+      "call_outcomes": {
+        "conditional_dropped": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "flat_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "nested_oneof_ok": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_allof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_anyof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_conditional": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_not": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_oneof": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        },
+        "root_reference": {
+          "valid": "accepted",
+          "invalid": "rejected"
+        }
+      }
+    }
+  ]
+}
