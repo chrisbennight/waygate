@@ -129,6 +129,11 @@ mod tests {
     use axum::{extract::Query, http::HeaderMap, routing::get, Json, Router};
     use serde_json::json;
 
+    #[cfg(test)]
+    fn raw_test_http_client() -> reqwest::Client {
+        reqwest::Client::new() // A raw test client isolates provider wire behavior from gateway policy.
+    }
+
     #[tokio::test]
     async fn discovery_uses_header_auth_paginates_and_checks_advertised_methods() {
         let app = Router::new().route("/v1beta/models", get(|headers: HeaderMap, Query(query): Query<std::collections::HashMap<String,String>>| async move {
@@ -147,7 +152,7 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let listing = list_gemini(
-            &reqwest::Client::new(),
+            &raw_test_http_client(),
             &base,
             "synthetic-google-key",
             &["selected-chat".into(), "selected-embedding".into()],
@@ -201,7 +206,7 @@ mod tests {
             let base = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let result = list_gemini(
-                &reqwest::Client::new(),
+                &raw_test_http_client(),
                 &base,
                 "synthetic-google-key",
                 &["selected".into()],
