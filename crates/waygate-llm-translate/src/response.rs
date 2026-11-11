@@ -475,28 +475,36 @@ pub fn gemini_response_to_openai_chat(resp: &Value) -> Value {
     Value::Object(obj)
 }
 
-/// Collect Gemini `functionCall` parts into OpenAI `tool_calls`. Gemini emits no
-/// call id, so a synthetic `call_N` (over the function-call parts) is minted for
-/// client-side correlation; `args` (an object) is serialized to OpenAI's
-/// arguments string.
+/// Preserve a Gemini function call's provider ID and opaque continuation
+/// signature. Older responses without IDs retain synthetic client correlation.
+pub(crate) fn gemini_function_call(part: &Value, index: u64) -> Option<Value> {
+    let call = part.get("functionCall")?;
+    let id = call
+        .get("id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("call_{index}"));
+    let name = call.get("name").and_then(Value::as_str).unwrap_or_default();
+    let arguments = call
+        .get("args")
+        .map(|args| args.to_string())
+        .unwrap_or_else(|| "{}".into());
+    let mut result =
+        json!({"id":id,"type":"function","function":{"name":name,"arguments":arguments}});
+    if let Some(signature) = part.get("thoughtSignature").and_then(Value::as_str) {
+        result["extra_content"] = json!({"google":{"thought_signature":signature}});
+    }
+    Some(result)
+}
+
+/// Collect function parts using the same context mapping as streaming egress.
 fn gemini_tool_calls(parts: Option<&Vec<Value>>) -> Vec<Value> {
     parts
         .map(|ps| {
             ps.iter()
-                .filter_map(|p| p.get("functionCall"))
+                .filter(|part| part.get("functionCall").is_some())
                 .enumerate()
-                .map(|(i, fc)| {
-                    let name = fc.get("name").and_then(Value::as_str).unwrap_or_default();
-                    let arguments = fc
-                        .get("args")
-                        .map(|a| serde_json::to_string(a).unwrap_or_default())
-                        .unwrap_or_else(|| "{}".to_string());
-                    json!({
-                        "id": format!("call_{i}"),
-                        "type": "function",
-                        "function": { "name": name, "arguments": arguments },
-                    })
-                })
+                .filter_map(|(index, part)| gemini_function_call(part, index as u64))
                 .collect()
         })
         .unwrap_or_default()
@@ -1306,7 +1314,7 @@ mod tests {
         let msg = &out["choices"][0]["message"];
         assert!(msg["content"].is_null());
         assert_eq!(msg["tool_calls"][0]["function"]["name"], "get_weather");
-        // A synthetic id is minted (Gemini provides none).
+        // This older response omits an ID, so client correlation is synthetic.
         assert_eq!(msg["tool_calls"][0]["id"], "call_0");
         assert_eq!(
             serde_json::from_str::<Value>(

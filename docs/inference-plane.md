@@ -54,9 +54,11 @@
   content blocks, and provider server-side tools therefore reach the provider intact. The
   surface is provider-pinned: it serves only models whose route speaks Anthropic Messages, and
   every governance stage applies (§4.8).
-- Four providers: **OpenAI** (ChatGPT/Codex subscription → Responses API), **Google Gemini**
-  (Code Assist subscription → `generateContent`), **Anthropic** (first-party `x-api-key` →
-  Messages API), **OpenRouter** (API key → OpenAI-compatible Chat Completions).
+- Four providers: **OpenAI** (API-key Chat/Responses and configured image/audio operations),
+  **Google Gemini** (Developer API key → `generateContent`), **Anthropic** (first-party
+  `x-api-key` → Messages API), and **OpenRouter** (API key → compatible Chat Completions).
+  Legacy Codex subscription routes remain during migration. See the [OpenAI](openai-api-upstreams.md)
+  and [Gemini](gemini-api-upstreams.md) API guides for supported configuration.
 - Fully-unified streaming invocation; credentials **injected** by Infisical; **lagging**
   per-user token/cost budgets; routing + credential pooling/failover; exact-match cache
   (off by default); usage/cost analytics; admin UI incl. credential status.
@@ -596,20 +598,21 @@ mounted file). Naming is semantic — `LLM_CRED_<PROVIDER>_<LABEL>`, where `<LAB
 account (`PRIMARY`, `FAMILY`, …). The set of labels for a provider is its pool (§7). Blob:
 
 ```jsonc
-// subscription (OAuth) providers (OpenAI, Google)
+// legacy subscription material retained during migration (OpenAI, Google)
 { "tokens": { "access_token": "…", "refresh_token": "…", "id_token": "…" },
   "expires_at": "2026-06-13T18:00:00Z" }
 // api-key providers (Anthropic, OpenRouter) — a bare key string
 "sk-ant-api03-…"   // Anthropic;  "sk-or-…" for OpenRouter
-// OpenAI API keys use an explicit envelope instead of a subscription blob
+// OpenAI and Gemini Developer API keys use explicit envelopes
 { "api_key": "…" }
 ```
 
 **In-process lifecycle (I4).** `waygate-llm-credentials` loads each `LLM_CRED_*` at startup
 into an in-memory cache (optionally encrypted at rest with
-`waygate_oidc::upstream_crypto::UpstreamCrypto` if any copy is persisted). A per-credential background
-task refreshes the OAuth access token before expiry from the injected `refresh_token`,
-updating the in-memory copy under a single-flight lock. **No write-back.**
+`waygate_oidc::upstream_crypto::UpstreamCrypto` if any copy is persisted). API-key routes read the selected key under the credential lock without OAuth refresh.
+For retained legacy OAuth routes, `bearer()` refreshes near-expiry material on demand
+under that lock, coalescing concurrent calls. No per-credential refresh worker is added.
+**No write-back.** The legacy refresh behavior below does not apply to Developer API keys.
 
 **Credential health states** (consumed by routing and the dashboard):
 
@@ -730,8 +733,11 @@ two fields at parse time, and is mutually exclusive with them.
   - **Anthropic** (`x-api-key`) — discovery unwired: stays operator-pinned
     (`DiscoverySurface::Unsupported`). (`/v1/models` is an `x-api-key` endpoint, so
     listing is now technically reachable, but the refresher arm is not built.)
-  - **Google / Gemini** (OAuth) — a provider-specific internal endpoint; unwired
-    until verifiable against the real credential rather than guessed.
+  - **Google / Gemini** (Developer API key) — bounded `/v1beta/models` pagination.
+    Explicitly selected `generate_content_models` must advertise `generateContent`.
+    Missing method metadata or incomplete pagination preserves last-good rows;
+    native image/audio/embedding models are not inferred as text/function routes.
+    Consumer OAuth discovery remains unsupported; see [Gemini API upstreams](gemini-api-upstreams.md).
 - **Provenance + soft-disable** (`migrations/0054_llm_models_discovery.sql`).
   `llm_models.source` ∈ `config` | `discovered`, orthogonal to the operator's
   `enabled`; `present_upstream` is discovery's view. A row is **effective-live**
@@ -805,7 +811,8 @@ two fields at parse time, and is mutually exclusive with them.
   no dedicated embeddings listing (OpenAI-direct) cannot be auto-classified, so their
   embeddings models stay configured via env pins (`kind: embeddings`). Gemini's
   `models.list` *does* flag embeddings (`supportedGenerationMethods ∋ embedContent`),
-  but its discovery adapter is not supported (§15).
+  but the native Gemini embedding protocol remains unsupported (§15); its
+  discovery adapter admits only qualified `generateContent` models.
 
 ---
 

@@ -343,6 +343,7 @@ mod tests {
             assistant: CanonicalMessage {
                 role: Role::Assistant,
                 content: vec![ContentPart::ToolUse {
+                    google_thought_signature: None,
                     id: id.to_owned(),
                     name: name.to_owned(),
                     arguments: "{}".to_owned(),
@@ -374,11 +375,13 @@ mod tests {
                 role: Role::Assistant,
                 content: vec![
                     ContentPart::ToolUse {
+                        google_thought_signature: None,
                         id: id1.to_owned(),
                         name: name.to_owned(),
                         arguments: "{}".to_owned(),
                     },
                     ContentPart::ToolUse {
+                        google_thought_signature: None,
                         id: id2.to_owned(),
                         name: name.to_owned(),
                         arguments: "{}".to_owned(),

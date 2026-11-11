@@ -422,7 +422,11 @@ fn parse_tool_call(c: &Value) -> Result<ContentPart, TranslateError> {
             ))
         }
     }
-    reject_extra_keys(obj, &["id", "type", "function"], "tool_call")?;
+    reject_extra_keys(
+        obj,
+        &["id", "type", "function", "extra_content"],
+        "tool_call",
+    )?;
     let id = obj
         .get("id")
         .and_then(Value::as_str)
@@ -454,7 +458,30 @@ fn parse_tool_call(c: &Value) -> Result<ContentPart, TranslateError> {
         id,
         name,
         arguments,
+        google_thought_signature: parse_google_thought_signature(obj.get("extra_content"))?,
     })
+}
+
+fn parse_google_thought_signature(extra: Option<&Value>) -> Result<Option<String>, TranslateError> {
+    let Some(extra) = extra else {
+        return Ok(None);
+    };
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ExtraContent {
+        google: GoogleContent,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GoogleContent {
+        thought_signature: String,
+    }
+    let parsed: ExtraContent = serde_json::from_value(extra.clone()).map_err(|_| {
+        TranslateError::Invalid(
+            "extra_content must contain only google.thought_signature as a string".into(),
+        )
+    })?;
+    Ok(Some(parsed.google.thought_signature))
 }
 
 /// Parse an OpenAI Chat Completions `response_format` value into the canonical
@@ -1169,7 +1196,15 @@ fn parse_responses_content_part(part: &Value) -> Result<ContentPart, TranslateEr
 fn parse_responses_function_call(obj: &Map<String, Value>) -> Result<ContentPart, TranslateError> {
     reject_extra_keys_responses(
         obj,
-        &["type", "id", "call_id", "name", "arguments", "status"],
+        &[
+            "type",
+            "id",
+            "call_id",
+            "name",
+            "arguments",
+            "status",
+            "extra_content",
+        ],
         "function_call",
     )?;
     let id = obj
@@ -1187,6 +1222,7 @@ fn parse_responses_function_call(obj: &Map<String, Value>) -> Result<ContentPart
         id,
         name,
         arguments,
+        google_thought_signature: parse_google_thought_signature(obj.get("extra_content"))?,
     })
 }
 
@@ -1872,6 +1908,7 @@ mod tests {
                     text: "checking".into()
                 },
                 ContentPart::ToolUse {
+                    google_thought_signature: None,
                     id: "c1".into(),
                     name: "get_weather".into(),
                     arguments: "{\"city\":\"SF\"}".into(),
@@ -1943,6 +1980,7 @@ mod tests {
                     value: json!("Run ls."),
                 },
                 ContentPart::ToolUse {
+                    google_thought_signature: None,
                     id: "c1".into(),
                     name: "bash".into(),
                     arguments: "{}".into(),
@@ -2328,6 +2366,7 @@ mod tests {
                     text: "checking".into()
                 },
                 ContentPart::ToolUse {
+                    google_thought_signature: None,
                     id: "c1".into(),
                     name: "get_weather".into(),
                     arguments: "{\"city\":\"SF\"}".into(),
@@ -2369,6 +2408,7 @@ mod tests {
             vec![
                 ContentPart::Reasoning { raw },
                 ContentPart::ToolUse {
+                    google_thought_signature: None,
                     id: "c1".into(),
                     name: "f".into(),
                     arguments: "{}".into(),
@@ -2755,6 +2795,7 @@ mod tests {
                     },
                     text("checking"),
                     ContentPart::ToolUse {
+                        google_thought_signature: None,
                         id: "c1".into(),
                         name: "get_weather".into(),
                         arguments: "{\"city\":\"SF\"}".into(),
@@ -2776,6 +2817,7 @@ mod tests {
             CanonicalMessage {
                 role: Role::Assistant,
                 content: vec![ContentPart::ToolUse {
+                    google_thought_signature: None,
                     id: "c2".into(),
                     name: "f".into(),
                     arguments: "{}".into(),

@@ -13,9 +13,10 @@
 //! (discovery) and `/chat/completions` + `/embeddings` (dispatch); Codex's
 //! `/models` + `/responses` (the Responses shape against the ChatGPT backend,
 //! which dispatch authenticates with the Codex request fingerprint via the
-//! discovered row's `openai_chatgpt` flag). Anthropic and Gemini stay deferred — Anthropic's
-//! first-party `x-api-key` `/v1/models` adapter is unwired, Gemini's is
-//! unverified — so their models remain operator-pinned.
+//! discovered row's `openai_chatgpt` flag). Gemini Developer API targets use
+//! `/v1beta/models`, an API key, and explicit text/function model selection
+//! checked against advertised generation methods. Anthropic discovery remains
+//! unwired, so its models stay operator-pinned.
 //! [`waygate_llm_discovery::DiscoverySurface`]
 //! maps each `(provider, auth-kind)` to its adapter; an `Unsupported` mapping is
 //! a normal outcome the refresher skips.
@@ -63,7 +64,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use waygate_llm_credentials::LlmCredentialStore;
 use waygate_llm_discovery::{
-    is_valid_codex_client_version, list_codex, list_openai, list_openrouter,
+    is_valid_codex_client_version, list_codex, list_gemini, list_openai, list_openrouter,
     list_openrouter_embeddings, CodexVersionTracker, DiscoveredModel, DiscoverySurface,
 };
 use waygate_llm_dispatch::DbModelResolver;
@@ -110,6 +111,9 @@ pub struct DiscoveryTarget {
     /// Required for API-key OpenAI discovery because `/models` carries no
     /// operation metadata. Images, audio, and realtime remain explicit pins.
     pub responses_models: Vec<String>,
+    /// Operator-qualified text/function models, verified against the API's
+    /// supportedGenerationMethods instead of inferring modality from names.
+    pub generate_content_models: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -121,6 +125,8 @@ struct RawTarget {
     client_version: Option<String>,
     #[serde(default)]
     responses_models: Vec<String>,
+    #[serde(default)]
+    generate_content_models: Vec<String>,
 }
 
 /// Default discovery interval (3h) and floor (5 min) so a misconfigured interval
@@ -168,7 +174,7 @@ pub fn parse_targets(raw: &str) -> Vec<DiscoveryTarget> {
             if !DiscoverySurface::provider_has_adapter(&t.provider) {
                 tracing::warn!(
                     provider = %t.provider,
-                    "discovery target has no wired adapter (supported: openrouter, openai/codex); skipping"
+                    "discovery target has no wired adapter (supported: openrouter, openai, google); skipping"
                 );
                 return None;
             }
@@ -203,6 +209,7 @@ pub fn parse_targets(raw: &str) -> Vec<DiscoveryTarget> {
                 base_url: t.base_url,
                 client_version,
                 responses_models: t.responses_models,
+                generate_content_models: t.generate_content_models,
             })
         })
         .collect()
@@ -284,6 +291,13 @@ async fn refresh_target(
             "OpenAI API discovery requires non-empty responses_models IDs; configure the supported Responses models explicitly or use model pins"
         );
     }
+    if surface == DiscoverySurface::GoogleApi {
+        anyhow::ensure!(
+            !target.generate_content_models.is_empty()
+                && target.generate_content_models.iter().all(|id| !id.trim().is_empty()),
+            "Gemini API discovery requires non-empty generate_content_models IDs; select qualified text/function models or use explicit pins"
+        );
+    }
     let bearer = if surface == DiscoverySurface::Codex {
         credentials
             .bearer(provider, &target.credential_label)
@@ -314,7 +328,19 @@ async fn refresh_target(
     // discovered now-hidden model would stay routable.
     let mut codex_raw_len: Option<usize> = None;
     let mut api_raw_len: Option<usize> = None;
+    let mut gemini_raw_len: Option<usize> = None;
     let (models, listing_complete): (Vec<DiscoveredModel>, bool) = match surface {
+        DiscoverySurface::GoogleApi => {
+            let listing = list_gemini(
+                http,
+                &target.base_url,
+                &bearer,
+                &target.generate_content_models,
+            )
+            .await?;
+            gemini_raw_len = Some(listing.raw_len);
+            (dedup_keep_last_by_id(listing.models), true)
+        }
         DiscoverySurface::OpenAiApi => {
             let listing =
                 list_openai(http, &target.base_url, &bearer, &target.responses_models).await?;
@@ -430,6 +456,8 @@ async fn refresh_target(
                 provider = %target.provider,
                 "OpenAI API listing has no selected Responses models; reconciling discovered rows away"
             );
+        } else if gemini_raw_len.is_some_and(|raw| raw > 0) {
+            tracing::warn!(provider=%target.provider,"Gemini API listing has no selected generateContent models; reconciling discovered rows away");
         } else if codex_all_filtered {
             tracing::warn!(
                 provider = %target.provider,
@@ -481,6 +509,7 @@ async fn refresh_target(
             match surface {
                 DiscoverySurface::OpenRouter => ("chat/completions", "chat_completions", false),
                 DiscoverySurface::OpenAiApi => ("responses", "responses", false),
+                DiscoverySurface::GoogleApi => ("v1beta", "generate_content", false),
                 DiscoverySurface::Codex => ("responses", "responses", true),
                 DiscoverySurface::Unsupported => unreachable!("Unsupported returned above"),
             }
@@ -627,6 +656,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_targets_preserves_gemini_api_generation_selection() {
+        let targets = parse_targets(
+            r#"[{"provider":"google","credential_label":"API","base_url":"https://generativelanguage.googleapis.com","generate_content_models":["qualified-model"]}]"#,
+        );
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].generate_content_models, vec!["qualified-model"]);
+        assert!(targets[0].responses_models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn gemini_api_discovery_requires_qualified_models_before_io() {
+        let target = DiscoveryTarget {
+            provider: "google".into(),
+            credential_label: "API".into(),
+            base_url: "http://127.0.0.1:1".into(),
+            client_version: None,
+            responses_models: vec![],
+            generate_content_models: vec![],
+        };
+        let credentials = LlmCredentialStore::from_vars([(
+            "LLM_CRED_GOOGLE_API".into(),
+            r#"{"api_key":"synthetic-api-key"}"#.into(),
+        )]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let error = refresh_target(
+            &target,
+            &raw_test_http_client(),
+            &credentials,
+            &pool,
+            &test_tracker(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("requires non-empty generate_content_models"));
+    }
+
+    #[test]
     fn parse_targets_preserves_public_api_responses_selection() {
         let targets = parse_targets(
             r#"[{"provider":"openai","credential_label":"API","base_url":"https://api.openai.com/v1","responses_models":["qualified-model"]}]"#,
@@ -644,6 +715,7 @@ mod tests {
             base_url: "http://127.0.0.1:1".into(),
             client_version: None,
             responses_models: vec![],
+            generate_content_models: vec![],
         };
         let credentials = LlmCredentialStore::from_vars([(
             "LLM_CRED_OPENAI_API".into(),
@@ -928,6 +1000,7 @@ mod tests {
             base_url,
             client_version: None,
             responses_models: vec![id.clone()],
+            generate_content_models: vec![],
         };
         let http = raw_test_http_client();
         let tracker = test_tracker();
@@ -965,6 +1038,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_target_gemini_api_reconciles_selected_generation_models() {
+        let Ok(url) = std::env::var("AUDIT_DATABASE_URL") else {
+            eprintln!("skipping Gemini API discovery pg test: AUDIT_DATABASE_URL not set");
+            return;
+        };
+        let _serial = super::DISCOVERY_PG_LOCK.lock().await;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .unwrap();
+        waygate_storage::PgAuditSink::migrate(&pool).await.unwrap();
+        let tenant = waygate_core::TenantId::default().as_str().to_owned();
+        let id = format!("qualified-{}", uuid::Uuid::now_v7().simple());
+        let alias = discovered_alias("google", &id);
+        let body = Arc::new(Mutex::new(
+            serde_json::json!({"models":[
+                {"name":format!("models/{id}"),"supportedGenerationMethods":["generateContent"]},
+                {"name":"models/unselected-image","supportedGenerationMethods":["generateContent"]}
+            ]})
+            .to_string(),
+        ));
+        let app=axum::Router::new().route("/v1beta/models",axum::routing::get(
+            |axum::extract::State(body):axum::extract::State<Arc<Mutex<String>>>| async move {
+                ([(axum::http::header::CONTENT_TYPE,"application/json")],body.lock().unwrap().clone())
+            }
+        )).with_state(body.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let credentials = LlmCredentialStore::from_vars([(
+            "LLM_CRED_GOOGLE_API".into(),
+            r#"{"api_key":"synthetic-api-key"}"#.into(),
+        )]);
+        let target = DiscoveryTarget {
+            provider: "google".into(),
+            credential_label: "API".into(),
+            base_url,
+            client_version: None,
+            generate_content_models: vec![id.clone()],
+            responses_models: vec![],
+        };
+        let http = raw_test_http_client();
+        let tracker = test_tracker();
+        assert_eq!(
+            refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+                .await
+                .unwrap(),
+            1
+        );
+        let row = waygate_storage::get_llm_model(&pool, &tenant, &alias)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.upstream_api, "generate_content");
+        assert_eq!(row.path, "v1beta");
+        assert!(!row.openai_chatgpt);
+        assert!(row.input_cost_per_mtok.is_none());
+        let models = crate::llm::load_discovered_models(&pool).await.unwrap();
+        let resolved = models
+            .get(&(crate::llm::LLM_SERVER.into(), alias.clone()))
+            .unwrap();
+        assert_eq!(
+            resolved.route.protocol,
+            waygate_llm_translate::UpstreamProtocol::Gemini
+        );
+        *body.lock().unwrap() =
+            serde_json::json!({"models":[{"name":format!("models/{id}")}]}).to_string();
+        assert!(
+            refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+                .await
+                .is_err()
+        );
+        assert!(present_upstream(&pool, &tenant, &alias).await);
+        *body.lock().unwrap()=serde_json::json!({"models":[{"name":format!("models/{id}"),"supportedGenerationMethods":["embedContent"]}]}).to_string();
+        refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+            .await
+            .unwrap();
+        assert!(!present_upstream(&pool, &tenant, &alias).await);
+        sqlx::query("DELETE FROM llm_models WHERE tenant_id=$1 AND alias=$2")
+            .bind(&tenant)
+            .bind(&alias)
+            .execute(&pool)
+            .await
+            .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn refresh_target_upserts_prices_and_reconciles() {
         let Ok(url) = std::env::var("AUDIT_DATABASE_URL") else {
             eprintln!("skipping refresh_target pg test: AUDIT_DATABASE_URL not set");
@@ -999,6 +1161,7 @@ mod tests {
             base_url,
             client_version: None,
             responses_models: vec![],
+            generate_content_models: vec![],
         };
         let tracker = test_tracker();
 
@@ -1104,6 +1267,7 @@ mod tests {
             base_url: base_url.clone(),
             client_version: Some("0.133.0".into()),
             responses_models: vec![],
+            generate_content_models: vec![],
         };
 
         let tracker = test_tracker();
@@ -1313,6 +1477,7 @@ mod tests {
             base_url,
             client_version: None,
             responses_models: vec![],
+            generate_content_models: vec![],
         };
         let tracker = test_tracker();
         let chat_alias = discovered_alias("openrouter", &chat_id);

@@ -59,22 +59,6 @@ fn tool_arguments_object(arguments: &str) -> Value {
 /// into message content. Chosen to be collision-unlikely with a real tool name.
 pub(crate) const STRUCTURED_OUTPUT_TOOL_NAME: &str = "__gateway_structured_output__";
 
-/// Map every `tool_call_id` issued by an assistant turn to the tool's function
-/// name, by scanning all [`ContentPart::ToolUse`] parts. Gemini keys tool
-/// results by function name (not call id), so its tool-result renderer needs
-/// this to resolve a [`ContentPart::ToolResult`]'s `tool_call_id` back to a name.
-fn tool_call_names(messages: &[CanonicalMessage]) -> HashMap<&str, &str> {
-    let mut map = HashMap::new();
-    for m in messages {
-        for p in &m.content {
-            if let ContentPart::ToolUse { id, name, .. } = p {
-                map.insert(id.as_str(), name.as_str());
-            }
-        }
-    }
-    map
-}
-
 /// Render a canonical request as an OpenAI Chat Completions request body.
 /// `model` is the resolved upstream model name (which may differ from the
 /// client's requested alias). For a streaming request, `stream_options.
@@ -328,6 +312,7 @@ fn openai_tool_calls(tool_uses: &[&ContentPart]) -> Value {
                     id,
                     name,
                     arguments,
+                    ..
                 } => Some(json!({
                     "id": id,
                     "type": "function",
@@ -618,6 +603,7 @@ fn anthropic_content(parts: &[ContentPart]) -> Value {
                         id,
                         name,
                         arguments,
+                        ..
                     } => Some(json!({
                         "type": "tool_use",
                         "id": id,
@@ -653,7 +639,7 @@ pub fn render_gemini(req: &LlmRequest) -> Result<Value, TranslateError> {
             param: "reasoning_effort".into(),
         });
     }
-    let names = tool_call_names(&req.messages);
+    let mut names = HashMap::new();
     let mut system_parts: Vec<Value> = Vec::new();
     let mut contents: Vec<Value> = Vec::new();
     // Gemini carries tool results as `functionResponse` parts in a user turn;
@@ -678,6 +664,13 @@ pub fn render_gemini(req: &LlmRequest) -> Result<Value, TranslateError> {
                 }
             }
             Role::User | Role::Assistant => {
+                if matches!(m.role, Role::Assistant) {
+                    for part in &m.content {
+                        if let ContentPart::ToolUse { id, name, .. } = part {
+                            names.insert(id.as_str(), name.as_str());
+                        }
+                    }
+                }
                 let role = if matches!(m.role, Role::User) {
                     "user"
                 } else {
@@ -692,10 +685,9 @@ pub fn render_gemini(req: &LlmRequest) -> Result<Value, TranslateError> {
                         content,
                     } = p
                     {
-                        // Gemini keys a functionResponse by the function NAME, not
-                        // the call id; resolve it from the assistant turn's
-                        // tool_use. A result with no matching call can't be
-                        // rendered faithfully (I6).
+                        // Resolve against preceding calls only: later turns may
+                        // reuse a provider ID for a different function. A result
+                        // without a preceding call has no faithful function name.
                         let name = names.get(tool_call_id.as_str()).ok_or_else(|| {
                             TranslateError::Unsupported {
                                 surface: "gemini",
@@ -705,6 +697,7 @@ pub fn render_gemini(req: &LlmRequest) -> Result<Value, TranslateError> {
                         })?;
                         pending_fn_responses.push(json!({
                             "functionResponse": {
+                                "id": tool_call_id,
                                 "name": name,
                                 "response": { "result": content },
                             }
@@ -769,10 +762,16 @@ fn gemini_parts(parts: &[ContentPart]) -> Value {
                 ContentPart::Text { text } => Some(json!({ "text": text })),
                 ContentPart::ImageUrl { url } => Some(json!({ "fileData": { "fileUri": url } })),
                 ContentPart::ToolUse {
-                    name, arguments, ..
-                } => Some(json!({
-                    "functionCall": { "name": name, "args": tool_arguments_object(arguments) }
-                })),
+                    id, name, arguments, google_thought_signature,
+                } => {
+                    let mut part = json!({
+                        "functionCall": { "id": id, "name": name, "args": tool_arguments_object(arguments) }
+                    });
+                    if let Some(signature) = google_thought_signature {
+                        part["thoughtSignature"] = json!(signature);
+                    }
+                    Some(part)
+                },
                 ContentPart::ToolResult { .. } => None,
                 // Replayed reasoning has no Gemini equivalent: Gemini continues
                 // its own thinking only from its own signatures — dropped.
@@ -885,6 +884,7 @@ pub fn render_openai_responses(req: &LlmRequest, model: &str) -> Result<Value, T
                         id,
                         name,
                         arguments,
+                        ..
                     } = p
                     {
                         input.push(json!({

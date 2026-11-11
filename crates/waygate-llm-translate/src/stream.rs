@@ -632,32 +632,21 @@ impl GeminiStreamTranslator {
             chunks.push(self.chunk(json!({ "content": text }), None));
         }
 
-        // functionCall parts → OpenAI tool_calls. Gemini streams each call whole
-        // (no incremental args), so the complete call is emitted in one chunk;
-        // Gemini provides no id, so a `call_N` is minted.
+        // Gemini function calls carry their provider IDs and opaque context
+        // through the same mapping as unary responses.
         if let Some(parts) = candidate
             .and_then(|c| c.get("content"))
             .and_then(|c| c.get("parts"))
             .and_then(Value::as_array)
         {
-            for fc in parts.iter().filter_map(|p| p.get("functionCall")) {
-                let name = fc.get("name").and_then(Value::as_str).unwrap_or_default();
-                let arguments = fc
-                    .get("args")
-                    .map(|a| serde_json::to_string(a).unwrap_or_default())
-                    .unwrap_or_else(|| "{}".to_string());
+            for part in parts.iter().filter(|p| p.get("functionCall").is_some()) {
                 let index = self.next_tool_index;
+                let mut call =
+                    crate::response::gemini_function_call(part, index).expect("function call part");
+                call["index"] = json!(index);
                 self.next_tool_index += 1;
                 self.has_tool_calls = true;
-                chunks.push(self.chunk(
-                    json!({ "tool_calls": [{
-                        "index": index,
-                        "id": format!("call_{index}"),
-                        "type": "function",
-                        "function": { "name": name, "arguments": arguments },
-                    }] }),
-                    None,
-                ));
+                chunks.push(self.chunk(json!({ "tool_calls": [call] }), None));
             }
         }
 
@@ -961,6 +950,18 @@ struct ResponsesToolItem {
     call_id: String,
     name: String,
     args: String,
+    google_thought_signature: Option<String>,
+}
+
+impl ResponsesToolItem {
+    fn item(&self, status: &str) -> Value {
+        let mut item = json!({"type":"function_call","id":self.item_id,"call_id":self.call_id,
+            "name":self.name,"arguments":self.args,"status":status});
+        if let Some(signature) = &self.google_thought_signature {
+            item["extra_content"] = json!({"google":{"thought_signature":signature}});
+        }
+        item
+    }
 }
 
 impl ChatStreamToResponses {
@@ -1281,21 +1282,30 @@ impl ChatStreamToResponses {
                         .get("function")
                         .and_then(|f| str_field(f, "name"))
                         .unwrap_or_default();
-                    let added = json!({
-                        "output_index": oi,
-                        "item": {"type": "function_call", "id": item_id, "call_id": call_id,
-                                 "name": name, "arguments": "", "status": "in_progress"},
-                    });
-                    out.push(self.event("response.output_item.added", added));
-                    let pos = self.tools.len();
-                    self.tools.push(ResponsesToolItem {
+                    let tool = ResponsesToolItem {
                         output_index: oi,
                         item_id,
                         call_id,
                         name,
                         args: String::new(),
-                    });
+                        google_thought_signature: tc
+                            .pointer("/extra_content/google/thought_signature")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned),
+                    };
+                    let added = json!({"output_index":oi,"item":tool.item("in_progress")});
+                    out.push(self.event("response.output_item.added", added));
+                    let pos = self.tools.len();
+                    self.tools.push(tool);
                     self.tool_by_index.insert(idx, pos);
+                }
+                if let Some(signature) = tc
+                    .pointer("/extra_content/google/thought_signature")
+                    .and_then(Value::as_str)
+                {
+                    if let Some(&pos) = self.tool_by_index.get(&idx) {
+                        self.tools[pos].google_thought_signature = Some(signature.to_owned());
+                    }
                 }
                 if let Some(args) = tc
                     .get("function")
@@ -1389,8 +1399,7 @@ impl ChatStreamToResponses {
             out.push(self.event(
                 "response.output_item.done",
                 json!({"output_index": t.output_index,
-                       "item": {"type": "function_call", "id": t.item_id, "call_id": t.call_id,
-                                "name": t.name, "arguments": t.args, "status": "completed"}}),
+                       "item": t.item("completed")}),
             ));
         }
         // Every item in the order it was opened.
@@ -1413,11 +1422,7 @@ impl ChatStreamToResponses {
             ));
         }
         for t in &tools {
-            output.push((
-                t.output_index,
-                json!({"type": "function_call", "id": t.item_id, "call_id": t.call_id,
-                               "name": t.name, "arguments": t.args, "status": "completed"}),
-            ));
+            output.push((t.output_index, t.item("completed")));
         }
         output.sort_by_key(|(index, _)| *index);
         let output = output.into_iter().map(|(_, item)| item).collect();

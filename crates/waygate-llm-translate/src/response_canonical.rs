@@ -187,12 +187,23 @@ impl CanonicalResponse {
                     call_id,
                     name,
                     arguments,
-                    ..
-                } => Some(json!({
-                    "id": call_id,
-                    "type": "function",
-                    "function": { "name": name, "arguments": arguments },
-                })),
+                    extra,
+                } => {
+                    let mut call = json!({
+                        "id": call_id,
+                        "type": "function",
+                        "function": { "name": name, "arguments": arguments },
+                    });
+                    if let Some(signature) = extra
+                        .get("extra_content")
+                        .and_then(|value| value.get("google"))
+                        .and_then(|value| value.get("thought_signature"))
+                        .and_then(Value::as_str)
+                    {
+                        call["extra_content"] = json!({"google":{"thought_signature":signature}});
+                    }
+                    Some(call)
+                }
                 _ => None,
             })
             .collect()
@@ -390,7 +401,7 @@ fn anthropic_stop_reason_to_status(s: &str) -> ResponseStatus {
 
 /// Fold a **Gemini `generateContent`** response body into a [`CanonicalResponse`].
 /// `candidates[0].content.parts` text → an assistant `Message`'s `output_text`;
-/// `functionCall` parts → `FunctionCall` items (Gemini emits no call id, so a
+/// `functionCall` parts → `FunctionCall` items (when a call ID is absent, a
 /// synthetic `call_N` is minted, matching the legacy translator); `finishReason`
 /// → [`ResponseStatus`].
 pub fn gemini_to_canonical_response(resp: &Value) -> CanonicalResponse {
@@ -423,21 +434,32 @@ pub fn gemini_to_canonical_response(resp: &Value) -> CanonicalResponse {
             extra: Map::new(),
         });
     }
-    // functionCall parts → function_call items with synthetic `call_N` ids.
+    // Function-call context remains opaque and stays attached to its call.
     if let Some(ps) = parts {
-        for (i, fc) in ps.iter().filter_map(|p| p.get("functionCall")).enumerate() {
+        for (i, part) in ps
+            .iter()
+            .filter(|p| p.get("functionCall").is_some())
+            .enumerate()
+        {
+            let call =
+                crate::response::gemini_function_call(part, i as u64).expect("function call part");
+            let mut extra = Map::new();
+            if let Some(context) = call.get("extra_content") {
+                extra.insert("extra_content".into(), context.clone());
+            }
             output.push(OutputItem::FunctionCall {
-                call_id: format!("call_{i}"),
-                name: fc
+                call_id: call["id"].as_str().unwrap_or_default().to_owned(),
+                name: call["function"]
                     .get("name")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
-                arguments: fc
-                    .get("args")
-                    .map(|a| serde_json::to_string(a).unwrap_or_default())
+                arguments: call["function"]
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
                     .unwrap_or_else(|| "{}".to_string()),
-                extra: Map::new(),
+                extra,
             });
         }
     }
@@ -868,13 +890,23 @@ pub fn openai_chat_to_canonical_response(resp: &Value) -> CanonicalResponse {
     {
         for tc in tcs {
             let func = tc.get("function");
+            let mut extra = Map::new();
+            if let Some(signature) = tc
+                .pointer("/extra_content/google/thought_signature")
+                .and_then(Value::as_str)
+            {
+                extra.insert(
+                    "extra_content".into(),
+                    json!({"google":{"thought_signature":signature}}),
+                );
+            }
             output.push(OutputItem::FunctionCall {
                 call_id: str_field(tc, "id").unwrap_or_default(),
                 name: func.and_then(|f| str_field(f, "name")).unwrap_or_default(),
                 arguments: func
                     .and_then(|f| str_field(f, "arguments"))
                     .unwrap_or_default(),
-                extra: Map::new(),
+                extra,
             });
         }
     }
