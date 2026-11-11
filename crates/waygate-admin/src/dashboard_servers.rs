@@ -710,6 +710,7 @@ struct ServerConfigFragment {
     /// `?server=`-scoped base for the in-panel tab nav; each tab hx-gets
     /// `{config_url}&tab=<tab>`.
     config_url: String,
+    compatibility_url: Option<String>,
     /// Gates the Reconnect / Refresh-catalog / Clear-quarantine forms (admins
     /// only), mirroring the servers table's `is_admin` gate.
     is_admin: bool,
@@ -907,6 +908,18 @@ pub(crate) async fn server_config_fragment(
     render(&ServerConfigFragment {
         active_tab,
         name: manifest.name.clone(),
+        compatibility_url: crate::compatibility::authorize(
+            user.as_ref().map(|Extension(p)| p),
+            tenant_ctx.as_ref(),
+        )
+        .is_ok()
+        .then(|| {
+            format!(
+                "{}?server={}",
+                crate::tenant_ctx::nav_url(tenant_ctx.as_ref(), "/servers/compatibility"),
+                urlencode(&manifest.name)
+            )
+        }),
         config_url,
         is_admin,
         csrf_token,

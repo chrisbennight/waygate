@@ -553,6 +553,10 @@ fn page_routes(state: Arc<AdminState>) -> Router<()> {
         .route("/servers", get(servers_page))
         .route("/servers/config", get(server_config_fragment))
         .route(
+            "/servers/compatibility",
+            get(crate::compatibility::report_fragment),
+        )
+        .route(
             "/servers/config/classifications",
             post(server_classifications_save),
         )

@@ -238,6 +238,24 @@ pub struct UpstreamStatus {
     /// the health count. A tool appears once; the first rejecting lane's root
     /// type is retained when connected lanes disagree.
     pub rejected_output_schemas: Vec<super::tool_listing::RejectedOutputSchema>,
+    /// Allowlisted peer declarations from the same live-lane snapshot. These
+    /// are upstream claims, not conformance or successful operation evidence.
+    pub compatibility: Vec<LaneCompatibility>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LaneCompatibility {
+    pub lane: usize,
+    pub connected_at: time::OffsetDateTime,
+    pub catalog_age_seconds: u64,
+    pub protocol_version: Option<String>,
+    pub implementation_name: Option<String>,
+    pub implementation_version: Option<String>,
+    pub tools_advertised: Option<bool>,
+    pub resources_advertised: Option<bool>,
+    pub tasks_advertised: Option<bool>,
+    pub skills_advertised: Option<bool>,
+    pub input_schema_warning_count: usize,
 }
 
 fn serialize_breaker_state<S: serde::Serializer>(
@@ -375,6 +393,24 @@ impl UpstreamPool {
             out.push(entry_status(name, &map[name]).await);
         }
         out
+    }
+
+    /// Read one configured upstream without waiting indefinitely for a busy
+    /// lane. An absent upstream and an unavailable snapshot remain distinct.
+    pub async fn server_status_within(
+        &self,
+        server: &str,
+        wait: Duration,
+    ) -> Option<UpstreamStatusObservation> {
+        let entry = self.entries.load().get(server).cloned()?;
+        Some(
+            match tokio::time::timeout(wait, entry_status(server, &entry)).await {
+                Ok(status) => UpstreamStatusObservation::Observed(Box::new(status)),
+                Err(_) => UpstreamStatusObservation::Busy {
+                    name: server.to_owned(),
+                },
+            },
+        )
     }
 
     /// Runtime-only projection for health callers. See
@@ -567,10 +603,40 @@ async fn entry_status(name: &str, entry: &UpstreamEntry) -> UpstreamStatus {
         rejected_output_schema_count,
         protocol_versions,
     };
+    let compatibility = guards
+        .iter()
+        .enumerate()
+        .filter_map(|(lane, guard)| {
+            let conn = guard.as_ref()?;
+            let peer_info = conn.client.peer_info();
+            let peer = peer_info.as_deref();
+            // Peer-controlled labels are display data. Bound the projection
+            // without serializing arbitrary extension settings or metadata.
+            let label = |value: &str| value.chars().take(256).collect::<String>();
+            Some(LaneCompatibility {
+                lane,
+                connected_at: conn.connected_at,
+                catalog_age_seconds: conn.dialed_at.elapsed().as_secs(),
+                protocol_version: conn.negotiated_protocol.as_deref().map(label),
+                implementation_name: peer
+                    .and_then(|p| p.server_info.as_ref())
+                    .map(|info| label(&info.name)),
+                implementation_version: peer
+                    .and_then(|p| p.server_info.as_ref())
+                    .map(|info| label(&info.version)),
+                tools_advertised: peer.map(|p| p.capabilities.tools.is_some()),
+                resources_advertised: peer.map(|p| p.capabilities.resources.is_some()),
+                tasks_advertised: peer.map(|p| p.capabilities.supports_tasks()),
+                skills_advertised: peer.map(|p| p.capabilities.supports_skills()),
+                input_schema_warning_count: conn.unregisterable_input_schemas.len(),
+            })
+        })
+        .collect();
     UpstreamStatus {
         manifest: manifest.clone(),
         health,
         rejected_output_schemas,
+        compatibility,
     }
 }
 
@@ -1291,6 +1357,115 @@ mod bounded_snapshot_tests {
         }
     }
 
+    #[tokio::test]
+    async fn compatibility_tracks_peer_declarations_without_probing_and_replaces_them_on_reload() {
+        use rmcp::model::{
+            Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities,
+            ServerConfig,
+        };
+        use rmcp::service::RequestContext;
+        use rmcp::transport::streamable_http_server::{
+            session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+        };
+        use rmcp::{RoleServer, ServerHandler};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(Clone)]
+        struct Fixture {
+            version: &'static str,
+            calls: Arc<AtomicUsize>,
+        }
+        impl ServerHandler for Fixture {
+            fn get_info(&self) -> ServerConfig {
+                let mut caps = ServerCapabilities::builder().enable_tools().build();
+                if self.version == "first" {
+                    caps.resources = Some(Default::default());
+                }
+                ServerConfig::new(caps)
+                    .with_server_info(Implementation::new("compatibility-fixture", self.version))
+            }
+            async fn list_tools(
+                &self,
+                _: Option<PaginatedRequestParams>,
+                _: RequestContext<RoleServer>,
+            ) -> Result<ListToolsResult, rmcp::ErrorData> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(ListToolsResult::with_all_items(Vec::new()))
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut servers = Vec::new();
+        let mut pool: Option<UpstreamPool> = None;
+        let mut prior_connection = None;
+        for version in ["first", "second"] {
+            let fixture = Fixture {
+                version,
+                calls: calls.clone(),
+            };
+            let service = StreamableHttpService::new(
+                move || Ok(fixture.clone()),
+                LocalSessionManager::default().into(),
+                StreamableHttpServerConfig::default(),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            servers.push(tokio::spawn(async move {
+                axum::serve(listener, axum::Router::new().nest_service("/mcp", service))
+                    .await
+                    .unwrap()
+            }));
+            let mut configured = manifest("fixture");
+            configured.transport = Transport::Http;
+            configured.command = None;
+            configured.url = Some(format!("http://{address}/mcp"));
+            let manifests = BTreeMap::from([("fixture".into(), configured)]);
+            match &pool {
+                None => pool = Some(UpstreamPool::connect(manifests).await),
+                Some(pool) => {
+                    pool.reload_manifests(&manifests).await;
+                }
+            }
+            let pool = pool.as_ref().unwrap();
+            let UpstreamStatusObservation::Observed(status) = pool
+                .server_status_within("fixture", Duration::from_secs(1))
+                .await
+                .unwrap()
+            else {
+                panic!("idle fixture")
+            };
+            let lane = &status.compatibility[0];
+            assert_eq!(
+                lane.implementation_name.as_deref(),
+                Some("compatibility-fixture")
+            );
+            assert_eq!(lane.implementation_version.as_deref(), Some(version));
+            assert_eq!(lane.resources_advertised, Some(version == "first"));
+            assert_eq!(lane.tasks_advertised, Some(false));
+            assert!(lane.protocol_version.is_some());
+            if let Some(before) = prior_connection {
+                assert!(lane.connected_at >= before);
+            }
+            prior_connection = Some(lane.connected_at);
+            let count = calls.load(Ordering::SeqCst);
+            pool.server_status_within("fixture", Duration::from_secs(1))
+                .await
+                .unwrap();
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                count,
+                "reporting does not re-probe the upstream"
+            );
+        }
+        let pool = pool.unwrap();
+        pool.reload_manifests(&BTreeMap::new()).await;
+        assert!(pool
+            .server_status_within("fixture", Duration::from_secs(1))
+            .await
+            .is_none());
+        for server in servers {
+            server.abort();
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_lane_held_by_a_call_with_a_refresh_queued_is_reported_busy_without_waiting() {
         let pool = UpstreamPool::from_manifests_disconnected(BTreeMap::from([
@@ -1341,6 +1516,21 @@ mod bounded_snapshot_tests {
             }
             other => panic!("unexpected status observations: {other:?}"),
         }
+        assert!(matches!(
+            pool.server_status_within("busy", Duration::from_secs(2))
+                .await,
+            Some(UpstreamStatusObservation::Busy { .. })
+        ));
+        let Some(UpstreamStatusObservation::Observed(idle)) = pool
+            .server_status_within("idle", Duration::from_secs(2))
+            .await
+        else {
+            panic!("idle upstream")
+        };
+        assert!(
+            idle.compatibility.is_empty(),
+            "disconnected declarations stay unknown"
+        );
 
         drop(call);
         refresh.await.expect("refresh task");

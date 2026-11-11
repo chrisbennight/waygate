@@ -36,11 +36,15 @@ pub fn router(state: Arc<AdminState>) -> Router<()> {
         .with_state(state)
 }
 
-/// Admin-gated mutating endpoints for upstream lifecycle. Kept on its own
+/// Admin-gated upstream lifecycle and compatibility inspection. Kept on its own
 /// router so the read-only `router()` above can stay layered with `mcp:read`
 /// while these require `mcp:admin`.
 pub fn admin_router(state: Arc<AdminState>) -> Router<()> {
     Router::new()
+        .route(
+            "/api/v1/servers/{name}/compatibility",
+            get(crate::compatibility::get_report),
+        )
         .route("/api/v1/servers/{name}/reconnect", post(reconnect_server))
         .route(
             "/api/v1/servers/{name}/catalog/refresh",

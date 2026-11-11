@@ -141,6 +141,10 @@ survive a restart belongs in a task or a detached Code Mode execution; see
 
 ## Verify your client
 
+Administrators can inspect [upstream compatibility evidence](../upstream-compatibility.md)
+from each server's configuration panel. It separates configuration and peer
+declarations from observations and explicitly tested behavior.
+
 Use the [host-contract probe](../host-tool-discovery.md#executable-proof) with an
 explicitly selected harmless tool. Also exercise policy refusal, catalog refresh,
 and the actual protocol generation your client uses. The repository's modern

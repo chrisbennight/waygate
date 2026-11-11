@@ -315,6 +315,9 @@ struct Connection {
     /// lanes may legitimately diverge during a partial heal while the
     /// upstream migrates. `None` only if the SDK exposed no peer info.
     negotiated_protocol: Option<String>,
+    /// Wall-clock observation for this connection's peer declaration. Catalog
+    /// refreshes do not make an older peer declaration look newly observed.
+    connected_at: time::OffsetDateTime,
     /// Whether this lane's initialize result advertised MCP Resources.
     resource_capability_advertised: bool,
     /// SEP-2549 `ttlMs` hint observed on this lane's dial-time `tools/list`
@@ -1234,6 +1237,7 @@ async fn dial(
         network_destination: connected.network_destination,
         cleartext_control_plane: connected.cleartext_control_plane,
         negotiated_protocol,
+        connected_at: time::OffsetDateTime::now_utc(),
         resource_capability_advertised,
         identity_cell,
         // `tools` is the manifest-filtered, published view; the caller
