@@ -617,9 +617,14 @@ whose token lapses before the next re-read surfaces an `awaiting re-read` error 
   `performance` (the catalog carries costing already).
 - **Cooldown:** per `(provider, credential_label)` exponential backoff on consecutive
   failures, **persisted** (survives restart); cooled targets are skipped.
-- **Failover (I8):** on retryable upstream failure (429/5xx/transport) or unhealthy credential
+- **Failover (I8):** for stateless requests, on retryable upstream failure (429/5xx/transport) or unhealthy credential
   (§6), try the next healthy target in the group, then the next group; bounded attempts;
   honor `Retry-After`.
+  Requests carrying `previous_response_id` instead make one attempt on the resolved
+  primary route, including its configured credential, even when that credential is
+  cooling down. A fallback endpoint, provider, or credential cannot establish that
+  it owns the referenced history. The first-frame deadline still applies; failure
+  never starts a second provider attempt for that continuation.
 - **Stall detection:** TTFB stall → fail over before the client sees bytes; throughput stall
   after first byte → abort (client already streaming); per-provider overrides for
   long-pre-token reasoning models.
@@ -985,8 +990,9 @@ strict about the request *body* and rejects a generic Responses body. A Codex ro
   with a clear, non-retryable error (`use stream=true`) — the backend streams-only and the gateway
   does not aggregate the upstream SSE back into a unary body. The finalizer also forces
   `stream:true` on the body it sends.
-- **Stateless.** It forces `store:false` and **removes** `previous_response_id` (the
-  subscription backend has no server-side store to honour either against), and requests
+- **Stateless.** Requests with `previous_response_id` are refused before credential
+  access or provider contact because the subscription backend has no response store.
+  Normalization forces `store:false` and requests
   `include: ["reasoning.encrypted_content"]` so a reasoning loop round-trips statelessly.
 - **Normalized fields.** `parallel_tool_calls:true`, a non-null `instructions` (defaulted to
   `""` when absent — the backend treats present-but-null as absent), and it strips the
@@ -1022,17 +1028,22 @@ written (§14).
   `previous_response_id` is carried in the canonical request and **forwarded** to an
   OpenAI-Responses upstream (whose own store provides continuity); the pre-dispatch capability
   gate (`check_provider_support`, §4.1) **rejects** it when the resolved **primary** route is
-  not a Responses upstream (there is no store to resolve it against). Note the gate runs
-  against the primary route only — a model whose **fallbacks** (§7) cross to a non-Responses
-  protocol can still fail over to one, where the id is dropped and continuity is best-effort;
-  configure Responses aliases with Responses-only fallbacks (§15). `store` is **forwarded to the upstream**, so
+  not a Responses upstream (there is no store to resolve it against). Dispatch also
+  checks the selected route and refuses stateless subscription profiles. A request
+  with this handle stays on the primary provider context and never fails over to
+  another credential, endpoint, or protocol. Configure a stable primary backend and
+  account for a chained conversation. The gateway does not record which route issued
+  a previous response: a handle from another context, including an earlier request
+  that failed over, must be continued against its originating backend. A provider
+  refusal leaves the handle intact and never triggers another attempt.
+  `store` is **forwarded to the upstream**, so
   `store:false` stops the *provider* from persisting the response. **Caveat:** this does
   **not** suppress the gateway's own opt-in exact-match cache (§9) — when caching is enabled
   for a model (the system flag *and* a per-model TTL), a `store:false` request's completion
   can still be persisted in that cache (§9, §15). This forwarding describes the **standard**
   api-key OpenAI Responses upstream; the **ChatGPT/Codex subscription** backend is
-  stateless-by-design and overrides it — its finalizer (`finalize_codex_responses_body`)
-  forces `store:false` and **strips** `previous_response_id` (§13.1), because the subscription
+  stateless-by-design: it rejects `previous_response_id`, and its finalizer
+  (`finalize_codex_responses_body`) forces `store:false` (§13.1), because the subscription
   backend exposes no server-side store. Reasoning *input* items are carried opaquely and
   forwarded to a Responses upstream; an OpenAI-chat upstream receives their plain text (see
   replayed model output below), and Anthropic / Gemini receive nothing; on the Codex backend the gateway requests `include:
@@ -1085,7 +1096,8 @@ written (§14).
 - Native Gemini and Cohere embedding protocols are not supported. Embedding
   auto-discovery is available for OpenRouter; other models require configuration.
 - The discovery dashboard does not expose every model-source or presence field.
-- Cross-protocol fallback routes cannot preserve Responses conversation IDs.
+- Responses conversation IDs require a stable primary provider context; the gateway
+  does not recover the originating route of a handle returned by an earlier fallback.
 - The native `/v1/messages` surface does not forward client `anthropic-beta` headers, so
   provider features that require a beta header are not available through it.
 - An upstream `store:false` request does not disable the gateway's separately
