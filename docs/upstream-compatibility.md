@@ -34,9 +34,11 @@ successful connection time is availability history only. A busy lane returns
 `busy` within a bounded wait instead of guessing or
 holding the operator page behind a long call.
 
-Input-schema warning counts describe tools in the retained upstream catalog
-before quarantine, durable review decisions, caller authorization, and client
-presentation. They do not count currently client-visible tools. In particular,
+Input-schema warning counts describe retained raw upstream declarations before
+output-contract rejection, quarantine, durable review decisions, caller
+authorization, and client presentation, including warnings for tools later
+omitted. Reading the count does not scan the catalog. These counts do not
+describe currently client-visible tools. In particular,
 approval on another replica can change durable admission while this replica's
 local quarantine cache remains unchanged. The report does not reproduce that
 admission decision or claim an effective catalog for any caller. Output-schema

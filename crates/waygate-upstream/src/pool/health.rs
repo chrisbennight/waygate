@@ -258,8 +258,8 @@ pub struct LaneCompatibility {
     pub resources_advertised: Option<bool>,
     pub tasks_advertised: Option<bool>,
     pub skills_advertised: Option<bool>,
-    /// Retained upstream catalog warnings before quarantine, durable admission,
-    /// caller authorization, or client-specific presentation.
+    /// Raw upstream warnings before output-contract rejection, quarantine,
+    /// durable admission, caller authorization, or client presentation.
     pub pre_admission_input_schema_warning_count: usize,
 }
 
@@ -636,11 +636,7 @@ async fn entry_status(name: &str, entry: &UpstreamEntry) -> UpstreamStatus {
                 resources_advertised: peer.map(|p| p.capabilities.resources.is_some()),
                 tasks_advertised: peer.map(|p| p.capabilities.supports_tasks()),
                 skills_advertised: peer.map(|p| p.capabilities.supports_skills()),
-                pre_admission_input_schema_warning_count: conn
-                    .unregisterable_input_schemas
-                    .iter()
-                    .filter(|warning| conn.tools.iter().any(|tool| tool.name == warning.tool))
-                    .count(),
+                pre_admission_input_schema_warning_count: conn.unregisterable_input_schemas.len(),
             })
         })
         .collect();
