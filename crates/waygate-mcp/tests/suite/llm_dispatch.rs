@@ -421,6 +421,7 @@ fn chat_args() -> Map<String, Value> {
 async fn anthropic_stream_provider_handler() -> Response {
     let sse = concat!(
         "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-served-x\",\"usage\":{\"input_tokens\":2,\"cache_read_input_tokens\":1,\"cache_creation_input_tokens\":2}}}\n\n",
+        "event: ping\ndata: {\"type\":\"ping\"}\n\n",
         "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"He\"}}\n\n",
         "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"llo\"}}\n\n",
         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",

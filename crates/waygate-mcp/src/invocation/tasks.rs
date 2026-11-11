@@ -159,6 +159,7 @@ impl DefaultInvocationService {
             transcription: None,
             realtime: None,
             native_messages_surface: false,
+            native_messages_headers: Default::default(),
             acting_agent: None,
             invocation_hierarchy: None,
             approval_binding: None,

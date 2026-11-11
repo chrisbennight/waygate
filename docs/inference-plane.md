@@ -508,15 +508,23 @@ loosening that rule.
 - **Body.** The gateway checks only what its own decisions depend on: the body is a JSON object,
   `stream` is absent or a boolean, `messages` is an array, and `max_tokens` is a positive
   integer. It replaces `model` with the route's upstream model and forwards every other field
-  unchanged. The provider validates the rest. The gateway sends its pinned `anthropic-version`
-  header and does not forward client `anthropic-beta` headers.
+  unchanged, including unknown fields and the order of system blocks. The provider validates
+  the rest. Native ingress forwards the open set of `anthropic-*` headers, including
+  `anthropic-beta`, `anthropic-version`, and workspace negotiation, without interpreting beta
+  values. An absent API version uses the translation adapter's default. Client authorization
+  and API-key headers are excluded; the selected route supplies the provider API key.
 - **Governance.** The call enters the same invocation service as the canonical surfaces (I1):
   the model authorizes as a Cedar `Model` resource, and profile restrictions, request quota, the
   lagging budget, approval, response capacity, and the pre-call and outcome audit rows all apply
   before or around the provider call (I2).
 - **Responses.** A unary response is the provider's Messages body, unchanged. A streamed
   response relays each provider event as a named SSE event (`message_start`,
-  `content_block_delta`, …, `message_stop`). Errors produced by the route and the invocation
+  `content_block_delta`, …, `message_delta`, `message_stop`), including JSON `ping` events,
+  without accumulating the complete response. The provider's HTTP status and selected
+  content-type, request-ID, retry, and `anthropic-ratelimit-*` headers reach the client.
+  Provider error bodies are relayed byte-for-byte within a bounded error-body limit; an
+  oversized body becomes a gateway transport error rather than a truncated provider error.
+  Errors produced by the route and the invocation
   pipeline use the Anthropic error envelope (`{"type":"error","error":{"type","message"}}`)
   with the same HTTP status the canonical surfaces would return. Authentication failures are
   answered earlier by the gateway's shared bearer layer, with its standard `401` challenge and
@@ -529,6 +537,19 @@ loosening that rule.
 - **Authentication.** Clients authenticate to the gateway with `Authorization: Bearer`, not an
   `x-api-key` header. Anthropic SDKs support this through their auth-token option; point the
   SDK's base URL at the gateway root so it calls `/v1/messages`.
+- **Claude Code.** Set `ANTHROPIC_BASE_URL` to the gateway root and
+  `ANTHROPIC_AUTH_TOKEN` to the caller's gateway credential. Select an authorized catalog
+  alias with `ANTHROPIC_MODEL`; use supported API-key credentials on the upstream route.
+  `/v1/messages?beta=true` uses the same native route. The optional
+  `/v1/messages/count_tokens` endpoint is not implemented, so Claude Code uses its
+  character-based estimate. This surface does not implement a Claude apps gateway sign-in,
+  Bedrock, or Vertex dialect. The
+  [Claude Code gateway compatibility guide](https://code.claude.com/docs/en/llm-gateway-protocol)
+  defines the client contract. Synthetic coverage lives in
+  `crates/waygate-server/src/llm/messages.rs` and
+  `crates/waygate-mcp/tests/suite/llm_dispatch/native_messages.rs`:
+  run `cargo test -p waygate-server llm::messages::` and
+  `cargo test -p waygate-mcp --test suite llm_dispatch::native_messages::`.
 
 ## 5. Invocation flow (normative, LLM specifics)
 
@@ -1098,8 +1119,7 @@ written (§14).
 - The discovery dashboard does not expose every model-source or presence field.
 - Responses conversation IDs require a stable primary provider context; the gateway
   does not recover the originating route of a handle returned by an earlier fallback.
-- The native `/v1/messages` surface does not forward client `anthropic-beta` headers, so
-  provider features that require a beta header are not available through it.
+- The optional native Messages token-counting endpoint is not implemented.
 - An upstream `store:false` request does not disable the gateway's separately
   configured exact-match cache. Keep that cache disabled when local persistence
   is unwanted.

@@ -42,8 +42,8 @@ pub use resolver::{
     DbModelResolver, LlmModelResolver, LlmOperation, ModelRisk, ResolvedModel, StaticModelResolver,
 };
 use waygate_llm_providers::{
-    ProviderAuth, ProviderClient, ProviderError, ProviderRequest, ProviderResponse,
-    SharedCodexUaVersion, SseStream,
+    ProviderAuth, ProviderClient, ProviderRequest, ProviderResponse, SharedCodexUaVersion,
+    SseStream,
 };
 use waygate_llm_translate::{
     anthropic_to_canonical_response, canonical_response_to_openai_chat,
@@ -61,7 +61,7 @@ pub use realtime::{RealtimeCallControl, RealtimeCallSetup};
 pub use waygate_llm_providers::realtime::{RealtimeMessage, RealtimeSocket};
 pub use waygate_llm_providers::speech::{AudioStream, SpeechResponse, MAX_AUDIO_RESPONSE_BYTES};
 pub use waygate_llm_providers::transcription::TranscriptionBody;
-pub use waygate_llm_providers::{SseEvent, SseStream as ProviderSseStream};
+pub use waygate_llm_providers::{ProviderError, SseEvent, SseStream as ProviderSseStream};
 
 /// Where a resolved request is sent and how it authenticates. Produced by the
 /// (stubbed-for-now) model resolver; carries transport + identity, no policy.
@@ -100,6 +100,7 @@ pub enum DispatchOutcome {
     Unary {
         record: InferenceRecord,
         body: Value,
+        metadata: Option<waygate_core::anthropic::ResponseMetadata>,
     },
     /// Streaming: the identity-stamped base record and the raw provider SSE
     /// frame stream. The consumer drives a
@@ -109,6 +110,7 @@ pub enum DispatchOutcome {
     Stream {
         record_base: InferenceRecord,
         frames: SseStream,
+        metadata: Option<waygate_core::anthropic::ResponseMetadata>,
     },
 }
 
@@ -139,6 +141,7 @@ pub struct NativeMessagesRequest {
     pub body: serde_json::Map<String, Value>,
     /// Whether the body asks for an SSE response (`"stream": true`).
     pub stream: bool,
+    pub headers: waygate_core::anthropic::RequestHeaders,
 }
 
 /// Failure modes of a dispatch, before any post-dispatch pipeline stage.
@@ -657,11 +660,16 @@ impl LlmDispatcher {
                         (record, body)
                     }
                 };
-                DispatchOutcome::Unary { record, body }
+                DispatchOutcome::Unary {
+                    record,
+                    body,
+                    metadata: None,
+                }
             }
             ProviderResponse::Stream(frames) => DispatchOutcome::Stream {
                 record_base,
                 frames,
+                metadata: None,
             },
         })
     }
@@ -703,18 +711,21 @@ impl LlmDispatcher {
         );
         let started = std::time::Instant::now();
 
-        let response = self
+        let (response, metadata) = self
             .providers
-            .send(ProviderRequest {
-                base_url: route.base_url.clone(),
-                path: route.path.clone(),
-                bearer,
-                auth: ProviderAuth::Anthropic,
-                body: Value::Object(body),
-                stream: req.stream,
-                account_id: None,
-                codex_ua_version: None,
-            })
+            .send_native_messages(
+                ProviderRequest {
+                    base_url: route.base_url.clone(),
+                    path: route.path.clone(),
+                    bearer,
+                    auth: ProviderAuth::Anthropic,
+                    body: Value::Object(body),
+                    stream: req.stream,
+                    account_id: None,
+                    codex_ua_version: None,
+                },
+                &req.headers,
+            )
             .await
             .inspect_err(|_| {
                 waygate_telemetry::metrics::record_llm_request_failure(
@@ -730,10 +741,12 @@ impl LlmDispatcher {
             ProviderResponse::Unary(body) => DispatchOutcome::Unary {
                 record: extract_anthropic_messages(record_base, &body),
                 body,
+                metadata: Some(metadata),
             },
             ProviderResponse::Stream(frames) => DispatchOutcome::Stream {
                 record_base,
                 frames,
+                metadata: Some(metadata),
             },
         })
     }
@@ -886,6 +899,9 @@ fn is_retryable(e: &DispatchError) -> bool {
         DispatchError::Provider(ProviderError::Status { status, .. }) => {
             *status == 429 || (500..=599).contains(status)
         }
+        DispatchError::Provider(ProviderError::NativeMessagesStatus { metadata, .. }) => {
+            metadata.status.as_u16() == 429 || metadata.status.is_server_error()
+        }
         DispatchError::Provider(_)
         | DispatchError::Translate(_)
         | DispatchError::UnsupportedProtocol(_) => false,
@@ -897,7 +913,10 @@ fn is_retryable(e: &DispatchError) -> bool {
 /// least the requested duration.
 fn retry_after_of(e: &DispatchError) -> Option<Duration> {
     match e {
-        DispatchError::Provider(ProviderError::Status { retry_after, .. }) => *retry_after,
+        DispatchError::Provider(ProviderError::Status { retry_after, .. })
+        | DispatchError::Provider(ProviderError::NativeMessagesStatus { retry_after, .. }) => {
+            *retry_after
+        }
         _ => None,
     }
 }
@@ -914,11 +933,12 @@ async fn settle_stream_outcome(
     ttfb: Option<Duration>,
     started: std::time::Instant,
 ) -> Result<DispatchOutcome, DispatchError> {
-    let (record_base, mut frames) = match outcome {
+    let (record_base, mut frames, metadata) = match outcome {
         DispatchOutcome::Stream {
             record_base,
             frames,
-        } => (record_base, frames),
+            metadata,
+        } => (record_base, frames, metadata),
         // Unary: no time-to-first-byte concept; the unary timeout already bounds it.
         unary => return Ok(unary),
     };
@@ -926,6 +946,7 @@ async fn settle_stream_outcome(
         return Ok(DispatchOutcome::Stream {
             record_base,
             frames,
+            metadata,
         });
     };
     let error = match tokio::time::timeout(ttfb, frames.next()).await {
@@ -937,6 +958,7 @@ async fn settle_stream_outcome(
             return Ok(DispatchOutcome::Stream {
                 record_base,
                 frames,
+                metadata,
             });
         }
         // A pre-first-frame stream error: no client byte has been forwarded yet,
@@ -1116,6 +1138,7 @@ mod cooldown_tests {
             let outcome = DispatchOutcome::Stream {
                 record_base,
                 frames,
+                metadata: None,
             };
             assert!(settle_stream_outcome(
                 outcome,
@@ -1161,6 +1184,7 @@ mod cooldown_tests {
         let outcome = DispatchOutcome::Stream {
             record_base: base,
             frames,
+            metadata: None,
         };
         let err = settle_stream_outcome(
             outcome,

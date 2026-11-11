@@ -1345,7 +1345,8 @@ async fn chat_completions(State(state): State<LlmRouterState>, req: Request) -> 
         Ok(InvocationResponse::UnaryValue(body)) => (StatusCode::OK, Json(body)).into_response(),
         // An MCP CallToolResult (or MRTR pause — this surface declares no
         // input capabilities) on the LLM route is a wiring bug.
-        Ok(InvocationResponse::Realtime { .. })
+        Ok(InvocationResponse::NativeMessages { .. })
+        | Ok(InvocationResponse::Realtime { .. })
         | Ok(InvocationResponse::RealtimeCall { .. })
         | Ok(InvocationResponse::Media { .. })
         | Ok(InvocationResponse::Unary(_))
@@ -1417,7 +1418,8 @@ async fn responses(State(state): State<LlmRouterState>, req: Request) -> Respons
         // The body is already Responses-shaped — dispatch rendered the canonical
         // response to the Responses surface.
         Ok(InvocationResponse::UnaryValue(body)) => (StatusCode::OK, Json(body)).into_response(),
-        Ok(InvocationResponse::Realtime { .. })
+        Ok(InvocationResponse::NativeMessages { .. })
+        | Ok(InvocationResponse::Realtime { .. })
         | Ok(InvocationResponse::RealtimeCall { .. })
         | Ok(InvocationResponse::Media { .. })
         | Ok(InvocationResponse::Unary(_))
@@ -1457,7 +1459,8 @@ async fn embeddings(State(state): State<LlmRouterState>, req: Request) -> Respon
         Ok(InvocationResponse::UnaryValue(body)) => (StatusCode::OK, Json(body)).into_response(),
         // `invoke_embeddings` only ever returns a unary value or an error; an MCP
         // tool result or a stream on the embeddings route is a wiring bug.
-        Ok(InvocationResponse::Realtime { .. })
+        Ok(InvocationResponse::NativeMessages { .. })
+        | Ok(InvocationResponse::Realtime { .. })
         | Ok(InvocationResponse::RealtimeCall { .. })
         | Ok(InvocationResponse::Media { .. })
         | Ok(InvocationResponse::Unary(_))

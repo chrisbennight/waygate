@@ -292,6 +292,10 @@ pub struct InvocationRequest {
     /// the OpenAI-shaped surfaces and every MCP tool call.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub native_messages_surface: bool,
+    /// Provider negotiation supplied by native HTTP ingress. Never serialized
+    /// into invocation envelopes, audit evidence, or retained request data.
+    #[serde(skip)]
+    pub native_messages_headers: waygate_core::anthropic::RequestHeaders,
     /// MRTR retry (SEP-2322): the caller's answers to a previous
     /// `input_required` pause. Passed through to the upstream dispatch
     /// verbatim — the gateway neither inspects nor synthesizes entries.
@@ -351,6 +355,7 @@ impl InvocationRequest {
             transcription: None,
             realtime: None,
             native_messages_surface: false,
+            native_messages_headers: Default::default(),
             input_responses: None,
             request_state: None,
             caller_capabilities: None,
@@ -799,6 +804,11 @@ impl InvocationError {
 /// dispatch method) is what lets the authorize / quota / inspect / audit
 /// stages stay on one path for both shapes.
 pub enum InvocationResponse {
+    /// Native Messages response with provider status and selected HTTP metadata.
+    NativeMessages {
+        metadata: waygate_core::anthropic::ResponseMetadata,
+        body: NativeMessagesBody,
+    },
     /// A governed standard Realtime event connection. Payloads stay inside the runtime.
     Realtime {
         commands: futures::channel::mpsc::Sender<Value>,
@@ -846,6 +856,10 @@ impl std::fmt::Debug for InvocationResponse {
     // type to be `Debug`, so the impl is part of the contract.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NativeMessages { metadata, .. } => f
+                .debug_struct("NativeMessages")
+                .field("metadata", metadata)
+                .finish_non_exhaustive(),
             Self::Realtime { .. } => f.write_str("Realtime(..)"),
             Self::RealtimeCall { .. } => f.write_str("RealtimeCall(..)"),
             Self::Media { media_type, .. } => f
@@ -866,6 +880,14 @@ impl std::fmt::Debug for InvocationResponse {
 /// item is a `Result` so a mid-stream upstream / inspection failure surfaces
 /// as a terminal error rather than a silent truncation.
 pub type InvocationStream = BoxStream<'static, Result<InvocationChunk, InvocationError>>;
+
+/// Native Messages retains provider JSON, bounded error bytes, or incremental events.
+pub enum NativeMessagesBody {
+    Json(Value),
+    /// A bounded provider error body, preserved byte-for-byte.
+    Error(bytes::Bytes),
+    Stream(InvocationStream),
+}
 
 /// One frame of a streamed response. Deliberately transport-neutral: `event`
 /// is an opaque JSON value the producer has already shaped for the client's

@@ -256,6 +256,7 @@ impl EvaluationGateway {
                     Ok(InvocationResponse::InputRequired(_))
                     | Ok(InvocationResponse::Task(_))
                     | Ok(InvocationResponse::UnaryValue(_))
+                    | Ok(InvocationResponse::NativeMessages { .. })
                     | Ok(InvocationResponse::Realtime { .. })
                     | Ok(InvocationResponse::RealtimeCall { .. })
                     | Ok(InvocationResponse::Media { .. })

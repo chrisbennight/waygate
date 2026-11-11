@@ -3,13 +3,14 @@
 //! `waygate-core` exists to hold types that span multiple crates
 //! without forcing them through one of the heavier crates
 //! (`waygate-oidc`, `waygate-mcp`). Keeping it dependency-light
-//! (no async, no DB, no HTTP) lets any crate depend on it without
+//! (no async runtime, database client, or HTTP client by default) lets any crate depend on it without
 //! pulling in a dependency tree.
 //!
 //! The seed type is `TenantId`. Every other shared type that needs
 //! to be tenant-aware lives here so its consumers (catalog,
 //! SCIM/RBAC, audit, etc.) can refer to a single source of truth.
 
+pub mod anthropic;
 pub mod audio;
 mod email_recipients;
 pub mod env;

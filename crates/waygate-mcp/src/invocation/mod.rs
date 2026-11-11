@@ -552,6 +552,7 @@ struct InvocationContext<'a> {
     /// `invoke_native_messages`, which forwards the body untranslated and so
     /// only accepts a model served by an Anthropic Messages route.
     native_messages_surface: bool,
+    native_messages_headers: waygate_core::anthropic::RequestHeaders,
     /// The in-app agent acting on the human principal's
     /// behalf (`agent:<name>`), carried from `InvocationRequest::acting_agent`.
     /// Stamped onto every audit row this call emits (`AuditEvent.acting_agent`)
@@ -768,6 +769,7 @@ impl InvocationService for DefaultInvocationService {
             transcription,
             realtime,
             native_messages_surface: req.native_messages_surface,
+            native_messages_headers: std::mem::take(&mut req.native_messages_headers),
             acting_agent: req.acting_agent(),
             invocation_hierarchy: req.hierarchy,
             approval_binding,

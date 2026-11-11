@@ -444,7 +444,7 @@ impl DefaultInvocationService {
             .await;
 
         match result {
-            Ok(DispatchOutcome::Unary { record, body }) => {
+            Ok(DispatchOutcome::Unary { record, body, .. }) => {
                 ctx.latency_ms = Some(elapsed_ms(started));
                 // Basic audit row first (activity feed), then the per-call
                 // usage ledger row built from the InferenceRecord.
@@ -488,6 +488,7 @@ impl DefaultInvocationService {
             Ok(DispatchOutcome::Stream {
                 record_base,
                 frames,
+                ..
             }) => {
                 // The pre-dispatch gates already fired (I1). The outcome audit
                 // is finalized by the final-outcome stage at stream CLOSE,

@@ -39,6 +39,14 @@ pub use sse::SseEvent;
 /// regardless of provider.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
+    /// A native Messages error, retained for the authorized HTTP caller rather
+    /// than converted to a diagnostic snippet or printed in logs.
+    #[error("provider returned native Messages HTTP {}", metadata.status)]
+    NativeMessagesStatus {
+        metadata: Box<waygate_core::anthropic::ResponseMetadata>,
+        body: bytes::Bytes,
+        retry_after: Option<std::time::Duration>,
+    },
     /// Connect/TLS/read failure before or during the response — no usable HTTP
     /// status was obtained.
     #[error("transport error: {0}")]
@@ -128,9 +136,8 @@ pub enum ProviderAuth {
     OpenAiChatGpt,
 }
 
-/// The Anthropic API version header value. Pinned here (not configurable) so the
-/// wire contract this adapter renders/extracts against is explicit and stable;
-/// bump it deliberately when the adapter is updated for a newer Messages schema.
+/// Default Anthropic API version for the canonical translation adapter. Native
+/// Messages callers can supply their own version without changing this adapter.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// A stable CLI session UUID, keyed **per credential** by a hash of the bearer.
@@ -298,7 +305,25 @@ impl ProviderClient {
         req: ProviderRequest,
         max_bytes: usize,
     ) -> Result<ProviderResponse, ProviderError> {
-        self.send_inner(req, max_bytes, &self.http).await
+        self.send_inner(req, max_bytes, &self.http, None)
+            .await
+            .map(|(body, _)| body)
+    }
+
+    /// Native Messages preserves negotiation headers and bounded provider
+    /// errors. Authentication still comes exclusively from the resolved route.
+    pub async fn send_native_messages(
+        &self,
+        req: ProviderRequest,
+        headers: &waygate_core::anthropic::RequestHeaders,
+    ) -> Result<(ProviderResponse, waygate_core::anthropic::ResponseMetadata), ProviderError> {
+        if req.auth != ProviderAuth::Anthropic {
+            return Err(ProviderError::Protocol(
+                "native Messages requires Anthropic authentication".into(),
+            ));
+        }
+        self.send_inner(req, MAX_CHAT_RESPONSE_BYTES, &self.http, Some(headers))
+            .await
     }
 
     /// Send a unary request with a hard response byte limit. Reads stop at the
@@ -318,7 +343,9 @@ impl ProviderClient {
         let http = self.single_attempt_http.as_ref().ok_or_else(|| {
             ProviderError::Protocol("single-attempt image transport is not configured".into())
         })?;
-        self.send_inner(req, max_bytes, http).await
+        self.send_inner(req, max_bytes, http, None)
+            .await
+            .map(|(body, _)| body)
     }
 
     async fn send_inner(
@@ -326,7 +353,8 @@ impl ProviderClient {
         req: ProviderRequest,
         max_bytes: usize,
         http: &reqwest::Client,
-    ) -> Result<ProviderResponse, ProviderError> {
+        native_headers: Option<&waygate_core::anthropic::RequestHeaders>,
+    ) -> Result<(ProviderResponse, waygate_core::anthropic::ResponseMetadata), ProviderError> {
         let url = format!(
             "{}/{}",
             req.base_url.trim_end_matches('/'),
@@ -372,6 +400,11 @@ impl ProviderClient {
                 b
             }
         };
+        if let Some(headers) = native_headers {
+            // RequestBuilder::headers replaces existing values, so an explicit
+            // native API version replaces the translation adapter's default.
+            builder = builder.headers(headers.as_header_map().clone());
+        }
         if req.stream {
             builder = builder.header(reqwest::header::ACCEPT, "text/event-stream");
         } else if let Some(timeout) = self.unary_timeout {
@@ -389,16 +422,25 @@ impl ProviderClient {
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
 
         let status = resp.status();
+        let metadata =
+            waygate_core::anthropic::ResponseMetadata::from_headers(status, resp.headers());
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(std::time::Duration::from_secs);
+        if !status.is_success() && native_headers.is_some() {
+            return Err(ProviderError::NativeMessagesStatus {
+                metadata: Box::new(metadata),
+                body: read_response_bytes(resp, 64 * 1024).await?,
+                retry_after,
+            });
+        }
         if !status.is_success() {
             // Capture Retry-After (delta-seconds) BEFORE the body read consumes
             // `resp`. Used by the dispatcher's failover cooldown to honor a
             // provider-advertised backoff on a rate-limited credential.
-            let retry_after = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .map(std::time::Duration::from_secs);
             return Err(ProviderError::Status {
                 status: status.as_u16(),
                 retry_after,
@@ -407,25 +449,36 @@ impl ProviderClient {
         }
 
         if req.stream {
-            Ok(ProviderResponse::Stream(sse::into_event_stream(resp)))
+            Ok((
+                ProviderResponse::Stream(sse::into_event_stream(resp)),
+                metadata,
+            ))
         } else {
-            let mut stream = resp.bytes_stream();
-            let mut bytes = Vec::new();
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk
-                    .map_err(|_| ProviderError::Transport("response body interrupted".into()))?;
-                if chunk.len() > max_bytes.saturating_sub(bytes.len()) {
-                    return Err(ProviderError::Protocol(format!(
-                        "provider response exceeds {max_bytes}-byte limit; request a smaller response or embedding batch"
-                    )));
-                }
-                bytes.extend_from_slice(&chunk);
-            }
+            let bytes = read_response_bytes(resp, max_bytes).await?;
             let value = serde_json::from_slice(&bytes)
                 .map_err(|_| ProviderError::Decode("invalid provider JSON response".into()))?;
-            Ok(ProviderResponse::Unary(value))
+            Ok((ProviderResponse::Unary(value), metadata))
         }
     }
+}
+
+async fn read_response_bytes(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> Result<bytes::Bytes, ProviderError> {
+    let mut stream = resp.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|_| ProviderError::Transport("response body interrupted".into()))?;
+        if chunk.len() > max_bytes.saturating_sub(bytes.len()) {
+            return Err(ProviderError::Protocol(format!(
+                "provider response exceeds {max_bytes}-byte limit; request a smaller response or embedding batch"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes.into())
 }
 
 /// Read at most [`MAX_ERROR_BODY`] bytes of a non-2xx response body, streaming

@@ -3094,7 +3094,8 @@ fn tool_call_response(
         Ok(crate::InvocationResponse::InputRequired(pause)) => {
             Ok(CallToolResponse::InputRequired(pause))
         }
-        Ok(crate::InvocationResponse::Realtime { .. })
+        Ok(crate::InvocationResponse::NativeMessages { .. })
+        | Ok(crate::InvocationResponse::Realtime { .. })
         | Ok(crate::InvocationResponse::RealtimeCall { .. })
         | Ok(crate::InvocationResponse::Media { .. })
         | Ok(crate::InvocationResponse::Stream(_)) => Err(McpError::internal_error(
