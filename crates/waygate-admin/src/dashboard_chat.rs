@@ -225,7 +225,8 @@ async fn chat_stream(
         Ok(InvocationResponse::UnaryValue(body)) => {
             sse_once(Event::default().data(body.to_string()))
         }
-        Ok(InvocationResponse::Realtime { .. })
+        Ok(InvocationResponse::NativeMessages { .. })
+        | Ok(InvocationResponse::Realtime { .. })
         | Ok(InvocationResponse::RealtimeCall { .. })
         | Ok(InvocationResponse::Media { .. })
         | Ok(InvocationResponse::Unary(_)) => {

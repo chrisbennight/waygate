@@ -137,7 +137,8 @@ impl AgentModel for OpenAiAgentModel {
                     "inference returned an MCP tool result on the model path".to_owned(),
                 ));
             }
-            Ok(InvocationResponse::Realtime { .. })
+            Ok(InvocationResponse::NativeMessages { .. })
+            | Ok(InvocationResponse::Realtime { .. })
             | Ok(InvocationResponse::RealtimeCall { .. })
             | Ok(InvocationResponse::Media { .. })
             | Ok(InvocationResponse::Stream(_)) => {
@@ -611,7 +612,8 @@ impl AgentToolDispatch for UpstreamAgentDispatch {
                 content: v.to_string(),
                 is_error: false,
             }),
-            Ok(InvocationResponse::Realtime { .. })
+            Ok(InvocationResponse::NativeMessages { .. })
+            | Ok(InvocationResponse::Realtime { .. })
             | Ok(InvocationResponse::RealtimeCall { .. })
             | Ok(InvocationResponse::Media { .. })
             | Ok(InvocationResponse::Stream(_)) => Ok(ToolOutcome {

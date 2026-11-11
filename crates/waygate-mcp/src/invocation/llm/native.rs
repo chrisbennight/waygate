@@ -44,6 +44,7 @@ fn parse_native_messages(
         model_requested: model_requested.to_owned(),
         body,
         stream,
+        headers: Default::default(),
     })
 }
 
@@ -79,7 +80,9 @@ impl DefaultInvocationService {
             })
             .cloned()
             .collect();
-        let request = parse_native_messages(ctx.tool, ctx.arguments.take().unwrap_or_default())?;
+        let mut request =
+            parse_native_messages(ctx.tool, ctx.arguments.take().unwrap_or_default())?;
+        request.headers = std::mem::take(&mut ctx.native_messages_headers);
 
         ctx.audit_category = EvidenceCategory::LlmCompletion;
         self.extract_facts(&mut ctx).await?;
@@ -102,16 +105,24 @@ impl DefaultInvocationService {
             .await;
 
         match result {
-            Ok(DispatchOutcome::Unary { record, body }) => {
+            Ok(DispatchOutcome::Unary {
+                record,
+                body,
+                metadata,
+            }) => {
                 ctx.latency_ms = Some(elapsed_ms(started));
                 self.record_llm_outcome(&ctx, AuditOutcome::Success, None)
                     .await;
                 self.record_llm_usage(&ctx, &record).await;
-                Ok(InvocationResponse::UnaryValue(body))
+                Ok(InvocationResponse::NativeMessages {
+                    metadata: metadata.expect("native dispatch preserves HTTP metadata"),
+                    body: waygate_invocation::NativeMessagesBody::Json(body),
+                })
             }
             Ok(DispatchOutcome::Stream {
                 record_base,
                 frames,
+                metadata,
             }) => {
                 let base_audit = llm_audit_base(&ctx);
                 let (tenant_id, principal_sub) = match ctx.principal {
@@ -134,16 +145,32 @@ impl DefaultInvocationService {
                         client_usage: false,
                     },
                 );
-                Ok(InvocationResponse::Stream(hold_response_capacity(
-                    stream,
-                    response_capacity,
-                )))
+                Ok(InvocationResponse::NativeMessages {
+                    metadata: metadata.expect("native dispatch preserves HTTP metadata"),
+                    body: waygate_invocation::NativeMessagesBody::Stream(hold_response_capacity(
+                        stream,
+                        response_capacity,
+                    )),
+                })
             }
             Err(e) => {
                 let reason = e.to_string();
                 ctx.latency_ms = Some(elapsed_ms(started));
                 self.record_llm_outcome(&ctx, AuditOutcome::ExecutionError, Some(reason.clone()))
                     .await;
+                if let waygate_llm_dispatch::DispatchError::Provider(
+                    waygate_llm_dispatch::ProviderError::NativeMessagesStatus {
+                        metadata,
+                        body,
+                        ..
+                    },
+                ) = e
+                {
+                    return Ok(InvocationResponse::NativeMessages {
+                        metadata: *metadata,
+                        body: waygate_invocation::NativeMessagesBody::Error(body),
+                    });
+                }
                 Err(InvocationError::Upstream(ErrorData::internal_error(
                     reason, None,
                 )))

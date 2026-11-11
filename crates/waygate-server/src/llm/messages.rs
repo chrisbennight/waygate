@@ -17,6 +17,7 @@ const MAX_ERROR_BODY: usize = 64 * 1024;
 
 pub(super) async fn messages(State(state): State<LlmRouterState>, req: Request) -> Response {
     let principal = waygate_oidc::middleware::principal_from_req(&req).cloned();
+    let headers = waygate_core::anthropic::RequestHeaders::from_headers(req.headers());
     let (payload, model) = match read_llm_body(req).await {
         Ok(parts) => parts,
         Err(resp) => return anthropic_error_envelope(*resp).await,
@@ -29,11 +30,32 @@ pub(super) async fn messages(State(state): State<LlmRouterState>, req: Request) 
         ))
         .await;
     };
-    let request = InvocationRequest::new(LLM_SERVER, model)
+    let mut request = InvocationRequest::new(LLM_SERVER, model)
         .with_arguments(Some(args))
         .with_native_messages_surface(true);
+    request.native_messages_headers = headers;
 
     match state.invocation.invoke(principal.as_ref(), request).await {
+        Ok(InvocationResponse::NativeMessages { metadata, body }) => {
+            let mut response = match body {
+                waygate_invocation::NativeMessagesBody::Json(body) => Json(body).into_response(),
+                waygate_invocation::NativeMessagesBody::Error(body) => body.into_response(),
+                waygate_invocation::NativeMessagesBody::Stream(stream) => native_sse(stream),
+            };
+            *response.status_mut() = metadata.status;
+            if metadata
+                .headers()
+                .contains_key(axum::http::header::CONTENT_TYPE)
+            {
+                response
+                    .headers_mut()
+                    .remove(axum::http::header::CONTENT_TYPE);
+            }
+            for (name, value) in metadata.headers() {
+                response.headers_mut().append(name, value.clone());
+            }
+            response
+        }
         // The provider's Messages body, returned verbatim.
         Ok(InvocationResponse::UnaryValue(body)) => (StatusCode::OK, Json(body)).into_response(),
         Ok(InvocationResponse::Realtime { .. })
@@ -147,11 +169,34 @@ mod tests {
                 .and_then(|a| a.get("stream"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let fixture_error = req
+                .arguments
+                .as_ref()
+                .is_some_and(|args| args.contains_key("fixture_error"));
             self.0.lock().unwrap().push(req);
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("request-id", "req_fixture".parse().unwrap());
+            headers.insert("x-should-retry", "false".parse().unwrap());
+            let status = if fixture_error {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::OK
+            };
+            let metadata =
+                waygate_core::anthropic::ResponseMetadata::from_headers(status, &headers);
+            if fixture_error {
+                return Ok(InvocationResponse::NativeMessages {
+                    metadata,
+                    body: waygate_invocation::NativeMessagesBody::Error(bytes::Bytes::from_static(b"{ \"type\": \"error\", \"error\": {\"type\":\"rate_limit_error\",\"message\":\"fixture refusal\"} }")),
+                });
+            }
             if !stream {
-                return Ok(InvocationResponse::UnaryValue(
-                    json!({"type": "message", "id": "msg_1"}),
-                ));
+                return Ok(InvocationResponse::NativeMessages {
+                    metadata,
+                    body: waygate_invocation::NativeMessagesBody::Json(
+                        json!({"type": "message", "id": "msg_1"}),
+                    ),
+                });
             }
             let chunks = vec![
                 Ok(InvocationChunk {
@@ -164,9 +209,12 @@ mod tests {
                     None,
                 ))),
             ];
-            Ok(InvocationResponse::Stream(Box::pin(futures::stream::iter(
-                chunks,
-            ))))
+            Ok(InvocationResponse::NativeMessages {
+                metadata,
+                body: waygate_invocation::NativeMessagesBody::Stream(Box::pin(
+                    futures::stream::iter(chunks),
+                )),
+            })
         }
     }
 
@@ -190,13 +238,25 @@ mod tests {
     async fn messages_route_marks_the_native_surface_and_returns_the_body_verbatim() {
         let capture = Arc::new(Capture::default());
         let app = router(capture.clone(), None, Arc::new(StaticModelResolver::new()));
-        let resp = app
-            .oneshot(post(
-                r#"{"model":"claude-x","max_tokens":8,"messages":[],"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}]}"#,
-            ))
-            .await
-            .unwrap();
+        let mut request = post(
+            r#"{"model":"claude-x","max_tokens":8,"messages":[],"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}]}"#,
+        );
+        *request.uri_mut() = "/v1/messages?beta=true".parse().unwrap();
+        request
+            .headers_mut()
+            .insert("anthropic-beta", "future-beta".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("anthropic-version", "fixture-version".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("authorization", "Bearer gateway_fixture".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("x-api-key", "gateway_fixture".parse().unwrap());
+        let resp = app.oneshot(request).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["request-id"], "req_fixture");
         assert_eq!(
             json_body(resp).await,
             json!({"type": "message", "id": "msg_1"})
@@ -205,6 +265,11 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let req = &requests[0];
         assert!(req.native_messages_surface);
+        let headers = req.native_messages_headers.as_header_map();
+        assert_eq!(headers["anthropic-beta"], "future-beta");
+        assert_eq!(headers["anthropic-version"], "fixture-version");
+        assert!(!headers.contains_key("authorization"));
+        assert!(!headers.contains_key("x-api-key"));
         assert!(!req.responses_surface && !req.embeddings_surface);
         assert_eq!(req.server, LLM_SERVER);
         assert_eq!(req.tool, "claude-x");
@@ -253,6 +318,25 @@ mod tests {
             assert_eq!(error["error"]["type"], "invalid_request_error");
         }
         assert!(capture.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_errors_are_not_reshaped_into_gateway_errors() {
+        let app = router(
+            Arc::new(Capture::default()),
+            None,
+            Arc::new(StaticModelResolver::new()),
+        );
+        let response = app
+            .oneshot(post(
+                r#"{"model":"claude-x","max_tokens":8,"messages":[],"fixture_error":true}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()["x-should-retry"], "false");
+        assert_eq!(response.headers()["request-id"], "req_fixture");
+        assert_eq!(text_body(response).await, "{ \"type\": \"error\", \"error\": {\"type\":\"rate_limit_error\",\"message\":\"fixture refusal\"} }");
     }
 
     async fn json_body(resp: Response) -> Value {

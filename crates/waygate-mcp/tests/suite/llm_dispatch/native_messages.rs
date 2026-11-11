@@ -19,6 +19,9 @@ fn native_body(stream: bool) -> Map<String, Value> {
             "cache_control": {"type": "ephemeral"}
         }],
         "thinking": {"type": "enabled", "budget_tokens": 1024},
+        "tools": [{"name": "lookup", "description": "fixture", "defer_loading": true, "input_schema": {"type": "object"}}],
+        "output_config": {"effort": "medium"},
+        "future_fixture_field": {"preserve": true},
         "messages": [
             {"role": "user", "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}]},
             {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}]},
@@ -43,6 +46,7 @@ struct NativeCapture {
     calls: AtomicUsize,
     api_key: Mutex<Option<String>>,
     body: Mutex<Option<Value>>,
+    headers: Mutex<HeaderMap>,
 }
 
 async fn native_provider(
@@ -56,6 +60,7 @@ async fn native_provider(
         .and_then(|h| h.to_str().ok())
         .map(str::to_owned);
     *cap.body.lock().unwrap() = serde_json::from_str(&body).ok();
+    *cap.headers.lock().unwrap() = headers;
     let resp = json!({
         "id": "msg_native",
         "type": "message",
@@ -76,6 +81,9 @@ async fn native_provider(
     Response::builder()
         .status(200)
         .header("content-type", "application/json")
+        .header("request-id", "req_fixture")
+        .header("anthropic-ratelimit-unified-status", "allowed")
+        .header("set-cookie", "fixture=discard")
         .body(Body::from(resp.to_string()))
         .unwrap()
 }
@@ -148,13 +156,38 @@ async fn native_surface_forwards_cache_control_and_returns_the_provider_body() {
             .with_llm(anthropic_dispatcher(), anthropic_resolver(addr))
             .with_llm_usage_store(usage.clone());
 
+    let mut request = native_request(false);
+    let mut headers = HeaderMap::new();
+    for (name, value) in [
+        ("anthropic-version", "fixture-version"),
+        ("anthropic-beta", "future-feature,another-feature"),
+        ("anthropic-workspace-id", "workspace_fixture"),
+        ("x-api-key", "gateway_fixture"),
+        ("authorization", "Bearer gateway_fixture"),
+    ] {
+        headers.insert(name, value.parse().unwrap());
+    }
+    request.native_messages_headers =
+        waygate_core::anthropic::RequestHeaders::from_headers(&headers);
     let resp = svc
-        .invoke(Some(&principal()), native_request(false))
+        .invoke(Some(&principal()), request)
         .await
         .expect("invoke");
     let body = match resp {
-        InvocationResponse::UnaryValue(body) => body,
-        other => panic!("expected UnaryValue, got {other:?}"),
+        InvocationResponse::NativeMessages {
+            metadata,
+            body: waygate_invocation::NativeMessagesBody::Json(body),
+        } => {
+            assert_eq!(metadata.status, axum::http::StatusCode::OK);
+            assert_eq!(metadata.headers()["request-id"], "req_fixture");
+            assert_eq!(
+                metadata.headers()["anthropic-ratelimit-unified-status"],
+                "allowed"
+            );
+            assert!(!metadata.headers().contains_key("set-cookie"));
+            body
+        }
+        other => panic!("expected native JSON, got {other:?}"),
     };
     // The provider's Messages body comes back untouched, thinking block included.
     assert_eq!(body["id"], "msg_native");
@@ -170,6 +203,15 @@ async fn native_surface_forwards_cache_control_and_returns_the_provider_body() {
         cap.api_key.lock().unwrap().as_deref(),
         Some("sk-ant-api03-test")
     );
+    let forwarded = cap.headers.lock().unwrap();
+    assert!(!forwarded.contains_key("authorization"));
+    for name in [
+        "anthropic-version",
+        "anthropic-beta",
+        "anthropic-workspace-id",
+    ] {
+        assert_eq!(forwarded[name], headers[name]);
+    }
 
     // Cached-read and cache-creation tokens reach usage accounting.
     let rows = usage.rows.lock().unwrap();
@@ -331,8 +373,11 @@ async fn native_streaming_relays_provider_events_and_records_usage_at_close() {
         .await
         .expect("invoke")
     {
-        InvocationResponse::Stream(s) => s,
-        other => panic!("expected Stream, got {other:?}"),
+        InvocationResponse::NativeMessages {
+            body: waygate_invocation::NativeMessagesBody::Stream(stream),
+            ..
+        } => stream,
+        other => panic!("expected native stream, got {other:?}"),
     };
     let mut chunks = Vec::new();
     while let Some(item) = stream.next().await {
@@ -348,13 +393,14 @@ async fn native_streaming_relays_provider_events_and_records_usage_at_close() {
         names,
         [
             "message_start",
+            "ping",
             "content_block_delta",
             "content_block_delta",
             "message_delta",
             "message_stop"
         ]
     );
-    assert_eq!(chunks[1].event["delta"]["text"], "He");
+    assert_eq!(chunks[2].event["delta"]["text"], "He");
     assert_eq!(
         chunks[0].event["message"]["usage"]["cache_read_input_tokens"],
         1
@@ -445,13 +491,73 @@ async fn native_failover_skips_fallbacks_on_other_protocols() {
         resolver,
     );
 
-    let err = svc
+    let response = svc
         .invoke(Some(&principal()), native_request(false))
         .await
-        .unwrap_err();
-    assert!(matches!(err, InvocationError::Upstream(_)), "got {err:?}");
+        .expect("provider HTTP errors remain native responses");
+    let InvocationResponse::NativeMessages {
+        metadata,
+        body: waygate_invocation::NativeMessagesBody::Error(body),
+    } = response
+    else {
+        panic!("expected native provider error");
+    };
+    assert_eq!(metadata.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body.as_ref(), b"down");
     assert!(
         !other.lock().unwrap().called,
         "a non-Messages fallback must not receive the native body"
     );
+}
+
+#[tokio::test]
+async fn native_provider_errors_keep_status_body_and_retry_guidance() {
+    let error_body = "{ \"type\": \"error\", \"error\": {\"type\":\"invalid_request_error\",\"message\":\"unsupported fixture capability\"} }";
+    for status in [400, 429] {
+        let app = Router::new().route(
+            "/messages",
+            post(move || async move {
+                Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .header("request-id", "req_error_fixture")
+                    .header("retry-after", "7")
+                    .header("x-should-retry", "false")
+                    .body(Body::from(error_body))
+                    .unwrap()
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let sink = Arc::new(RecordingSink::default());
+        let svc = DefaultInvocationService::new(
+            Arc::new(FakeCatalog),
+            Arc::new(AllowAllGate),
+            sink.clone(),
+        )
+        .with_llm(anthropic_dispatcher(), anthropic_resolver(addr));
+        let response = svc
+            .invoke(Some(&principal()), native_request(true))
+            .await
+            .unwrap();
+        let InvocationResponse::NativeMessages {
+            metadata,
+            body: waygate_invocation::NativeMessagesBody::Error(body),
+        } = response
+        else {
+            panic!("expected native provider error");
+        };
+        assert_eq!(metadata.status.as_u16(), status);
+        assert_eq!(metadata.headers()["retry-after"], "7");
+        assert_eq!(metadata.headers()["x-should-retry"], "false");
+        assert_eq!(metadata.headers()["request-id"], "req_error_fixture");
+        assert_eq!(body.as_ref(), error_body.as_bytes());
+        let evidence = sink.best_effort.lock().unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].outcome, AuditOutcome::ExecutionError);
+        assert!(!format!("{:?}", evidence[0]).contains("unsupported fixture capability"));
+    }
 }

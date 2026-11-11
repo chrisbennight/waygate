@@ -159,7 +159,7 @@ async fn unary_dispatch_resolves_bearer_renders_upstream_model_and_extracts() {
         .expect("dispatch");
 
     match outcome {
-        DispatchOutcome::Unary { record, body } => {
+        DispatchOutcome::Unary { record, body, .. } => {
             assert_eq!(record.model_served.as_deref(), Some("served-x"));
             assert_eq!(record.usage.input, Some(3));
             assert_eq!(record.usage.output, Some(1));
@@ -197,6 +197,7 @@ async fn streaming_dispatch_yields_frames_that_fold_into_the_record() {
         DispatchOutcome::Stream {
             record_base,
             frames,
+            ..
         } => (record_base, frames),
         other => panic!("expected Stream, got {other:?}"),
     };
@@ -279,6 +280,7 @@ async fn responses_streaming_dispatch_returns_frames() {
         DispatchOutcome::Stream {
             record_base,
             frames,
+            ..
         } => (record_base, frames),
         other => panic!("expected Stream, got {other:?}"),
     };
@@ -333,6 +335,7 @@ async fn anthropic_streaming_returns_a_stream_of_provider_events() {
         DispatchOutcome::Stream {
             record_base,
             frames,
+            ..
         } => (record_base, frames),
         other => panic!("expected Stream, got {other:?}"),
     };
@@ -446,7 +449,7 @@ async fn gemini_unary_dispatch_templates_path_renders_and_extracts() {
         .expect("gemini unary dispatch");
 
     let (record, body) = match outcome {
-        DispatchOutcome::Unary { record, body } => (record, body),
+        DispatchOutcome::Unary { record, body, .. } => (record, body),
         other => panic!("expected Unary, got {other:?}"),
     };
     assert_eq!(record.upstream_protocol, UpstreamProtocol::Gemini);
@@ -505,6 +508,7 @@ async fn gemini_streaming_dispatch_templates_sse_path_and_returns_frames() {
         DispatchOutcome::Stream {
             record_base,
             frames,
+            ..
         } => (record_base, frames),
         other => panic!("expected Stream, got {other:?}"),
     };
@@ -580,7 +584,7 @@ async fn anthropic_unary_dispatch_renders_anthropic_body_and_extracts() {
     // `input_tokens` (not OpenAI's `prompt_tokens`), and the Anthropic
     // `end_turn` stop_reason normalizes to Stop.
     let (record, body) = match outcome {
-        DispatchOutcome::Unary { record, body } => (record, body),
+        DispatchOutcome::Unary { record, body, .. } => (record, body),
         other => panic!("expected Unary, got {other:?}"),
     };
     assert_eq!(
@@ -638,7 +642,7 @@ async fn responses_surface_unary_dispatch_renders_a_responses_body() {
         .await
         .expect("responses-surface dispatch");
     let (record, body) = match outcome {
-        DispatchOutcome::Unary { record, body } => (record, body),
+        DispatchOutcome::Unary { record, body, .. } => (record, body),
         other => panic!("expected Unary, got {other:?}"),
     };
     // Record extraction is unchanged (the Anthropic branch).
@@ -936,7 +940,7 @@ async fn responses_unary_dispatch_renders_responses_body_and_extracts() {
     // Extracted via the OpenAI-Responses branch: usage.input from `input_tokens`,
     // and `status: completed` normalizes to Stop.
     let (record, body) = match outcome {
-        DispatchOutcome::Unary { record, body } => (record, body),
+        DispatchOutcome::Unary { record, body, .. } => (record, body),
         other => panic!("expected Unary, got {other:?}"),
     };
     assert_eq!(record.upstream_protocol, UpstreamProtocol::OpenAiResponses);
