@@ -6,20 +6,14 @@
 //! `initialize` and live on the session peer. rmcp's `RequestContext`
 //! accessors already consult `_meta` first and fall back to the session's
 //! peer info, so this module is the single seam that turns those accessors
-//! into the gateway's per-request decisions — client-name catalog matching,
-//! elicitation capability, log level — instead
+//! into the gateway's per-request decisions — client-specific catalog selection
+//! and elicitation capability — instead
 //! of each call site reading session state that a stateless request does
 //! not have.
 
 use rmcp::model::ProtocolVersion;
 use rmcp::service::RequestContext;
 use rmcp::RoleServer;
-
-/// `_meta` key carrying the per-request log level (SEP-2575). Read as a raw
-/// string: rmcp's typed `LoggingLevel` is deprecated with the Logging
-/// feature itself, and the gateway only needs presence + value to honor the
-/// "no `notifications/message` for requests that omitted it" rule.
-const META_KEY_LOG_LEVEL: &str = "io.modelcontextprotocol/logLevel";
 
 /// Which protocol generation the current request negotiated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,10 +67,6 @@ pub struct ClientContext {
     /// an upstream pause is answerable, and the upstream pool mirrors it
     /// into per-call dials on 2026-negotiated upstreams.
     pub capabilities: Option<rmcp::model::ClientCapabilities>,
-    /// `io.modelcontextprotocol/logLevel` from `_meta`, when present. The
-    /// gateway emits no `notifications/message` today; parsed so a future
-    /// emitter cannot forget the requests-that-omitted-it-get-nothing rule.
-    pub log_level: Option<String>,
 }
 
 impl ClientContext {
@@ -99,12 +89,6 @@ impl ClientContext {
                 .as_ref()
                 .is_some_and(|caps| caps.elicitation.is_some()),
             capabilities,
-            log_level: ctx
-                .meta
-                .0
-                .get(META_KEY_LOG_LEVEL)
-                .and_then(|value| value.as_str())
-                .map(str::to_owned),
         }
     }
 }

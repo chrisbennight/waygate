@@ -260,9 +260,9 @@ impl BoundedResponseClient {
         body: &[u8],
     ) -> Result<ServerJsonRpcMessage, serde_json::Error> {
         if Self::is_file_authorization(request) {
-            // The SDK's untagged result union accepts `_meta` as a tool
-            // result and drops the custom fields. Select the custom result
-            // by the originating method, preserving the complete payload.
+            // File authorization has a method-specific custom result. Select
+            // it by the originating method so extension fields remain intact
+            // even if they overlap another result shape.
             let decoded: JsonRpcMessage<ServerRequest, serde_json::Value, ServerNotification> =
                 serde_json::from_slice(body)?;
             if let JsonRpcMessage::Response(response) = decoded {

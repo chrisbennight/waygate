@@ -370,6 +370,27 @@ async fn connect_named_client(
 }
 
 #[tokio::test]
+async fn deprecated_logging_is_not_advertised_and_requests_are_refused() {
+    let server = spawn_gateway_with_allowed_hosts(vec![ALLOWED_HOST.into()]).await;
+    let client = connect_named_client(server.addr, "deprecated-capability-fixture").await;
+    let capabilities = serde_json::to_value(&client.peer_info().unwrap().capabilities).unwrap();
+    assert!(capabilities.get("logging").is_none());
+    let request = serde_json::from_value(json!({
+        "method": "logging/setLevel", "params": {"level": "info"}
+    }))
+    .unwrap();
+    let error = client
+        .send_request(request)
+        .await
+        .expect_err("Logging is unsupported");
+    assert!(
+        matches!(error, ServiceError::McpError(error) if error.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND)
+    );
+    let _ = client.cancel().await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn streamable_http_initialize_list_call_round_trip() {
     let server = spawn_gateway_with_allowed_hosts(vec![ALLOWED_HOST.into()]).await;
 
@@ -665,6 +686,20 @@ async fn accessible_skills_notify_an_already_connected_prompt_client() {
         .list_prompts(None)
         .await
         .expect("accessible approved skills are exposed through prompts");
+    let listed = client
+        .list_skills(None)
+        .await
+        .expect("typed Skills listing");
+    let skill = listed
+        .skills
+        .iter()
+        .find(|skill| skill.frontmatter.name == "demo")
+        .expect("approved skill");
+    let fetched = client
+        .get_skill(rmcp::model::GetSkillRequestParams::new(skill.uri.clone()))
+        .await
+        .expect("typed Skills metadata");
+    assert_eq!(fetched.skill, *skill);
     epoch.mark_changed();
     tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
         .await

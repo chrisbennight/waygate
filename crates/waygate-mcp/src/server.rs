@@ -3590,6 +3590,42 @@ fn skill_distribution_error(error: waygate_skills::distribution::DistributionErr
 }
 
 impl ServerHandler for GatewayServer {
+    async fn list_skills(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::ListSkillsResult, McpError> {
+        let params = serde_json::to_value(request).map_err(|_| {
+            McpError::internal_error("Skills parameters could not be encoded", None)
+        })?;
+        let result = self
+            .on_custom_request(
+                CustomRequest::new(crate::skills::LIST_METHOD, Some(params)),
+                ctx,
+            )
+            .await?;
+        serde_json::from_value(result.0)
+            .map_err(|_| McpError::internal_error("Skills result could not be encoded", None))
+    }
+
+    async fn get_skill(
+        &self,
+        request: rmcp::model::GetSkillRequestParams,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::GetSkillResult, McpError> {
+        let params = serde_json::to_value(request).map_err(|_| {
+            McpError::internal_error("Skills parameters could not be encoded", None)
+        })?;
+        let result = self
+            .on_custom_request(
+                CustomRequest::new(crate::skills::GET_METHOD, Some(params)),
+                ctx,
+            )
+            .await?;
+        serde_json::from_value(result.0)
+            .map_err(|_| McpError::internal_error("Skills result could not be encoded", None))
+    }
+
     async fn on_custom_request(
         &self,
         request: CustomRequest,
