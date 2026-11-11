@@ -94,8 +94,8 @@ Review this policy at each of these points:
   the earliest point at which the
   [deprecated features registry](https://modelcontextprotocol.io/specification/2026-07-28/deprecated)
   allows Roots, Sampling, Logging and Dynamic Client Registration to be removed;
-- when SEP-2596 reaches Final, which starts the registry's three-month notice
-  before the HTTP+SSE transport may be removed; and
+- when the deprecated registry or release changelog changes HTTP+SSE removal
+  status; SEP-2596 is Final, and its transition notice is already defined; and
 - whenever the gateway adopts a new specification revision.
 
 ### Deprecated features
@@ -106,7 +106,13 @@ Review this policy at each of these points:
 | Sampling | Never requests sampling. An upstream sampling request on `2026-07-28` is refused the same way as roots. | Never declares sampling. On a `2025-11-25` upstream session a sampling request is refused as an unknown method. | No change. No sampling relay will be built. |
 | Logging | Does not advertise the `logging` capability, refuses `logging/setLevel` as an unknown method and sends no `notifications/message`. | Drops upstream log notifications. | No change. The gateway reports through its own logs, metrics and audit records. |
 | Dynamic Client Registration | Not offered. The optional built-in authorization server, off by default, identifies clients by Client ID Metadata Documents. | Not used. Upstream credentials come from each manifest's `auth:` block. | No change. |
-| HTTP+SSE transport | Not served. Clients use Streamable HTTP at `/mcp`. | Opt-in per upstream with `transport: sse`, which always uses the `2025-11-25` handshake. | Kept while configured upstreams need it. When SEP-2596 reaches Final, move SSE upstreams to Streamable HTTP before the removal date the registry then sets. |
+| HTTP+SSE transport | Not served. Clients use Streamable HTTP at `/mcp`. | Opt-in per upstream with `transport: sse`, which always uses the `2025-11-25` handshake. | Migrate configured dependencies to Streamable HTTP using the [migration guide](../legacy-sse-migration.md). Removal requires the gateway's release and migration gates; specification eligibility does not automatically end gateway support. |
+
+[SEP-2596](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/seps/2596-spec-feature-lifecycle-and-deprecation.md)
+is Final. Its transition provision makes HTTP+SSE eligible for removal three
+months after Final, following the older deprecation notice. Eligibility is not
+specification removal: Core Maintainers decide removal during release
+preparation. Waygate's own support policy and migration gates are separate.
 
 ### Restarts and `2025-11-25` sessions
 
