@@ -507,8 +507,8 @@ impl LlmDispatcher {
                 // `route.path` is unused for Gemini. Streaming uses the SSE method
                 // (`:streamGenerateContent?alt=sse`), unary `:generateContent`;
                 // the streaming egress selects the Gemini SSE translator from
-                // record_base's protocol. Auth is `Bearer`: the credential store
-                // resolves Google as OAuth.
+                // record_base's protocol. The Developer API uses an explicit
+                // API key in x-goog-api-key, never a consumer OAuth session.
                 let method = if req.stream {
                     "streamGenerateContent?alt=sse"
                 } else {
@@ -516,7 +516,7 @@ impl LlmDispatcher {
                 };
                 (
                     render_gemini(req)?,
-                    ProviderAuth::Bearer,
+                    ProviderAuth::GoogleApiKey,
                     format!("v1beta/models/{}:{}", route.upstream_model, method),
                 )
             }
@@ -559,19 +559,20 @@ impl LlmDispatcher {
         };
 
         // I4: the bearer is injected and managed by the credential store.
-        let (bearer, credential_account_id) =
-            if route.provider == LlmProvider::OpenAi && !route.openai_chatgpt {
-                (
-                    self.credentials
-                        .api_key(route.provider, &route.credential_label)
-                        .await?,
-                    None,
-                )
-            } else {
+        let (bearer, credential_account_id) = if route.provider == LlmProvider::Google
+            || (route.provider == LlmProvider::OpenAi && !route.openai_chatgpt)
+        {
+            (
                 self.credentials
-                    .bearer_with_account(route.provider, &route.credential_label)
-                    .await?
-            };
+                    .api_key(route.provider, &route.credential_label)
+                    .await?,
+                None,
+            )
+        } else {
+            self.credentials
+                .bearer_with_account(route.provider, &route.credential_label)
+                .await?
+        };
         let account_id = if matches!(auth, ProviderAuth::OpenAiChatGpt) {
             credential_account_id
         } else {

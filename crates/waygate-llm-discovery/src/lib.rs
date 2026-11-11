@@ -33,10 +33,9 @@
 //! - **Anthropic (`x-api-key`)** — discovery is unwired; its models stay
 //!   operator-pinned. (`/v1/models` is an `x-api-key` endpoint, so listing is
 //!   technically reachable, but the refresher arm is not built.)
-//! - **Google / Gemini (OAuth)** lists only from a provider-specific internal
-//!   endpoint whose shape depends on the OAuth flavor; left unwired here
-//!   (mapped to [`DiscoverySurface::Unsupported`]) until it can be verified
-//!   against the gateway's actual Google credential rather than guessed.
+//! - **Google / Gemini (API key)** uses the documented `/v1beta/models` listing
+//!   with bounded pagination. Selected text/function models must advertise
+//!   generateContent; consumer OAuth discovery remains unsupported.
 //!
 //! [`DiscoverySurface::for_provider`] encodes that mapping; an `Unsupported`
 //! surface is a normal outcome the refresher skips, not an error.
@@ -48,6 +47,8 @@ use serde::Deserialize;
 
 pub mod codex_version;
 pub use codex_version::{is_valid_codex_client_version, CodexVersionTracker};
+mod gemini;
+pub use gemini::{list_gemini, GeminiListing};
 
 /// Per-MILLION-token rates (the unit the `llm_models` catalog stores), in
 /// `currency`. Only OpenRouter publishes pricing in its listing today.
@@ -101,6 +102,8 @@ pub enum DiscoverySurface {
     OpenRouter,
     /// OpenAI public API `/v1/models` (API key); no pricing or modality.
     OpenAiApi,
+    /// Documented Gemini Developer API `/v1beta/models`, with an API key.
+    GoogleApi,
     /// OpenAI Codex backend `/models` (subscription OAuth); no pricing.
     Codex,
     /// No wired listing endpoint — the refresher skips this credential and its
@@ -113,11 +116,12 @@ impl DiscoverySurface {
     /// Pick the listing surface for a `provider` (lowercase vocabulary:
     /// `openai`/`anthropic`/`google`/`openrouter`) and whether its credential is
     /// subscription OAuth. API-key OpenAI and OpenRouter credentials use their
-    /// public APIs; legacy OpenAI OAuth selects Codex.
+    /// public APIs, as do Google API keys; legacy OpenAI OAuth selects Codex.
     pub fn for_provider(provider: &str, is_oauth: bool) -> Self {
         match (provider.to_ascii_lowercase().as_str(), is_oauth) {
             ("openrouter", false) => Self::OpenRouter,
             ("openai", false) => Self::OpenAiApi,
+            ("google", false) => Self::GoogleApi,
             ("openai", true) => Self::Codex,
             _ => Self::Unsupported,
         }
@@ -135,7 +139,7 @@ impl DiscoverySurface {
     pub fn provider_has_adapter(provider: &str) -> bool {
         matches!(
             provider.to_ascii_lowercase().as_str(),
-            "openrouter" | "openai"
+            "openrouter" | "openai" | "google"
         )
     }
 }
@@ -562,6 +566,7 @@ mod tests {
         assert_eq!(S::for_provider("openai", false), S::OpenAiApi);
         assert_eq!(S::for_provider("anthropic", false), S::Unsupported);
         assert_eq!(S::for_provider("google", true), S::Unsupported);
+        assert_eq!(S::for_provider("google", false), S::GoogleApi);
         assert_eq!(S::for_provider("whatever", false), S::Unsupported);
     }
 
@@ -575,7 +580,7 @@ mod tests {
         assert!(S::provider_has_adapter("OpenAI"), "case-insensitive");
         // Providers with no wired adapter at all are dropped at parse time.
         assert!(!S::provider_has_adapter("anthropic"));
-        assert!(!S::provider_has_adapter("google"));
+        assert!(S::provider_has_adapter("google"));
         assert!(!S::provider_has_adapter("whatever"));
     }
 

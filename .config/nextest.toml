@@ -41,7 +41,7 @@ transfer-sweep-pg = { max-threads = 1 }
 federation-peers-pg = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'package(waygate-server) & (test(=llm_discovery::tests::refresh_target_upserts_prices_and_reconciles) | test(=llm_discovery::tests::refresh_target_discovers_embeddings_distinctly_and_reconcile_keeps_both) | test(=llm_discovery::tests::refresh_target_public_openai_reconciles_only_explicit_responses_models) | test(=llm_discovery::tests::refresh_target_codex_writes_responses_routing_with_chatgpt_flag) | test(=llm::tests::boot_load_makes_a_discovered_row_routable))'
+filter = 'package(waygate-server) & (test(=llm_discovery::tests::refresh_target_upserts_prices_and_reconciles) | test(=llm_discovery::tests::refresh_target_discovers_embeddings_distinctly_and_reconcile_keeps_both) | test(=llm_discovery::tests::refresh_target_public_openai_reconciles_only_explicit_responses_models) | test(=llm_discovery::tests::refresh_target_codex_writes_responses_routing_with_chatgpt_flag) | test(=llm_discovery::tests::refresh_target_gemini_api_reconciles_selected_generation_models) | test(=llm::tests::boot_load_makes_a_discovered_row_routable))'
 test-group = 'discovery-pg'
 
 [[profile.default.overrides]]

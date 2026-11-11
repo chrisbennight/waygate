@@ -7,12 +7,11 @@
 //! Deliberately narrow responsibilities:
 //! - It is a pure **consumer** of a bearer string. It never reads, writes, or
 //!   refreshes credential material — that is `waygate-llm-credentials`'
-//!   job (invariant I4). OpenAI / Google subscription-OAuth and OpenRouter
-//!   API-key authenticate with `Authorization: Bearer <token>`; Anthropic uses a
-//!   first-party `x-api-key` + `anthropic-version`. Per-provider header divergence
-//!   is selected by [`ProviderAuth`]: OpenAI/OpenRouter are Bearer-only, Anthropic
-//!   is `x-api-key`, and the Codex (ChatGPT-backend) path adds the Codex CLI
-//!   device fingerprint its OAuth token requires.
+//!   job (invariant I4). OpenAI and OpenRouter API keys use
+//!   `Authorization: Bearer <token>`; Gemini Developer API keys use
+//!   `x-goog-api-key`; Anthropic uses `x-api-key` + `anthropic-version`.
+//!   [`ProviderAuth`] selects the headers. The retained legacy Codex path adds
+//!   the CLI fingerprint its subscription token requires during migration.
 //! - It does **not** interpret payloads beyond SSE framing. Request rendering
 //!   (including `stream_options.include_usage`) and response→`InferenceRecord`
 //!   extraction live in `waygate-llm-translate`; this crate forwards the body
@@ -111,6 +110,8 @@ pub enum ProviderAuth {
     /// `Authorization: Bearer <token>` — OpenAI chat/responses, OpenRouter.
     #[default]
     Bearer,
+    /// Gemini Developer API key, carried only in `x-goog-api-key`.
+    GoogleApiKey,
     /// The Anthropic Messages API authenticated with a first-party **API key**:
     /// `x-api-key: <key>` + `anthropic-version` (no `Authorization: Bearer`, no
     /// device fingerprint). This is the sanctioned path; the prior
@@ -367,6 +368,7 @@ impl ProviderClient {
         builder = match req.auth {
             ProviderAuth::None => builder,
             ProviderAuth::Bearer => builder.bearer_auth(&req.bearer),
+            ProviderAuth::GoogleApiKey => builder.header("x-goog-api-key", req.bearer.as_str()),
             // The Anthropic Messages API authenticated with a first-party **API
             // key** (`x-api-key`), not `Authorization: Bearer`. No Claude Code
             // device fingerprint — this is the sanctioned, ToS-clean path (the

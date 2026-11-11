@@ -37,6 +37,7 @@ use waygate_llm_translate::{
 #[derive(Default)]
 struct Captured {
     authorization: Option<String>,
+    x_goog_api_key: Option<String>,
     x_api_key: Option<String>,
     anthropic_beta: Option<String>,
     model: Option<String>,
@@ -376,9 +377,9 @@ fn anthropic_route(addr: SocketAddr) -> ResolvedRoute {
     }
 }
 
-/// Google credential (OAuth blob — the store treats Google as OAuth).
+/// Explicit Gemini Developer API credential, without consumer OAuth material.
 fn gemini_store() -> Arc<LlmCredentialStore> {
-    let blob = r#"{"tokens":{"access_token":"ya29-test","refresh_token":"rt"},"expires_at":"2099-01-01T00:00:00Z"}"#;
+    let blob = r#"{"api_key":"google-api-fixture"}"#;
     Arc::new(LlmCredentialStore::from_vars([(
         "LLM_CRED_GOOGLE_MAIN".to_string(),
         blob.to_string(),
@@ -412,6 +413,10 @@ async fn gemini_handler(
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|h| h.to_str().ok())
             .map(str::to_string);
+        c.x_goog_api_key = headers
+            .get("x-goog-api-key")
+            .and_then(|h| h.to_str().ok())
+            .map(str::to_owned);
     }
     let resp = json!({
         "responseId": "resp_1",
@@ -464,15 +469,22 @@ async fn gemini_unary_dispatch_templates_path_renders_and_extracts() {
     assert_eq!(body["choices"][0]["finish_reason"], "stop");
     assert_eq!(body["usage"]["prompt_tokens"], 5);
 
-    // OAuth bearer (the store resolves Google as OAuth).
     let c = captured.lock().unwrap();
-    assert_eq!(c.authorization.as_deref(), Some("Bearer ya29-test"));
+    assert!(c.authorization.is_none());
+    assert_eq!(c.x_goog_api_key.as_deref(), Some("google-api-fixture"));
 }
 
 /// Loopback Gemini SSE provider: emits the `streamGenerateContent?alt=sse` frame
 /// sequence — an incremental content chunk, then a final chunk carrying
 /// `finishReason` + `usageMetadata` (Gemini sends no `[DONE]` sentinel).
-async fn gemini_stream_handler() -> Response {
+async fn gemini_stream_handler(
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    assert_eq!(headers["x-goog-api-key"], "google-api-fixture");
+    assert!(!headers.contains_key("authorization"));
+    assert_eq!(query.get("alt").map(String::as_str), Some("sse"));
+    assert!(!query.contains_key("key"));
     let sse = concat!(
         "data: {\"responseId\":\"resp_1\",\"modelVersion\":\"gemini-served-x\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hi\"}]}}]}\n\n",
         "data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"!\"}]}}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2}}\n\n",
@@ -520,6 +532,50 @@ async fn gemini_streaming_dispatch_templates_sse_path_and_returns_frames() {
         "first frame is a Gemini streamGenerateContent chunk: {}",
         first.data
     );
+}
+
+#[tokio::test]
+async fn gemini_developer_api_refuses_subscription_credentials_before_network_access() {
+    let store = LlmCredentialStore::from_vars([("LLM_CRED_GOOGLE_MAIN".into(),
+        r#"{"tokens":{"access_token":"consumer-session","refresh_token":"refresh"},"expires_at":"2099-01-01T00:00:00Z"}"#.into())]);
+    let dispatcher =
+        LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), Arc::new(store));
+    let error = dispatcher
+        .dispatch(&chat(false), &gemini_route("127.0.0.1:1".parse().unwrap()))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DispatchError::Credential(waygate_llm_credentials::CredentialError::ApiKeyRequired(_))
+    ));
+}
+
+#[tokio::test]
+async fn gemini_api_errors_retain_provider_http_status() {
+    for status in [429, 503] {
+        let addr = spawn(Router::new().route(
+            "/v1beta/models/gemini-served-x:generateContent",
+            post(move |headers: HeaderMap| async move {
+                assert_eq!(headers["x-goog-api-key"], "google-api-fixture");
+                (
+                    axum::http::StatusCode::from_u16(status).unwrap(),
+                    axum::Json(
+                        json!({"error":{"code":status,"message":"synthetic provider rejection"}}),
+                    ),
+                )
+            }),
+        ))
+        .await;
+        let dispatcher =
+            LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), gemini_store());
+        let error = dispatcher
+            .dispatch(&chat(false), &gemini_route(addr))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error,DispatchError::Provider(ProviderError::Status { status:observed,.. }) if observed==status)
+        );
+    }
 }
 
 /// Loopback Anthropic Messages provider: captures the `x-api-key` header and the
