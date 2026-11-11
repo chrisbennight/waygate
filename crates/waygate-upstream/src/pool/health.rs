@@ -628,7 +628,14 @@ async fn entry_status(name: &str, entry: &UpstreamEntry) -> UpstreamStatus {
                 resources_advertised: peer.map(|p| p.capabilities.resources.is_some()),
                 tasks_advertised: peer.map(|p| p.capabilities.supports_tasks()),
                 skills_advertised: peer.map(|p| p.capabilities.supports_skills()),
-                input_schema_warning_count: conn.unregisterable_input_schemas.len(),
+                input_schema_warning_count: conn
+                    .unregisterable_input_schemas
+                    .iter()
+                    .filter(|warning| {
+                        conn.tools.iter().any(|tool| tool.name == warning.tool)
+                            && !quarantined.contains(warning.tool.as_str())
+                    })
+                    .count(),
             })
         })
         .collect();
@@ -1389,7 +1396,14 @@ mod bounded_snapshot_tests {
                 _: RequestContext<RoleServer>,
             ) -> Result<ListToolsResult, rmcp::ErrorData> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                Ok(ListToolsResult::with_all_items(Vec::new()))
+                let schema = serde_json::json!({"type":"object","properties":{"id":{"type":"string"}},"anyOf":[{"required":["id"]}]});
+                Ok(ListToolsResult::with_all_items(vec![
+                    rmcp::model::Tool::new(
+                        "choice",
+                        "A synthetic root composition",
+                        Arc::new(schema.as_object().unwrap().clone()),
+                    ),
+                ]))
             }
         }
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1417,6 +1431,12 @@ mod bounded_snapshot_tests {
             configured.transport = Transport::Http;
             configured.command = None;
             configured.url = Some(format!("http://{address}/mcp"));
+            configured.tools = vec![crate::ToolClassification::new(
+                "choice",
+                waygate_core::RiskTier::Low,
+                false,
+                false,
+            )];
             let manifests = BTreeMap::from([("fixture".into(), configured)]);
             match &pool {
                 None => pool = Some(UpstreamPool::connect(manifests).await),
@@ -1441,6 +1461,7 @@ mod bounded_snapshot_tests {
             assert_eq!(lane.resources_advertised, Some(version == "first"));
             assert_eq!(lane.tasks_advertised, Some(false));
             assert!(lane.protocol_version.is_some());
+            assert_eq!(lane.input_schema_warning_count, 1);
             if let Some(before) = prior_connection {
                 assert!(lane.connected_at >= before);
             }
@@ -1456,6 +1477,27 @@ mod bounded_snapshot_tests {
             );
         }
         let pool = pool.unwrap();
+        let entry = pool.entries.load().get("fixture").cloned().unwrap();
+        entry.quarantined.write().unwrap().insert("choice".into());
+        let Some(UpstreamStatusObservation::Observed(blocked)) = pool
+            .server_status_within("fixture", Duration::from_secs(1))
+            .await
+        else {
+            panic!("available snapshot")
+        };
+        assert_eq!(blocked.health.published_tool_count, 0);
+        assert_eq!(
+            blocked.compatibility[0].input_schema_warning_count, 0,
+            "quarantined tools are not client-visible warnings"
+        );
+        assert_eq!(pool.clear_quarantine("fixture").await, Some(1));
+        let Some(UpstreamStatusObservation::Observed(released)) = pool
+            .server_status_within("fixture", Duration::from_secs(1))
+            .await
+        else {
+            panic!("available snapshot")
+        };
+        assert_eq!(released.compatibility[0].input_schema_warning_count, 1);
         pool.reload_manifests(&BTreeMap::new()).await;
         assert!(pool
             .server_status_within("fixture", Duration::from_secs(1))
