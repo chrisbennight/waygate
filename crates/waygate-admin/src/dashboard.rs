@@ -193,6 +193,7 @@ const DESTINATIONS: &[DestDef] = &[
             ("API Keys", "/identities"),
             ("Sessions", "/sessions"),
             ("Profiles", "/profiles"),
+            ("Clients", "/client_compatibility"),
             ("OAuth consent", "/oauth_consent"),
             ("Tenants", "/tenants"),
         ],
@@ -586,6 +587,7 @@ fn page_routes(state: Arc<AdminState>) -> Router<()> {
             post(delete_activity_view),
         )
         .merge(crate::api_keys::router())
+        .merge(crate::client_compatibility::dashboard_router())
         .merge(crate::oauth_clients::router())
         // Sessions + Profiles split off the API
         // Keys page into their own pages (the OAuth-session inventory and

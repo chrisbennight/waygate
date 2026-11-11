@@ -1057,7 +1057,10 @@ async fn gateway_main() -> anyhow::Result<()> {
         cfg.codemode_capacity,
         inflight_work.clone(),
     );
+    let client_observations =
+        Arc::new(waygate_mcp::client_observations::ClientObservationStore::new());
     let mcp_factory = Arc::new(mcp_factory::McpServerFactory {
+        client_observations: client_observations.clone(),
         catalog: catalog.clone(),
         catalog_store: catalog_store.clone(),
         authz: authz_gate.clone(),
@@ -1417,6 +1420,7 @@ async fn gateway_main() -> anyhow::Result<()> {
         // /api/v1/policy_bundles admin endpoints. Same handle the authz
         // gate loads from; `None` ⇒ those endpoints 503.
         .with_policy_store(policy_store.clone())
+        .with_client_observations(client_observations)
         // Inference-plane LLM model catalog for the read-only
         // /llm_models dashboard page. `None` ⇒ the page shows the
         // "store not configured" card.

@@ -18,6 +18,7 @@ pub mod builtin;
 pub mod call_tasks;
 pub mod catalog;
 pub mod catalog_changes;
+pub mod client_observations;
 pub mod client_schema;
 mod count_bounds;
 pub mod discovery;
