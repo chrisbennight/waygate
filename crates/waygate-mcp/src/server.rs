@@ -610,8 +610,8 @@ pub struct GatewayServer {
     /// one sealer across request-scoped server instances; embedders get a
     /// process-local fallback from the base constructor.
     tool_list_cursor_sealer: crate::SharedToolListCursorSealer,
-    /// Last-known-good verified skill catalog. `None` leaves the experimental
-    /// extension absent and all draft methods unmounted.
+    /// Last-known-good verified skill catalog. `None` leaves the Skills
+    /// extension absent and its methods unmounted.
     skill_catalog: Option<Arc<waygate_skills::ReloadableSkillCatalog>>,
     reviewed_skills: Option<Arc<waygate_skills::distribution::ReviewedSkillCatalog>>,
     file_upload_authorizer: Option<crate::files::SharedFileUploadAuthorizer>,
@@ -941,7 +941,7 @@ impl GatewayServer {
         self
     }
 
-    /// Mount the draft Skills extension over a verified reloadable catalog.
+    /// Mount the Skills extension over a verified reloadable catalog.
     #[must_use]
     pub fn with_skill_catalog(
         mut self,
@@ -4247,8 +4247,8 @@ impl ServerHandler for GatewayServer {
                 .builtins
                 .iter()
                 .any(|builtin| builtin.supports_tasks() && builtin.task_tool().is_some());
-        // SEP-2640 remains experimental. Advertise only list/get (empty
-        // settings object, no directoryRead claim), and only while a complete
+        // Advertise only Skills list/get (empty settings object, no
+        // directoryRead claim), and only while a complete
         // verified snapshot is actually available to serve.
         let skills_enabled = self
             .skill_catalog

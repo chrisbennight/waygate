@@ -1,4 +1,4 @@
-//! Draft Agent Skills MCP extension projection.
+//! Official Agent Skills MCP extension projection.
 //!
 //! The catalog crate owns acquisition and validation. This module only projects
 //! one already-verified immutable snapshot onto SEP-2640's current list/get
@@ -87,9 +87,13 @@ struct ListSkillsResult {
 struct GetSkillResult {
     result_type: &'static str,
     skill: Skill,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_scope: Option<CacheScope>,
 }
 
-/// Handle a draft Skills custom method against one immutable snapshot.
+/// Handle a Skills extension method against one immutable snapshot.
 pub(crate) fn handle_custom(
     snapshot: &SkillCatalogSnapshot,
     method: &str,
@@ -161,6 +165,8 @@ pub(crate) fn handle_entries(
             serde_json::to_value(GetSkillResult {
                 result_type: RESULT_COMPLETE,
                 skill: Skill::from(skill),
+                ttl_ms: include_cache_hints.then_some(0),
+                cache_scope: include_cache_hints.then_some(CacheScope::Private),
             })
         }
         _ => unreachable!("caller checks is_method"),
@@ -303,10 +309,17 @@ mod tests {
         )
         .expect("get");
         assert_eq!(fetched["skill"], listed["skills"][0]);
-        // SEP-2640 applies the MCP 2026 list-cache attributes only to
-        // skills/list; skills/get has no corresponding fields.
-        assert!(fetched.get("ttlMs").is_none());
-        assert!(fetched.get("cacheScope").is_none());
+        assert_eq!(fetched["resultType"], "complete");
+        assert_eq!(fetched["ttlMs"], 0);
+        assert_eq!(fetched["cacheScope"], "private");
+
+        for method in [LIST_METHOD, GET_METHOD] {
+            let legacy =
+                handle_custom(&snapshot, method, json!({"uri": uri}), None, &sealer, false)
+                    .expect("legacy extension response");
+            assert!(legacy.get("ttlMs").is_none());
+            assert!(legacy.get("cacheScope").is_none());
+        }
     }
 
     #[test]

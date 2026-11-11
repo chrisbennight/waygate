@@ -99,6 +99,11 @@ without fetching supporting files. `skills/get` advertises the SEP-2640
 `resources: "dynamic"` form. This is the
 standards-compatible way to preserve progressive disclosure when the backing
 source does not already provide the extension's SHA-256 resource manifest.
+Publishing a complete manifest would require fetching and hashing every supporting
+blob before publication. The gateway intentionally keeps the dynamic form rather
+than adding that acquisition requirement. Hosts may decline dynamic skills;
+gateway-side Git integrity and distribution review do not replace the host's
+own content approval or grant execution authority.
 Workflow load separately verifies fetch-permitted supporting files to evaluate
 content-bound read policies before advertising their file inventory. See
 [client delivery](skills-client-delivery.md) for its limits and deadline.
@@ -158,7 +163,7 @@ approved contents when those files remain available. See
 [distribution review](skill-distribution-review.md) for recovery and revocation.
 
 
-The gateway advertises the experimental
+The gateway advertises the official
 `io.modelcontextprotocol/skills` extension only when the caller can access an
 approved skill from a verified snapshot.
 `skills/list` and `skills/get` expose validated frontmatter and the dynamic
@@ -203,8 +208,8 @@ control without forcing that extra machinery on every installation.
 
 - [Agent Skills specification and progressive disclosure](https://agentskills.io/specification)
 - [SEP-2640 Skills extension pull request and discussion](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2640)
-- [Pinned SEP-2640 draft text](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/753b9f2be43e07fdd070e535d75f190cff14beea/seps/2640-skills-extension.md)
-- [Skills Over MCP working-group repository](https://github.com/modelcontextprotocol/experimental-ext-skills)
+- [Published Skills extension](https://modelcontextprotocol.io/extensions/skills/overview)
+- [Skills extension repository](https://github.com/modelcontextprotocol/ext-skills)
 - [MCP Skills capability proposal](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/2167)
 - [MCP first-class Skills proposal](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/2405)
 - [MCP executable-resource proposal](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1632)

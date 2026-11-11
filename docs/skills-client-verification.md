@@ -1,5 +1,19 @@
 # Verify central workflows with an MCP client
 
+## Skills extension interoperability
+
+The loopback fixture below also serves the official Skills extension. A protocol
+check with `@modelcontextprotocol/client` 2.4.0 and its `SkillsClient` exercises
+modern discovery, `skills/list`, `skills/get`, root and supporting resource reads,
+and unknown-skill refusal. The SDK validates the required cache fields and root
+frontmatter. Dynamic resources are intentionally reported as unverified by the
+SDK because no SHA-256 manifest is published; gateway-side source integrity and
+distribution review remain separate guarantees.
+
+The extension advertises no directory-reading capability. This protocol check
+does not establish native skill-menu support or automatic activation in a chat
+client.
+
 ## Reproduce the central-delivery check
 
 Run the fixture from a source checkout:

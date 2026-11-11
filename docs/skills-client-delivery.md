@@ -1,7 +1,7 @@
 # Use gateway workflows without local skill bundles
 
 The gateway exposes its Git-backed Agent Skills through ordinary MCP tools and
-prompts. A client does not need the draft Skills extension to discover and read
+prompts. A client does not need the official Skills extension to discover and read
 them. The authoring repository remains the source of truth; these interfaces
 use its existing verified catalog and individual resource reader.
 
@@ -21,6 +21,14 @@ approved skill; a client uses it only if it also supports it, and other
 clients ignore the advertisement. The official
 [client support matrix](https://modelcontextprotocol.io/extensions/client-matrix)
 lists which clients support it.
+
+On MCP `2026-07-28`, both `skills/list` and `skills/get` return the required
+`resultType`, `ttlMs`, and `cacheScope` fields. Results are private and require
+revalidation because access depends on the caller's current policy and review
+state. The gateway does not advertise optional directory reading. Its dynamic
+resource declaration preserves lazy Git-backed reads; hosts may decline dynamic
+skills and must not treat an earlier approval as covering arbitrary future
+contents. See [source integrity](skills-git-source.md#acquisition-and-integrity).
 
 ## Discover and use a workflow
 
