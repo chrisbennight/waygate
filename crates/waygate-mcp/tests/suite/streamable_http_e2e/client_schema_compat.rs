@@ -1,6 +1,122 @@
 //! Client registration changes do not change the invoked schema contract.
 use super::*;
 
+#[derive(serde::Deserialize)]
+struct FixtureCase {
+    tool: String,
+    valid: Value,
+    invalid: Value,
+    adapted: bool,
+}
+
+#[tokio::test]
+async fn fixture_schemas_keep_authoritative_calls_across_protocols_and_presentation_modes() {
+    let fixtures: Vec<Value> =
+        serde_json::from_str(include_str!("../../fixtures/client-schema-tools.json")).unwrap();
+    let cases: Vec<FixtureCase> =
+        serde_json::from_str(include_str!("../../fixtures/client-schema-cases.json")).unwrap();
+    for case in cases {
+        let schema = fixtures
+            .iter()
+            .find(|tool| tool["name"] == case.tool)
+            .unwrap()["inputSchema"]
+            .clone();
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let catalog: SharedCatalog = Arc::new(DemoCatalog {
+            input_schema: Some(schema.as_object().unwrap().clone()),
+            dispatches: Some(dispatches.clone()),
+            ..DemoCatalog::default()
+        });
+        let server = spawn_gateway_custom(
+            StreamableHttpServerConfig::default().with_allowed_hosts(vec![ALLOWED_HOST.to_owned()]),
+            move || {
+                GatewayServer::new(catalog.clone())
+                    .with_root_composition_clients(vec!["restricted-client".to_owned()])
+            },
+        )
+        .await;
+        let url = format!("http://{}/mcp", server.addr);
+        let http = reqwest::Client::new();
+        for (name, selected) in [("restricted-client", true), ("standard-client", false)] {
+            let legacy = connect_named_client(server.addr, name).await;
+            let listed = legacy.list_tools(None).await.unwrap();
+            let shown = listed
+                .tools
+                .iter()
+                .find(|tool| tool.name == "demo.echo")
+                .unwrap();
+            assert_eq!(
+                Value::Object((*shown.input_schema).clone()) != schema,
+                selected && case.adapted,
+                "{} legacy",
+                case.tool
+            );
+            let stateless = stateless_response_json(
+                stateless_post(&http, &url, 1, "tools/list", json!({}), name).await,
+            )
+            .await;
+            let shown = stateless["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == "demo.echo")
+                .unwrap();
+            assert_eq!(
+                shown["inputSchema"] != schema,
+                selected && case.adapted,
+                "{} stateless",
+                case.tool
+            );
+            for (arguments, valid) in [(&case.valid, true), (&case.invalid, false)] {
+                let before = dispatches.load(Ordering::SeqCst);
+                let called = legacy
+                    .call_tool(
+                        CallToolRequestParams::new("demo.echo")
+                            .with_arguments(arguments.as_object().unwrap().clone()),
+                    )
+                    .await;
+                assert_eq!(
+                    called
+                        .as_ref()
+                        .is_ok_and(|result| result.is_error != Some(true)),
+                    valid,
+                    "{} legacy selected={selected}",
+                    case.tool
+                );
+                assert_eq!(
+                    dispatches.load(Ordering::SeqCst) - before,
+                    usize::from(valid)
+                );
+                let before = dispatches.load(Ordering::SeqCst);
+                let called = stateless_response_json(
+                    stateless_post(
+                        &http,
+                        &url,
+                        2,
+                        "tools/call",
+                        json!({"name":"demo.echo","arguments":arguments}),
+                        name,
+                    )
+                    .await,
+                )
+                .await;
+                let accepted = called.get("error").is_none() && called["result"]["isError"] != true;
+                assert_eq!(
+                    accepted, valid,
+                    "{} stateless selected={selected}",
+                    case.tool
+                );
+                assert_eq!(
+                    dispatches.load(Ordering::SeqCst) - before,
+                    usize::from(valid)
+                );
+            }
+            let _ = legacy.cancel().await;
+        }
+        server.shutdown().await;
+    }
+}
+
 fn conditional_schema() -> Map<String, Value> {
     serde_json::from_str::<Value>(include_str!("../../fixtures/client-schema-tools.json")).unwrap()
         [2]["inputSchema"]

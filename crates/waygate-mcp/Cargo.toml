@@ -57,6 +57,7 @@ rmcp = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+tracing-subscriber.workspace = true
 waygate-test-support.workspace = true
 axum = { workspace = true, features = ["ws"] }
 waygate-llm-providers.workspace = true
@@ -66,6 +67,7 @@ reqwest = { workspace = true }
 sha2.workspace = true
 rmcp = { workspace = true, features = [
     "client",
+    "transport-io",
     "reqwest",
     "transport-streamable-http-client-reqwest",
 ] }

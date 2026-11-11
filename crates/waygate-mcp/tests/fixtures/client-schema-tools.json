@@ -91,5 +91,35 @@
         }
       ]
     }
+  },
+  {
+    "name": "root_anyof",
+    "description": "Supply an id or a slug.",
+    "inputSchema": {"type":"object","properties":{"id":{"type":"string"},"slug":{"type":"string"}},"anyOf":[{"required":["id"]},{"required":["slug"]}]}
+  },
+  {
+    "name": "root_oneof",
+    "description": "Supply exactly one of id and slug.",
+    "inputSchema": {"type":"object","properties":{"id":{"type":"string"},"slug":{"type":"string"}},"oneOf":[{"required":["id"]},{"required":["slug"]}]}
+  },
+  {
+    "name": "root_allof",
+    "description": "Supply both first and second.",
+    "inputSchema": {"type":"object","properties":{"first":{"type":"string"},"second":{"type":"string"}},"allOf":[{"required":["first"]},{"required":["second"]}]}
+  },
+  {
+    "name": "root_conditional",
+    "description": "A size cap selected by mode without a wrapping combinator.",
+    "inputSchema": {"type":"object","properties":{"mode":{"type":"string"},"size":{"type":"integer"}},"required":["mode","size"],"if":{"properties":{"mode":{"const":"large"}}},"then":{"properties":{"size":{"maximum":2000000000}}},"else":{"properties":{"size":{"maximum":16000000}}}}
+  },
+  {
+    "name": "root_not",
+    "description": "Supply an id and omit forbidden.",
+    "inputSchema": {"type":"object","properties":{"id":{"type":"string"},"forbidden":{"type":"boolean"}},"required":["id"],"not":{"required":["forbidden"]}}
+  },
+  {
+    "name": "root_reference",
+    "description": "A referenced id constraint that the gateway adapter leaves unchanged.",
+    "inputSchema": {"type":"object","properties":{"id":{"type":"string"}},"allOf":[{"$ref":"#/$defs/Identifier"}],"$defs":{"Identifier":{"type":"object","required":["id"]}}}
   }
 ]
