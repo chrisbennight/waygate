@@ -18,11 +18,11 @@ impl DefaultInvocationService {
             .map_err(|e| InvocationError::InvalidArguments(e.to_string()))?;
         request.model_requested = ctx.tool.to_owned();
         if model.route.provider != waygate_llm_credentials::LlmProvider::OpenAi
-            || !model.route.openai_chatgpt
+            || model.route.embeddings_no_auth
             || !model.fallbacks.is_empty()
         {
             return Err(InvocationError::InvalidArguments(
-                "image models require one Codex subscription route without fallbacks".into(),
+                "image models require one authenticated OpenAI route without fallbacks".into(),
             ));
         }
         ctx.audit_category = EvidenceCategory::LlmCompletion;

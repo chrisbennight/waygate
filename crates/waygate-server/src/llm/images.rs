@@ -1,4 +1,4 @@
-//! Standard Images API ingress and bounded multipart-to-Codex conversion.
+//! Standard Images API ingress and bounded multipart-to-inline conversion.
 
 use super::*;
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart};
@@ -583,6 +583,34 @@ mod tests {
             2
         );
         assert!(requests[1].arguments.as_ref().unwrap().contains_key("mask"));
+    }
+
+    #[test]
+    fn public_api_image_config_keeps_single_attempt_and_explicit_operation() {
+        let body = json!([{
+            "alias":"image-api", "provider":"openai", "credential_label":"API",
+            "base_url":"https://api.openai.com/v1", "kind":"images"
+        }]);
+        let defs: Vec<ModelDef> = serde_json::from_value(body.clone()).unwrap();
+        let row = model_def_to_upsert(&defs[0]);
+        assert!(!row.openai_chatgpt);
+        assert_eq!(row.upstream_api, "images");
+        let (_, resolver) = build_from_defs(defs, None).unwrap().unwrap();
+        let model = resolver.resolve(LLM_SERVER, "image-api").unwrap();
+        assert_eq!(model.operation, LlmOperation::Images);
+        assert_eq!(model.route.path, "images");
+        assert!(!model.route.openai_chatgpt);
+        for (key, value) in [
+            ("credential_labels", json!(["API", "OTHER"])),
+            ("cache_ttl_ms", json!(1000)),
+            ("ttfb_ms", json!(1000)),
+            ("surface", json!("responses")),
+        ] {
+            let mut invalid = body.clone();
+            invalid[0][key] = value;
+            let defs = serde_json::from_value(invalid).unwrap();
+            assert!(build_from_defs(defs, None).is_err(), "{key}");
+        }
     }
 
     #[test]
