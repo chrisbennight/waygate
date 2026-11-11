@@ -258,7 +258,9 @@ pub struct LaneCompatibility {
     pub resources_advertised: Option<bool>,
     pub tasks_advertised: Option<bool>,
     pub skills_advertised: Option<bool>,
-    pub input_schema_warning_count: usize,
+    /// Retained upstream catalog warnings before quarantine, durable admission,
+    /// caller authorization, or client-specific presentation.
+    pub pre_admission_input_schema_warning_count: usize,
 }
 
 fn serialize_breaker_state<S: serde::Serializer>(
@@ -634,13 +636,10 @@ async fn entry_status(name: &str, entry: &UpstreamEntry) -> UpstreamStatus {
                 resources_advertised: peer.map(|p| p.capabilities.resources.is_some()),
                 tasks_advertised: peer.map(|p| p.capabilities.supports_tasks()),
                 skills_advertised: peer.map(|p| p.capabilities.supports_skills()),
-                input_schema_warning_count: conn
+                pre_admission_input_schema_warning_count: conn
                     .unregisterable_input_schemas
                     .iter()
-                    .filter(|warning| {
-                        conn.tools.iter().any(|tool| tool.name == warning.tool)
-                            && !quarantined.contains(warning.tool.as_str())
-                    })
+                    .filter(|warning| conn.tools.iter().any(|tool| tool.name == warning.tool))
                     .count(),
             })
         })
@@ -1468,7 +1467,7 @@ mod bounded_snapshot_tests {
             assert_eq!(lane.tasks_advertised, Some(false));
             assert!(lane.protocol_version.is_some());
             assert!(lane.current);
-            assert_eq!(lane.input_schema_warning_count, 1);
+            assert_eq!(lane.pre_admission_input_schema_warning_count, 1);
             if let Some(before) = prior_connection {
                 assert!(lane.connected_at >= before);
             }
@@ -1494,8 +1493,8 @@ mod bounded_snapshot_tests {
         };
         assert_eq!(blocked.health.published_tool_count, 0);
         assert_eq!(
-            blocked.compatibility[0].input_schema_warning_count, 0,
-            "quarantined tools are not client-visible warnings"
+            blocked.compatibility[0].pre_admission_input_schema_warning_count, 1,
+            "catalog compatibility evidence is independent of admission decisions"
         );
         assert_eq!(pool.clear_quarantine("fixture").await, Some(1));
         let Some(UpstreamStatusObservation::Observed(released)) = pool
@@ -1504,7 +1503,10 @@ mod bounded_snapshot_tests {
         else {
             panic!("available snapshot")
         };
-        assert_eq!(released.compatibility[0].input_schema_warning_count, 1);
+        assert_eq!(
+            released.compatibility[0].pre_admission_input_schema_warning_count,
+            1
+        );
         for _ in 0..crate::BreakerConfig::default().failure_threshold {
             entry.breaker.acquire().unwrap().failure();
         }

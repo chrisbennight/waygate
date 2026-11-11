@@ -15,7 +15,7 @@ The report distinguishes:
   retained by the MCP library, separately for each retained connection. These are
   upstream declarations, not independently verified facts.
 - **Observed:** the protocol that connection negotiated and the age of its
-  successful catalog observation, plus schema warnings and runtime availability.
+  successful catalog observation, plus pre-admission schema warnings and runtime availability.
 - **Explicitly tested:** `not_recorded`. Opening a report runs no tool,
   resource, elicitation, file-transfer, or conformance probe. Use a separately
   selected harmless qualification workflow to test those contracts.
@@ -33,6 +33,14 @@ not open; it is not an independent liveness or conformance test. The last
 successful connection time is availability history only. A busy lane returns
 `busy` within a bounded wait instead of guessing or
 holding the operator page behind a long call.
+
+Input-schema warning counts describe tools in the retained upstream catalog
+before quarantine, durable review decisions, caller authorization, and client
+presentation. They do not count currently client-visible tools. In particular,
+approval on another replica can change durable admission while this replica's
+local quarantine cache remains unchanged. The report does not reproduce that
+admission decision or claim an effective catalog for any caller. Output-schema
+refusals remain evidence of invalid output contracts omitted during publication.
 
 Reports cover one explicitly selected upstream. At most 32 retained lanes are
 returned, with an explicit truncation signal; peer-controlled display labels

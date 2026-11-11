@@ -54,7 +54,7 @@ pub struct LaneCompatibilityView {
     pub resources_advertised: Option<bool>,
     pub tasks_advertised: Option<bool>,
     pub skills_advertised: Option<bool>,
-    pub input_schema_warning_count: usize,
+    pub pre_admission_input_schema_warning_count: usize,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -120,7 +120,7 @@ fn from_observation(observation: UpstreamStatusObservation) -> UpstreamCompatibi
         ("Elicitation", "Elicitation is a caller capability, not a server declaration. The gateway mirrors permitted request input capabilities on compatible modern dials; legacy or undeclared input flows are refused. This report does not exercise an elicitation."),
         ("Files", "Draft file authorization support cannot be established from the SDK's retained server declarations. File operations still require governed authorization and matching caller capabilities. Actual transfer compatibility is unknown here."),
         ("Resources", "An upstream resource declaration and configured URI-prefix ownership are separate evidence. Without configured ownership, native resource reads and listings do not reach this upstream. No resource read is performed by this report."),
-        ("Schemas", "Input-schema warnings identify live tools that strict tool-calling clients may reject. Output-schema refusals describe omitted invalid output contracts. Client projection is opt-in and never replaces authoritative invocation validation; neither count proves a particular client accepts the catalog."),
+        ("Schemas", "Pre-admission input-schema warnings describe the retained upstream catalog before quarantine, durable review decisions, caller authorization, and client presentation. They do not count currently client-visible tools; approval on another replica may change admission without changing these observations. Output-schema refusals describe omitted invalid output contracts. Client projection is opt-in and never replaces authoritative invocation validation; neither count proves a particular client accepts the catalog."),
         ("Skills and Apps", "A Skills declaration is an upstream claim; Waygate's governed Skills catalog has its own distribution contract. This report does not enable upstream Skills relay or MCP Apps negotiation."),
     ] {
         result.explanations.push(CompatibilityExplanation { capability: capability.into(), explanation: explanation.into() });
@@ -174,7 +174,7 @@ fn fill_observed(report: &mut UpstreamCompatibilityReport, status: UpstreamStatu
             resources_advertised: lane.resources_advertised,
             tasks_advertised: lane.tasks_advertised,
             skills_advertised: lane.skills_advertised,
-            input_schema_warning_count: lane.input_schema_warning_count,
+            pre_admission_input_schema_warning_count: lane.pre_admission_input_schema_warning_count,
         })
         .collect();
     if matches!(status.manifest.transport, Transport::Sse) {
@@ -259,7 +259,7 @@ mod tests {
             resources_advertised: None,
             tasks_advertised: None,
             skills_advertised: None,
-            input_schema_warning_count: 0,
+            pre_admission_input_schema_warning_count: 0,
         };
         status.compatibility.push(lane.clone());
         let stale = convert(status.clone());

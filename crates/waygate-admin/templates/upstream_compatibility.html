@@ -16,7 +16,7 @@
         <dt>Resources</dt><dd>{% match lane.resources_advertised %}{% when Some with (value) %}{% if *value %}advertised{% else %}not advertised{% endif %}{% when None %}unknown{% endmatch %}</dd>
         <dt>Tasks extension</dt><dd>{% match lane.tasks_advertised %}{% when Some with (value) %}{% if *value %}advertised{% else %}not advertised{% endif %}{% when None %}unknown{% endmatch %}</dd>
         <dt>Skills extension</dt><dd>{% match lane.skills_advertised %}{% when Some with (value) %}{% if *value %}advertised{% else %}not advertised{% endif %}{% when None %}unknown{% endmatch %}</dd>
-        <dt>Strict-client input-schema warnings</dt><dd>{{ lane.input_schema_warning_count }}</dd>
+        <dt>Input-schema warnings before admission</dt><dd>{{ lane.pre_admission_input_schema_warning_count }}</dd>
     </dl>
     {% endfor %}
     {% if report.lanes_truncated %}<p class="chip chip--warn">Only the first 32 retained lanes are shown. Additional lanes may declare different capabilities.</p>{% endif %}
