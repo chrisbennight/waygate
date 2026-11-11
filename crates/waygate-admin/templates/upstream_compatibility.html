@@ -3,7 +3,8 @@
     <p>Observed {{ report.observed_at }} · {{ report.evidence_status }}.</p>
     <p>Configured transport: {% match report.configured_transport %}{% when Some with (value) %}<code>{{ value }}</code>{% when None %}unavailable while busy{% endmatch %}.
     Configured protocol: {% match report.configured_protocol %}{% when Some with (value) %}<code>{{ value }}</code>{% when None %}unavailable while busy{% endmatch %}.</p>
-    {% if report.lanes.is_empty() %}<p class="muted">No peer declarations are retained. This does not establish whether an upstream supports a capability. Retry after connection recovery or after the busy operation finishes.</p>{% endif %}
+    {% if report.evidence_status == "busy" %}<p class="muted">The compatibility snapshot is temporarily unreadable. Retry after the busy operation finishes.</p>
+    {% else if report.lanes.is_empty() %}<p class="muted">No peer declarations are retained. This does not establish whether an upstream supports a capability. Retry after connection recovery.</p>{% endif %}
     {% for lane in report.lanes %}
     <h4>Lane {{ lane.lane }}</h4>
     {% if !lane.current %}<p class="chip chip--warn">Stale connection evidence. These cached declarations do not establish current support.</p>{% endif %}
