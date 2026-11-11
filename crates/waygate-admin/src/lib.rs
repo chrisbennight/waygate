@@ -53,6 +53,7 @@ mod change_outcome;
 pub mod change_policy_preview;
 pub mod change_requests;
 pub mod chrome;
+pub mod client_compatibility;
 pub mod codemode_executions;
 pub mod confidential_clients;
 pub mod config_reload;
@@ -173,6 +174,7 @@ pub fn api_router(state: Arc<AdminState>) -> Router<()> {
         .merge(tenants::router(state.clone()))
         .merge(rate_limit_policies::router(state.clone()))
         .merge(api_key_profiles::router(state.clone()))
+        .merge(client_compatibility::router(state.clone()))
         .merge(break_glass::router(state.clone()))
         .merge(change_requests::router(state.clone()))
         .merge(change_requests::admin_router(state.clone()))

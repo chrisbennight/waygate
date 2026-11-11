@@ -37,6 +37,7 @@ use waygate_oidc::Principal;
 const ALLOWED_HOST: &str = "127.0.0.1";
 
 mod call_tasks;
+mod client_observations;
 mod client_schema_compat;
 
 #[derive(Default)]

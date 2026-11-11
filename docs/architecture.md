@@ -455,6 +455,13 @@ Where each kind of state lives and how it changes:
   by the `CedarEngine` whose policy set produced them, so installing a new
   policy set discards them rather than invalidating entries). All rebuildable;
   none is a source of truth.
+- **Client compatibility observations** — a bounded process-local reporting
+  store in `waygate-mcp::client_observations`, shared into request/session
+  handlers and the protected admin report by the composition root. It retains
+  only authenticated identity/context metadata and declared client/protocol
+  metadata, with explicit retention, capacity drops, and restart/replica gaps.
+  It does not own identity, authorization, or durable audit. See
+  [the report contract](client-compatibility-report.md).
 - **Environment config** — read once at boot by `from_env()` in
   [`waygate-server/src/config.rs`](../crates/waygate-server/src/config.rs).
   **New `GATEWAY_*` variables are read there, not inline at point of use**

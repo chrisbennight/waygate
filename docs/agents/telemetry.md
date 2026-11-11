@@ -150,6 +150,13 @@ Best-effort: no `traceparent`, or no tracer provider installed ⇒ no-op.
 
 ## Prometheus metrics
 
+Identity-level MCP compatibility observations use the bounded protected
+[client compatibility report](../client-compatibility-report.md), separate from
+metrics and durable audit. It records trusted tenant/issuer/subject and
+non-secret credential context alongside self-reported client declarations.
+Its process-local retention, drops and replica limits must be considered before
+using absence as evidence to retire a compatibility path.
+
 Pull-based, scraped at `/metrics`; all registered in
 `crates/waygate-telemetry/src/metrics.rs`. Request-path metrics use `mcp_`,
 fleet-state gauges use `gateway_`, and model usage metrics use `gen_ai_`.

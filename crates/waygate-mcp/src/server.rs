@@ -556,6 +556,7 @@ pub struct GatewayServer {
     tools_list_cache_ttl: Option<std::time::Duration>,
     /// Exact client names selecting presentation-only root-composition adaptation.
     root_composition_clients: Vec<String>,
+    client_observations: Option<Arc<crate::client_observations::ClientObservationStore>>,
     /// Set during legacy `initialize` when the session selected the compact
     /// Code Mode-only projection. Stateless requests match their inline client
     /// name independently.
@@ -845,6 +846,7 @@ impl GatewayServer {
             codemode_only_tools_clients: Vec::new(),
             tools_list_cache_ttl: None,
             root_composition_clients: Vec::new(),
+            client_observations: None,
             client_codemode_only_tools_list: Arc::new(AtomicBool::new(false)),
             invocation,
             audit,
@@ -1102,12 +1104,44 @@ impl GatewayServer {
     /// is counted exactly once.
     fn client_context(&self, ctx: &RequestContext<RoleServer>) -> ClientContext {
         let client = ClientContext::from_ctx(ctx);
+        if let (Some(store), Some(principal)) = (&self.client_observations, principal_from_ctx(ctx))
+        {
+            // A stateless request with missing declarations must not inherit
+            // SDK fallback peer information from an earlier request.
+            let info = if client.generation == ProtocolGeneration::Stateless2026 {
+                ctx.meta.client_info()
+            } else {
+                ctx.client_info()
+            };
+            let protocol = ctx.protocol_version();
+            store.observe(
+                &principal,
+                info.as_ref().map(|i| i.name.as_str()),
+                info.as_ref().map(|i| i.version.as_str()),
+                protocol.as_ref().map(ProtocolVersion::as_str),
+                if client.generation == ProtocolGeneration::Stateless2026 {
+                    "2026-07-28"
+                } else {
+                    "legacy"
+                },
+            );
+        }
         crate::request_meta::record_request(
             client.generation,
             ctx.protocol_version().as_ref(),
             client.client_name.as_deref(),
         );
         client
+    }
+
+    /// Share one bounded reporting store across sessions and stateless builds.
+    #[must_use]
+    pub fn with_client_observations(
+        mut self,
+        store: Arc<crate::client_observations::ClientObservationStore>,
+    ) -> Self {
+        self.client_observations = Some(store);
+        self
     }
 
     /// Register a gateway-local tool namespace (e.g. the HITL `gateway-admin.*`
@@ -4202,6 +4236,19 @@ impl ServerHandler for GatewayServer {
         let compatibility =
             Self::client_name_matches(Some(client_name), &self.root_composition_clients);
         context.peer.set_peer_info(request);
+        if let (Some(store), Some(principal)) =
+            (&self.client_observations, principal_from_ctx(&context))
+        {
+            let client = context.client_info();
+            store.observe(
+                &principal,
+                client.as_ref().map(|i| i.name.as_str()),
+                client.as_ref().map(|i| i.version.as_str()),
+                // The SDK selects the response version after this handler.
+                None,
+                "legacy",
+            );
+        }
         let mut info = self.get_info();
         if compatibility {
             info.instructions = Some(format!(

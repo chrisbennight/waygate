@@ -65,6 +65,12 @@ request-metadata alternative. It does not assume all hosts implement these draft
 
 ## Protocol support policy
 
+Operators can inspect the protected
+[client compatibility report](../client-compatibility-report.md) for recent
+client declarations by authenticated identity and protocol generation. Its
+bounded process-local observations complement aggregate metrics; neither a
+missing row nor a self-reported client label establishes fleet completeness.
+
 The gateway serves two protocol generations side by side:
 
 - **MCP `2026-07-28`** has no sessions. Any replica can answer any request, so a

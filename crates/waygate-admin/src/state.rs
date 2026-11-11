@@ -349,6 +349,7 @@ pub struct PolicyPlane {
 /// What happened: the audit reader, evidence routing/retention/sweep, the
 /// signed-bundle exporter, and the trace-link template.
 pub struct ObservabilityPlane {
+    pub clients: Arc<waygate_mcp::client_observations::ClientObservationStore>,
     pub audit: Capability<Arc<dyn AuditReader>>,
     /// Per-tenant evidence routing store.
     /// `Some` ⇒ the `/api/v1/audit/routing` GET/PUT/DELETE
@@ -895,6 +896,7 @@ impl AdminState {
                 rate_limit_policies: Capability::absent("rate-limit store not configured"),
             },
             observability: ObservabilityPlane {
+                clients: Arc::new(waygate_mcp::client_observations::ClientObservationStore::new()),
                 audit: Capability::new("audit store not configured", audit),
                 routing: Capability::absent("routing store not configured"),
                 retention: Capability::absent("retention store not configured"),
@@ -2125,6 +2127,15 @@ impl AdminState {
     #[must_use]
     pub fn with_system_info(mut self, info: Arc<SystemInfo>) -> Self {
         self.system = info;
+        self
+    }
+
+    #[must_use]
+    pub fn with_client_observations(
+        mut self,
+        store: Arc<waygate_mcp::client_observations::ClientObservationStore>,
+    ) -> Self {
+        self.observability.clients = store;
         self
     }
 

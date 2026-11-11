@@ -1,0 +1,28 @@
+{% extends "layout.html" %}
+{% block main %}
+<header class="page-header"><h1 class="page-title">Client compatibility</h1></header>
+<section class="card">
+<p>Observed client declarations for the authenticated tenant, from this gateway process only. Client labels are self-reported; shared credentials do not identify separate installations. These observations do not prove client conformance.</p>
+<p>Process observations began at {{ self.timestamp(report.observed_since) }}. Report time: {{ self.timestamp(report.as_of) }}. Window: {{ report.window_seconds }} seconds; retention: {{ report.retention_seconds }} seconds. Rows last seen more than {{ report.fresh_within_seconds }} seconds ago are stale. Process-wide dropped observations since startup: {{ report.dropped_observations }}.</p>
+<p>Counts cover the retained row's lifetime, not just the selected window. Restarts clear this report; other replicas have separate observations. Missing rows are not proof of absence.</p>
+<form method="get" action="{{ chrome.nav_url("/client_compatibility") }}">
+<label>Subject <input name="subject" value="{{ subject }}" maxlength="512"></label>
+<label>Issuer <input name="issuer" value="{{ issuer }}" maxlength="512"></label>
+<label>Client name <input name="client" value="{{ client }}" maxlength="128"></label>
+<label>Window in seconds <input name="window_seconds" type="number" min="1" max="86400" value="{{ report.window_seconds }}"></label>
+<button type="submit">Filter observations</button>
+</form>
+</section>
+<section class="card"><div class="table-scroll"><table>
+<thead><tr><th>Identity</th><th>Credential context</th><th>Declared client</th><th>Protocol</th><th>Observed interval</th><th>Requests</th></tr></thead>
+<tbody>{% for row in report.rows %}<tr>
+<td>{{ row.key.subject }}<br>{{ row.key.issuer }}</td>
+<td>{{ row.key.auth_method }}<br>Profile: {% match row.key.profile_id %}{% when Some with (id) %}{{ id }}{% when None %}none{% endmatch %}<br><code>{{ row.key.credential_context }}</code></td>
+<td>{% match row.key.client_name %}{% when Some with (name) %}{{ name }}{% when None %}unknown name{% endmatch %}<br>{% match row.key.client_version %}{% when Some with (version) %}{{ version }}{% when None %}unknown version{% endmatch %}{% if row.key.client_metadata_truncated %}<br>metadata truncated{% endif %}</td>
+<td>{{ row.key.protocol_generation }}<br>{% match row.key.protocol_version %}{% when Some with (version) %}{{ version }}{% when None %}unknown version{% endmatch %}</td>
+<td>{{ self.timestamp(row.first_seen) }}–{{ self.timestamp(row.last_seen) }}{% if report.as_of - row.last_seen > report.fresh_within_seconds %}<br>stale{% endif %}</td><td>{{ row.requests_observed }}</td>
+</tr>{% endfor %}</tbody></table></div>
+{% if report.rows.is_empty() %}<p>No retained observations match these filters.</p>{% endif %}
+{% match next_url %}{% when Some with (url) %}<a href="{{ url }}">Next page</a>{% when None %}{% endmatch %}
+</section>
+{% endblock %}

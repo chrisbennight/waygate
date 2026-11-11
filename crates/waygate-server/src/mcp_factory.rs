@@ -73,6 +73,7 @@ pub(crate) struct McpServerFactory {
     pub codemode_only_tools_clients: Vec<String>,
     pub tools_list_cache_ttl: Option<Duration>,
     pub root_composition_clients: Vec<String>,
+    pub client_observations: Arc<waygate_mcp::client_observations::ClientObservationStore>,
     pub idjag_advertise_ema: bool,
     pub mcp_ping_interval: Option<Duration>,
 }
@@ -112,6 +113,7 @@ impl McpServerFactory {
                 .with_codemode_only_tools_clients(self.codemode_only_tools_clients.clone())
                 .with_tools_list_cache_ttl(self.tools_list_cache_ttl)
                 .with_root_composition_clients(self.root_composition_clients.clone())
+                .with_client_observations(self.client_observations.clone())
                 .with_ema_capability_advert(self.idjag_advertise_ema)
                 .with_client_ping_interval(self.mcp_ping_interval)
                 .with_tool_catalog_epoch(&self.tool_catalog_epoch)
