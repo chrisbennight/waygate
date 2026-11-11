@@ -636,7 +636,7 @@ async fn entry_status(name: &str, entry: &UpstreamEntry) -> UpstreamStatus {
                 resources_advertised: peer.map(|p| p.capabilities.resources.is_some()),
                 tasks_advertised: peer.map(|p| p.capabilities.supports_tasks()),
                 skills_advertised: peer.map(|p| p.capabilities.supports_skills()),
-                pre_admission_input_schema_warning_count: conn.unregisterable_input_schemas.len(),
+                pre_admission_input_schema_warning_count: conn.raw_input_schema_warning_count,
             })
         })
         .collect();
@@ -1404,6 +1404,11 @@ mod bounded_snapshot_tests {
                         "A synthetic root composition",
                         Arc::new(schema.as_object().unwrap().clone()),
                     ),
+                    rmcp::model::Tool::new(
+                        "withheld",
+                        "An unclassified synthetic root composition",
+                        Arc::new(schema.as_object().unwrap().clone()),
+                    ),
                 ]))
             }
         }
@@ -1463,7 +1468,11 @@ mod bounded_snapshot_tests {
             assert_eq!(lane.tasks_advertised, Some(false));
             assert!(lane.protocol_version.is_some());
             assert!(lane.current);
-            assert_eq!(lane.pre_admission_input_schema_warning_count, 1);
+            assert_eq!(lane.pre_admission_input_schema_warning_count, 2);
+            assert_eq!(
+                status.health.published_tool_count, 1,
+                "classification still withholds the second raw declaration"
+            );
             if let Some(before) = prior_connection {
                 assert!(lane.connected_at >= before);
             }
@@ -1489,7 +1498,7 @@ mod bounded_snapshot_tests {
         };
         assert_eq!(blocked.health.published_tool_count, 0);
         assert_eq!(
-            blocked.compatibility[0].pre_admission_input_schema_warning_count, 1,
+            blocked.compatibility[0].pre_admission_input_schema_warning_count, 2,
             "catalog compatibility evidence is independent of admission decisions"
         );
         assert_eq!(pool.clear_quarantine("fixture").await, Some(1));
@@ -1501,7 +1510,7 @@ mod bounded_snapshot_tests {
         };
         assert_eq!(
             released.compatibility[0].pre_admission_input_schema_warning_count,
-            1
+            2
         );
         for _ in 0..crate::BreakerConfig::default().failure_threshold {
             entry.breaker.acquire().unwrap().failure();

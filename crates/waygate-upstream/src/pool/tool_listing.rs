@@ -60,22 +60,31 @@ pub(super) fn normalize_connection(server: &str, conn: &mut super::Connection) {
     conn.unregisterable_input_schemas = unregisterable;
 }
 
-/// Published tools whose input schema applies a composition keyword at its
-/// root. Restricted to published tools for the same reason as
-/// [`advertised_refusals`]: a withheld tool is not part of the inventory an
-/// operator is serving.
-///
-/// A schema without the MCP object root is skipped even when it carries a
-/// composition keyword. That tool is withheld from `tools/list` outright, so
-/// counting it here would report a client-visible incompatibility for
-/// something no client is offered — two different defects with two different
-/// fixes. This signal covers only schemas that conform and are served.
+/// Recognize composition warnings for object-rooted schemas independently of
+/// admission. Invalid roots are a separate protocol defect.
+fn root_composition_warning(tool: &Tool) -> Option<&'static str> {
+    if !waygate_mcp::tool_schema::input_schema_has_object_root(&tool.input_schema) {
+        return None;
+    }
+    waygate_mcp::tool_schema::root_composition_keyword(&tool.input_schema)
+}
+
+/// Separate raw-declaration evidence from the published warning inventory.
+/// Computed once at dial, before classification or common-lane intersection.
+pub(super) fn raw_input_schema_warning_count(advertised: &[Tool]) -> usize {
+    advertised
+        .iter()
+        .filter(|tool| root_composition_warning(tool).is_some())
+        .count()
+}
+
+/// Published warning inventory used by serving diagnostics. Withheld tools
+/// remain outside this inventory; raw compatibility evidence is separate.
 fn unregisterable_input_schemas(published: &[Tool]) -> Vec<UnregisterableInputSchema> {
     published
         .iter()
-        .filter(|tool| waygate_mcp::tool_schema::input_schema_has_object_root(&tool.input_schema))
         .filter_map(|tool| {
-            let keyword = waygate_mcp::tool_schema::root_composition_keyword(&tool.input_schema)?;
+            let keyword = root_composition_warning(tool)?;
             Some(UnregisterableInputSchema {
                 tool: tool.name.to_string(),
                 keyword,
