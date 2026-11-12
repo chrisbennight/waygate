@@ -1,5 +1,43 @@
 # Release notes
 
+## 3.0.0
+
+- Inference now uses supported provider APIs. Consumer subscription credentials,
+  token refresh, consumer model listing and CLI request fingerprints are
+  removed. This is a breaking configuration change: migrate on a release that
+  accepts both routes, qualify API access and pricing, then remove retired
+  credentials, discovery fields and `surface: codex` configuration before
+  upgrading. Historical usage and catalog records remain readable; legacy
+  catalog aliases are withheld from model discovery and refused before cache
+  lookup or provider contact. Invalid API-key reloads preserve the prior key.
+  MCP authentication and upstream MCP OAuth are unchanged. Follow the
+  [API-only migration guide](api-only-inference-migration.md).
+
+- Gemini Developer API routes support explicitly selected generateContent models,
+  streaming and tool conversations while retaining the gateway's policy and
+  accounting. API credentials are separate from Google subscription access.
+  Vertex AI, workload OAuth, Interactions, Live and native image/audio/embedding
+  operations are outside this adapter. See [Gemini API upstreams](gemini-api-upstreams.md).
+
+- Administrators can inspect upstream compatibility without initiating new
+  probes or background work. The report distinguishes configured support,
+  declarations, observed state and unavailable or stale evidence. Schema warnings
+  include listed tool definitions that were withheld before admission.
+
+- Tenant administrators can inspect recently observed MCP clients per authenticated
+  identity and credential-profile scope. Client name and version remain
+  self-reported evidence. The report documents its process-local retention,
+  capacity, replica and restart limits; it is not a durable client inventory.
+
+- Client schema qualification records the tested Claude Code and Codex CLI
+  behavior against controlled model endpoints. Optional compatibility profiles
+  remain opt-in, with explicit retirement criteria; generic SDK client metadata
+  does not establish the product using it. See [SDK compatibility](mcp-sdk-compatibility.md).
+
+- Legacy SSE removal still requires upstream migration. Completion and task
+  notification delivery still await released SDK support. This release does not
+  add MCP Apps, a replacement transport stack or a background polling worker.
+
 ## 2.4.0
 
 - Skills discovery and delivery match the finalized extension, including modern
