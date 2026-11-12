@@ -135,13 +135,18 @@ fn parse_api_key(provider: LlmProvider, raw: &str) -> Result<String, ValueError>
         return Err(ValueError::Subscription);
     }
     if matches!(provider, LlmProvider::OpenAi | LlmProvider::Google) {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Envelope {
-            api_key: String,
+        let envelope = object
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .ok_or(ValueError::Invalid)?;
+        if envelope.len() != 1 {
+            return Err(ValueError::Invalid);
         }
-        let envelope: Envelope = serde_json::from_str(value).map_err(|_| ValueError::Invalid)?;
-        let key = envelope.api_key.trim();
+        let key = envelope
+            .get("api_key")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(ValueError::Invalid)?
+            .trim();
         if valid_key(key) {
             Ok(key.to_owned())
         } else {
@@ -368,12 +373,15 @@ mod tests {
             r#"{"api_key":"synthetic","extra":"field"}"#,
             r#"{"api_key":"{token blob}"}"#,
             r#"{"api_key":"bad\nheader"}"#,
+            r#"["synthetic-array-key"]"#,
         ] {
-            assert!(LlmCredentialStore::try_from_vars([(
-                "LLM_CRED_OPENAI_BAD".into(),
-                value.into()
-            )])
-            .is_err());
+            for provider in ["OPENAI", "GOOGLE"] {
+                assert!(LlmCredentialStore::try_from_vars([(
+                    format!("LLM_CRED_{provider}_BAD"),
+                    value.into()
+                )])
+                .is_err());
+            }
         }
     }
 
@@ -384,6 +392,16 @@ mod tests {
             r#"{"api_key":"synthetic-first"}"#.into(),
         )]);
         assert!(matches!(store.reload(LlmProvider::OpenAi,"API",r#"{"tokens":{"access_token":"synthetic-access","refresh_token":"synthetic-refresh"}}"#).await,Err(ReloadError::SubscriptionUnsupported("openai"))));
+        assert_eq!(
+            store.api_key(LlmProvider::OpenAi, "API").await.unwrap(),
+            "synthetic-first"
+        );
+        assert!(matches!(
+            store
+                .reload(LlmProvider::OpenAi, "API", r#"["synthetic-array-key"]"#)
+                .await,
+            Err(ReloadError::Unparseable("openai"))
+        ));
         assert_eq!(
             store.api_key(LlmProvider::OpenAi, "API").await.unwrap(),
             "synthetic-first"
