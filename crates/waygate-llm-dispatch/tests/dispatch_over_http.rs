@@ -739,16 +739,24 @@ async fn retired_consumer_routes_are_refused_before_dispatch() {
     };
     let dispatcher = LlmDispatcher::new(
         ProviderClient::new(reqwest::Client::new()),
-        responses_store(),
+        Arc::new(LlmCredentialStore::from_vars([])),
     );
-    let err = dispatcher
-        .dispatch(&chat(false), &unreachable)
-        .await
-        .expect_err("non-streaming codex must fail closed");
-    assert!(
-        matches!(err, DispatchError::Translate(_)),
-        "expected a non-retryable translation error, got {err:?}"
-    );
+    for stream in [false, true] {
+        let err = dispatcher
+            .dispatch(&chat(stream), &unreachable)
+            .await
+            .expect_err("retired consumer routes must fail before credential access");
+        assert!(
+            matches!(
+                err,
+                DispatchError::Translate(waygate_llm_translate::TranslateError::Unsupported {
+                    surface: "api_only_inference",
+                    ..
+                })
+            ),
+            "expected the API-only retirement error, got {err:?}"
+        );
+    }
 }
 
 /// Loopback OpenAI Responses provider: captures the bearer + the request body's
