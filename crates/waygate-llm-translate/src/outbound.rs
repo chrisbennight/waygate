@@ -1020,64 +1020,6 @@ fn responses_text_format(rf: &ResponseFormat) -> Value {
     json!({ "format": format })
 }
 
-/// Apply the ChatGPT-backend (Codex) body constraints to an already-rendered
-/// OpenAI Responses body. **Only** for routes that target the ChatGPT backend
-/// (`chatgpt.com/backend-api/codex`, `ResolvedRoute::openai_chatgpt`) — the
-/// standard OpenAI Responses endpoint (`api.openai.com/v1/responses`) accepts the
-/// sampling/token fields and does not require `stream`, so it must NOT be run
-/// through here.
-///
-/// Mirrors the reference proxy's `ConvertOpenAIResponsesRequestToCodex` +
-/// `codex_executor` normalizations. The Codex backend is strict and rejects a
-/// generic Responses body in several ways the gateway must pre-empt:
-/// - **`instructions` MUST be present** (absent ⇒ `400 {"detail":"Instructions
-///   are required"}`); an empty string is accepted. A present-but-`null` value
-///   counts as absent. Mirrors `normalizeCodexInstructions`.
-/// - it is a **streaming-only** backend, so `stream` is forced `true` (the
-///   transport must stream too — dispatch only runs this on a streaming call).
-/// - `store: false` + `include: ["reasoning.encrypted_content"]` +
-///   `parallel_tool_calls: true` are what the Codex CLI sends (a stateless,
-///   encrypted-reasoning-replay client).
-/// - **token-limit + sampling fields are rejected** (`Unsupported parameter`):
-///   `max_output_tokens`, `max_completion_tokens`, `temperature`, `top_p` are
-///   stripped — note `render_openai_responses` *sets* `temperature`/`top_p`/
-///   `max_output_tokens`, so this strip is load-bearing, not defensive.
-/// - a set of fields the backend does not accept (`truncation`,
-///   `context_management`, `user`, `previous_response_id`,
-///   `prompt_cache_retention`, `safety_identifier`, `stream_options`) are stripped
-///   so a future caller (or a translated inbound body) cannot smuggle one in.
-///
-/// Idempotent and total: a non-object body is returned unchanged.
-pub fn finalize_codex_responses_body(mut body: Value) -> Value {
-    let Value::Object(obj) = &mut body else {
-        return body;
-    };
-    obj.insert("stream".into(), Value::Bool(true));
-    obj.insert("store".into(), Value::Bool(false));
-    obj.insert("parallel_tool_calls".into(), Value::Bool(true));
-    obj.insert("include".into(), json!(["reasoning.encrypted_content"]));
-    // Present-but-null counts as absent for the backend's required-field check.
-    if !matches!(obj.get("instructions"), Some(v) if !v.is_null()) {
-        obj.insert("instructions".into(), json!(""));
-    }
-    for field in [
-        "max_output_tokens",
-        "max_completion_tokens",
-        "temperature",
-        "top_p",
-        "truncation",
-        "context_management",
-        "user",
-        "previous_response_id",
-        "prompt_cache_retention",
-        "safety_identifier",
-        "stream_options",
-    ] {
-        obj.remove(field);
-    }
-    body
-}
-
 /// Flatten content to plain text for the Responses top-level `instructions`
 /// field (text-only). An image in a system message fails closed (I6) —
 /// symmetric with the Anthropic/Gemini system-image rejection.
@@ -1166,7 +1108,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn reasoning_effort_renders_per_surface_and_survives_codex() {
+    fn reasoning_effort_renders_per_supported_surface() {
         let req = parse_chat_completions(&json!({
             "model": "m",
             "messages": [{"role": "user", "content": "x"}],
@@ -1181,12 +1123,6 @@ mod tests {
         // Responses: nested `reasoning.effort`.
         let resp = render_openai_responses(&req, "served").unwrap();
         assert_eq!(resp["reasoning"]["effort"], "high");
-        // The Codex finalizer must NOT strip `reasoning` (it controls reasoning
-        // depth on the ChatGPT backend).
-        assert_eq!(
-            finalize_codex_responses_body(resp)["reasoning"]["effort"],
-            "high"
-        );
 
         // Anthropic/Gemini express reasoning as a token *budget*, not an effort
         // level; until that mapping lands they fail closed (I6) rather than
@@ -1228,11 +1164,6 @@ mod tests {
         assert_eq!(resp["reasoning"], json!({"summary": "auto"}));
         assert_eq!(resp["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(resp["prompt_cache_key"], "session-1");
-        // The ChatGPT backend accepts all three.
-        let codex = finalize_codex_responses_body(resp);
-        assert_eq!(codex["reasoning"]["summary"], "auto");
-        assert_eq!(codex["include"], json!(["reasoning.encrypted_content"]));
-        assert_eq!(codex["prompt_cache_key"], "session-1");
         // Other protocols have no equivalent: none of it is sent, and the
         // request still renders.
         for (name, body) in [
@@ -1878,80 +1809,6 @@ mod tests {
 
     // ---- Codex (ChatGPT backend) body finalizer ---------------------------
 
-    #[test]
-    fn finalize_codex_responses_body_enforces_backend_contract() {
-        // A rendered Responses body for a request that carried sampling +
-        // max_tokens but no system message: `render_openai_responses` set
-        // temperature/top_p/max_output_tokens and (no system ⇒) omitted
-        // `instructions`. The Codex finalizer must make it backend-valid.
-        let req = parse_chat_completions(&json!({
-            "model": "alias",
-            "messages": [{"role": "user", "content": "hi"}],
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "max_tokens": 1024
-        }))
-        .unwrap();
-        let rendered = render_openai_responses(&req, "gpt-5.5").unwrap();
-        // Pre-conditions the finalizer has to fix.
-        assert!(rendered.get("instructions").is_none());
-        assert_eq!(rendered["temperature"], 0.7);
-        assert_eq!(rendered["max_output_tokens"], 1024);
-
-        let out = finalize_codex_responses_body(rendered);
-        // Required-present fields: instructions (empty ok), and the streaming-only
-        // backend's stateless-replay contract.
-        assert_eq!(
-            out["instructions"], "",
-            "instructions must be present (absent ⇒ 400 'Instructions are required')"
-        );
-        assert_eq!(out["stream"], true, "Codex backend is streaming-only");
-        assert_eq!(out["store"], false);
-        assert_eq!(out["parallel_tool_calls"], true);
-        assert_eq!(out["include"], json!(["reasoning.encrypted_content"]));
-        // Rejected fields stripped (the backend 400s on these).
-        for f in [
-            "temperature",
-            "top_p",
-            "max_output_tokens",
-            "max_completion_tokens",
-        ] {
-            assert!(
-                out.get(f).is_none(),
-                "`{f}` must be stripped for the Codex backend"
-            );
-        }
-        // Untouched passthrough.
-        assert_eq!(out["model"], "gpt-5.5");
-        assert!(out["input"].is_array());
-    }
-
-    #[test]
-    fn finalize_codex_keeps_real_instructions_but_replaces_null() {
-        // A non-empty system message renders to `instructions`; the finalizer
-        // must preserve it (only absent/null gets the empty-string fallback).
-        let req = parse_chat_completions(&json!({
-            "model": "alias",
-            "messages": [
-                {"role": "system", "content": "be terse"},
-                {"role": "user", "content": "hi"}
-            ]
-        }))
-        .unwrap();
-        let out = finalize_codex_responses_body(render_openai_responses(&req, "gpt-5.5").unwrap());
-        assert_eq!(out["instructions"], "be terse");
-
-        // A present-but-null instructions counts as absent → empty string.
-        let nulled = json!({"input": [], "instructions": Value::Null});
-        assert_eq!(finalize_codex_responses_body(nulled)["instructions"], "");
-    }
-
-    #[test]
-    fn finalize_codex_is_total_on_a_non_object() {
-        // Defensive: a non-object body is returned unchanged rather than panicking.
-        assert_eq!(finalize_codex_responses_body(json!("x")), json!("x"));
-    }
-
     // ---- response_format rendering (structured output) --------------------
 
     #[test]
@@ -2014,9 +1871,6 @@ mod tests {
         assert_eq!(fmt["strict"], true);
         assert_eq!(fmt["schema"]["type"], "object");
         assert!(fmt.get("json_schema").is_none());
-        // The Codex finalizer must NOT strip `text` — structured output must
-        // survive onto the ChatGPT-backend route.
-        assert!(finalize_codex_responses_body(out).get("text").is_some());
 
         let obj = parse_chat_completions(&json!({
             "model": "m", "messages": [{"role":"user","content":"x"}],

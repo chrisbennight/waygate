@@ -709,7 +709,7 @@ async fn gateway_main() -> anyhow::Result<()> {
     // but still needs the dispatcher/resolver/`/v1`), and they drive the
     // refresher spawned further below. Parsed once and reused.
     let discovery_targets =
-        llm_discovery::parse_targets(&std::env::var("GATEWAY_LLM_DISCOVERY").unwrap_or_default());
+        llm_discovery::parse_targets(&std::env::var("GATEWAY_LLM_DISCOVERY").unwrap_or_default())?;
     // Build the inference-plane dispatch path. `None` only when neither
     // pins nor discovery are configured (MCP-only, unchanged). Credentials are
     // injected (Infisical) and read by the store; we're a pure consumer (I4).
@@ -793,9 +793,6 @@ async fn gateway_main() -> anyhow::Result<()> {
                         .build()
                         .map_err(|e| anyhow::anyhow!("building the discovery HTTP client: {e}"))?;
                 let credentials = dispatcher.credentials();
-                // The SAME handle dispatch reads for the /responses User-Agent:
-                // the refresher keeps it current with the listing's version.
-                let codex_ua = dispatcher.codex_ua_version();
                 let pool = pool.clone();
                 let resolver = resolver.clone();
                 let shutdown = ct.clone();
@@ -812,7 +809,6 @@ async fn gateway_main() -> anyhow::Result<()> {
                         pool,
                         resolver,
                         interval,
-                        codex_ua,
                         shutdown.cancelled_owned(),
                     )
                     .await
@@ -958,13 +954,8 @@ async fn gateway_main() -> anyhow::Result<()> {
         }
         _ => None,
     };
-    // In-process re-read of externally-refreshed LLM credentials. Spawned
-    // only when an LLM path exists (the dispatcher's credential store), a scoped
-    // read-only Infisical client is configured (GATEWAY_INFISICAL_*), the reload
-    // mapping (GATEWAY_LLM_CRED_RELOAD) is non-empty, AND the interval is > 0.
-    // Keeps the Codex access token fresh from Infisical without an
-    // in-process OAuth refresh (which would fight the external refresher's
-    // single-use rotation). Shares the global cancellation token.
+    // Optional scoped, read-only API-key rotation shares global cancellation.
+    // Only an enabled inference path initializes this credential dependency.
     // Do not initialize an otherwise-unused Infisical transport in MCP-only
     // mode. A configured LLM path owns this optional dependency and is the only
     // path whose startup should fail if its client cannot be built.
@@ -987,12 +978,6 @@ async fn gateway_main() -> anyhow::Result<()> {
                 Some(interval) if !entries.is_empty() => {
                     let store = store.clone();
                     let shutdown = ct.clone();
-                    // Mark the managed credentials externally-refreshed SYNCHRONOUSLY
-                    // here — before the listener accepts traffic below — so `bearer()`
-                    // never attempts a doomed in-process refresh on a credential whose
-                    // re-read poller hasn't run yet. (Marking inside the spawned task
-                    // would race the first request.)
-                    llm_cred_reload::mark_external(&store, &entries).await;
                     tracing::info!(
                         interval_secs = interval.as_secs(),
                         entries = entries.len(),

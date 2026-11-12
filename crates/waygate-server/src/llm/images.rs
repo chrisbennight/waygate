@@ -617,13 +617,13 @@ mod tests {
     fn image_config_resolves_the_same_operation_as_the_catalog() {
         let defs: Vec<ModelDef> = serde_json::from_value(json!([{
             "alias":"gpt-image-2", "provider":"openai", "credential_label":"PRIMARY",
-            "base_url":"https://chatgpt.com/backend-api/codex", "surface":"codex", "kind":"images"
+            "base_url":"https://api.openai.com/v1", "kind":"images"
         }]))
         .unwrap();
         let row = model_def_to_upsert(&defs[0]);
         assert_eq!(row.upstream_api, "images");
         assert_eq!(row.path, "images");
-        assert!(row.openai_chatgpt);
+        assert!(!row.openai_chatgpt);
         let (_, resolver) = build_from_defs(defs, None).unwrap().unwrap();
         let model = resolver.resolve(LLM_SERVER, "gpt-image-2").unwrap();
         assert_eq!(model.operation, LlmOperation::Images);

@@ -55,6 +55,12 @@ impl DefaultInvocationService {
         model: ResolvedModel,
         dispatcher: &LlmDispatcher,
     ) -> Result<InvocationResponse, InvocationError> {
+        // Refuse a retired route before any operation can replay a cached result.
+        if model.route.openai_chatgpt {
+            return Err(InvocationError::InvalidArguments(
+                "consumer subscription model routes are no longer supported; migrate this model to a supported provider API".into(),
+            ));
+        }
         if ctx.audio_resource.is_some() {
             if model.audio_resource_operations().is_empty()
                 || ctx.speech_surface

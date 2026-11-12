@@ -142,18 +142,8 @@ struct ModelDef {
     /// unrecognized value fails safe to high).
     #[serde(default)]
     risk: Option<String>,
-    /// Optional surface selector (case-insensitive):
-    /// - `responses` routes the model to the OpenAI Responses API (`/responses`,
-    ///   `UpstreamProtocol::OpenAiResponses`) with plain `Bearer` auth — point
-    ///   `base_url` at an OpenAI-compatible Responses endpoint.
-    /// - `codex` is the ChatGPT backend (`base_url:
-    ///   https://chatgpt.com/backend-api/codex`): the Responses body shape *plus*
-    ///   the Codex auth fingerprint (`ProviderAuth::OpenAiChatGpt` —
-    ///   originator/session/`chatgpt-account-id`), which a Codex subscription
-    ///   OAuth token requires.
-    ///
-    /// Both record `upstream_api = responses`. Unset (or any other value) uses
-    /// the provider's default protocol + path.
+    /// Optional `responses` selector for a supported OpenAI-compatible API.
+    /// Retired consumer subscription selectors fail configuration validation.
     #[serde(default)]
     surface: Option<String>,
     /// Optional operation selector (case-insensitive). `embeddings` makes this an
@@ -162,15 +152,14 @@ struct ModelDef {
     /// the only wired shape), and the catalog records `upstream_api = embeddings`.
     /// Unset (or `chat`) is a chat/completions model (the default). An embeddings
     /// model must be called on `/v1/embeddings`; the pipeline rejects a
-    /// surface/operation mismatch. `surface` (responses/codex) does not apply to
+    /// surface/operation mismatch. `surface` (responses) does not apply to
     /// an embeddings model. `images` selects the OpenAI Images API and defaults
     /// the endpoint prefix to `images`; omit `surface` for API-key access.
     #[serde(default)]
     kind: Option<String>,
     /// Optional ordered cross-provider failover groups (§7). After the primary
     /// group's credential pool is exhausted on retryable failures, dispatch fails
-    /// over to each of these in turn — e.g. a subscription group falling back to
-    /// an api-key group on a different provider/endpoint. Each is a full target
+    /// over to each configured API target group in turn. Each is a full target
     /// (its own provider / base_url / credential pool / surface), with its own
     /// per-credential cooldown. Empty/absent ⇒ the model has only its primary
     /// group.
@@ -216,22 +205,14 @@ fn surface_is_responses(surface: Option<&str>) -> bool {
     surface.is_some_and(|s| s.eq_ignore_ascii_case("responses"))
 }
 
-/// Whether a surface selector opts into the ChatGPT backend (`surface: codex`,
-/// case-insensitive). The ChatGPT backend speaks the OpenAI Responses shape, so
-/// it uses the same render/extract adapter as `surface: responses` but with the
-/// Codex auth fingerprint (`ProviderAuth::OpenAiChatGpt`) — see
-/// [`routes_for_target`].
+/// Identify the retired consumer selector so upgrade mistakes fail explicitly.
 fn surface_is_codex(surface: Option<&str>) -> bool {
     surface.is_some_and(|s| s.eq_ignore_ascii_case("codex"))
 }
 
-/// Whether a model entry uses the OpenAI Responses protocol
-/// (`UpstreamProtocol::OpenAiResponses`) — via `surface: responses` OR
-/// `surface: codex` (the ChatGPT backend, which is Responses-shaped). Any other
-/// value — or none — uses the provider default. Drives both the route protocol
-/// and the boot seeder's `upstream_api`.
+/// Whether a model entry selects the supported OpenAI Responses API.
 fn wants_responses(def: &ModelDef) -> bool {
-    surface_is_responses(def.surface.as_deref()) || surface_is_codex(def.surface.as_deref())
+    surface_is_responses(def.surface.as_deref())
 }
 
 /// Whether this model serves the separate Images API.
@@ -268,8 +249,7 @@ fn is_embeddings(def: &ModelDef) -> bool {
 
 /// The model's upstream wire API for the catalog's `upstream_api` column.
 /// An embeddings model is `embeddings`; otherwise the resolved
-/// [`UpstreamProtocol`]'s name: `surface: responses|codex` → `responses` (the
-/// Codex auth variant is carried separately by `openai_chatgpt`); else the
+/// [`UpstreamProtocol`]'s name: `surface: responses` → `responses`; else the
 /// provider's native shape (Anthropic → `messages`, Google → `generate_content`,
 /// OpenAI/OpenRouter → `chat_completions`). Mirrors the protocol/path
 /// [`routes_for_target`] resolves, so the catalog never disagrees with the live
@@ -350,17 +330,15 @@ fn routes_for_target(
     is_embeddings: bool,
 ) -> anyhow::Result<Vec<ResolvedRoute>> {
     let provider = parse_provider(provider_str)?;
-    // `surface: codex` is the ChatGPT backend — Responses-shaped body, but it
-    // flips the auth to the Codex fingerprint (set via `openai_chatgpt` below).
-    // It does not apply to an embeddings route (which defaults to Bearer).
-    let chatgpt = !is_embeddings && surface_is_codex(surface);
+    anyhow::ensure!(!surface_is_codex(surface),
+        "surface codex is retired; explicitly migrate the endpoint, model and credential to a supported provider API");
     let (protocol, default_path) = if is_embeddings {
         // OpenAI-compatible embeddings: POST to `embeddings` with plain `Bearer`.
         // `OpenAiChat` is the inert protocol placeholder on an embeddings route —
         // `dispatch_embeddings` never reads it; the operation lives on
-        // `ResolvedModel`. `surface` (responses/codex) does not apply.
+        // `ResolvedModel`. `surface` (responses) does not apply.
         (UpstreamProtocol::OpenAiChat, "embeddings".to_string())
-    } else if surface_is_responses(surface) || chatgpt {
+    } else if surface_is_responses(surface) {
         (UpstreamProtocol::OpenAiResponses, "responses".to_string())
     } else {
         (protocol_for(provider), default_path_for(provider))
@@ -399,7 +377,7 @@ fn routes_for_target(
             upstream_model: upstream_model.clone(),
             protocol,
             embeddings_no_auth: false,
-            openai_chatgpt: chatgpt,
+            openai_chatgpt: false,
         })
         .collect())
 }
@@ -474,9 +452,12 @@ fn parse_model_defs() -> anyhow::Result<Option<Vec<ModelDef>>> {
 ///   the shorthand AND either split field is ambiguous and rejected.
 /// - After resolution every entry must carry a non-empty `provider`. The provider
 ///   STRING is validated downstream by `parse_provider` (in [`routes_for_target`]);
-///   this step is purely structural so it stays decoupled from the provider set.
+///   this step also rejects retired consumer selectors on every target.
 fn normalize_model_defs(defs: &mut [ModelDef]) -> anyhow::Result<()> {
     for def in defs.iter_mut() {
+        anyhow::ensure!(!surface_is_codex(def.surface.as_deref()) &&
+            def.fallbacks.iter().all(|fallback| !surface_is_codex(fallback.surface.as_deref())),
+            "surface codex is retired; explicitly migrate primary and fallback endpoints, models and credentials to supported provider APIs");
         if let Some(model) = def.model.take() {
             if !def.provider.is_empty() {
                 return Err(anyhow::anyhow!(
@@ -566,10 +547,7 @@ fn build_from_defs(
         let no_auth = embedding_config::no_auth(&def)?;
         if is_img
             && (!def.provider.eq_ignore_ascii_case("openai")
-                || def
-                    .surface
-                    .as_deref()
-                    .is_some_and(|surface| !surface.eq_ignore_ascii_case("codex"))
+                || def.surface.is_some()
                 || !def.fallbacks.is_empty()
                 || def
                     .credential_labels
@@ -578,7 +556,7 @@ fn build_from_defs(
                 || def.cache_ttl_ms.is_some()
                 || def.ttfb_ms.is_some())
         {
-            anyhow::bail!("image models require one OpenAI credential, no surface (API) or surface codex (legacy), and no fallbacks, caching, or streaming deadlines");
+            anyhow::bail!("image models require one OpenAI credential, no surface selector, and no fallbacks, caching, or streaming deadlines");
         }
         // Build the primary group's routes (its credential pool), then each
         // cross-provider fallback group's routes, flattened in order. The first
@@ -666,11 +644,11 @@ fn build_from_defs(
             },
         );
     }
-    // The store reads injected `LLM_CRED_*` credentials from the environment and
-    // owns OAuth refresh; this process never sources or persists them (I4).
+    // Only injected provider API keys are accepted. Scoped external rotation
+    // may replace them; the process does not refresh consumer credentials.
     let credentials = Arc::new(
         LlmCredentialStore::from_env()
-            .map_err(|e| anyhow::anyhow!("building the LLM credential refresh client: {e}"))?,
+            .map_err(|e| anyhow::anyhow!("loading provider API credentials: {e}"))?,
     );
     // Bound a slow/wedged provider with connect + idle-read timeouts on the
     // shared client (NOT a client-wide total-request timeout): a healthy
@@ -699,17 +677,7 @@ fn build_from_defs(
         .with_single_attempt_http(build_http()?)
         .map_err(|e| anyhow::anyhow!("building the image HTTP client: {e}"))?
         .with_unary_timeout(call_timeout);
-    // The shared Codex UA version handle: dispatch reads it per ChatGPT-backend
-    // request; the discovery refresher (when a Codex target is configured)
-    // hot-swaps it to the version the model listing was fetched as, so both
-    // surfaces present one client identity. Seeded from the discovery crate's
-    // compiled default so a pinned-model-only deployment (no discovery) still
-    // sends a current version.
-    let codex_ua_version: waygate_llm_providers::SharedCodexUaVersion = Arc::new(
-        std::sync::RwLock::new(waygate_llm_discovery::CODEX_DEFAULT_CLIENT_VERSION.to_string()),
-    );
-    let dispatcher =
-        LlmDispatcher::new(providers, credentials).with_codex_ua_version(codex_ua_version);
+    let dispatcher = LlmDispatcher::new(providers, credentials);
     // Wrap the env pins in a DB-backed resolver with an empty discovered layer.
     // The boot loader fills it from the catalog (and the discovery refresher
     // reloads it at runtime); with no discovered rows it resolves exactly like
@@ -760,13 +728,8 @@ fn resolved_from_catalog_row(row: &waygate_storage::LlmModelRow) -> Option<Resol
             path: row.path.clone(),
             upstream_model: row.upstream_model.clone(),
             protocol,
-            // The ChatGPT-backend (Codex) auth variant is carried by its own
-            // catalog column: `upstream_api = responses` selects the Responses
-            // protocol (above), and `openai_chatgpt` then flips the transport auth
-            // to the Codex fingerprint. Discovered Codex rows set the column at
-            // upsert time (the refresher's Codex arm), so a discovered route can
-            // now reach the ChatGPT backend — not just an env-pin `surface: codex`.
             embeddings_no_auth: false,
+            // Retain the legacy marker so invocation refuses unmigrated rows.
             openai_chatgpt: row.openai_chatgpt,
         },
         operation: if is_img {
@@ -831,7 +794,7 @@ pub async fn boot_load_discovered(
 /// constraints accept. `upstream_api` records the model's real upstream wire API
 /// — the resolved `UpstreamProtocol` via [`upstream_api_for`]: `messages` for
 /// Anthropic, `generate_content` for Gemini, `responses` for
-/// `surface: responses|codex`, `chat_completions` otherwise (#395).
+/// `surface: responses`, `chat_completions` otherwise (#395).
 fn model_def_to_upsert(def: &ModelDef) -> waygate_storage::LlmModelUpsert {
     let responses = wants_responses(def);
     waygate_storage::LlmModelUpsert {
@@ -870,12 +833,7 @@ fn model_def_to_upsert(def: &ModelDef) -> waygate_storage::LlmModelUpsert {
             }
         }),
         upstream_api: upstream_api_for(def).to_owned(),
-        // A `surface: codex` pin is the Responses shape against the ChatGPT
-        // backend; persist that auth variant so a redeploy (or the dashboard
-        // reading the catalog) sees the same Codex fingerprint the in-memory
-        // route uses. Every other surface — and every embeddings model — is plain
-        // Bearer ⇒ false.
-        openai_chatgpt: !is_embeddings(def) && surface_is_codex(def.surface.as_deref()),
+        openai_chatgpt: false,
         risk: model_risk_str(parse_risk(def.risk.as_deref())).to_owned(),
         requires_approval: false,
         description: None,
@@ -1195,7 +1153,11 @@ async fn models_response(
     };
     let rows: Vec<waygate_storage::LlmModelRow> = rows
         .into_iter()
-        .filter(|r| resolver.resolve(LLM_SERVER, &r.alias).is_some())
+        .filter(|r| {
+            resolver
+                .resolve(LLM_SERVER, &r.alias)
+                .is_some_and(|model| !model.route.openai_chatgpt)
+        })
         .filter(|r| match type_filter {
             Some(f) => f.matches(&r.upstream_api),
             None => true,
@@ -1626,21 +1588,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_ua_fallback_version_matches_the_discovery_default() {
-        // waygate-llm-providers (the /responses fingerprint fallback) and
-        // waygate-llm-discovery (the /models listing fallback) deliberately do
-        // not depend on each other, so each compiles its own default Codex CLI
-        // version. This server — the composition root that depends on both —
-        // pins them equal, so the two surfaces can never silently present
-        // different client identities when neither a pin nor a tracked version
-        // applies. Bump both together.
-        assert_eq!(
-            waygate_llm_providers::CODEX_FP_DEFAULT_VERSION,
-            waygate_llm_discovery::CODEX_DEFAULT_CLIENT_VERSION,
-        );
-    }
-
-    #[test]
     fn egress_proxy_is_optional_and_validated() {
         // Absent / blank ⇒ unchanged (no proxy configured).
         assert!(apply_egress_proxy(http_client::builder(Profile::NoTotalTimeout), None).is_ok());
@@ -1850,33 +1797,16 @@ mod tests {
     }
 
     #[test]
-    fn codex_surface_selects_responses_protocol_with_chatgpt_backend_auth() {
-        // `surface: codex` is the ChatGPT backend: it reuses the Responses
-        // protocol + `responses` path (Responses-shaped body) but flips
-        // `openai_chatgpt` so dispatch sends the Codex auth fingerprint. The
-        // catalog row still records upstream_api = responses (the CHECK has no
-        // separate codex value).
-        let defs: Vec<ModelDef> = serde_json::from_str(
-            r#"[{"alias":"gpt-5-codex","provider":"openai","credential_label":"PRIMARY",
-                 "base_url":"https://chatgpt.com/backend-api/codex","surface":"codex"}]"#,
-        )
-        .unwrap();
-        let row = model_def_to_upsert(&defs[0]);
-        assert_eq!(row.upstream_api, "responses");
-        assert_eq!(row.path, "responses");
-
-        let (_dispatcher, resolver) = build_from_defs(defs, None)
-            .unwrap()
-            .expect("models configured");
-        let m = resolver
-            .resolve(LLM_SERVER, "gpt-5-codex")
-            .expect("resolves");
-        assert_eq!(m.route.protocol, UpstreamProtocol::OpenAiResponses);
-        assert_eq!(m.route.path, "responses");
-        assert!(
-            m.route.openai_chatgpt,
-            "surface: codex must select the ChatGPT-backend auth path"
-        );
+    fn consumer_selectors_are_rejected_for_primary_and_fallback_routes() {
+        for json in [
+            r#"[{"alias":"retired","provider":"openai","credential_label":"API","base_url":"https://api.openai.com/v1","surface":"CoDeX"}]"#,
+            r#"[{"alias":"retired","provider":"openai","credential_label":"API","base_url":"https://api.openai.com/v1","fallbacks":[{"provider":"openai","credential_label":"OTHER","base_url":"https://api.openai.com/v1","surface":"codex"}]}]"#,
+        ] {
+            let mut defs: Vec<ModelDef> = serde_json::from_str(json).unwrap();
+            let error = normalize_model_defs(&mut defs).unwrap_err();
+            assert!(error.to_string().contains("surface codex is retired"));
+            assert!(build_from_defs(defs, None).is_err());
+        }
     }
 
     #[test]
@@ -2004,7 +1934,7 @@ mod tests {
         // #395: the catalog records the REAL upstream wire API, not a coarse
         // chat_completions placeholder. Anthropic speaks Messages, Gemini speaks
         // generateContent, OpenRouter/OpenAI-chat speak chat/completions, and
-        // surface: responses|codex both speak the OpenAI Responses shape.
+        // surface: responses speaks the OpenAI Responses shape.
         let cases = [
             (
                 r#"{"alias":"a","provider":"anthropic","credential_label":"L","base_url":"https://a"}"#,
@@ -2020,10 +1950,6 @@ mod tests {
             ),
             (
                 r#"{"alias":"r","provider":"openai","credential_label":"L","base_url":"https://r","surface":"responses"}"#,
-                "responses",
-            ),
-            (
-                r#"{"alias":"c","provider":"openai","credential_label":"L","base_url":"https://c","surface":"codex"}"#,
                 "responses",
             ),
         ];
@@ -2523,10 +2449,7 @@ mod tests {
 
     #[test]
     fn resolved_from_catalog_row_maps_codex_chatgpt_flag() {
-        // A discovered Codex row: Responses shape + the openai_chatgpt column set.
-        // The column must drive ResolvedRoute.openai_chatgpt so dispatch picks the
-        // Codex request fingerprint rather than a bare Bearer — the routability the
-        // schema column unlocks for discovered (non-env-pin) Codex models.
+        // The retained legacy catalog marker must reach invocation refusal.
         let mut codex = catalog_row("openai:gpt-5.5-codex", "openai");
         codex.upstream_api = "responses".into();
         codex.path = "responses".into();
@@ -2572,16 +2495,15 @@ mod tests {
     fn embeddings_kind_overrides_surface_and_applies_to_fallbacks() {
         // An embeddings model with a cross-provider fallback: BOTH the primary and
         // the fallback route to `embeddings` (you cannot fail an embeddings call
-        // over to a chat endpoint), and the operation is Embeddings. A stray
-        // `surface: codex` is ignored for an embeddings model.
+        // over to a chat endpoint), and the operation is Embeddings.
         let defs: Vec<ModelDef> = serde_json::from_str(
             r#"[{"alias":"embed","provider":"openai","credential_label":"MAIN",
-                 "base_url":"https://api.openai.com/v1","kind":"embeddings","surface":"codex",
+                 "base_url":"https://api.openai.com/v1","kind":"embeddings",
                  "fallbacks":[{"provider":"openrouter","credential_label":"OR",
                                "base_url":"https://openrouter.ai/api/v1"}]}]"#,
         )
         .unwrap();
-        // The catalog upsert ignores the codex surface for an embeddings model.
+        // API embeddings keep a separate operation for all fallback routes.
         assert!(!model_def_to_upsert(&defs[0]).openai_chatgpt);
 
         let (_dispatcher, resolver) = build_from_defs(defs, None).unwrap().expect("configured");
@@ -2590,7 +2512,7 @@ mod tests {
         assert_eq!(m.route.path, "embeddings");
         assert!(
             !m.route.openai_chatgpt,
-            "kind:embeddings overrides surface:codex"
+            "API embeddings use supported API authentication"
         );
         assert_eq!(m.fallbacks.len(), 1);
         assert_eq!(

@@ -31,8 +31,8 @@ released image digest.
 Use an injected `LLM_CRED_OPENAI_PRIMARY` value with the explicit JSON
 `api_key` envelope described in [OpenAI API upstreams](openai-api-upstreams.md).
 Omit `surface` for Images API access. A subscription token is refused before
-the public API is contacted. The legacy `surface: codex` route remains only
-during migration; this change does not remove or silently convert it.
+the public API is contacted. Retired `surface: codex` configuration is refused;
+follow the [API-only migration guide](api-only-inference-migration.md).
 
 ## SDK examples
 
@@ -120,8 +120,6 @@ errors. Provider error text is withheld because it can echo prompts or uploads.
 
 - [OpenAI image generation API](https://developers.openai.com/api/reference/resources/images/methods/generate)
 - [OpenAI image editing API](https://developers.openai.com/api/reference/resources/images/methods/edit)
-- [Codex image transport](https://github.com/openai/codex/blob/47ca4619be10c20c1cec6ee9944738c5b961fa1d/codex-rs/codex-api/src/endpoint/images.rs)
-- [Codex image request types](https://github.com/openai/codex/blob/47ca4619be10c20c1cec6ee9944738c5b961fa1d/codex-rs/codex-api/src/images.rs)
 
 ## SDK compatibility test
 

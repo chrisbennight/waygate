@@ -14,9 +14,7 @@ reqwest.workspace = true
 tokio-tungstenite.workspace = true
 percent-encoding.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
-uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

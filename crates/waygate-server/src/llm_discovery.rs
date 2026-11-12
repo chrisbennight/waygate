@@ -1,62 +1,8 @@
-//! Discovery refresher: periodically enumerate each configured provider's live
-//! model list and upsert the results into the `llm_models` catalog, so an
-//! operator no longer hand-lists every model in `GATEWAY_LLM_MODELS`. The
-//! DB-backed resolver (`waygate_llm_dispatch::DbModelResolver`) then makes the
-//! discovered models routable after each cycle reloads it.
-//!
-//! Scope today: **OpenRouter** (api-key listing, with pricing — chat models from
-//! `/models` AND embeddings models from the dedicated `/embeddings/models`, each
-//! tagged by operation), **OpenAI API** (API-key listing with an explicit
-//! Responses model selection), and legacy **OpenAI Codex** (subscription OAuth — the
-//! ChatGPT-backend `/models` listing, no pricing). Each provider shares one base
-//! URL between discovery and chat: OpenRouter's `/models` + `/embeddings/models`
-//! (discovery) and `/chat/completions` + `/embeddings` (dispatch); Codex's
-//! `/models` + `/responses` (the Responses shape against the ChatGPT backend,
-//! which dispatch authenticates with the Codex request fingerprint via the
-//! discovered row's `openai_chatgpt` flag). Gemini Developer API targets use
-//! `/v1beta/models`, an API key, and explicit text/function model selection
-//! checked against advertised generation methods. Anthropic discovery remains
-//! unwired, so its models stay operator-pinned.
-//! [`waygate_llm_discovery::DiscoverySurface`]
-//! maps each `(provider, auth-kind)` to its adapter; an `Unsupported` mapping is
-//! a normal outcome the refresher skips.
-//!
-//! ## The Codex listing's `client_version`
-//!
-//! The ChatGPT backend scopes its `/models` response to what the named CLI
-//! release may see (an old version gets an old subset; an ancient one an empty
-//! list), so the version sent must track CLI releases. Resolution order per
-//! Codex cycle: the target's optional `client_version` pin (operator override,
-//! bypasses tracking) → [`waygate_llm_discovery::CodexVersionTracker`] (the
-//! live release trackers, cached on a TTL, falling back through last-good to
-//! the compiled default). The tracker never fails, so a registry outage
-//! degrades to a possibly-stale version — never a skipped cycle.
-//!
-//! ## Safety
-//!
-//! - **Fail-open.** A target whose discovery fails (transport, auth, decode) logs
-//!   a `WARN` and leaves the catalog untouched — the last-good rows keep serving.
-//!   An *empty* result skips reconciliation entirely, so a transient empty/garbled
-//!   response can never mass-soft-disable a provider's catalog. For Codex,
-//!   "empty" means the **raw** listing was empty: a non-empty listing whose every
-//!   model was filtered as non-picker-visible is a complete answer and DOES
-//!   reconcile (empty seen-set ⇒ soft-disable all) — otherwise a previously
-//!   discovered, now-hidden model would stay routable.
-//! - **Reconcile only after a successful, non-empty fetch.** `mark_discovered_absent`
-//!   runs per `(tenant, provider)` only with the just-seen alias set, so a dropped
-//!   model is soft-disabled (retained, hidden) — never deleted, and a pin is never
-//!   touched (the storage layer scopes reconciliation to `source = 'discovered'`).
-//!   For OpenRouter the seen set is the **union** of the chat and embeddings
-//!   listings, so the single provider-scoped reconcile never soft-disables one
-//!   operation's models because the other operation's listing changed. The picture
-//!   is treated as **incomplete** — and reconcile **skipped** that cycle (last-good
-//!   preserved) — if the best-effort embeddings listing *fails* OR the primary chat
-//!   listing returns *empty* (the transient/garble case), so a partial or
-//!   degenerate listing never soft-disables previously-discovered rows. (A
-//!   *successful empty* embeddings listing is not degenerate — the provider has no
-//!   embeddings models — so it still reconciles them away.)
-//! - **Bounded.** The interval is floored so a misconfiguration can't hammer
-//!   providers; the HTTP client carries a request timeout.
+//! Refresh supported provider API model lists into the durable catalog.
+//! OpenRouter supplies chat/embedding listings and pricing. OpenAI and Gemini
+//! require explicit qualified model selections. Partial or transient-empty
+//! listings preserve last-good rows; configured pins remain authoritative.
+//! No consumer model listing or CLI identity tracking is implemented.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,11 +10,10 @@ use std::time::Duration;
 use serde::Deserialize;
 use waygate_llm_credentials::LlmCredentialStore;
 use waygate_llm_discovery::{
-    is_valid_codex_client_version, list_codex, list_gemini, list_openai, list_openrouter,
-    list_openrouter_embeddings, CodexVersionTracker, DiscoveredModel, DiscoverySurface,
+    list_gemini, list_openai, list_openrouter, list_openrouter_embeddings, DiscoveredModel,
+    DiscoverySurface,
 };
 use waygate_llm_dispatch::DbModelResolver;
-use waygate_llm_providers::SharedCodexUaVersion;
 use waygate_storage::LlmDiscoveredModelUpsert;
 
 /// Serializes the live-PG tests that operate on the fixed
@@ -88,25 +33,12 @@ pub(crate) static DISCOVERY_PG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex
 /// One discovery target parsed from `GATEWAY_LLM_DISCOVERY`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveryTarget {
-    /// Provider in the lowercase vocabulary (`openrouter`, `openai`).
+    /// Provider in the lowercase vocabulary (`openrouter`, `openai`, `google`).
     pub provider: String,
-    /// The injected credential label (`LLM_CRED_<PROVIDER>_<LABEL>`) whose bearer
-    /// authenticates both the listing and the discovered models' chat calls. Its
-    /// kind (api-key vs OAuth) also selects the discovery surface for `openai`
-    /// (OAuth ⇒ legacy Codex; an API key ⇒ public API).
+    /// API-key label (`LLM_CRED_<PROVIDER>_<LABEL>`) used for listing and calls.
     pub credential_label: String,
-    /// Provider base URL shared by the model listing (`/models`) and the chat
-    /// route the discovered models point at. OpenRouter:
-    /// `https://openrouter.ai/api/v1` (listing `/models`, chat `/chat/completions`).
-    /// Codex: `https://chatgpt.com/backend-api/codex` (listing `/models`, chat
-    /// `/responses`).
+    /// Supported provider API base URL shared by listing and model calls.
     pub base_url: String,
-    /// Operator pin for the Codex listing's `client_version` (the backend
-    /// scopes the returned models to what that CLI release may see). `None` —
-    /// the normal case — lets the refresher resolve a current version via the
-    /// release tracker; a pin bypasses the tracker entirely for this target.
-    /// Ignored by non-Codex surfaces.
-    pub client_version: Option<String>,
     /// Exact model IDs that may be discovered through the public Responses API.
     /// Required for API-key OpenAI discovery because `/models` carries no
     /// operation metadata. Images, audio, and realtime remain explicit pins.
@@ -122,7 +54,7 @@ struct RawTarget {
     credential_label: String,
     base_url: String,
     #[serde(default)]
-    client_version: Option<String>,
+    client_version: Option<serde_json::Value>,
     #[serde(default)]
     responses_models: Vec<String>,
     #[serde(default)]
@@ -136,83 +68,32 @@ struct RawTarget {
 pub(crate) const DEFAULT_INTERVAL_SECS: u64 = 3 * 60 * 60;
 pub(crate) const MIN_INTERVAL_SECS: u64 = 300;
 
-/// Parse `GATEWAY_LLM_DISCOVERY` (a JSON array of targets). Targets whose
-/// provider has no wired discovery adapter (`openrouter` or `openai`/Codex today)
-/// are dropped with a `WARN`. The concrete surface for a kept target is resolved
-/// later, in [`refresh_target`], from the credential's actual auth-kind — parse
-/// time has no credential store, so it can only gate on whether the provider has
-/// an adapter under *some* auth-kind (see
-/// [`DiscoverySurface::provider_has_adapter`]). An `openai` target backed by an
-/// API key uses the public API with an explicit Responses model selection.
-///
-/// **At most one target per provider** is kept: reconciliation
-/// (`mark_discovered_absent`) is provider-scoped, so two targets sharing a
-/// provider would each soft-disable the other's discovered models, leaving only
-/// the last one effective-live. The first target for a provider wins; a later
-/// duplicate is dropped with a `WARN`. A blank value, invalid JSON, or an empty
-/// array yields no targets, so the refresher does not spawn (discovery is off by
-/// default).
-pub fn parse_targets(raw: &str) -> Vec<DiscoveryTarget> {
+/// Parse explicitly configured API discovery. Retired CLI-version settings
+/// fail with upgrade guidance instead of selecting a consumer backend.
+pub fn parse_targets(raw: &str) -> anyhow::Result<Vec<DiscoveryTarget>> {
     let raw = raw.trim();
     if raw.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let parsed: Vec<RawTarget> = match serde_json::from_str(raw) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "GATEWAY_LLM_DISCOVERY is not a valid JSON array; discovery disabled");
-            return Vec::new();
-        }
-    };
+    let parsed: Vec<RawTarget> = serde_json::from_str(raw).map_err(|_| {
+        anyhow::anyhow!("GATEWAY_LLM_DISCOVERY must be an array of provider API discovery targets")
+    })?;
+    anyhow::ensure!(parsed.iter().all(|target| target.client_version.is_none()),
+        "GATEWAY_LLM_DISCOVERY client_version is a retired consumer setting; remove it and explicitly select supported API models");
     let mut seen_providers = std::collections::HashSet::new();
-    parsed
-        .into_iter()
-        .filter_map(|t| {
-            // Keep any provider with a wired adapter under SOME auth-kind; the
-            // refresher resolves the concrete surface per credential. parse_targets
-            // has no credential store, so it cannot know the auth-kind here.
-            if !DiscoverySurface::provider_has_adapter(&t.provider) {
-                tracing::warn!(
-                    provider = %t.provider,
-                    "discovery target has no wired adapter (supported: openrouter, openai, google); skipping"
-                );
-                return None;
-            }
-            let provider = t.provider.to_ascii_lowercase();
-            if !seen_providers.insert(provider.clone()) {
-                tracing::warn!(
-                    provider = %provider,
-                    "duplicate discovery target for provider; keeping the first and skipping \
-                     this one (reconciliation is provider-scoped)"
-                );
-                return None;
-            }
-            // A malformed client_version pin would be rejected by the Codex
-            // backend with a 400 on every cycle. Dropping the PIN (not the
-            // target) fails toward the release tracker, so discovery still
-            // runs — with a loud WARN so the operator fixes the pin.
-            let client_version = t.client_version.filter(|v| {
-                let ok = is_valid_codex_client_version(v);
-                if !ok {
-                    tracing::warn!(
-                        provider = %provider,
-                        client_version = %v,
-                        "discovery target's client_version pin is not MAJOR.MINOR.PATCH; \
-                         ignoring the pin (the release tracker will resolve the version)"
-                    );
-                }
-                ok
-            });
-            Some(DiscoveryTarget {
-                provider,
-                credential_label: t.credential_label,
-                base_url: t.base_url,
-                client_version,
-                responses_models: t.responses_models,
-                generate_content_models: t.generate_content_models,
-            })
-        })
-        .collect()
+    Ok(parsed.into_iter().filter_map(|target| {
+        if !DiscoverySurface::provider_has_adapter(&target.provider) {
+            tracing::warn!(provider=%target.provider,"discovery has no supported API adapter; models remain operator-pinned");
+            return None;
+        }
+        let provider=target.provider.to_ascii_lowercase();
+        if !seen_providers.insert(provider.clone()) {
+            tracing::warn!(provider=%provider,"duplicate discovery target; keeping the first provider-scoped target");
+            return None;
+        }
+        Some(DiscoveryTarget {provider, credential_label:target.credential_label, base_url:target.base_url,
+            responses_models:target.responses_models, generate_content_models:target.generate_content_models})
+    }).collect())
 }
 
 /// Build the discovered-model alias for `(provider, upstream id)`. Namespacing by
@@ -258,24 +139,9 @@ async fn refresh_target(
     http: &reqwest::Client,
     credentials: &LlmCredentialStore,
     pool: &sqlx::PgPool,
-    codex_version: &CodexVersionTracker,
-    codex_ua: Option<&SharedCodexUaVersion>,
 ) -> anyhow::Result<usize> {
     let provider = crate::llm::parse_provider(&target.provider)?;
-    // The credential's KIND picks the surface (api-key OpenRouter vs OAuth Codex).
-    // parse_targets kept this target on provider alone (no credential store), so
-    // resolve the kind here and skip if it maps to no wired surface.
-    let is_oauth = credentials
-        .credential_is_oauth(provider, &target.credential_label)
-        .await
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "discovery credential {}/{} is not configured",
-                target.provider,
-                target.credential_label
-            )
-        })?;
-    let surface = DiscoverySurface::for_provider(&target.provider, is_oauth);
+    let surface = DiscoverySurface::for_provider(&target.provider);
     if surface == DiscoverySurface::Unsupported {
         tracing::warn!(
             provider = %target.provider,
@@ -298,15 +164,9 @@ async fn refresh_target(
             "Gemini API discovery requires non-empty generate_content_models IDs; select qualified text/function models or use explicit pins"
         );
     }
-    let bearer = if surface == DiscoverySurface::Codex {
-        credentials
-            .bearer(provider, &target.credential_label)
-            .await?
-    } else {
-        credentials
-            .api_key(provider, &target.credential_label)
-            .await?
-    };
+    let bearer = credentials
+        .api_key(provider, &target.credential_label)
+        .await?;
     // Fetch the live listing(s) for this surface. OpenRouter additionally exposes a
     // dedicated embeddings catalog (`/embeddings/models`); fetch both and tag each
     // model by operation (`DiscoveredModel::is_embeddings`). Both kinds flow through
@@ -316,17 +176,6 @@ async fn refresh_target(
     // `listing_complete` is false when a best-effort sub-listing failed: we still
     // upsert what we got, but skip the reconcile below so a partial fetch never
     // soft-disables the operation whose listing failed (last-good / fail-open).
-    // The client_version the Codex arm sent, kept for the empty-listing WARN
-    // below: an empty Codex listing usually means the version was too old for
-    // the backend (it returns an empty — not error — response for a version
-    // below what it supports), and naming the version makes that diagnosable.
-    let mut codex_client_version: Option<String> = None;
-    // How many models the raw Codex response carried BEFORE the visibility
-    // filter. Distinguishes "the backend returned nothing" (fail-open below)
-    // from "the backend returned models but none are picker-visible" — the
-    // latter is a complete answer that must reconcile, or a previously
-    // discovered now-hidden model would stay routable.
-    let mut codex_raw_len: Option<usize> = None;
     let mut api_raw_len: Option<usize> = None;
     let mut gemini_raw_len: Option<usize> = None;
     let (models, listing_complete): (Vec<DiscoveredModel>, bool) = match surface {
@@ -391,101 +240,17 @@ async fn refresh_target(
                 embeddings_ok && !chat_empty,
             )
         }
-        DiscoverySurface::Codex => {
-            // The ChatGPT workspace id (`chatgpt-account-id`) when the OAuth blob
-            // carried one; the backend gates the listing on it for multi-workspace
-            // accounts. `None` is fine for a single-workspace token.
-            let account_id = credentials
-                .oauth_account_id(provider, &target.credential_label)
-                .await;
-            // Version resolution: the operator pin bypasses the tracker; the
-            // tracker itself never fails (last-good / compiled-default chain).
-            let client_version = match &target.client_version {
-                Some(pinned) => pinned.clone(),
-                None => codex_version.current(http).await,
-            };
-            // Publish the version this cycle lists models as into the shared
-            // dispatch handle, so the /responses User-Agent fingerprint
-            // presents the same client identity as the listing fetch.
-            if let Some(handle) = codex_ua {
-                *handle.write().expect("codex ua version lock") = client_version.clone();
-            }
-            let listing = list_codex(
-                http,
-                &target.base_url,
-                &bearer,
-                account_id.as_deref(),
-                &client_version,
-            )
-            .await?;
-            codex_client_version = Some(client_version);
-            codex_raw_len = Some(listing.raw_len);
-            // A malformed entry (missing/empty slug) means the payload cannot
-            // be trusted as the complete model universe: upsert what parsed
-            // cleanly but mark the picture INCOMPLETE so reconcile is skipped
-            // this cycle — a garbled response never soft-disables last-good
-            // rows (the same incomplete-picture rule as OpenRouter).
-            let complete = listing.malformed_len == 0;
-            if !complete {
-                tracing::warn!(
-                    provider = %target.provider,
-                    malformed = listing.malformed_len,
-                    raw_models = listing.raw_len,
-                    "codex listing carries malformed (slugless) entries; \
-                     treating it as incomplete and skipping reconcile this cycle"
-                );
-            }
-            (listing.models, complete)
-        }
+
         // Unreachable: Unsupported returned above.
         DiscoverySurface::Unsupported => return Ok(0),
     };
     if models.is_empty() {
-        // A Codex listing that was non-empty upstream, WELL-FORMED throughout,
-        // and filtered to zero picker-visible models is a COMPLETE answer, not
-        // a transient failure: fall through so the reconcile below runs with
-        // an empty seen-set and soft-disables every previously discovered row
-        // (none are picker-visible anymore). A raw-empty listing stays
-        // fail-open, and a listing with malformed entries is incomplete
-        // (listing_complete = false) — its reconcile is skipped below anyway,
-        // so it exits early here with the incompleteness already logged.
-        let codex_all_filtered = codex_raw_len.is_some_and(|raw| raw > 0) && listing_complete;
-        let api_all_filtered = api_raw_len.is_some_and(|raw| raw > 0);
-        if api_all_filtered {
-            tracing::warn!(
-                provider = %target.provider,
-                "OpenAI API listing has no selected Responses models; reconciling discovered rows away"
-            );
-        } else if gemini_raw_len.is_some_and(|raw| raw > 0) {
-            tracing::warn!(provider=%target.provider,"Gemini API listing has no selected generateContent models; reconciling discovered rows away");
-        } else if codex_all_filtered {
-            tracing::warn!(
-                provider = %target.provider,
-                raw_models = codex_raw_len.unwrap_or(0),
-                "codex listing carries no picker-visible models; reconciling \
-                 previously discovered rows away (soft-disable)"
-            );
+        if api_raw_len.is_some_and(|raw| raw > 0) || gemini_raw_len.is_some_and(|raw| raw > 0) {
+            tracing::warn!(provider=%target.provider,listing_complete,
+                "provider listing has no selected API models; only a complete listing may reconcile discovered rows");
         } else {
-            match &codex_client_version {
-                // The malformed-entry case already logged its own WARN at the
-                // fetch site; this diagnostic is for the RAW-EMPTY listing,
-                // which is what a too-old client_version looks like (the
-                // backend scopes the listing to the version and returns empty
-                // — not an error — below its supported range), so name the
-                // version sent.
-                Some(sent) if codex_raw_len == Some(0) => tracing::warn!(
-                    provider = %target.provider,
-                    client_version = %sent,
-                    "codex discovery returned no models — likely a too-old \
-                     client_version (the backend returns an empty listing below \
-                     its supported range); skipping reconcile (fail-open)"
-                ),
-                Some(_) => {}
-                None => tracing::warn!(
-                    provider = %target.provider,
-                    "discovery returned no models; skipping reconcile (fail-open against a transient empty response)"
-                ),
-            }
+            tracing::warn!(provider=%target.provider,
+                "discovery returned no models; preserving last-good catalog against a transient empty response");
             return Ok(0);
         }
     }
@@ -510,7 +275,7 @@ async fn refresh_target(
                 DiscoverySurface::OpenRouter => ("chat/completions", "chat_completions", false),
                 DiscoverySurface::OpenAiApi => ("responses", "responses", false),
                 DiscoverySurface::GoogleApi => ("v1beta", "generate_content", false),
-                DiscoverySurface::Codex => ("responses", "responses", true),
+
                 DiscoverySurface::Unsupported => unreachable!("Unsupported returned above"),
             }
         };
@@ -562,13 +327,9 @@ async fn run_cycle(
     credentials: &LlmCredentialStore,
     pool: &sqlx::PgPool,
     resolver: &DbModelResolver,
-    codex_version: &CodexVersionTracker,
-    codex_ua: Option<&SharedCodexUaVersion>,
 ) {
     for target in targets {
-        if let Err(e) =
-            refresh_target(target, http, credentials, pool, codex_version, codex_ua).await
-        {
+        if let Err(e) = refresh_target(target, http, credentials, pool).await {
             tracing::warn!(
                 provider = %target.provider,
                 error = %e,
@@ -592,11 +353,6 @@ async fn run_cycle(
 /// The discovery refresher loop: runs a cycle immediately (boot fetch), then once
 /// per `interval_period`, until `shutdown` fires. Spawned as a background task so
 /// it never blocks the listener.
-// Each parameter is an independent runtime dependency (client, credentials,
-// pool, resolver, the shared Codex UA handle) rather than a data-clump worth a
-// struct, and the generic `shutdown` future can't live in a plain params
-// struct — so the arg count is inherent, not accidental.
-#[allow(clippy::too_many_arguments)]
 pub async fn run_discovery_scheduler(
     targets: Vec<DiscoveryTarget>,
     http: reqwest::Client,
@@ -604,7 +360,6 @@ pub async fn run_discovery_scheduler(
     pool: sqlx::PgPool,
     resolver: Arc<DbModelResolver>,
     interval_period: Duration,
-    codex_ua: Option<SharedCodexUaVersion>,
     shutdown: impl std::future::Future<Output = ()>,
 ) {
     use tokio::pin;
@@ -615,10 +370,6 @@ pub async fn run_discovery_scheduler(
     // The first tick fires immediately → a boot-time fetch (the boot loader only
     // loaded already-persisted rows; this pulls fresh from the provider).
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // One tracker for the scheduler's lifetime so its TTL cache and last-good
-    // fallback span cycles (a per-cycle tracker would re-fetch every cycle and
-    // forget last-good across an outage).
-    let codex_version = CodexVersionTracker::default();
     tracing::info!(
         interval_secs = interval_period.as_secs(),
         targets = targets.len(),
@@ -637,8 +388,6 @@ pub async fn run_discovery_scheduler(
                     &credentials,
                     &pool,
                     &resolver,
-                    &codex_version,
-                    codex_ua.as_ref(),
                 )
                 .await;
             }
@@ -659,7 +408,7 @@ mod tests {
     fn parse_targets_preserves_gemini_api_generation_selection() {
         let targets = parse_targets(
             r#"[{"provider":"google","credential_label":"API","base_url":"https://generativelanguage.googleapis.com","generate_content_models":["qualified-model"]}]"#,
-        );
+        ).unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].generate_content_models, vec!["qualified-model"]);
         assert!(targets[0].responses_models.is_empty());
@@ -671,7 +420,6 @@ mod tests {
             provider: "google".into(),
             credential_label: "API".into(),
             base_url: "http://127.0.0.1:1".into(),
-            client_version: None,
             responses_models: vec![],
             generate_content_models: vec![],
         };
@@ -682,16 +430,9 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
-        let error = refresh_target(
-            &target,
-            &raw_test_http_client(),
-            &credentials,
-            &pool,
-            &test_tracker(),
-            None,
-        )
-        .await
-        .unwrap_err();
+        let error = refresh_target(&target, &raw_test_http_client(), &credentials, &pool)
+            .await
+            .unwrap_err();
         assert!(error
             .to_string()
             .contains("requires non-empty generate_content_models"));
@@ -701,10 +442,9 @@ mod tests {
     fn parse_targets_preserves_public_api_responses_selection() {
         let targets = parse_targets(
             r#"[{"provider":"openai","credential_label":"API","base_url":"https://api.openai.com/v1","responses_models":["qualified-model"]}]"#,
-        );
+        ).unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].responses_models, vec!["qualified-model"]);
-        assert!(targets[0].client_version.is_none());
     }
 
     #[tokio::test]
@@ -713,7 +453,6 @@ mod tests {
             provider: "openai".into(),
             credential_label: "API".into(),
             base_url: "http://127.0.0.1:1".into(),
-            client_version: None,
             responses_models: vec![],
             generate_content_models: vec![],
         };
@@ -724,92 +463,56 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
-        let error = refresh_target(
-            &target,
-            &raw_test_http_client(),
-            &credentials,
-            &pool,
-            &test_tracker(),
-            None,
-        )
-        .await
-        .unwrap_err();
+        let error = refresh_target(&target, &raw_test_http_client(), &credentials, &pool)
+            .await
+            .unwrap_err();
         assert!(error
             .to_string()
             .contains("requires non-empty responses_models"));
     }
 
     #[test]
-    fn parse_targets_keeps_adapter_providers_drops_unsupported() {
-        let raw = r#"[
+    fn parse_targets_keeps_api_adapter_providers_and_rejects_malformed_config() {
+        let targets = parse_targets(r#"[
             {"provider":"openrouter","credential_label":"MAIN","base_url":"https://openrouter.ai/api/v1"},
-            {"provider":"anthropic","credential_label":"X","base_url":"https://api.anthropic.com/v1"},
-            {"provider":"openai","credential_label":"CODEX","base_url":"https://chatgpt.com/backend-api/codex"}
-        ]"#;
-        let targets = parse_targets(raw);
-        // openrouter and openai both have a wired adapter under SOME auth-kind, so
-        // both survive the parse-time gate (openai's concrete surface — Codex vs
-        // skipped — is resolved later from its credential). anthropic has no
-        // adapter at all and is dropped here.
-        let providers: Vec<&str> = targets.iter().map(|t| t.provider.as_str()).collect();
-        assert_eq!(providers, vec!["openrouter", "openai"]);
-
-        let openrouter = targets.iter().find(|t| t.provider == "openrouter").unwrap();
-        assert_eq!(openrouter.credential_label, "MAIN");
-        assert_eq!(openrouter.base_url, "https://openrouter.ai/api/v1");
-        let openai = targets.iter().find(|t| t.provider == "openai").unwrap();
-        assert_eq!(openai.credential_label, "CODEX");
-        assert_eq!(openai.base_url, "https://chatgpt.com/backend-api/codex");
+            {"provider":"anthropic","credential_label":"API","base_url":"https://api.anthropic.com/v1"},
+            {"provider":"openai","credential_label":"API","base_url":"https://api.openai.com/v1","responses_models":["qualified-model"]}
+        ]"#).unwrap();
         assert_eq!(
-            openai.client_version, None,
-            "no pin ⇒ the release tracker resolves the version"
+            targets
+                .iter()
+                .map(|t| t.provider.as_str())
+                .collect::<Vec<_>>(),
+            vec!["openrouter", "openai"]
         );
-
-        // Blank / invalid / empty array ⇒ no targets (refresher won't spawn).
-        assert!(parse_targets("").is_empty());
-        assert!(parse_targets("   ").is_empty());
-        assert!(parse_targets("not json").is_empty());
-        assert!(parse_targets("[]").is_empty());
+        assert_eq!(targets[1].credential_label, "API");
+        assert!(parse_targets("").unwrap().is_empty());
+        assert!(parse_targets("  ").unwrap().is_empty());
+        assert!(parse_targets("[]").unwrap().is_empty());
+        assert!(parse_targets("not json").is_err());
     }
 
     #[test]
-    fn parse_targets_validates_the_client_version_pin() {
-        // A well-formed pin is kept; a malformed one (the backend would 400 on
-        // it every cycle) is dropped while the TARGET survives, failing toward
-        // the release tracker rather than disabling discovery.
-        let raw = r#"[
-            {"provider":"openai","credential_label":"CODEX","base_url":"https://chatgpt.com/backend-api/codex","client_version":"0.144.0"},
-            {"provider":"openrouter","credential_label":"MAIN","base_url":"https://a","client_version":"not-a-version"}
-        ]"#;
-        let targets = parse_targets(raw);
-        assert_eq!(targets.len(), 2, "both targets survive");
-        let openai = targets.iter().find(|t| t.provider == "openai").unwrap();
-        assert_eq!(openai.client_version.as_deref(), Some("0.144.0"));
-        let openrouter = targets.iter().find(|t| t.provider == "openrouter").unwrap();
-        assert_eq!(
-            openrouter.client_version, None,
-            "the malformed pin is dropped, not the target"
-        );
+    fn parse_targets_rejects_retired_consumer_version_settings() {
+        let error = parse_targets(r#"[{"provider":"openai","credential_label":"API","base_url":"https://api.openai.com/v1","client_version":"0.144.0"}]"#).unwrap_err();
+        assert!(error.to_string().contains("retired consumer setting"));
     }
 
     #[test]
     fn parse_targets_dedupes_by_provider() {
-        // Two openrouter targets ⇒ only the FIRST is kept: reconciliation is
-        // provider-scoped, so a second would soft-disable the first's models.
-        let raw = r#"[
+        let targets = parse_targets(
+            r#"[
             {"provider":"openrouter","credential_label":"FIRST","base_url":"https://a"},
             {"provider":"OpenRouter","credential_label":"SECOND","base_url":"https://b"}
-        ]"#;
-        let targets = parse_targets(raw);
+        ]"#,
+        )
+        .unwrap();
         assert_eq!(
             targets.len(),
             1,
-            "the duplicate openrouter provider is dropped"
+            "provider-scoped reconciliation keeps the first target"
         );
-        assert_eq!(
-            targets[0].credential_label, "FIRST",
-            "the first target wins"
-        );
+        assert_eq!(targets[0].credential_label, "FIRST");
     }
 
     #[test]
@@ -875,92 +578,6 @@ mod tests {
         format!(r#"{{"data":[{}]}}"#, data.join(","))
     }
 
-    /// A loopback OpenAI Codex backend serving `/models` (the
-    /// `{"models":[{"slug":…}]}` shape), so the refresher's Codex arm can be
-    /// exercised without the real ChatGPT backend or a subscription token. The
-    /// Codex CLI fingerprint headers are asserted in `waygate-llm-discovery`'s own
-    /// `codex_sends_cli_fingerprint_and_parses_slugs`; this fake echoes a
-    /// swappable body (so a test can drive an empty-listing cycle) and records
-    /// the `client_version` query it was asked with (the refresher's
-    /// version-resolution contract).
-    async fn serve_codex(
-        body: Arc<Mutex<String>>,
-        seen_version: Arc<Mutex<Option<String>>>,
-    ) -> String {
-        type CodexState = (Arc<Mutex<String>>, Arc<Mutex<Option<String>>>);
-        let app = Router::new()
-            .route(
-                "/models",
-                get(
-                    |State((body, seen)): State<CodexState>,
-                     axum::extract::Query(q): axum::extract::Query<
-                        std::collections::HashMap<String, String>,
-                    >| async move {
-                        *seen.lock().unwrap() = q.get("client_version").cloned();
-                        (
-                            [(axum::http::header::CONTENT_TYPE, "application/json")],
-                            body.lock().unwrap().clone(),
-                        )
-                    },
-                ),
-            )
-            .with_state((body, seen_version));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr: SocketAddr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        format!("http://{addr}")
-    }
-
-    fn codex_body_with(slugs: &[&str]) -> String {
-        let models: Vec<String> = slugs
-            .iter()
-            .map(|s| format!(r#"{{"slug":"{s}"}}"#))
-            .collect();
-        format!(r#"{{"models":[{}]}}"#, models.join(","))
-    }
-
-    /// A tracker whose source URLs are unroutable, so a test that should never
-    /// consult it (OpenRouter surface, or a pinned Codex target) fails fast to
-    /// the compiled default instead of reaching the real registries if a bug
-    /// ever routes through it.
-    fn test_tracker() -> CodexVersionTracker {
-        CodexVersionTracker::new(
-            "http://127.0.0.1:1/npm",
-            "http://127.0.0.1:1/github",
-            Duration::ZERO,
-        )
-    }
-
-    /// Shared buffer a scoped `tracing` subscriber writes into, so a test can
-    /// assert the operator-facing WARN text a refresh emits.
-    #[derive(Clone, Default)]
-    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for CapturedLogs {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
-        type Writer = CapturedLogs;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    impl CapturedLogs {
-        fn contents(&self) -> String {
-            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-        }
-    }
-
     async fn present_upstream(pool: &sqlx::PgPool, tenant: &str, alias: &str) -> bool {
         sqlx::query_scalar::<_, bool>(
             "SELECT present_upstream FROM llm_models WHERE tenant_id = $1 AND alias = $2",
@@ -998,14 +615,12 @@ mod tests {
             provider: "openai".into(),
             credential_label: "API".into(),
             base_url,
-            client_version: None,
             responses_models: vec![id.clone()],
             generate_content_models: vec![],
         };
         let http = raw_test_http_client();
-        let tracker = test_tracker();
         assert_eq!(
-            refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+            refresh_target(&target, &http, &credentials, &pool)
                 .await
                 .unwrap(),
             1
@@ -1020,12 +635,12 @@ mod tests {
         assert!(row.input_cost_per_mtok.is_none());
         assert_eq!(row.credential_label, "API");
         *body.lock().unwrap() = r#"{"data":[]}"#.into();
-        refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+        refresh_target(&target, &http, &credentials, &pool)
             .await
             .unwrap();
         assert!(present_upstream(&pool, &tenant, &alias).await);
         *body.lock().unwrap() = body_with(&["gpt-image-2"]);
-        refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+        refresh_target(&target, &http, &credentials, &pool)
             .await
             .unwrap();
         assert!(!present_upstream(&pool, &tenant, &alias).await);
@@ -1076,14 +691,12 @@ mod tests {
             provider: "google".into(),
             credential_label: "API".into(),
             base_url,
-            client_version: None,
             generate_content_models: vec![id.clone()],
             responses_models: vec![],
         };
         let http = raw_test_http_client();
-        let tracker = test_tracker();
         assert_eq!(
-            refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+            refresh_target(&target, &http, &credentials, &pool)
                 .await
                 .unwrap(),
             1
@@ -1106,14 +719,12 @@ mod tests {
         );
         *body.lock().unwrap() =
             serde_json::json!({"models":[{"name":format!("models/{id}")}]}).to_string();
-        assert!(
-            refresh_target(&target, &http, &credentials, &pool, &tracker, None)
-                .await
-                .is_err()
-        );
+        assert!(refresh_target(&target, &http, &credentials, &pool)
+            .await
+            .is_err());
         assert!(present_upstream(&pool, &tenant, &alias).await);
         *body.lock().unwrap()=serde_json::json!({"models":[{"name":format!("models/{id}"),"supportedGenerationMethods":["embedContent"]}]}).to_string();
-        refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+        refresh_target(&target, &http, &credentials, &pool)
             .await
             .unwrap();
         assert!(!present_upstream(&pool, &tenant, &alias).await);
@@ -1159,14 +770,12 @@ mod tests {
             provider: "openrouter".into(),
             credential_label: "MAIN".into(),
             base_url,
-            client_version: None,
             responses_models: vec![],
             generate_content_models: vec![],
         };
-        let tracker = test_tracker();
 
         // Cycle 1: both models discovered, priced, present.
-        let n = refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+        let n = refresh_target(&target, &http, &credentials, &pool)
             .await
             .expect("cycle 1");
         assert_eq!(n, 2);
@@ -1192,7 +801,7 @@ mod tests {
 
         // Cycle 2: m2 disappears from the listing → soft-disabled, m1 stays.
         *body.lock().unwrap() = body_with(&[&m1]);
-        refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+        refresh_target(&target, &http, &credentials, &pool)
             .await
             .expect("cycle 2");
         assert!(
@@ -1206,7 +815,7 @@ mod tests {
 
         // Cycle 3: an empty listing must NOT reconcile (fail-open) — m1 stays present.
         *body.lock().unwrap() = r#"{"data":[]}"#.to_string();
-        let n3 = refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+        let n3 = refresh_target(&target, &http, &credentials, &pool)
             .await
             .expect("cycle 3");
         assert_eq!(n3, 0);
@@ -1218,176 +827,6 @@ mod tests {
         sqlx::query("DELETE FROM llm_models WHERE tenant_id = $1 AND alias = ANY($2)")
             .bind(&tenant)
             .bind(vec![alias1, alias2])
-            .execute(&pool)
-            .await
-            .expect("cleanup");
-    }
-
-    #[tokio::test]
-    async fn refresh_target_codex_writes_responses_routing_with_chatgpt_flag() {
-        let Ok(url) = std::env::var("AUDIT_DATABASE_URL") else {
-            eprintln!("skipping codex refresh_target pg test: AUDIT_DATABASE_URL not set");
-            return;
-        };
-        let _serial = super::DISCOVERY_PG_LOCK.lock().await;
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .expect("connect");
-        waygate_storage::PgAuditSink::migrate(&pool)
-            .await
-            .expect("migrate");
-        let tenant = waygate_core::TenantId::default().as_str().to_owned();
-
-        let run = uuid::Uuid::now_v7().simple().to_string();
-        let slug = format!("gpt-{run}-codex");
-        let seen_version: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let codex_body = Arc::new(Mutex::new(codex_body_with(&[&slug])));
-        let base_url = serve_codex(codex_body.clone(), seen_version.clone()).await;
-
-        // An OAuth credential for provider `openai` — parsed as an OAuth blob
-        // because `OpenAi.is_oauth()` — with a future expiry so `bearer()` returns
-        // the token without a network refresh, and an `account_id` for the
-        // `chatgpt-account-id` header. This is what makes the surface resolve to
-        // Codex (`for_provider("openai", is_oauth=true)`).
-        let blob = r#"{"tokens":{"access_token":"oauth-token","refresh_token":"rt","account_id":"acct-codex"},"expires_at":"2100-01-01T00:00:00Z"}"#;
-        let credentials = LlmCredentialStore::from_vars([(
-            "LLM_CRED_OPENAI_CODEX".to_string(),
-            blob.to_string(),
-        )]);
-        let http = raw_test_http_client();
-        // The operator pin: it must bypass the release tracker and reach the
-        // listing request verbatim (the test tracker is unroutable, so a
-        // consult would fall back to the compiled default and fail the
-        // pinned-version assertion below).
-        let target = DiscoveryTarget {
-            provider: "openai".into(),
-            credential_label: "CODEX".into(),
-            base_url: base_url.clone(),
-            client_version: Some("0.133.0".into()),
-            responses_models: vec![],
-            generate_content_models: vec![],
-        };
-
-        let tracker = test_tracker();
-        // The shared dispatch UA handle: the cycle must publish the version it
-        // lists models as, so the /responses fingerprint matches the listing.
-        let ua_handle: SharedCodexUaVersion = Arc::new(std::sync::RwLock::new("0.0.0".to_string()));
-        let n = refresh_target(
-            &target,
-            &http,
-            &credentials,
-            &pool,
-            &tracker,
-            Some(&ua_handle),
-        )
-        .await
-        .expect("codex cycle");
-        assert_eq!(n, 1);
-        assert_eq!(
-            seen_version.lock().unwrap().as_deref(),
-            Some("0.133.0"),
-            "the pinned client_version reaches the listing request"
-        );
-        assert_eq!(
-            ua_handle.read().unwrap().as_str(),
-            "0.133.0",
-            "the cycle publishes its client_version into the shared dispatch UA handle"
-        );
-
-        let alias = discovered_alias("openai", &slug);
-        let row = waygate_storage::get_llm_model(&pool, &tenant, &alias)
-            .await
-            .unwrap()
-            .expect("codex model upserted");
-        // The contract this PR adds: a discovered Codex model routes chat via the
-        // OpenAI Responses shape against the ChatGPT backend, flagged so dispatch
-        // uses the Codex request fingerprint rather than a plain Bearer.
-        assert_eq!(
-            row.upstream_model, slug,
-            "raw slug preserved as upstream_model"
-        );
-        assert_eq!(row.provider, "openai");
-        assert_eq!(row.path, "responses");
-        assert_eq!(row.upstream_api, "responses");
-        assert!(
-            row.openai_chatgpt,
-            "Codex rows set the ChatGPT-backend auth flag"
-        );
-        assert_eq!(
-            row.base_url, base_url,
-            "the chat base is the Codex backend base"
-        );
-        assert!(
-            row.input_cost_per_mtok.is_none(),
-            "the Codex listing carries no pricing"
-        );
-        assert!(present_upstream(&pool, &tenant, &alias).await);
-
-        // A RAW-EMPTY Codex listing — what a too-old client_version produces
-        // (the backend returns empty, not an error, below its supported
-        // range) — must not reconcile: the previously-discovered row stays
-        // present (fail-open), and the WARN names the client_version actually
-        // sent so the cause is diagnosable from the log line alone.
-        *codex_body.lock().unwrap() = r#"{"models":[]}"#.to_string();
-        let logs = CapturedLogs::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
-            .with_writer(logs.clone())
-            .finish();
-        let n_empty = {
-            use tracing::instrument::WithSubscriber;
-            refresh_target(&target, &http, &credentials, &pool, &tracker, None)
-                .with_subscriber(subscriber)
-                .await
-                .expect("codex empty cycle")
-        };
-        assert_eq!(n_empty, 0);
-        assert!(
-            present_upstream(&pool, &tenant, &alias).await,
-            "a raw-empty codex listing (e.g. a too-old client_version) never soft-disables last-good rows"
-        );
-        let warn = logs.contents();
-        assert!(
-            warn.contains("0.133.0") && warn.contains("client_version"),
-            "the empty-listing WARN names the exact client_version sent; got: {warn}"
-        );
-
-        // A payload that PARSES but carries only slugless entries
-        // (`{"models":[{}]}`) is a garbled response, not an authoritative
-        // "no visible models" answer: the listing is incomplete, reconcile is
-        // skipped, and the previously discovered row keeps serving
-        // (last-good) — a malformed listing must never mass-soft-disable.
-        *codex_body.lock().unwrap() = r#"{"models":[{}]}"#.to_string();
-        let n_malformed = refresh_target(&target, &http, &credentials, &pool, &tracker, None)
-            .await
-            .expect("codex malformed cycle");
-        assert_eq!(n_malformed, 0);
-        assert!(
-            present_upstream(&pool, &tenant, &alias).await,
-            "a parsed-but-malformed listing (slugless entries) is incomplete and never soft-disables last-good rows"
-        );
-
-        // A listing that is NON-empty upstream, well-formed, but has zero
-        // picker-visible models is a complete answer, not a transient failure:
-        // it must reconcile, soft-disabling the previously discovered row
-        // (otherwise a model that turned hidden would stay routable forever).
-        *codex_body.lock().unwrap() =
-            format!(r#"{{"models":[{{"slug":"{slug}","visibility":"hide"}}]}}"#);
-        let n_hidden = refresh_target(&target, &http, &credentials, &pool, &tracker, None)
-            .await
-            .expect("codex all-hidden cycle");
-        assert_eq!(n_hidden, 0, "no picker-visible models discovered");
-        assert!(
-            !present_upstream(&pool, &tenant, &alias).await,
-            "an all-hidden listing reconciles: the now-hidden model is soft-disabled, not left routable"
-        );
-
-        sqlx::query("DELETE FROM llm_models WHERE tenant_id = $1 AND alias = $2")
-            .bind(&tenant)
-            .bind(&alias)
             .execute(&pool)
             .await
             .expect("cleanup");
@@ -1475,16 +914,14 @@ mod tests {
             provider: "openrouter".into(),
             credential_label: "MAIN".into(),
             base_url,
-            client_version: None,
             responses_models: vec![],
             generate_content_models: vec![],
         };
-        let tracker = test_tracker();
         let chat_alias = discovered_alias("openrouter", &chat_id);
         let emb_alias = discovered_alias("openrouter", &emb_id);
 
         // Cycle 1: a chat model and an embeddings model discovered in one cycle.
-        let n = refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+        let n = refresh_target(&target, &http, &credentials, &pool)
             .await
             .expect("cycle 1");
         assert_eq!(n, 2, "both the chat and embeddings models are discovered");
@@ -1545,7 +982,7 @@ mod tests {
         // so the previously-discovered embeddings row stays present — a partial
         // embeddings failure must never soft-disable last-good embeddings models.
         *emb_body.lock().unwrap() = "__FAIL__".to_string();
-        refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+        refresh_target(&target, &http, &credentials, &pool)
             .await
             .expect("cycle 2 (embeddings listing fails)");
         assert!(
@@ -1564,7 +1001,7 @@ mod tests {
         // so this cycle isolates the chat-empty condition.
         *chat_body.lock().unwrap() = r#"{"data":[]}"#.to_string();
         *emb_body.lock().unwrap() = body_with(&[&emb_id]);
-        refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+        refresh_target(&target, &http, &credentials, &pool)
             .await
             .expect("cycle 2b (chat listing empty)");
         assert!(
@@ -1579,7 +1016,7 @@ mod tests {
         // stays. Proves reconcile acts on embeddings rows too, scoped to the
         // provider, without disturbing chat.
         *emb_body.lock().unwrap() = r#"{"data":[]}"#.to_string();
-        refresh_target(&target, &http, &credentials, &pool, &tracker, None)
+        refresh_target(&target, &http, &credentials, &pool)
             .await
             .expect("cycle 3");
         assert!(

@@ -53,8 +53,8 @@ pub use embeddings::{
 };
 pub use inbound::{parse_chat_completions, parse_responses, TranslateError};
 pub use outbound::{
-    finalize_codex_responses_body, render_anthropic_messages, render_gemini, render_openai_chat,
-    render_openai_responses, DEFAULT_ANTHROPIC_MAX_TOKENS,
+    render_anthropic_messages, render_gemini, render_openai_chat, render_openai_responses,
+    DEFAULT_ANTHROPIC_MAX_TOKENS,
 };
 pub use record::{FinishReason, InferenceRecord, TokenUsage};
 pub use response::{

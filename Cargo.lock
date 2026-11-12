@@ -5882,17 +5882,10 @@ dependencies = [
 name = "waygate-llm-credentials"
 version = "2.4.0"
 dependencies = [
- "axum",
- "base64 0.22.1",
- "reqwest",
  "serde",
  "serde_json",
- "serde_urlencoded",
  "thiserror 2.0.18",
- "time",
  "tokio",
- "tracing",
- "waygate-core",
 ]
 
 [[package]]
@@ -5906,7 +5899,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -5938,11 +5930,9 @@ dependencies = [
  "percent-encoding",
  "reqwest",
  "serde_json",
- "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
- "uuid",
  "waygate-core",
 ]
 

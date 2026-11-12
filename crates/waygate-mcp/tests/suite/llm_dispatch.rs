@@ -1983,6 +1983,58 @@ fn principal_named(sub: &str) -> Principal {
 }
 
 #[tokio::test]
+async fn retired_catalog_route_refuses_a_preexisting_completion_cache_entry() {
+    let captured = Arc::new(Mutex::new(Captured::default()));
+    let addr = spawn_provider(captured.clone()).await;
+    let cache = Arc::new(MockCache::default());
+    let resolver = caching_resolver(addr);
+    let dispatcher = LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), store());
+    let service = DefaultInvocationService::new(
+        Arc::new(FakeCatalog),
+        Arc::new(AllowAllGate),
+        Arc::new(RecordingSink::default()),
+    )
+    .with_llm(dispatcher.clone(), resolver.clone())
+    .with_llm_cache(cache.clone());
+    let request = || InvocationRequest::new("llm", "gpt-x").with_arguments(Some(chat_args()));
+    service
+        .invoke(Some(&principal()), request())
+        .await
+        .expect("seed cache using a supported API route");
+    assert_eq!(cache.puts(), 1);
+    let cache_reads = cache.gets();
+    captured.lock().unwrap().called = false;
+
+    let mut retired = resolver.resolve("llm", "gpt-x").unwrap();
+    retired.route.openai_chatgpt = true;
+    let resolver = Arc::new(StaticModelResolver::new().with_model("llm", "gpt-x", retired));
+    let service = DefaultInvocationService::new(
+        Arc::new(FakeCatalog),
+        Arc::new(AllowAllGate),
+        Arc::new(RecordingSink::default()),
+    )
+    .with_llm(dispatcher, resolver)
+    .with_llm_cache(cache.clone());
+    let error = service
+        .invoke(Some(&principal()), request())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, InvocationError::InvalidArguments(ref message)
+        if message.contains("consumer subscription model routes are no longer supported"))
+    );
+    assert_eq!(
+        cache.gets(),
+        cache_reads,
+        "retired routes cannot read old completions"
+    );
+    assert!(
+        !captured.lock().unwrap().called,
+        "retired routes cannot contact the provider"
+    );
+}
+
+#[tokio::test]
 async fn cached_model_stores_on_miss_then_replays_on_hit_without_dispatch() {
     let cap = Arc::new(Mutex::new(Captured::default()));
     let addr = spawn_provider(cap.clone()).await;

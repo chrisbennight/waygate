@@ -16,19 +16,16 @@ not claim support for every Git hosting API.
 Choose a namespace such as `team-skills`. See [skills from Git](skills-git-source.md)
 for source integrity, approval, and availability behavior.
 
-## External credential refresh
+## API-key rotation
 
-The optional Infisical adapter re-reads designated provider credentials from a
-scoped location. A separate refresher owns rotation of externally managed OAuth
-tokens. The gateway must not compete for a single-use refresh token; reading
-the newly published credential preserves the single-owner contract.
-
-Use the same credential location as the designated refresher, and scope the
-service token to read only that location. Choose a polling interval that fits
-the credential lifetime and refresher cadence. The
-[configuration reference](configuration-reference.md) defines the Infisical
-client settings and credential reload mapping; the
-[inference guide](inference-plane.md) explains provider and credential labels.
+The optional Infisical adapter re-reads configured provider API-key references
+from a scoped location. The service token should read only that location.
+Replacements pass the same API-only parser used at startup; failed reads and
+invalid replacements preserve the prior key. Consumer access-token refresh is
+removed. The [configuration reference](configuration-reference.md) defines the
+client and reload settings; see the [API-only migration guide](api-only-inference-migration.md)
+when upgrading a deployment that used consumer credentials. MCP OAuth and its
+separate upstream-session refresh are unaffected.
 
 ## OIDC configuration names
 

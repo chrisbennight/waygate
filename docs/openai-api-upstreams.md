@@ -91,8 +91,8 @@ No price is invented when the provider listing omits it.
    on their original backend or begin a new conversation with explicit history;
    response handles cannot be migrated between accounts or endpoints.
 5. Remove unused subscription routes and credentials from deployment
-   configuration. Legacy subscription support is removed separately after
-   replacement capabilities and operator migration are complete.
+   configuration. Consumer subscription support is removed; follow the
+   [API-only upgrade guide](api-only-inference-migration.md) before upgrading.
 
 The API Images adapter preserves bounded PNG/JPEG/WebP uploads, JSON inline
 edits, reported usage, and one provider attempt. It does not add automatic

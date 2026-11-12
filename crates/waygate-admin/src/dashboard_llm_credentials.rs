@@ -148,9 +148,6 @@ async fn load_credentials(store: &LlmCredentialStore) -> Vec<CredRow> {
 fn health_str(h: Health) -> &'static str {
     match h {
         Health::Healthy => "healthy",
-        Health::Unknown => "unknown",
-        Health::Failing => "failing",
-        Health::Stale => "stale",
     }
 }
 
@@ -207,9 +204,6 @@ mod tests {
         // form the store emits for metrics / the Grafana view, so the panel and
         // the JSON snapshot never disagree about what a credential's health is.
         assert_eq!(health_str(Health::Healthy), "healthy");
-        assert_eq!(health_str(Health::Unknown), "unknown");
-        assert_eq!(health_str(Health::Failing), "failing");
-        assert_eq!(health_str(Health::Stale), "stale");
     }
 
     #[tokio::test]
