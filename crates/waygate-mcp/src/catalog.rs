@@ -518,6 +518,22 @@ pub trait UpstreamCatalog: Send + Sync + 'static {
         ))
     }
 
+    /// Inspect or cancel an already-authorized private upload. The caller must
+    /// prove ownership and the original tool's profile scope before invoking.
+    async fn manage_file_upload(
+        &self,
+        _server: &str,
+        _uri: &str,
+        _cancel: bool,
+        _principal: Option<&Principal>,
+    ) -> Result<Value, McpError> {
+        Err(McpError::new(
+            rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+            "upload lifecycle unavailable",
+            None,
+        ))
+    }
+
     /// Classification metadata for `<server>.<tool>`. Default is Low-risk /
     /// no-side-effects; the per-server YAML manifest loader populates
     /// real values, and test fakes can override to exercise the step-up

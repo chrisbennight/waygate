@@ -41,6 +41,44 @@ The [bundled transfer skill](../../skills/mcp-file-transfer/SKILL.md) gives exac
 helper commands and recovery instructions. A denied helper network call should
 be resolved in the execution host's network permissions.
 
+## Recover delivery into an upstream
+
+A successful helper upload means the gateway has the source file. The consuming
+tool must still ingest it. Keep the original gateway URI for retry; do not split
+large files, rename fragments, or wrap them in archives to work around a
+capacity error. Declared tool file constraints are checked before forwarding.
+
+Call `gateway-files.delivery_status` with `{}` to inspect the gateway's file
+size and global/per-owner active-transfer limits. Those limits differ from an
+upstream's staged-file capacity. Pass `{"uri":"mcp-file://gateway/<file-id>"}`
+to inspect recent deliveries owned by the caller. Each record has an opaque
+`delivery_id`, its receiving server/tool, the last gateway-observed stage, and
+an upstream-confirmed state when the upstream supports lifecycle inspection.
+The response is bounded; when `next_cursor` is present, pass it as `cursor`
+with the same URI to continue. New deliveries do not shift continuation pages.
+
+To abandon a delivery, call `gateway-files.cancel_delivery` with its
+`delivery_id`. Only its owner may cancel it. Cancellation preserves the source
+file in gateway storage and refuses to delete committed files or uncertain
+publication. `cancelling` means resource release is pending; only
+`cancelled: true` confirms the upstream released staging. A status of `unknown`
+or `commit_uncertain` requires destination inspection before replaying a
+consuming mutation.
+
+Ingestion failures after staging may include `delivery_ids` in error data;
+successful tool results carry them under
+`_meta["io.cacahuate.mcp-gateway/file-deliveries"]`. Status lookup by original
+file URI also works when the tool response was lost. A definitely rejected
+request triggers automatic cancellation when supported. A timeout or lost
+mutation response remains unknown and does not trigger replay or cancellation.
+
+Upstream lifecycle support is optional: the gateway interoperability extension
+uses `files/transferStatus` and `files/cancelUpload`, advertised through the
+upload authorization's `lifecycle` descriptor. These methods are separate from
+the SEP-2631 draft. Older upstreams remain usable but report cancellation as
+unsupported. Lifecycle records contain routing and ownership metadata, never
+transfer credentials, and expire independently of the original source bytes.
+
 ## Receiving tool and task reports
 
 An upstream may return a file from an ordinary tool call or from a completed

@@ -1429,6 +1429,15 @@ impl UpstreamCatalog for UpstreamPool {
         self.authorize_upload(server, tool_name, params, principal, admitted)
             .await
     }
+    async fn manage_file_upload(
+        &self,
+        server: &str,
+        uri: &str,
+        cancel: bool,
+        principal: Option<&Principal>,
+    ) -> Result<Value, McpError> {
+        self.manage_upload(server, uri, cancel, principal).await
+    }
     async fn call_tool(
         &self,
         server: &str,

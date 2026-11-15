@@ -10,6 +10,7 @@ mod config;
 mod continuation_key;
 mod database;
 mod ema;
+mod file_delivery;
 mod file_transfer;
 mod file_transfer_config;
 mod health;

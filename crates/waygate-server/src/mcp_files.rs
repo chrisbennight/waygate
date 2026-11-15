@@ -31,6 +31,8 @@ pub const NAMESPACE: &str = waygate_core::FILES_BUILTIN_NAMESPACE;
 const PREPARE_DOWNLOAD: &str = "prepare_download";
 const PREPARE_UPLOAD: &str = "prepare_upload";
 const UPLOAD_STATUS: &str = "upload_status";
+const DELIVERY_STATUS: &str = "delivery_status";
+const CANCEL_DELIVERY: &str = "cancel_delivery";
 
 pub struct GatewayFileTools {
     authority: Arc<TransferAuthority>,
@@ -41,6 +43,7 @@ pub struct GatewayFileTools {
     public_url: String,
     public_transport: String,
     max_bytes: Option<u64>,
+    catalog: Option<waygate_mcp::SharedCatalog>,
 }
 
 impl GatewayFileTools {
@@ -62,12 +65,88 @@ impl GatewayFileTools {
             public_url,
             public_transport,
             max_bytes: None,
+            catalog: None,
         }
     }
 
     pub fn with_max_bytes(mut self, max_bytes: Option<u64>) -> Self {
         self.max_bytes = max_bytes;
         self
+    }
+
+    pub fn with_catalog(mut self, catalog: waygate_mcp::SharedCatalog) -> Self {
+        self.catalog = Some(catalog);
+        self
+    }
+
+    fn delivery_manager(&self) -> Result<crate::file_delivery::DeliveryManager, McpError> {
+        let catalog = self.catalog.clone().ok_or_else(|| {
+            file_transfer_failure(
+                FileTransferReason::NotEnabled,
+                "upstream upload delivery recovery is not enabled",
+            )
+        })?;
+        Ok(crate::file_delivery::DeliveryManager::new(
+            catalog,
+            self.storage.clone(),
+        ))
+    }
+
+    async fn delivery_status(
+        &self,
+        principal: &Principal,
+        input: DeliveryStatusInput,
+    ) -> Result<CallToolResult, McpError> {
+        enforce_delivery_profile(principal, DELIVERY_STATUS)?;
+        if input.uri.is_none() && input.cursor.is_some() {
+            return Err(invalid_file_request(
+                FileTransferReason::InvalidFileInput,
+                "cursor requires uri from the previous delivery_status page",
+            ));
+        }
+        let cursor = input
+            .cursor
+            .map(|v| {
+                Uuid::parse_str(&v).map_err(|_| {
+                    invalid_file_request(
+                        FileTransferReason::InvalidFileInput,
+                        "cursor must be the next_cursor returned by delivery_status",
+                    )
+                })
+            })
+            .transpose()?;
+        let mut result = match input.uri {
+            Some(uri) => {
+                self.delivery_manager()?
+                    .status(principal, parse_file_uri(&uri)?, cursor)
+                    .await?
+            }
+            None => crate::file_delivery::DeliveryStatuses {
+                deliveries: Vec::new(),
+                limited: false,
+                next_cursor: None,
+                upload_max_bytes: 0,
+                active_transfer_capacity: 0,
+                per_owner_transfer_capacity: 0,
+            },
+        };
+        result.upload_max_bytes = self.max_bytes.unwrap_or(i64::MAX as u64);
+        result.active_transfer_capacity = self.admission.capacity();
+        result.per_owner_transfer_capacity = self.admission.per_owner_capacity();
+        Ok(structured(&result))
+    }
+
+    async fn cancel_delivery(
+        &self,
+        principal: &Principal,
+        input: CancelDeliveryInput,
+    ) -> Result<CallToolResult, McpError> {
+        enforce_delivery_profile(principal, CANCEL_DELIVERY)?;
+        let id=Uuid::parse_str(&input.delivery_id).map_err(|_|invalid_file_request(FileTransferReason::InvalidFileInput,"delivery_id must be a UUID returned by delivery_status or an ingestion error; example: {\"delivery_id\":\"01999999-9999-7999-8999-999999999999\"}"))?;
+        self.check_quota(principal, CANCEL_DELIVERY).await?;
+        let result = self.delivery_manager()?.cancel(principal, id).await?;
+        self.audit.record_required(AuditEvent::new("file_transfer.delivery.cancel_requested",AuditOutcome::Success).with_category(EvidenceCategory::FileTransfer).with_tenant(principal.tenant.clone()).with_principal(Some(principal)).with_tool(NAMESPACE,CANCEL_DELIVERY).with_target(id.to_string())).await.map_err(|_|file_transfer_failure(FileTransferReason::TransferFailed,"cancellation outcome could not be audited; inspect delivery_status before retrying"))?;
+        Ok(structured(&result))
     }
 
     async fn prepare_upload(
@@ -386,6 +465,19 @@ pub(crate) fn enforce_upload_preparation_profile(principal: &Principal) -> Resul
     }
 }
 
+fn enforce_delivery_profile(principal: &Principal, tool: &str) -> Result<(), McpError> {
+    if profile_blocks_server(principal, NAMESPACE)
+        || profile_blocks_tool(principal, NAMESPACE, tool)
+    {
+        Err(invalid_file_request(
+            FileTransferReason::PolicyViolation,
+            "upload delivery recovery is not available to this credential",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn enforce_upload_status_profile(principal: &Principal) -> Result<(), McpError> {
     if profile_blocks_server(principal, NAMESPACE)
         || profile_blocks_tool(principal, NAMESPACE, UPLOAD_STATUS)
@@ -526,6 +618,14 @@ impl BuiltinTools for GatewayFileTools {
                 })?;
                 self.prepare_download(principal, input).await
             }
+            DELIVERY_STATUS => {
+                let input=serde_json::from_value(serde_json::Value::Object(arguments.unwrap_or_default())).map_err(|_|invalid_file_request(FileTransferReason::InvalidFileInput,"expected delivery_status input {\"uri\":\"mcp-file://gateway/<file-id>\"}; omit uri to inspect gateway limits"))?;
+                self.delivery_status(principal, input).await
+            }
+            CANCEL_DELIVERY => {
+                let input=serde_json::from_value(serde_json::Value::Object(arguments.unwrap_or_default())).map_err(|_|invalid_file_request(FileTransferReason::InvalidFileInput,"expected cancel_delivery input {\"delivery_id\":\"01999999-9999-7999-8999-999999999999\"}"))?;
+                self.cancel_delivery(principal, input).await
+            }
             UPLOAD_STATUS => {
                 let input = serde_json::from_value(serde_json::Value::Object(
                     arguments.unwrap_or_default(),
@@ -576,6 +676,27 @@ struct PrepareUploadInput {
     /// Optional exact SHA-256 digest encoded as base64url without padding.
     #[serde(default)]
     digest: Option<PrepareFileDigest>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DeliveryStatusInput {
+    /// Original gateway file URI to inspect caller-owned deliveries. Omit to
+    /// inspect the gateway's file-size and active-transfer limits only.
+    #[serde(default)]
+    uri: Option<String>,
+    /// Exact next_cursor from a previous page for the same uri. Omit for the
+    /// newest deliveries; new insertions do not shift the continuation page.
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CancelDeliveryInput {
+    /// Opaque identifier from delivery_status or an ingestion failure. Only
+    /// the delivery's owning caller may cancel it; the source file is retained.
+    delivery_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -750,6 +871,18 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
                 .idempotent(true),
         ),
         Tool::new(
+            format!("{NAMESPACE}.{DELIVERY_STATUS}"),
+            "Inspect gateway upload limits and caller-owned deliveries into an upstream. Omit uri for limits; pass the original gateway file URI to find delivery IDs and upstream staging states. CallToolResult.structuredContent is authoritative. Gateway upload readiness alone does not mean the consuming tool ingested the file. An unknown or commit_uncertain state requires destination inspection before retrying. Retain the original URI; do not split or repackage the file to recover from capacity errors.",
+            schema_obj(serde_json::to_value(schemars::schema_for!(DeliveryStatusInput)).expect("delivery status schema")),
+        ).with_title("Inspect file deliveries and limits").with_output_schema::<crate::file_delivery::DeliveryStatuses>()
+        .annotate(ToolAnnotations::new().read_only(true).destructive(false).idempotent(true)),
+        Tool::new(
+            format!("{NAMESPACE}.{CANCEL_DELIVERY}"),
+            "Cancel an owned upstream upload delivery by delivery_id from delivery_status or an ingestion error. The original gateway file remains available. Requires upstream lifecycle support; committed files and uncertain publication are not deleted. A cancelling result means cleanup is pending: inspect delivery_status until the upstream confirms cancelled. This operation does not replay the consuming tool.",
+            schema_obj(serde_json::to_value(schemars::schema_for!(CancelDeliveryInput)).expect("cancel delivery schema")),
+        ).with_title("Cancel an upstream file delivery").with_output_schema::<crate::file_delivery::DeliveryCancellation>()
+        .annotate(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true)),
+        Tool::new(
             format!("{NAMESPACE}.{PREPARE_DOWNLOAD}"),
             "Prepare a gateway-owned file for download to local disk, so its bytes never enter a tool result. Pass the file URI from an earlier tool result. Completing the download requires signing and is the job of the `mcp-files` helper: run `mcp-files thumbprint` to get the helper_jkt this call needs, then run `mcp-files download --uri <file uri> --dest <path>`, which redeems this grant with the helper's key, writes the file, and verifies the size and digest the gateway reports. Nothing else from this result needs to reach the helper. Without the helper the download cannot be completed by hand from an agent loop; obtain it rather than asking for the contents another way. Writing your own helper instead: this result carries no file bytes or bearer credential, so POST the handle to credential_exchange with an RFC 9449 proof, read the short-lived access_token, then send Authorization: DPoP <access_token> and a fresh proof carrying ath (the base64url SHA-256 of that token) to the download URL. Stream the response; do not read it into memory.",
             schema_obj(
@@ -776,7 +909,9 @@ pub(crate) fn surface_catalog() -> BuiltinCatalog {
     let tools = tool_defs()
         .into_iter()
         .map(|tool| {
-            let side_effects = !tool.name.as_ref().ends_with(".upload_status");
+            let side_effects = ![".upload_status", ".delivery_status"]
+                .iter()
+                .any(|suffix| tool.name.as_ref().ends_with(suffix));
             CatalogTool::builtin(NAMESPACE, tool, RiskTier::Low, side_effects, false)
         })
         .collect();
@@ -935,7 +1070,7 @@ mod tests {
     #[test]
     fn file_helpers_are_fully_described_on_the_wire() {
         let tools = tool_defs();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 5);
         let tool = tools
             .iter()
             .find(|tool| tool.name.as_ref() == "gateway-files.prepare_download")
@@ -951,7 +1086,7 @@ mod tests {
         assert!(surface_descriptor()
             .tools
             .iter()
-            .filter(|tool| tool.name != UPLOAD_STATUS)
+            .filter(|tool| ![UPLOAD_STATUS, DELIVERY_STATUS].contains(&tool.name.as_str()))
             .all(|tool| tool.side_effects));
         for field in ["uri", "helper_jkt"] {
             assert!(
@@ -997,6 +1132,40 @@ mod tests {
         assert!(status.input_schema["properties"]["uri"]["description"]
             .as_str()
             .is_some_and(|description| !description.is_empty()));
+    }
+
+    #[test]
+    fn delivery_recovery_schemas_match_safe_results() {
+        let tools = tool_defs();
+        let status = tools
+            .iter()
+            .find(|t| t.name.as_ref() == "gateway-files.delivery_status")
+            .unwrap();
+        let cancellation = tools
+            .iter()
+            .find(|t| t.name.as_ref() == "gateway-files.cancel_delivery")
+            .unwrap();
+        assert_eq!(
+            status.annotations.as_ref().unwrap().read_only_hint,
+            Some(true)
+        );
+        assert_eq!(
+            cancellation.annotations.as_ref().unwrap().read_only_hint,
+            Some(false)
+        );
+        for (tool, value) in [
+            (
+                status,
+                serde_json::json!({"upload_max_bytes":1073741824_u64,"active_transfer_capacity":8,"per_owner_transfer_capacity":4,"deliveries":[],"limited":false,"next_cursor":null}),
+            ),
+            (
+                cancellation,
+                serde_json::json!({"delivery_id":"opaque","state":"cancelling","cancelled":false}),
+            ),
+        ] {
+            let schema = serde_json::to_value(tool.output_schema.as_ref().unwrap()).unwrap();
+            assert!(jsonschema::validator_for(&schema).unwrap().is_valid(&value));
+        }
     }
 
     #[test]
@@ -1150,7 +1319,7 @@ mod tests {
         assert!(d
             .tools
             .iter()
-            .filter(|tool| tool.name != UPLOAD_STATUS)
+            .filter(|tool| ![UPLOAD_STATUS, DELIVERY_STATUS].contains(&tool.name.as_str()))
             .all(|tool| tool.side_effects));
         assert!(d
             .tools
@@ -1165,7 +1334,11 @@ mod tests {
     /// only route, and a caller without a JOSE library concluded it was stuck.
     #[test]
     fn tool_descriptions_name_the_helper_before_the_protocol() {
-        for tool in tool_defs() {
+        for tool in tool_defs().into_iter().filter(|tool| {
+            [PREPARE_UPLOAD, PREPARE_DOWNLOAD, UPLOAD_STATUS]
+                .iter()
+                .any(|name| tool.name.as_ref() == format!("{NAMESPACE}.{name}"))
+        }) {
             let description = tool.description.as_deref().unwrap_or_default();
             let helper = description
                 .find("mcp-files")

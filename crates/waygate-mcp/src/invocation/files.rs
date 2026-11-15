@@ -236,6 +236,7 @@ impl DefaultInvocationService {
             .await
             .map_err(InvocationError::Upstream)?;
         if rewritten {
+            ctx.file_inputs_prepared = true;
             self.validate_input(ctx).await?;
         }
         // Elicited files inside an MRTR continuation follow the same
@@ -263,13 +264,63 @@ impl DefaultInvocationService {
                 compiled_input_schema: ctx.compiled_input_validator.clone(),
             };
             if let Some(input_responses) = ctx.mrtr.input_responses.as_mut() {
-                processor
+                let rewritten = processor
                     .prepare_continuation(continuation_context, input_responses, &file_keys)
                     .await
                     .map_err(InvocationError::Upstream)?;
+                ctx.file_inputs_prepared |= rewritten;
             }
         }
         Ok(())
+    }
+
+    pub(super) fn file_input_context(
+        ctx: &InvocationContext<'_>,
+    ) -> crate::files::FileInputContext {
+        crate::files::FileInputContext {
+            principal: ctx.principal.cloned(),
+            server: ctx.server.to_owned(),
+            tool: ctx.tool.to_owned(),
+            invocation_id: ctx.invocation_id.to_string(),
+            admitted_contract: ctx.tool_snapshot().contract_identity(),
+            compiled_input_schema: ctx.compiled_input_validator.clone(),
+        }
+    }
+
+    pub(super) async fn finish_file_inputs(
+        &self,
+        ctx: &InvocationContext<'_>,
+        outcome: crate::files::FileInputOutcome,
+    ) -> Vec<String> {
+        if !ctx.file_inputs_prepared
+            && !matches!(outcome, crate::files::FileInputOutcome::NotDispatched)
+        {
+            return Vec::new();
+        }
+        match self.file_input_processor.as_ref() {
+            Some(processor) => {
+                processor
+                    .finish(&Self::file_input_context(ctx), outcome)
+                    .await
+            }
+            None => Vec::new(),
+        }
+    }
+
+    pub(super) async fn mark_file_dispatch(
+        &self,
+        ctx: &InvocationContext<'_>,
+    ) -> Result<(), InvocationError> {
+        if !ctx.file_inputs_prepared {
+            return Ok(());
+        }
+        match self.file_input_processor.as_ref() {
+            Some(processor) => processor
+                .dispatch_started(&Self::file_input_context(ctx))
+                .await
+                .map_err(InvocationError::Upstream),
+            None => Ok(()),
+        }
     }
 
     pub(super) async fn prepare_files_and_validate_output(

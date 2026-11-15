@@ -128,6 +128,7 @@ impl DefaultInvocationService {
             ));
         }
         let mut ctx = InvocationContext {
+            file_inputs_prepared: false,
             principal: Some(principal),
             task_origin: None,
             task_action: Some(match &action {

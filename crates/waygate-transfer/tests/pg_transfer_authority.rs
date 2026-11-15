@@ -1193,3 +1193,172 @@ async fn redemption_by_file_uri_waits_for_the_grant_to_be_issued() {
         Err(AuthorityError::GrantUnavailable)
     ));
 }
+
+#[tokio::test]
+async fn delivery_records_survive_reopen_and_enforce_exact_owner() {
+    let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+        return;
+    };
+    let tenant = format!("delivery-{}", Uuid::new_v4().simple());
+    seed_tenant(&pool, &tenant).await;
+    let root = tempfile::tempdir().unwrap();
+    let storage = GatewayFileStorage::new(pool.clone(), root.path())
+        .await
+        .unwrap();
+    let owner = GatewayFileOwner {
+        tenant_id: TenantId::parse(&tenant).unwrap(),
+        principal_sub: "owner".into(),
+        principal_issuer: "issuer".into(),
+    };
+    let id = Uuid::new_v4();
+    let file_id = Uuid::new_v4();
+    storage
+        .record_delivery(waygate_transfer::NewFileDelivery {
+            id,
+            owner: &owner,
+            file_id,
+            invocation_id: "call",
+            server: "printable",
+            tool: "artifact",
+            source_server: "gateway",
+            source_tool: "prepare_upload",
+            upstream_uri: "mcp-file://printable/upload/private",
+            lifecycle_supported: true,
+            expires_at: OffsetDateTime::now_utc() + Duration::hours(1),
+        })
+        .await
+        .unwrap();
+    let reopened = GatewayFileStorage::new(pool.clone(), root.path())
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened
+            .owned_delivery(&owner, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .file_id,
+        file_id
+    );
+    for other in [
+        GatewayFileOwner {
+            principal_sub: "other".into(),
+            ..owner.clone()
+        },
+        GatewayFileOwner {
+            principal_issuer: "other".into(),
+            ..owner.clone()
+        },
+    ] {
+        assert!(reopened.owned_delivery(&other, id).await.unwrap().is_none());
+        assert!(reopened
+            .deliveries_for_file(&other, file_id, None)
+            .await
+            .unwrap()
+            .is_empty());
+        reopened
+            .set_delivery_stage(&other, id, "cancelled")
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        reopened
+            .owned_delivery(&owner, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .stage,
+        "prepared"
+    );
+    reopened
+        .set_delivery_stage(&owner, id, "cancelled")
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .owned_delivery(&owner, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .stage,
+        "cancelled"
+    );
+    assert!(!reopened
+        .set_delivery_stage(&owner, id, "cancelling")
+        .await
+        .unwrap());
+    assert!(!reopened
+        .set_delivery_stage(&owner, id, "ready")
+        .await
+        .unwrap());
+    assert!(!reopened
+        .set_delivery_stage(&owner, id, "dispatched")
+        .await
+        .unwrap());
+    assert_eq!(
+        storage
+            .owned_delivery(&owner, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .stage,
+        "cancelled"
+    );
+    for _ in 0..24 {
+        storage
+            .record_delivery(waygate_transfer::NewFileDelivery {
+                id: Uuid::new_v4(),
+                owner: &owner,
+                file_id,
+                invocation_id: "call",
+                server: "printable",
+                tool: "artifact",
+                source_server: "gateway",
+                source_tool: "prepare_upload",
+                upstream_uri: "mcp-file://printable/upload/private",
+                lifecycle_supported: true,
+                expires_at: OffsetDateTime::now_utc() + Duration::hours(1),
+            })
+            .await
+            .unwrap();
+    }
+    let first = storage
+        .deliveries_for_file(&owner, file_id, None)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 21);
+    let cursor = first[19].id;
+    let newer = Uuid::new_v4();
+    storage
+        .record_delivery(waygate_transfer::NewFileDelivery {
+            id: newer,
+            owner: &owner,
+            file_id,
+            invocation_id: "new-call",
+            server: "printable",
+            tool: "artifact",
+            source_server: "gateway",
+            source_tool: "prepare_upload",
+            upstream_uri: "mcp-file://printable/upload/private",
+            lifecycle_supported: true,
+            expires_at: OffsetDateTime::now_utc() + Duration::hours(1),
+        })
+        .await
+        .unwrap();
+    let second = storage
+        .deliveries_for_file(&owner, file_id, Some(cursor))
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 5);
+    assert!(second.iter().any(|r| r.id == id));
+    assert!(!second.iter().any(|r| r.id == newer));
+    assert!(!second
+        .iter()
+        .any(|r| first[..20].iter().any(|initial| initial.id == r.id)));
+    sqlx::query("DELETE FROM tenants WHERE id=$1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(storage.owned_delivery(&owner, id).await.unwrap().is_none());
+}

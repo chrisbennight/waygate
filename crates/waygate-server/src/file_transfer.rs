@@ -104,7 +104,7 @@ pub(crate) fn build_file_services(
     let admission = FileTransferAdmission::new(config.concurrency);
     let processor = Arc::new(
         OutboundFileProcessor::new(
-            catalog,
+            catalog.clone(),
             storage.clone(),
             runtime.audit.clone(),
             config.retention,
@@ -127,7 +127,8 @@ pub(crate) fn build_file_services(
                 public_url.to_owned(),
                 public_transport.to_owned(),
             )
-            .with_max_bytes(max_bytes),
+            .with_max_bytes(max_bytes)
+            .with_catalog(catalog),
         )),
         native_download_authorizer: Some(Arc::new(
             NativeFileAuthorizer::new(
@@ -380,6 +381,7 @@ pub(crate) struct OutboundFileProcessor {
 }
 
 struct PreparedFileDelivery {
+    delivery_id: uuid::Uuid,
     file: StoredGatewayFile,
     upload_name: Option<String>,
     upstream_file: FileValue,
@@ -821,6 +823,50 @@ impl OutboundFileProcessor {
                 &context.admitted_contract,
             )
             .await?;
+        let delivery_id = uuid::Uuid::new_v4();
+        let lifecycle_supported = authorized
+            .response
+            .lifecycle
+            .as_ref()
+            .is_some_and(|lifecycle| lifecycle.supported());
+        let owner = owner_from_principal(principal);
+        if let Err(error) = self
+            .storage
+            .record_delivery(waygate_transfer::NewFileDelivery {
+                id: delivery_id,
+                owner: &owner,
+                file_id: file.id,
+                invocation_id: &context.invocation_id,
+                server: &context.server,
+                tool: &context.tool,
+                source_server: &file.upstream_server,
+                source_tool: &file.upstream_tool,
+                upstream_uri: &authorized.response.file.uri,
+                lifecycle_supported,
+                expires_at: OffsetDateTime::now_utc() + time::Duration::days(1),
+            })
+            .await
+        {
+            tracing::warn!(%delivery_id,%error,"upload delivery recovery could not be recorded");
+            if lifecycle_supported {
+                if let Err(error) = self
+                    .catalog
+                    .manage_file_upload(
+                        &context.server,
+                        &authorized.response.file.uri,
+                        true,
+                        Some(principal),
+                    )
+                    .await
+                {
+                    tracing::warn!(%delivery_id,code=?error.code,"unrecorded upload cleanup remains unconfirmed");
+                }
+            }
+            return Err(file_transfer_failure(
+                FileTransferReason::TemporarilyUnavailable,
+                "upload delivery recovery is unavailable; the consuming tool was not dispatched",
+            ));
+        }
         let mut upstream_file = validate_authorized_upload(
             &authorized.response.file,
             file.media_type.as_deref(),
@@ -870,6 +916,7 @@ impl OutboundFileProcessor {
         upstream_file.size = Some(file.size);
         upstream_file.digest = Some(digest);
         Ok(PreparedFileDelivery {
+            delivery_id,
             upload_name: supplied.name.clone().or(file.display_name.clone()),
             file,
             upstream_file,
@@ -896,6 +943,10 @@ impl OutboundFileProcessor {
                     "file transfer capacity is currently full; retry later",
                 )
             })?;
+        self.storage.set_delivery_stage(&owner_from_principal(principal),delivery.delivery_id,"transferring").await.map_err(|error|{
+            tracing::warn!(delivery_id=%delivery.delivery_id,%error,"upload delivery stage unavailable");
+            file_transfer_failure(FileTransferReason::TemporarilyUnavailable,"upload delivery recovery is unavailable")
+        })?;
         let http = self
             .client_for_transfer(&delivery.url, &delivery.network)
             .await?;
@@ -959,6 +1010,10 @@ impl OutboundFileProcessor {
             tracing::warn!(server = %context.server, status = %response.status(), "upstream file upload was refused");
             return Err(error);
         }
+        self.storage.set_delivery_stage(&owner_from_principal(principal),delivery.delivery_id,"ready").await.map_err(|error|{
+            tracing::warn!(delivery_id=%delivery.delivery_id,%error,"upload delivery stage unavailable");
+            file_transfer_failure(FileTransferReason::TemporarilyUnavailable,"upload delivery recovery is unavailable")
+        })?;
         self.audit
             .record_required(
                 AuditEvent::new("file_transfer.file.delivered", AuditOutcome::Success)
@@ -1131,15 +1186,63 @@ fn verify_upload_response_status(status: reqwest::StatusCode) -> Result<(), McpE
     ) {
         Ok(())
     } else {
-        Err(file_transfer_failure(
-            FileTransferReason::TransferFailed,
-            "upstream file upload did not confirm complete storage",
-        ))
+        let (category, reason, retryable) = match status {
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE => (
+                FileTransferReason::InvalidFileInput,
+                "file_too_large",
+                false,
+            ),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY => (
+                FileTransferReason::IntegrityMismatch,
+                "integrity_mismatch",
+                false,
+            ),
+            reqwest::StatusCode::INSUFFICIENT_STORAGE => (
+                FileTransferReason::QuotaExhausted,
+                "storage_budget_exceeded",
+                false,
+            ),
+            reqwest::StatusCode::REQUEST_TIMEOUT => {
+                (FileTransferReason::TransferFailed, "upload_timeout", true)
+            }
+            reqwest::StatusCode::GONE => (
+                FileTransferReason::FileUnavailable,
+                "upload_cancelled",
+                false,
+            ),
+            _ => (FileTransferReason::TransferFailed, "transfer_failed", false),
+        };
+        let mut error=file_transfer_failure(category,"upstream file upload did not confirm complete storage; retain the gateway URI and inspect delivery_status");
+        error.data = Some(
+            serde_json::json!({"error":category.as_str(),"reason":reason,"stage":"receive","retryable":retryable,"publication_attempted":false}),
+        );
+        Err(error)
     }
 }
 
 #[async_trait]
 impl FileInputProcessor for OutboundFileProcessor {
+    async fn dispatch_started(&self, context: &FileInputContext) -> Result<(), McpError> {
+        let Some(principal) = context.principal.as_ref() else {
+            return Ok(());
+        };
+        crate::file_delivery::DeliveryManager::new(self.catalog.clone(), self.storage.clone())
+            .dispatch_started(principal, &context.invocation_id)
+            .await
+    }
+
+    async fn finish(
+        &self,
+        context: &FileInputContext,
+        outcome: waygate_mcp::files::FileInputOutcome,
+    ) -> Vec<String> {
+        let Some(principal) = context.principal.as_ref() else {
+            return Vec::new();
+        };
+        crate::file_delivery::DeliveryManager::new(self.catalog.clone(), self.storage.clone())
+            .settle(principal, &context.invocation_id, outcome)
+            .await
+    }
     fn admit(
         &self,
         input_schema: Option<&Value>,
@@ -1903,6 +2006,7 @@ impl FileUploadAuthorizer for NativeFileAuthorizer {
             headers.insert("Content-Type".to_owned(), media_type.clone());
         }
         Ok(AuthorizeUploadResult {
+            lifecycle: None,
             file: FileValue {
                 uri: file_uri,
                 name: params.name,
@@ -3435,6 +3539,39 @@ mod tests {
             "printable",
             NATIVE_RESOURCE_FILE_ORIGIN,
         ));
+    }
+
+    #[test]
+    fn upload_http_refusals_retain_safe_recovery_categories() {
+        for (status, category, reason) in [
+            (
+                reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+                "invalid_file_input",
+                "file_too_large",
+            ),
+            (
+                reqwest::StatusCode::INSUFFICIENT_STORAGE,
+                "quota_exhausted",
+                "storage_budget_exceeded",
+            ),
+            (
+                reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+                "integrity_mismatch",
+                "integrity_mismatch",
+            ),
+            (
+                reqwest::StatusCode::GONE,
+                "file_unavailable",
+                "upload_cancelled",
+            ),
+        ] {
+            let error = verify_upload_response_status(status).unwrap_err();
+            let data = error.data.unwrap();
+            assert_eq!(data["error"], category);
+            assert_eq!(data["reason"], reason);
+            assert_eq!(data["stage"], "receive");
+            assert_eq!(data["publication_attempted"], false);
+        }
     }
 
     #[tokio::test]
@@ -5595,6 +5732,7 @@ mod tests {
                     },
                 ],
                 Some(AuthorizeUploadResult {
+                    lifecycle: None,
                     file: FileValue {
                         uri: "mcp-file://printable/imported".to_owned(),
                         name: None,

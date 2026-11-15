@@ -1051,3 +1051,34 @@ Which projections exist today:
   contents also pass through the normal response-inspector chain before any
   file is staged or published; binary resource contents are not interpreted as
   text.
+
+## Upload delivery recovery extension
+
+Gateway-owned source files and deliveries into upstream tools have separate
+lifetimes. `gateway-files.delivery_status` and `gateway-files.cancel_delivery`
+provide owner-scoped recovery without exposing the upstream-private URI or
+upload credentials. A delivery ID identifies one upstream staging allocation;
+it does not grant access. The gateway enforces tenant, issuer, subject and
+credential-profile restrictions before inspection or cancellation.
+
+An upstream may advertise `lifecycle` in its `files/authorizeUpload` result:
+`{"statusMethod":"files/transferStatus","cancelMethod":"files/cancelUpload"}`.
+Both methods accept `{"uri":"<upstream-private-upload-uri>"}`. Status returns
+`state`; cancellation returns `state` and `cancelled`. The gateway executes only
+these known method names. The extension is optional and is not described as a
+standard MCP method. The upstream must serialize cancellation with reception and
+publication: committed and uncertain publication cannot be deleted by cancel.
+
+Authorization refusals may return typed error data. The gateway preserves only
+allowlisted categories, reasons, stages, boolean retry/publication facts and
+unsigned size/capacity/retry values. It never forwards arbitrary upstream error
+messages, paths, identifiers or signed URLs. Unrecognized errors retain the
+existing generic transfer failure. Recovery metadata is additive to error data;
+`delivery_ids` names owned staging records when they exist. Successful tool
+results carry the same IDs in
+`_meta["io.cacahuate.mcp-gateway/file-deliveries"]`.
+
+The invocation boundary cancels staging after a definite rejection or failure
+before dispatch when supported. It records unknown outcomes after transport
+failure without replaying the tool or claiming that staging was deleted. The
+source gateway file remains unchanged and can be reused with corrected input.

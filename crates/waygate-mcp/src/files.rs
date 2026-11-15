@@ -57,6 +57,14 @@ pub struct FileInputContext {
     pub compiled_input_schema: Option<Arc<jsonschema::Validator>>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum FileInputOutcome {
+    NotDispatched,
+    Rejected,
+    Completed,
+    Unknown,
+}
+
 /// Delivers caller-owned gateway files to the selected upstream and replaces
 /// their public gateway references with upstream-private file references.
 /// Returns `true` only when arguments were rewritten, so the invocation
@@ -90,6 +98,16 @@ pub trait FileInputProcessor: Send + Sync + 'static {
         input_schema: Option<&Value>,
         arguments: &mut Option<Map<String, Value>>,
     ) -> Result<bool, McpError>;
+
+    async fn dispatch_started(&self, _context: &FileInputContext) -> Result<(), McpError> {
+        Ok(())
+    }
+
+    /// Record the invocation outcome and reclaim only definitely rejected staging.
+    /// Returned identifiers are safe caller-owned recovery handles.
+    async fn finish(&self, _context: &FileInputContext, _outcome: FileInputOutcome) -> Vec<String> {
+        Vec::new()
+    }
 
     /// Deliver caller-owned gateway file references found inside an MRTR
     /// continuation's input responses and replace them with upstream-private
@@ -539,11 +557,28 @@ pub struct AuthorizeDownloadParams {
     pub uri: String,
 }
 
+/// Optional private upload lifecycle methods understood by the gateway.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadLifecycle {
+    pub status_method: String,
+    pub cancel_method: String,
+}
+
+impl UploadLifecycle {
+    pub fn supported(&self) -> bool {
+        self.status_method == "files/transferStatus" && self.cancel_method == "files/cancelUpload"
+    }
+}
+
 /// Upload authorization has one required upload descriptor and may include an
 /// eager download descriptor beside the stable file value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthorizeUploadResult {
+    /// Optional gateway interoperability extension, separate from SEP-2631.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<UploadLifecycle>,
     pub file: FileValue,
     pub upload: FileTransferDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]

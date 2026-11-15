@@ -450,6 +450,7 @@ pub fn build_default_invocation_service(
 /// orchestrator hands stages owned strings via clones only at the moments
 /// where ownership actually transfers (audit events, error variants).
 struct InvocationContext<'a> {
+    file_inputs_prepared: bool,
     principal: Option<&'a Principal>,
     task_origin: Option<crate::tasks::TaskRoute>,
     task_action: Option<&'static str>,
@@ -741,6 +742,7 @@ impl InvocationService for DefaultInvocationService {
             cancellation: std::mem::take(&mut req.cancellation),
         };
         let mut ctx = InvocationContext {
+            file_inputs_prepared: false,
             task_origin: None,
             task_action: None,
             principal,
@@ -893,9 +895,22 @@ impl InvocationService for DefaultInvocationService {
             }
         }
         self.enter_stage(InvocationStage::PrepareFileInputs);
-        if let Err(error) = self.prepare_and_validate_file_inputs(&mut ctx).await {
+        if let Err(mut error) = self.prepare_and_validate_file_inputs(&mut ctx).await {
+            let ids = self
+                .finish_file_inputs(&ctx, crate::files::FileInputOutcome::NotDispatched)
+                .await;
+            attach_delivery_recovery(&mut error, &ids);
             let result = Err(error);
             self.enter_stage(InvocationStage::RecordOutcome);
+            self.record_outcome(&mut ctx, &result).await;
+            return result.map(InvocationResponse::Unary);
+        }
+        if let Err(mut error) = self.mark_file_dispatch(&ctx).await {
+            let ids = self
+                .finish_file_inputs(&ctx, crate::files::FileInputOutcome::NotDispatched)
+                .await;
+            attach_delivery_recovery(&mut error, &ids);
+            let result = Err(error);
             self.record_outcome(&mut ctx, &result).await;
             return result.map(InvocationResponse::Unary);
         }
@@ -935,6 +950,22 @@ impl InvocationService for DefaultInvocationService {
             ))),
             Err(error) => Err(error),
         };
+        let file_outcome = match &result {
+            Ok(value) if value.is_error == Some(true) => crate::files::FileInputOutcome::Rejected,
+            Ok(_) => crate::files::FileInputOutcome::Completed,
+            Err(_) => crate::files::FileInputOutcome::Unknown,
+        };
+        let delivery_ids = self.finish_file_inputs(&ctx, file_outcome).await;
+        match &mut result {
+            Err(error) => attach_delivery_recovery(error, &delivery_ids),
+            Ok(value) if !delivery_ids.is_empty() => {
+                value.meta.get_or_insert_with(Default::default).insert(
+                    "io.cacahuate.mcp-gateway/file-deliveries".into(),
+                    serde_json::json!({"delivery_ids":delivery_ids}),
+                );
+            }
+            _ => {}
+        }
         // Validate the value the
         // CALLER will see, not the upstream's original. If
         // validate_output ran first, inspect_response
@@ -2289,3 +2320,15 @@ mod tests;
 
 #[cfg(test)]
 mod count_tests;
+
+fn attach_delivery_recovery(error: &mut InvocationError, ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
+    if let InvocationError::Upstream(error) = error {
+        let data = error.data.get_or_insert_with(|| serde_json::json!({}));
+        if let Some(data) = data.as_object_mut() {
+            data.insert("delivery_ids".into(), serde_json::json!(ids));
+        }
+    }
+}
