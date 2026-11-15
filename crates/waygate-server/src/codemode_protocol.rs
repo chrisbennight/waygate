@@ -66,12 +66,27 @@ pub enum ParentFrame {
     },
     CallResult {
         id: u32,
-        result: Result<ConnectorCallResult, String>,
+        result: Result<ConnectorCallResult, ConnectorCallError>,
     },
     ArtifactResult {
         id: u32,
         result: Result<Value, String>,
     },
+}
+
+/// Inspected application error detail, separate from gateway refusal codes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolErrorDetail {
+    pub code: String,
+    pub message: String,
+}
+
+/// Preserve the existing refusal strings while carrying typed tool failures.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ConnectorCallError {
+    Message(String),
+    Tool { tool_error: Option<ToolErrorDetail> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

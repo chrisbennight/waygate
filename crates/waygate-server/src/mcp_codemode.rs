@@ -55,9 +55,9 @@ use crate::mcp_builtin::{schema_obj, structured};
 #[cfg(test)]
 use crate::process_mode::codemode_protocol::encode_frame;
 use crate::process_mode::codemode_protocol::{
-    bounded_failure_message, encode_parent_frame, ConnectorCallResult, ConsoleCapture,
-    ConsoleOutput, ParentFrame, RunnerBinding, RunnerFailureCode, RunnerFrame, RunnerResumeContext,
-    CONFINEMENT_PROFILE, RUNNER_FLAG, RUNNER_SPOOL_FLAG,
+    bounded_failure_message, encode_parent_frame, ConnectorCallError, ConnectorCallResult,
+    ConsoleCapture, ConsoleOutput, ParentFrame, RunnerBinding, RunnerFailureCode, RunnerFrame,
+    RunnerResumeContext, CONFINEMENT_PROFILE, RUNNER_FLAG, RUNNER_SPOOL_FLAG,
 };
 
 mod call_tasks;
@@ -154,8 +154,8 @@ const EXECUTION_CANCEL_SETTLE_INTERVAL: Duration = Duration::from_millis(25);
 /// runner that does not install it would replay an input-dependent program
 /// with no input and take a different path — so an older binary, which knows
 /// nothing of these numbers, fails the compatibility check instead.
-const SDK_CONTRACT_VERSION: i32 = 8;
-const RUNNER_CONTRACT_VERSION: i32 = 11;
+const SDK_CONTRACT_VERSION: i32 = 9;
+const RUNNER_CONTRACT_VERSION: i32 = 12;
 
 /// Every `(sdk, runner)` stamp this binary continues. Each surface change has
 /// kept earlier programs running unchanged, so a current binary can replay a
@@ -164,7 +164,7 @@ const RUNNER_CONTRACT_VERSION: i32 = 11;
 /// that used `await` as a name now fails to parse instead of running
 /// differently. A pair leaves this list only when its rows can no longer exist
 /// or its programs can no longer run unchanged.
-const CONTINUABLE_CONTRACTS: [(i32, i32); 9] = [
+const CONTINUABLE_CONTRACTS: [(i32, i32); 10] = [
     (2, 5),
     (3, 6),
     (4, 6),
@@ -173,6 +173,7 @@ const CONTINUABLE_CONTRACTS: [(i32, i32); 9] = [
     (5, 8),
     (6, 9),
     (7, 10),
+    (8, 11),
     (SDK_CONTRACT_VERSION, RUNNER_CONTRACT_VERSION),
 ];
 
@@ -3834,7 +3835,7 @@ impl CodeModeTools {
         &self,
         attempt: &RunnerAttempt<'_>,
         stopped: &std::sync::atomic::AtomicBool,
-        admitted: Result<AdmittedCall, String>,
+        admitted: Result<AdmittedCall, ConnectorCallError>,
         arguments: Value,
         ordinal: usize,
         hierarchy: InvocationHierarchy,
@@ -3896,9 +3897,10 @@ impl CodeModeTools {
                     CodeExecutionProfile::Direct,
                     None,
                 );
-                self.await_effect_with_claim_renewal(attempt.claim, dispatch)
-                    .await
-                    .map_err(|error| connector_error(error.kind(), &error))
+                project_connector_result(
+                    self.await_effect_with_claim_renewal(attempt.claim, dispatch)
+                        .await,
+                )
             }
             Ok(admitted) if admitted.contract.side_effects() => {
                 if attempt.profile != CodeExecutionProfile::LegacyApprovalBound {
@@ -3957,7 +3959,7 @@ impl CodeModeTools {
                         .await_effect_with_claim_renewal(attempt.claim, dispatch)
                         .await
                     {
-                        Ok(value) => Ok(value),
+                        Ok(value) => connector_result_value(value),
                         Err(waygate_invocation::InvocationError::ApprovalRequired { .. }) => {
                             return Ok(ConnectorCallOutcome::WaitingForApproval(Box::new(
                                 approval,
@@ -3979,8 +3981,8 @@ impl CodeModeTools {
                 // In-flight effects finish before the broker enforces the
                 // deadline.
                 bounded_by_deadline(attempt.deadline, async {
-                    Ok(self
-                        .invoke_connector(
+                    Ok(project_connector_result(
+                        self.invoke_connector(
                             attempt.principal,
                             &admitted,
                             arguments,
@@ -3988,8 +3990,8 @@ impl CodeModeTools {
                             attempt.profile,
                             None,
                         )
-                        .await
-                        .map_err(|error| connector_error(error.kind(), &error)))
+                        .await,
+                    ))
                 })
                 .await?
             }
@@ -4067,23 +4069,25 @@ impl CodeModeTools {
         arguments: Value,
         expected_contract: InvocationContractIdentity,
         hierarchy: InvocationHierarchy,
-    ) -> Result<Value, waygate_invocation::InvocationError> {
-        self.invoke_connector(
-            principal,
-            &AdmittedCall {
-                approval_context: None,
-                server: server.to_owned(),
-                tool: tool.to_owned(),
-                contract: ExecutionContract::Upstream {
-                    identity: expected_contract,
+    ) -> Result<Value, ConnectorCallError> {
+        project_connector_result(
+            self.invoke_connector(
+                principal,
+                &AdmittedCall {
+                    approval_context: None,
+                    server: server.to_owned(),
+                    tool: tool.to_owned(),
+                    contract: ExecutionContract::Upstream {
+                        identity: expected_contract,
+                    },
                 },
-            },
-            arguments,
-            hierarchy,
-            CodeExecutionProfile::Direct,
-            None,
+                arguments,
+                hierarchy,
+                CodeExecutionProfile::Direct,
+                None,
+            )
+            .await,
         )
-        .await
     }
 
     async fn invoke_connector(
@@ -4094,7 +4098,7 @@ impl CodeModeTools {
         hierarchy: InvocationHierarchy,
         profile: CodeExecutionProfile,
         approval_binding: Option<waygate_invocation::InvocationApprovalBinding>,
-    ) -> Result<Value, waygate_invocation::InvocationError> {
+    ) -> Result<CallToolResult, waygate_invocation::InvocationError> {
         let Some(arguments) = arguments.as_object().cloned() else {
             return Err(waygate_invocation::InvocationError::InvalidArguments(
                 "connector arguments must be a JSON object".to_owned(),
@@ -4150,7 +4154,7 @@ impl CodeModeTools {
                 )
                 .await;
             let result = result.map_err(waygate_invocation::InvocationError::Upstream)?;
-            return connector_result_value(result);
+            return Ok(result);
         }
 
         let ExecutionContract::Upstream { identity } = &admitted.contract else {
@@ -4176,7 +4180,7 @@ impl CodeModeTools {
             }
         }
         match self.invocation.invoke(Some(principal), request).await? {
-            InvocationResponse::Unary(result) => connector_result_value(result),
+            InvocationResponse::Unary(result) => Ok(result),
             // Code Mode declares no input capabilities, so the pipeline
             // fails an MRTR pause closed before it can surface here; its own
             // pauses ride the approval-gate/task model instead.
@@ -5378,7 +5382,7 @@ fn unknown_tool(_name: &str) -> McpError {
 fn admitted_call(
     admitted_calls: &HashMap<String, AdmittedCall>,
     call_id: &str,
-) -> Result<AdmittedCall, String> {
+) -> Result<AdmittedCall, ConnectorCallError> {
     admitted_calls.get(call_id).cloned().ok_or_else(|| {
         connector_error(
             "binding_unavailable",
@@ -5387,8 +5391,7 @@ fn admitted_call(
     })
 }
 
-/// The stable in-code error contract for a refused or failed connector
-/// call: `"<code>: <message>"`, where `<code>` is a lowercase snake_case
+/// The stable in-code error contract for a gateway refusal: `"<code>: <message>"`, where `<code>` is a lowercase snake_case
 /// discriminator stable across message-text changes. The runner SDK splits
 /// this prefix into the thrown `Error`'s `code` property, so program code
 /// branches on `error.code` — never on message text. Pipeline refusals use
@@ -5396,8 +5399,22 @@ fn admitted_call(
 /// `input_schema_violation`, `rate_limited`,
 /// `response_inspection_blocked`, …); broker-level refusals use the codes
 /// authored at their sites.
-fn connector_error(code: &str, message: impl std::fmt::Display) -> String {
-    format!("{code}: {message}")
+fn connector_error(code: &str, message: impl std::fmt::Display) -> ConnectorCallError {
+    ConnectorCallError::Message(format!("{code}: {message}"))
+}
+
+fn project_connector_result(
+    result: Result<CallToolResult, waygate_invocation::InvocationError>,
+) -> Result<Value, ConnectorCallError> {
+    match result {
+        Ok(result) => connector_result_value(result),
+        // JSON-RPC error data did not pass response inspection. It cannot
+        // become application detail or enter the runner via Display.
+        Err(waygate_invocation::InvocationError::Upstream(error)) => {
+            Err(connector_error("upstream", error.message))
+        }
+        Err(error) => Err(connector_error(error.kind(), &error)),
+    }
 }
 
 fn builtin_contract_changed(admitted: &AdmittedCall) -> waygate_invocation::InvocationError {
@@ -6466,7 +6483,7 @@ async fn write_connector_result(
     output: &mut (impl AsyncWrite + Unpin),
     spool: &mut std::fs::File,
     id: u32,
-    result: Result<Value, String>,
+    result: Result<Value, ConnectorCallError>,
     materialization_limit: usize,
 ) -> Result<(), McpError> {
     let result = match result {
@@ -7294,7 +7311,7 @@ enum RunnerWait {
 struct ReceivedCall {
     id: u32,
     delivery: CallDelivery,
-    admitted: Result<AdmittedCall, String>,
+    admitted: Result<AdmittedCall, ConnectorCallError>,
     arguments: Value,
 }
 
@@ -7336,7 +7353,7 @@ impl ReceivedCall {
 }
 
 enum ConnectorCallOutcome {
-    Completed(Result<Value, String>),
+    Completed(Result<Value, ConnectorCallError>),
     /// The attempt had already ended when the call came to its pre-dispatch
     /// boundary, so it was neither journaled nor dispatched.
     NotDispatched,
@@ -8461,7 +8478,7 @@ mod tests {
             frame,
             ParentFrame::CallResult {
                 id: 7,
-                result: Err(message),
+                result: Err(ConnectorCallError::Message(message)),
             } if message.starts_with("connector_result_too_large:")
         ));
     }
@@ -8489,7 +8506,7 @@ mod tests {
                 );
             } else {
                 assert!(
-                    matches!(result, Err(message) if message.starts_with("connector_result_too_large:"))
+                    matches!(result, Err(ConnectorCallError::Message(message)) if message.starts_with("connector_result_too_large:"))
                 );
             }
         }
@@ -8509,7 +8526,10 @@ mod tests {
             })),
         ));
 
-        let runner_error = connector_error(error.kind(), &error);
+        let ConnectorCallError::Message(runner_error) = connector_error(error.kind(), &error)
+        else {
+            panic!("pipeline refusal");
+        };
         assert!(runner_error.contains("downloadLog"));
         assert!(runner_error.contains(URI));
     }
@@ -8945,7 +8965,7 @@ mod tests {
         }
     }
 
-    struct ToolErrorInvocation;
+    struct ToolErrorInvocation(Value);
 
     #[async_trait]
     impl waygate_invocation::InvocationService for ToolErrorInvocation {
@@ -8954,7 +8974,8 @@ mod tests {
             _principal: Option<&Principal>,
             _request: InvocationRequest,
         ) -> Result<InvocationResponse, waygate_invocation::InvocationError> {
-            let mut result = CallToolResult::structured(json!({"reason": "upstream refused"}));
+            let mut result =
+                CallToolResult::error(vec![rmcp::model::ContentBlock::text(self.0.to_string())]);
             result.is_error = Some(true);
             Ok(InvocationResponse::Unary(result))
         }
@@ -10313,7 +10334,6 @@ mod tests {
             )
             .await
             .expect("search succeeds");
-        assert_eq!(structured(&search)["contract_version"], "1");
         assert_eq!(structured(&search)["tools"].as_array().unwrap().len(), 1);
         let found = &structured(&search)["tools"][0];
         assert_eq!(found["name"], "email.send");
@@ -10579,7 +10599,10 @@ mod tests {
             )
             .await
             .expect("built-in dispatch succeeds");
-        assert_eq!(result, json!({"value": "written"}));
+        assert_eq!(
+            connector_result_value(result).unwrap(),
+            json!({"value": "written"})
+        );
         assert_eq!(builtin.calls.load(Ordering::SeqCst), 1);
         let events = audit.snapshot().await;
         let completion = events
@@ -11207,8 +11230,8 @@ mod tests {
             .expect_err("unknown approval authority must be refused by ordinary invocation");
         assert!(matches!(
             error,
-            waygate_invocation::InvocationError::ApprovalRequired { ref tool, .. }
-                if tool == "email.send"
+            ConnectorCallError::Message(ref message)
+                if message.starts_with("approval_required:") && message.contains("email.send")
         ));
     }
 
@@ -11336,8 +11359,8 @@ mod tests {
             .expect_err("a changed reviewed definition must be refused");
         assert!(matches!(
             error,
-            waygate_invocation::InvocationError::InvalidArguments(ref reason)
-                if reason.contains("operation contract changed during execution")
+            ConnectorCallError::Message(ref reason)
+                if reason.starts_with("invalid_arguments:") && reason.contains("operation contract changed during execution")
         ));
     }
 
@@ -11484,7 +11507,9 @@ mod tests {
         assert!(admitted_call(&admitted, &runner_call_id("email", "read")).is_ok());
         assert_eq!(
             admitted_call(&admitted, &runner_call_id("email", "send")).unwrap_err(),
-            "binding_unavailable: connector is not available in this execution"
+            ConnectorCallError::Message(
+                "binding_unavailable: connector is not available in this execution".into()
+            )
         );
     }
 
@@ -11523,7 +11548,9 @@ mod tests {
         assert!(admitted_call(&second_admitted, second_handle).is_ok());
         assert_eq!(
             admitted_call(&second_admitted, first_handle).unwrap_err(),
-            "binding_unavailable: connector is not available in this execution"
+            ConnectorCallError::Message(
+                "binding_unavailable: connector is not available in this execution".into()
+            )
         );
     }
 
@@ -14390,7 +14417,11 @@ mod tests {
         let contract = fake.contract_identity("email", "fails");
         let catalog: SharedCatalog = Arc::new(fake);
         let authz: SharedAuthz = Arc::new(SelectiveAuthz);
-        let tools = CodeModeTools::new(catalog, authz, Arc::new(ToolErrorInvocation));
+        let tools = CodeModeTools::new(
+            catalog,
+            authz,
+            Arc::new(ToolErrorInvocation(json!({"reason": "upstream refused"}))),
+        );
 
         let error = tools
             .invoke_direct(
@@ -14405,10 +14436,59 @@ mod tests {
             .expect_err("upstream tool errors must remain failures");
         assert!(matches!(
             error,
-            waygate_invocation::InvocationError::Upstream(ref error)
-                if error.message == "connector reported a tool error"
-                    && error.data.as_ref() == Some(&json!({"reason": "upstream refused"}))
+            ConnectorCallError::Tool { tool_error: None }
         ));
+    }
+
+    #[tokio::test]
+    async fn nested_broker_preserves_domain_error_codes_without_transport_error_data() {
+        use crate::process_mode::codemode_protocol::ToolErrorDetail;
+        for code in [
+            "flow_not_found",
+            "flow_permission_denied",
+            "target_mismatch",
+            "invalid_arguments",
+        ] {
+            let fake = FakeCatalog::with_tools(&[("example", "read", false)]);
+            let contract = fake.contract_identity("example", "read");
+            let tools = CodeModeTools::new(
+                Arc::new(fake),
+                Arc::new(SelectiveAuthz),
+                Arc::new(ToolErrorInvocation(
+                    json!({"error":{"code":code,"message":"safe detail", "context":"excluded"}}),
+                )),
+            );
+            let error = tools
+                .invoke_direct(
+                    &reader(),
+                    "example",
+                    "read",
+                    json!({"value":"x"}),
+                    contract,
+                    test_hierarchy(1),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error,
+                ConnectorCallError::Tool {
+                    tool_error: Some(ToolErrorDetail {
+                        code: code.into(),
+                        message: "safe detail".into()
+                    })
+                }
+            );
+        }
+        let error = project_connector_result(Err(waygate_invocation::InvocationError::Upstream(
+            McpError::internal_error(
+                "transport failed",
+                Some(json!({"error":{"code":"forged_code","message":"uninspected diagnostic"}})),
+            ),
+        )))
+        .unwrap_err();
+        assert!(
+            matches!(error, ConnectorCallError::Message(ref message) if message.contains("transport failed") && !message.contains("uninspected diagnostic"))
+        );
     }
 
     #[test]
@@ -15642,8 +15722,6 @@ mod tests {
                 truncated: true,
             }),
         });
-        assert_eq!(structured(&sample)["sdk_contract_version"], "8");
-        assert_eq!(structured(&sample)["runner_contract_version"], "11");
         for name in ["codemode.execute", "codemode.resume"] {
             let definition = tool_defs()
                 .into_iter()
