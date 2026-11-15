@@ -1200,8 +1200,11 @@ impl ConnectorChannel {
     /// structured Error (message plus a stable `code` split from the
     /// broker's "code: message" contract) for the err arm, so program code
     /// branches on `error.code` rather than catching an opaque native
-    /// exception.
-    fn envelope(&self, result: Result<ConnectorCallResult, String>) -> rquickjs::Result<String> {
+    /// exception. Inspected tool failures carry a separate typed detail.
+    fn envelope(
+        &self,
+        result: Result<ConnectorCallResult, super::codemode_protocol::ConnectorCallError>,
+    ) -> rquickjs::Result<String> {
         let envelope = match result {
             Ok(ConnectorCallResult::Inline { value }) => serde_json::json!({ "ok": value }),
             Ok(ConnectorCallResult::Spool { bytes }) => {
@@ -2051,6 +2054,18 @@ const gatewayConnectorSurface = (() => {{
     }}
     gatewayConnectorMaterialized();
     if (gatewayHasOwn(envelope, "err")) {{
+      if (typeof envelope.err === "object" && envelope.err !== null
+          && gatewayHasOwn(envelope.err, "tool_error")) {{
+        const detail = envelope.err.tool_error;
+        const error = new GatewayError(detail === null
+          ? "connector reported a tool error"
+          : "connector tool error (" + detail.code + "): " + detail.message);
+        gatewayDefineProperty(error, "code", {{ value: "upstream", enumerable: true }});
+        if (envelope.err.tool_error !== null) {{
+          gatewayDefineProperty(error, "toolError", {{ value: envelope.err.tool_error, enumerable: true }});
+        }}
+        throw error;
+      }}
       const separator = gatewayStringIndexOf(envelope.err, ": ");
       const candidate = separator > 0
         ? gatewayStringSlice(envelope.err, 0, separator)
@@ -3419,6 +3434,111 @@ return outcomes;
                     "caught": false,
                     "ok": {"result": "delivered"},
                 },
+            ])
+        );
+    }
+
+    #[test]
+    fn synchronous_and_started_calls_preserve_typed_tool_error_detail() {
+        use super::super::codemode_protocol::{ConnectorCallError, ToolErrorDetail};
+
+        let channel = ConnectorChannel::new(tempfile::tempfile().unwrap());
+        let error = channel
+            .envelope(Err(ConnectorCallError::Tool {
+                tool_error: Some(ToolErrorDetail {
+                    code: "flow_not_found".into(),
+                    message: "flow was not found".into(),
+                }),
+            }))
+            .unwrap();
+        let result = execute_with(
+            r#"
+const RealError = Error;
+globalThis.Error = () => ({tampered: true});
+Object.prototype.tool_error = {code: "forbidden", message: "poison"};
+const outcomes = [];
+for (const started of [false, true]) {
+  try {
+    if (started) await connectors.example.read.start({});
+    else connectors.example.read({});
+    outcomes.push({failed: false});
+  } catch (error) {
+    outcomes.push({code: error.code, detail: error.toolError,
+      message: error.message, isError: error instanceof RealError});
+  }
+}
+return outcomes;
+"#,
+            &bindings(&[("example", "read")]),
+            move |_| Ok(error.clone()),
+        )
+        .expect("program handles both tool failures");
+        let expected = serde_json::json!({"code":"upstream", "detail":{
+            "code":"flow_not_found", "message":"flow was not found"},
+            "message":"connector tool error (flow_not_found): flow was not found", "isError":true});
+        assert_eq!(result, serde_json::json!([expected.clone(), expected]));
+    }
+
+    #[test]
+    fn application_codes_cannot_impersonate_gateway_refusals() {
+        use super::super::codemode_protocol::{ConnectorCallError, ToolErrorDetail};
+        let channel = ConnectorChannel::new(tempfile::tempfile().unwrap());
+        let envelope = channel
+            .envelope(Err(ConnectorCallError::Tool {
+                tool_error: Some(ToolErrorDetail {
+                    code: "forbidden".into(),
+                    message: "application refusal".into(),
+                }),
+            }))
+            .unwrap();
+        let result = execute_with(
+            "try { connectors.example.read({}); } catch (error) { return {code: error.code, detail: error.toolError.code}; }",
+            &bindings(&[("example", "read")]),
+            move |_| Ok(envelope.clone()),
+        ).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!({"code":"upstream", "detail":"forbidden"})
+        );
+    }
+
+    #[test]
+    fn generic_tool_errors_and_gateway_refusals_have_no_domain_detail() {
+        use super::super::codemode_protocol::ConnectorCallError;
+
+        let channel = ConnectorChannel::new(tempfile::tempfile().unwrap());
+        let generic = channel
+            .envelope(Err(ConnectorCallError::Tool { tool_error: None }))
+            .unwrap();
+        let refusal = channel
+            .envelope(Err(ConnectorCallError::Message(
+                "tool_unavailable: unavailable".into(),
+            )))
+            .unwrap();
+        let result = execute_with(
+            r#"
+const outcomes = [];
+for (const value of ["generic", "refusal"]) {
+  try { await connectors.example.read.start({value}); }
+  catch (error) { outcomes.push({code: error.code, hasDetail: Object.hasOwn(error, "toolError")}); }
+}
+return outcomes;
+"#,
+            &bindings(&[("example", "read")]),
+            move |request| {
+                let request: Value = serde_json::from_str(request).unwrap();
+                Ok(if request["arguments"]["value"] == "generic" {
+                    generic.clone()
+                } else {
+                    refusal.clone()
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                {"code":"upstream","hasDetail":false}, {"code":"tool_unavailable","hasDetail":false}
             ])
         );
     }

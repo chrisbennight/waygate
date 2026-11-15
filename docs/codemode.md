@@ -780,7 +780,24 @@ tools. The broker
 adds `binding_unavailable` (the call id is not in this execution's admitted
 bindings). A
 prefix that is not lowercase snake_case is not a code: the full text becomes
-the message and the code is `connector_failure`. A direct-authority call
+the message and the code is `connector_failure`. Tool results marked `isError`
+retain the `upstream` refusal code. When the inspected result contains an object `error` with string `code` and `message`,
+the Error's optional `toolError` property contains only those fields. Programs
+can branch on `error.toolError?.code` within that category. Application codes
+remain untrusted upstream data and cannot replace gateway refusal codes.
+Structured content takes precedence; a sole JSON text block is also supported
+for upstreams without structured errors. Codes start with a lowercase ASCII
+letter and contain only lowercase letters, digits, and underscores, up to 64
+bytes. Messages are at most 1024 UTF-8 bytes and contain no control characters.
+Legacy JSON text is capped at 4096 bytes before parsing. Unrecognized or
+oversized detail is omitted and the call still fails. Extra context, raw
+diagnostics and MCP metadata are excluded. Inspection and sensitive-result
+release checks run before this projection; errors do not cause automatic retries.
+Synchronous calls and promises returned by `.start` use the same contract.
+JSON-RPC error data is not inspected as a tool result and is excluded from both
+this detail and the exception text.
+
+A direct-authority call
 surfaces the same approval or step-up refusal as the corresponding direct MCP
 call. Resume incompatibility surfaces
 as the structured `execution_resume_incompatible` refusal on the
@@ -958,8 +975,10 @@ primitive, and SDK version 4 with runner version 7 adds `execution.input`. SDK
 version 5 with runner version 8 runs program bodies as async functions, and
 SDK version 6 with runner version 9 adds `console` and its console frames, and
 SDK version 7 with runner version 10 adds `TextEncoder`, `TextDecoder`, `URL`,
-`URLSearchParams`, `crypto`, and `structuredClone`. A current worker continues
-executions stamped 2/5, 3/6, 4/6, 3/7, 4/7, 5/8, 6/9, or 7/10 and atomically
+`URLSearchParams`, `crypto`, and `structuredClone`. SDK version 9 with runner
+version 12 adds the bounded `toolError` detail for inspected application errors.
+A current worker continues executions stamped 2/5, 3/6, 4/6, 3/7, 4/7, 5/8, 6/9,
+7/10, or 8/11 and atomically
 restamps them with the current pair when it claims the next attempt. Rolling upgrades therefore preserve continuations while an older
 worker cannot claim an execution that may depend on a newer SDK surface.
 Success-result contract versioning remains independent.
