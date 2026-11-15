@@ -1,5 +1,16 @@
 # Release notes
 
+## 3.0.1
+
+- Code Mode preserves bounded application error codes and messages in the
+  Error's optional `toolError` detail after response inspection and release
+  checks. Existing `upstream` refusal codes remain available, and application
+  claims stay separate from gateway authorization decisions. Unsupported or
+  oversized detail stays generic; extra context, metadata, and uninspected
+  JSON-RPC error data are excluded. Synchronous and started calls share the
+  contract, and earlier continuations remain supported. No migration or
+  configuration change is required.
+
 ## 3.0.0
 
 - Inference now uses supported provider APIs. Consumer subscription credentials,
