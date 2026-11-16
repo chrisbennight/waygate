@@ -1,5 +1,24 @@
 # Release notes
 
+## 3.1.0
+
+- Large file ingestion has caller-owned delivery status and cancellation through
+  the gateway. Clients can retain and reuse the original gateway file after a
+  refusal, discover delivery handles after a lost response, and inspect bounded
+  history without splitting or repackaging files. Upstream capacity, size and
+  type refusals retain safe recovery information without exposing transfer
+  credentials or private upload addresses.
+
+- Cancellation uses an optional upstream lifecycle extension and rechecks the
+  originating tool's current authority and configuration. It preserves source
+  files, committed artifacts and uncertain publication. Definite prepublication
+  rejection reclaims staging when supported, including terminal native task
+  results when polled. Unknown outcomes never trigger automatic replay. Older
+  upstreams remain usable with lifecycle recovery reported unsupported; recovery
+  storage outages may require upstream expiry or operator cleanup. Existing
+  active byte-transfer concurrency defaults are unchanged. See
+  [file recovery](guides/files.md#recover-delivery-into-an-upstream).
+
 ## 3.0.1
 
 - Code Mode preserves bounded application error codes and messages in the
