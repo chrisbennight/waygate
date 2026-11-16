@@ -21,6 +21,9 @@ pub struct TaskRoute {
     /// Only reviewed operation selection is retained, never tool arguments.
     pub operation_arguments: Map<String, Value>,
     pub request_facts: waygate_core::RequestFacts,
+    /// Original file-delivery invocation, retained only when this task received files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_input_invocation_id: Option<Uuid>,
     pub created_at: String,
     pub ttl_ms: u64,
     pub exp: i64,
@@ -55,6 +58,7 @@ impl TaskRoute {
             contract,
             operation_arguments,
             request_facts,
+            file_input_invocation_id: None,
             upstream_id: String::new(),
             created_at: String::new(),
             ttl_ms: 0,

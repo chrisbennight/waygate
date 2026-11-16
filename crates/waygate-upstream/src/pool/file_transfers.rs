@@ -9,18 +9,21 @@ use rmcp::service::{PeerRequestOptions, ServiceError};
 enum FileAuthorizationRequest {
     Upload(AuthorizeUploadParams),
     Download(AuthorizeDownloadParams),
+    Lifecycle { uri: String, cancel: bool },
 }
 
 enum FileAuthorizationResponse {
     Upload(AuthorizeUploadResult),
     Download(AuthorizeDownloadResult),
+    Lifecycle(Value),
 }
 
 impl FileAuthorizationResponse {
-    fn descriptor_url(&self) -> &str {
+    fn descriptor_url(&self) -> Option<&str> {
         match self {
-            Self::Upload(result) => &result.upload.url,
-            Self::Download(result) => &result.download.url,
+            Self::Upload(result) => Some(&result.upload.url),
+            Self::Download(result) => Some(&result.download.url),
+            Self::Lifecycle(_) => None,
         }
     }
 }
@@ -84,6 +87,15 @@ async fn send_file_authorization(
             serde_json::to_value(params),
             waygate_mcp::files::FileOperation::Download,
         ),
+        FileAuthorizationRequest::Lifecycle { uri, cancel } => (
+            if *cancel {
+                "files/cancelUpload"
+            } else {
+                "files/transferStatus"
+            },
+            Ok(serde_json::json!({"uri":uri})),
+            waygate_mcp::files::FileOperation::Upload,
+        ),
     };
     let params = params.map_err(|_| ServiceError::UnexpectedResponse)?;
     let response = client
@@ -108,6 +120,10 @@ async fn send_file_authorization(
                 .result_as::<AuthorizeDownloadResult>()
                 .map(FileAuthorizationResponse::Download)
                 .map_err(|_| ServiceError::UnexpectedResponse),
+            FileAuthorizationRequest::Lifecycle { .. } => result
+                .result_as::<Value>()
+                .map(FileAuthorizationResponse::Lifecycle)
+                .map_err(|_| ServiceError::UnexpectedResponse),
         },
         _ => Err(ServiceError::UnexpectedResponse),
     }
@@ -121,12 +137,20 @@ impl UpstreamPool {
         conn: &Connection,
         server: &str,
         principal: Option<&Principal>,
-        admitted_tool: Option<(&str, &InvocationContractIdentity)>,
+        admitted_tool: Option<(&str, &InvocationContractIdentity, Option<&str>)>,
     ) -> Result<(), McpError> {
-        let Some((tool_name, admitted)) = admitted_tool else {
+        let Some((tool_name, admitted, binding)) = admitted_tool else {
             return Ok(());
         };
         let current_manifest = entry.manifest_snapshot();
+        if binding
+            .is_some_and(|expected| tasks::binding(&current_manifest).as_deref() != Some(expected))
+        {
+            return Err(waygate_mcp::files::file_transfer_failure(
+                waygate_mcp::files::FileTransferReason::TemporarilyUnavailable,
+                "upload's originating upstream configuration changed; restore it before recovery",
+            ));
+        }
         let tenant = principal
             .map(|principal| principal.tenant.as_str())
             .unwrap_or(waygate_core::TenantId::DEFAULT);
@@ -167,11 +191,12 @@ impl UpstreamPool {
         server: &str,
         request: FileAuthorizationRequest,
         principal: Option<&Principal>,
-        admitted_tool: Option<(&str, &InvocationContractIdentity)>,
+        admitted_tool: Option<(&str, &InvocationContractIdentity, Option<&str>)>,
     ) -> Result<
         (
             FileAuthorizationResponse,
             waygate_mcp::files::FileTransferNetwork,
+            String,
         ),
         McpError,
     > {
@@ -435,7 +460,7 @@ impl UpstreamPool {
                 }
                 let pinned_network_addresses = private_file_destination_addresses(
                     &current,
-                    response.descriptor_url(),
+                    response.descriptor_url().unwrap_or(""),
                     network_destination.as_ref(),
                 );
                 let network = if matches!(current.transport, Transport::Stdio) {
@@ -448,7 +473,13 @@ impl UpstreamPool {
                         cleartext_control_plane,
                     }
                 };
-                Ok((response, network))
+                let binding = tasks::binding(&snapshot).ok_or_else(|| {
+                    waygate_mcp::files::file_transfer_failure(
+                        waygate_mcp::files::FileTransferReason::TransferFailed,
+                        "upstream configuration identity is unavailable",
+                    )
+                })?;
+                Ok((response, network, binding))
             }
             Err(ServiceError::McpError(error)) => {
                 let recovered = permit.success();
@@ -457,8 +488,9 @@ impl UpstreamPool {
                 // The upstream's own authorization error may carry
                 // provider-private identifiers, signed URLs, or transfer
                 // detail, so neither the downstream response nor the gateway
-                // log receives its message — only the bounded code survives.
-                // That code is still a capability signal: method-not-found
+                // log receives its message. An explicit allowlist preserves
+                // typed recovery categories, limits and retry guidance only.
+                // The code is still a capability signal: method-not-found
                 // means the upstream has no native file transfer, which the
                 // caller must be able to distinguish from a failed attempt.
                 tracing::warn!(
@@ -466,7 +498,7 @@ impl UpstreamPool {
                     code = ?error.code,
                     "upstream file authorization refused"
                 );
-                Err(classify_refused_authorization(server, error.code))
+                Err(classify_authorization_error(server, &error))
             }
             Err(error) => {
                 permit.failure();
@@ -485,13 +517,36 @@ impl UpstreamPool {
         }
     }
 
+    pub(super) async fn manage_upload(
+        &self,
+        server: &str,
+        request: waygate_mcp::files::UploadRecoveryRequest,
+        principal: Option<&Principal>,
+    ) -> Result<Value, McpError> {
+        let (response, _, _) = self
+            .authorize_file_transfer_inner(
+                server,
+                FileAuthorizationRequest::Lifecycle {
+                    uri: request.uri,
+                    cancel: request.cancel,
+                },
+                principal,
+                Some((&request.tool, &request.contract, Some(&request.binding))),
+            )
+            .await?;
+        let FileAuthorizationResponse::Lifecycle(value) = response else {
+            unreachable!("lifecycle response")
+        };
+        Ok(value)
+    }
+
     pub(super) async fn authorize_download(
         &self,
         server: &str,
         params: AuthorizeDownloadParams,
         principal: Option<&Principal>,
     ) -> Result<waygate_mcp::files::AuthorizedFileDownload, McpError> {
-        let (response, network) = self
+        let (response, network, _) = self
             .authorize_file_transfer_inner(
                 server,
                 FileAuthorizationRequest::Download(params),
@@ -513,19 +568,87 @@ impl UpstreamPool {
         principal: Option<&Principal>,
         admitted: &InvocationContractIdentity,
     ) -> Result<waygate_mcp::files::AuthorizedFileUpload, McpError> {
-        let (response, network) = self
+        let (response, network, binding) = self
             .authorize_file_transfer_inner(
                 server,
                 FileAuthorizationRequest::Upload(params),
                 principal,
-                Some((tool_name, admitted)),
+                Some((tool_name, admitted, None)),
             )
             .await?;
         let FileAuthorizationResponse::Upload(response) = response else {
             unreachable!("upload authorization returned a download response")
         };
-        Ok(waygate_mcp::files::AuthorizedFileUpload { response, network })
+        Ok(waygate_mcp::files::AuthorizedFileUpload {
+            response,
+            network,
+            binding,
+        })
     }
+}
+
+/// Preserve only bounded, typed recovery metadata. Upstream prose, paths,
+/// identifiers and transfer credentials never cross this boundary.
+fn classify_authorization_error(server: &str, error: &McpError) -> McpError {
+    let Some(data) = error.data.as_ref().and_then(Value::as_object) else {
+        return classify_refused_authorization(server, error.code);
+    };
+    let Some(category) = data.get("error").and_then(Value::as_str).filter(|v| {
+        matches!(
+            *v,
+            "temporarily_unavailable"
+                | "invalid_file_input"
+                | "file_unavailable"
+                | "completion_unknown"
+                | "quota_exhausted"
+                | "integrity_mismatch"
+                | "policy_violation"
+        )
+    }) else {
+        return classify_refused_authorization(server, error.code);
+    };
+    let mut safe = Map::new();
+    safe.insert("error".into(), category.into());
+    if let Some(reason) = data.get("reason").and_then(Value::as_str).filter(|v| {
+        matches!(
+            *v,
+            "upload_capacity_exhausted"
+                | "receipt_capacity"
+                | "file_too_large"
+                | "unsupported_type"
+                | "storage_budget_exceeded"
+                | "upload_not_found"
+                | "invalid_file_input"
+                | "completion_unknown"
+        )
+    }) {
+        safe.insert("reason".into(), reason.into());
+    }
+    if let Some(stage) = data.get("stage").and_then(Value::as_str).filter(|v| {
+        matches!(
+            *v,
+            "authorize_upload" | "receive" | "ingest" | "cancel" | "status"
+        )
+    }) {
+        safe.insert("stage".into(), stage.into());
+    }
+    for field in ["retryable", "publication_attempted"] {
+        if let Some(value) = data.get(field).and_then(Value::as_bool) {
+            safe.insert(field.into(), value.into());
+        }
+    }
+    for field in ["retry_after_seconds", "max_bytes", "capacity"] {
+        if let Some(value) = data.get(field).and_then(Value::as_u64) {
+            safe.insert(field.into(), value.into());
+        }
+    }
+    let message = match category {
+        "temporarily_unavailable" => format!("upstream `{server}` upload capacity is unavailable; retain the gateway file URI and follow retry guidance"),
+        "invalid_file_input" => format!("upstream `{server}` refused the uploaded file; correct the declared file constraints"),
+        "completion_unknown" => format!("upstream `{server}` upload publication outcome is unknown; inspect delivery status before retrying"),
+        _ => format!("upstream `{server}` refused file authorization ({category})"),
+    };
+    McpError::new(error.code, message, Some(Value::Object(safe)))
 }
 
 /// The bounded downstream shape of an upstream's own authorization refusal.
@@ -601,6 +724,36 @@ mod tests {
         assert_eq!(
             cleartext.0 .0[waygate_mcp::files::CLIENT_CAPABILITIES_META_KEY]["files"]["transports"],
             serde_json::json!(["https", "http"])
+        );
+    }
+
+    #[test]
+    fn upload_refusal_retains_recovery_facts_without_private_detail() {
+        let error = McpError::invalid_params(
+            "private upstream message with signed transfer authority",
+            Some(serde_json::json!({
+                "error":"temporarily_unavailable","reason":"upload_capacity_exhausted","stage":"authorize_upload",
+                "retryable":true,"retry_after_seconds":12,"publication_attempted":false,"capacity":20,
+                "uri":"mcp-file://private/hidden","authorization":"hidden","max_bytes":"not a number"
+            })),
+        );
+        let projected = classify_authorization_error("printable", &error);
+        assert_eq!(
+            projected.data,
+            Some(
+                serde_json::json!({"error":"temporarily_unavailable","reason":"upload_capacity_exhausted","stage":"authorize_upload","retryable":true,"retry_after_seconds":12,"publication_attempted":false,"capacity":20})
+            )
+        );
+        assert!(!projected.to_string().contains("signed transfer"));
+        let error = McpError::invalid_params(
+            "private",
+            Some(
+                serde_json::json!({"error":"invalid_file_input","reason":"private-value","stage":"private-path"}),
+            ),
+        );
+        assert_eq!(
+            classify_authorization_error("printable", &error).data,
+            Some(serde_json::json!({"error":"invalid_file_input"}))
         );
     }
 

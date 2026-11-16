@@ -67,12 +67,13 @@ impl DefaultInvocationService {
         ctx: &mut InvocationContext<'_>,
         task: &mut CreateTaskResult,
     ) -> Result<CallToolResult, InvocationError> {
-        let route = ctx.task_origin.take().ok_or_else(|| {
+        let mut route = ctx.task_origin.take().ok_or_else(|| {
             InvocationError::Upstream(ErrorData::internal_error(
                 "upstream returned a task envelope without negotiated gateway task support",
                 None,
             ))
         })?;
+        route.file_input_invocation_id = ctx.file_inputs_prepared.then_some(ctx.invocation_id);
         self.inspect_task_metadata(
             ctx,
             serde_json::to_value(&*task).map_err(|_| invalid("invalid upstream task"))?,
@@ -128,6 +129,7 @@ impl DefaultInvocationService {
             ));
         }
         let mut ctx = InvocationContext {
+            file_inputs_prepared: false,
             principal: Some(principal),
             task_origin: None,
             task_action: Some(match &action {
@@ -250,7 +252,13 @@ impl DefaultInvocationService {
         };
         if let TaskResponse::Status(status) = &mut response {
             let outcome = self
-                .admit_task_status(&mut ctx, &route.upstream_id, &route.created_at, status)
+                .admit_task_status(
+                    &mut ctx,
+                    &route.upstream_id,
+                    &route.created_at,
+                    route.file_input_invocation_id,
+                    status,
+                )
                 .await;
             self.record_outcome(&mut ctx, &outcome).await;
             // Redaction evidence counts payloads that were forwarded, so a
@@ -286,6 +294,7 @@ impl DefaultInvocationService {
         ctx: &mut InvocationContext<'_>,
         upstream_id: &str,
         created_at: &str,
+        file_input_invocation_id: Option<uuid::Uuid>,
         status: &mut rmcp::model::GetTaskResult,
     ) -> Result<CallToolResult, InvocationError> {
         if status.task.task.task_id != upstream_id || status.task.task.created_at != created_at {
@@ -305,7 +314,19 @@ impl DefaultInvocationService {
         let completed: CallToolResult =
             serde_json::from_value(Value::Object(std::mem::take(result)))
                 .map_err(|_| invalid("upstream terminal task result is not a tool result"))?;
-        let completed = self.inspect_response(ctx, Ok(completed)).await;
+        let completed = Ok(completed);
+        // Publication facts come from the terminal upstream result, before an
+        // inspector can redact or replace its caller-visible representation.
+        if let (Some(origin), Some(processor)) =
+            (file_input_invocation_id, self.file_input_processor.as_ref())
+        {
+            let mut file_context = Self::file_input_context(ctx);
+            file_context.invocation_id = origin.to_string();
+            processor
+                .finish(&file_context, file_input_outcome(&completed))
+                .await;
+        }
+        let completed = self.inspect_response(ctx, completed).await;
         let completed = self
             .prepare_files_and_validate_output(ctx, completed)
             .await??;

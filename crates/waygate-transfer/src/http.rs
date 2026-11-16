@@ -67,6 +67,7 @@ struct UploadState {
 #[derive(Clone)]
 pub struct FileTransferAdmission {
     global: Arc<Semaphore>,
+    capacity: usize,
     owners: Arc<Mutex<HashMap<GatewayFileOwner, usize>>>,
     per_owner: usize,
 }
@@ -97,9 +98,18 @@ impl FileTransferAdmission {
         let capacity = max_concurrent_transfers.max(1);
         Self {
             global: Arc::new(Semaphore::new(capacity)),
+            capacity,
             owners: Arc::new(Mutex::new(HashMap::new())),
             per_owner: capacity.div_ceil(2),
         }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn per_owner_capacity(&self) -> usize {
+        self.per_owner
     }
 
     pub fn try_enter(&self) -> Result<OwnedSemaphorePermit, TryAcquireError> {

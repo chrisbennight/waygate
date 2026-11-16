@@ -10,6 +10,7 @@ mod config;
 mod continuation_key;
 mod database;
 mod ema;
+mod file_delivery;
 mod file_transfer;
 mod file_transfer_config;
 mod health;
@@ -563,6 +564,7 @@ async fn gateway_main() -> anyhow::Result<()> {
     } = file_transfer::build_file_services(
         transfer_runtime.as_ref(),
         catalog.clone(),
+        authz_gate.clone(),
         quota_service.clone(),
         &cfg.public_url,
         &cfg.file_transfer,

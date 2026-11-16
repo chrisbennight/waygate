@@ -75,6 +75,7 @@ pub(crate) use crate::file_transfer_config::FileRetention;
 pub(crate) fn build_file_services(
     runtime: Option<&TransferRuntime>,
     catalog: SharedCatalog,
+    authz: waygate_mcp::authz::SharedAuthz,
     quota: Option<Arc<dyn waygate_quota::QuotaService>>,
     public_url: &str,
     config: &crate::file_transfer_config::FileTransferConfig,
@@ -104,7 +105,7 @@ pub(crate) fn build_file_services(
     let admission = FileTransferAdmission::new(config.concurrency);
     let processor = Arc::new(
         OutboundFileProcessor::new(
-            catalog,
+            catalog.clone(),
             storage.clone(),
             runtime.audit.clone(),
             config.retention,
@@ -112,7 +113,8 @@ pub(crate) fn build_file_services(
             admission.clone(),
             native_https,
         )?
-        .with_response_settings(response_settings),
+        .with_response_settings(response_settings)
+        .with_recovery_authz(authz.clone()),
     );
     Ok(FileServices {
         input_processor: Some(processor.clone()),
@@ -127,7 +129,9 @@ pub(crate) fn build_file_services(
                 public_url.to_owned(),
                 public_transport.to_owned(),
             )
-            .with_max_bytes(max_bytes),
+            .with_max_bytes(max_bytes)
+            .with_catalog(catalog)
+            .with_recovery_authz(authz),
         )),
         native_download_authorizer: Some(Arc::new(
             NativeFileAuthorizer::new(
@@ -361,6 +365,7 @@ impl waygate_admin::param_files::ProposalFileReader for StoredTextFileReader {
 #[derive(Clone)]
 pub(crate) struct OutboundFileProcessor {
     catalog: SharedCatalog,
+    recovery_authz: Option<waygate_mcp::authz::SharedAuthz>,
     storage: Arc<GatewayFileStorage>,
     audit: SharedEvidence,
     http: reqwest::Client,
@@ -380,6 +385,7 @@ pub(crate) struct OutboundFileProcessor {
 }
 
 struct PreparedFileDelivery {
+    delivery_id: uuid::Uuid,
     file: StoredGatewayFile,
     upload_name: Option<String>,
     upstream_file: FileValue,
@@ -407,6 +413,7 @@ impl OutboundFileProcessor {
                 .context("build outbound file client")?;
         Ok(Self {
             catalog,
+            recovery_authz: None,
             storage,
             audit,
             http,
@@ -423,6 +430,20 @@ impl OutboundFileProcessor {
             ),
             resource_preparation_timeout: resource_file_preparation_timeout(),
         })
+    }
+
+    fn with_recovery_authz(mut self, authz: waygate_mcp::authz::SharedAuthz) -> Self {
+        self.recovery_authz = Some(authz);
+        self
+    }
+
+    fn delivery_manager(&self) -> crate::file_delivery::DeliveryManager {
+        crate::file_delivery::DeliveryManager::new(
+            self.catalog.clone(),
+            self.storage.clone(),
+            self.audit.clone(),
+        )
+        .with_optional_authz(self.recovery_authz.clone())
     }
 
     fn with_response_settings(
@@ -803,6 +824,20 @@ impl OutboundFileProcessor {
             algorithm: "sha-256".to_owned(),
             value: URL_SAFE_NO_PAD.encode(&file.sha256),
         };
+        let recovery_authorization = context.recovery_authorization.clone().unwrap_or_else(|| {
+            waygate_mcp::files::UploadRecoveryAuthorization {
+                contract: context.admitted_contract.clone(),
+                operation_arguments: Map::new(),
+                request_facts: None,
+            }
+        });
+        let recovery_authorization =
+            serde_json::to_value(recovery_authorization).map_err(|_| {
+                file_transfer_failure(
+                    FileTransferReason::InvalidToolContract,
+                    "upload recovery authorization could not be encoded",
+                )
+            })?;
         let authorized = self
             .catalog
             .authorize_file_upload(
@@ -821,6 +856,98 @@ impl OutboundFileProcessor {
                 &context.admitted_contract,
             )
             .await?;
+        let delivery_id = uuid::Uuid::new_v4();
+        let lifecycle_supported = authorized
+            .response
+            .lifecycle
+            .as_ref()
+            .is_some_and(|lifecycle| lifecycle.supported());
+        let owner = owner_from_principal(principal);
+        if let Err(error) = self
+            .storage
+            .record_delivery(waygate_transfer::NewFileDelivery {
+                id: delivery_id,
+                owner: &owner,
+                file_id: file.id,
+                invocation_id: &context.invocation_id,
+                server: &context.server,
+                tool: &context.tool,
+                source_server: &file.upstream_server,
+                source_tool: &file.upstream_tool,
+                upstream_uri: &authorized.response.file.uri,
+                lifecycle_supported,
+                upstream_binding: &authorized.binding,
+                authorization: &recovery_authorization,
+                expires_at: OffsetDateTime::now_utc() + time::Duration::days(1),
+            })
+            .await
+        {
+            tracing::warn!(%delivery_id,%error,"upload delivery recovery could not be recorded");
+            let mut cleanup_state = "unconfirmed";
+            if lifecycle_supported
+                && self
+                    .audit
+                    .record_required(
+                        AuditEvent::new(
+                            "file_transfer.delivery.cancel_started",
+                            AuditOutcome::Success,
+                        )
+                        .with_category(EvidenceCategory::FileTransfer)
+                        .with_tenant(principal.tenant.clone())
+                        .with_principal(Some(principal))
+                        .with_tool(&context.server, &context.tool)
+                        .with_target(delivery_id.to_string()),
+                    )
+                    .await
+                    .is_ok()
+            {
+                match self
+                    .catalog
+                    .manage_file_upload(
+                        &context.server,
+                        waygate_mcp::files::UploadRecoveryRequest {
+                            uri: authorized.response.file.uri.clone(),
+                            cancel: true,
+                            tool: context.tool.clone(),
+                            contract: context.admitted_contract.clone(),
+                            binding: authorized.binding.clone(),
+                        },
+                        Some(principal),
+                    )
+                    .await
+                {
+                    Ok(value) => {
+                        if value.get("state").and_then(Value::as_str) == Some("cancelled")
+                            && value.get("cancelled").and_then(Value::as_bool) == Some(true)
+                        {
+                            cleanup_state = "cancelled";
+                        } else if value.get("state").and_then(Value::as_str) == Some("cancelling") {
+                            cleanup_state = "cancelling";
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%delivery_id,code=?error.code,"unrecorded upload cleanup remains unconfirmed");
+                    }
+                }
+            }
+            let cleanup_pending = cleanup_state != "cancelled";
+            tracing::warn!(%delivery_id, cleanup_state, cleanup_pending, "upload recovery unavailable; pending staging may require upstream expiry");
+            let mut error = file_transfer_failure(
+                FileTransferReason::TemporarilyUnavailable,
+                "upload delivery recovery is unavailable; the consuming tool was not dispatched; retain the source file and inspect cleanup_state before retrying",
+            );
+            error.data = Some(serde_json::json!({
+                "error": FileTransferReason::TemporarilyUnavailable.as_str(),
+                "reason": "delivery_recovery_unavailable",
+                "stage": "authorize_upload",
+                "publication_attempted": false,
+                "cleanup_state": cleanup_state,
+                "cleanup_pending": cleanup_pending,
+                "retryable": !cleanup_pending,
+                "source_uri": format!("mcp-file://gateway/{}", file.id),
+            }));
+            return Err(error);
+        }
         let mut upstream_file = validate_authorized_upload(
             &authorized.response.file,
             file.media_type.as_deref(),
@@ -870,6 +997,7 @@ impl OutboundFileProcessor {
         upstream_file.size = Some(file.size);
         upstream_file.digest = Some(digest);
         Ok(PreparedFileDelivery {
+            delivery_id,
             upload_name: supplied.name.clone().or(file.display_name.clone()),
             file,
             upstream_file,
@@ -896,6 +1024,10 @@ impl OutboundFileProcessor {
                     "file transfer capacity is currently full; retry later",
                 )
             })?;
+        self.storage.set_delivery_stage(&owner_from_principal(principal),delivery.delivery_id,"transferring").await.map_err(|error|{
+            tracing::warn!(delivery_id=%delivery.delivery_id,%error,"upload delivery stage unavailable");
+            file_transfer_failure(FileTransferReason::TemporarilyUnavailable,"upload delivery recovery is unavailable")
+        })?;
         let http = self
             .client_for_transfer(&delivery.url, &delivery.network)
             .await?;
@@ -959,6 +1091,10 @@ impl OutboundFileProcessor {
             tracing::warn!(server = %context.server, status = %response.status(), "upstream file upload was refused");
             return Err(error);
         }
+        self.storage.set_delivery_stage(&owner_from_principal(principal),delivery.delivery_id,"ready").await.map_err(|error|{
+            tracing::warn!(delivery_id=%delivery.delivery_id,%error,"upload delivery stage unavailable");
+            file_transfer_failure(FileTransferReason::TemporarilyUnavailable,"upload delivery recovery is unavailable")
+        })?;
         self.audit
             .record_required(
                 AuditEvent::new("file_transfer.file.delivered", AuditOutcome::Success)
@@ -1131,15 +1267,63 @@ fn verify_upload_response_status(status: reqwest::StatusCode) -> Result<(), McpE
     ) {
         Ok(())
     } else {
-        Err(file_transfer_failure(
-            FileTransferReason::TransferFailed,
-            "upstream file upload did not confirm complete storage",
-        ))
+        let (category, reason, retryable) = match status {
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE => (
+                FileTransferReason::InvalidFileInput,
+                "file_too_large",
+                false,
+            ),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY => (
+                FileTransferReason::IntegrityMismatch,
+                "integrity_mismatch",
+                false,
+            ),
+            reqwest::StatusCode::INSUFFICIENT_STORAGE => (
+                FileTransferReason::QuotaExhausted,
+                "storage_budget_exceeded",
+                false,
+            ),
+            reqwest::StatusCode::REQUEST_TIMEOUT => {
+                (FileTransferReason::TransferFailed, "upload_timeout", true)
+            }
+            reqwest::StatusCode::GONE => (
+                FileTransferReason::FileUnavailable,
+                "upload_cancelled",
+                false,
+            ),
+            _ => (FileTransferReason::TransferFailed, "transfer_failed", false),
+        };
+        let mut error=file_transfer_failure(category,"upstream file upload did not confirm complete storage; retain the gateway URI and inspect delivery_status");
+        error.data = Some(
+            serde_json::json!({"error":category.as_str(),"reason":reason,"stage":"receive","retryable":retryable,"publication_attempted":false}),
+        );
+        Err(error)
     }
 }
 
 #[async_trait]
 impl FileInputProcessor for OutboundFileProcessor {
+    async fn dispatch_started(&self, context: &FileInputContext) -> Result<(), McpError> {
+        let Some(principal) = context.principal.as_ref() else {
+            return Ok(());
+        };
+        self.delivery_manager()
+            .dispatch_started(principal, &context.invocation_id)
+            .await
+    }
+
+    async fn finish(
+        &self,
+        context: &FileInputContext,
+        outcome: waygate_mcp::files::FileInputOutcome,
+    ) -> Vec<String> {
+        let Some(principal) = context.principal.as_ref() else {
+            return Vec::new();
+        };
+        self.delivery_manager()
+            .settle(principal, &context.invocation_id, outcome)
+            .await
+    }
     fn admit(
         &self,
         input_schema: Option<&Value>,
@@ -1903,6 +2087,7 @@ impl FileUploadAuthorizer for NativeFileAuthorizer {
             headers.insert("Content-Type".to_owned(), media_type.clone());
         }
         Ok(AuthorizeUploadResult {
+            lifecycle: None,
             file: FileValue {
                 uri: file_uri,
                 name: params.name,
@@ -3437,6 +3622,39 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn upload_http_refusals_retain_safe_recovery_categories() {
+        for (status, category, reason) in [
+            (
+                reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+                "invalid_file_input",
+                "file_too_large",
+            ),
+            (
+                reqwest::StatusCode::INSUFFICIENT_STORAGE,
+                "quota_exhausted",
+                "storage_budget_exceeded",
+            ),
+            (
+                reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+                "integrity_mismatch",
+                "integrity_mismatch",
+            ),
+            (
+                reqwest::StatusCode::GONE,
+                "file_unavailable",
+                "upload_cancelled",
+            ),
+        ] {
+            let error = verify_upload_response_status(status).unwrap_err();
+            let data = error.data.unwrap();
+            assert_eq!(data["error"], category);
+            assert_eq!(data["reason"], reason);
+            assert_eq!(data["stage"], "receive");
+            assert_eq!(data["publication_attempted"], false);
+        }
+    }
+
     #[tokio::test]
     async fn retained_tool_results_preserve_owner_profile_expiry_and_audit() {
         let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
@@ -4906,6 +5124,7 @@ mod tests {
                 requires_approval_known: true,
             },
             compiled_input_schema: None,
+            recovery_authorization: None,
         };
         let schema = json!({
             "type": "object",
@@ -5036,6 +5255,7 @@ mod tests {
                 requires_approval_known: true,
             },
             compiled_input_schema: None,
+            recovery_authorization: None,
         };
 
         let mut with_file = std::collections::BTreeMap::from([(
@@ -5595,6 +5815,7 @@ mod tests {
                     },
                 ],
                 Some(AuthorizeUploadResult {
+                    lifecycle: None,
                     file: FileValue {
                         uri: "mcp-file://printable/imported".to_owned(),
                         name: None,
@@ -5654,6 +5875,7 @@ mod tests {
         let admission = FileTransferAdmission::new(8);
         let processor = Arc::new(OutboundFileProcessor {
             catalog: catalog.clone(),
+            recovery_authz: None,
             storage: storage.clone(),
             audit: evidence.clone(),
             http,
@@ -6004,6 +6226,7 @@ mod tests {
                 invocation_id: "schema-refusal".to_owned(),
                 admitted_contract: admitted_contract.clone(),
                 compiled_input_schema: None,
+                recovery_authorization: None,
             },
             Some(&rejecting_schema),
             &mut rejecting_arguments,
@@ -6022,6 +6245,7 @@ mod tests {
                 invocation_id: "confined-import".to_owned(),
                 admitted_contract: admitted_contract.clone(),
                 compiled_input_schema: None,
+                recovery_authorization: None,
             },
             Some(&import_schema),
             &mut confined_arguments,
@@ -6140,6 +6364,7 @@ mod tests {
                 invocation_id: "elicited-import".to_owned(),
                 admitted_contract: admitted_contract.clone(),
                 compiled_input_schema: None,
+                recovery_authorization: None,
             },
             &mut continuation,
             &["attachment".to_owned()],
@@ -6185,6 +6410,7 @@ mod tests {
                 invocation_id: "elicited-oversized".to_owned(),
                 admitted_contract: admitted_contract.clone(),
                 compiled_input_schema: None,
+                recovery_authorization: None,
             },
             &mut oversized,
             &["attachment".to_owned()],
@@ -6215,6 +6441,7 @@ mod tests {
                 invocation_id: "elicited-repetitive".to_owned(),
                 admitted_contract: admitted_contract.clone(),
                 compiled_input_schema: None,
+                recovery_authorization: None,
             },
             &mut repetitive,
             &["attachment".to_owned()],

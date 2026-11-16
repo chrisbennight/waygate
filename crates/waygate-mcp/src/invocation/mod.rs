@@ -450,6 +450,7 @@ pub fn build_default_invocation_service(
 /// orchestrator hands stages owned strings via clones only at the moments
 /// where ownership actually transfers (audit events, error variants).
 struct InvocationContext<'a> {
+    file_inputs_prepared: bool,
     principal: Option<&'a Principal>,
     task_origin: Option<crate::tasks::TaskRoute>,
     task_action: Option<&'static str>,
@@ -741,6 +742,7 @@ impl InvocationService for DefaultInvocationService {
             cancellation: std::mem::take(&mut req.cancellation),
         };
         let mut ctx = InvocationContext {
+            file_inputs_prepared: false,
             task_origin: None,
             task_action: None,
             principal,
@@ -893,9 +895,22 @@ impl InvocationService for DefaultInvocationService {
             }
         }
         self.enter_stage(InvocationStage::PrepareFileInputs);
-        if let Err(error) = self.prepare_and_validate_file_inputs(&mut ctx).await {
+        if let Err(mut error) = self.prepare_and_validate_file_inputs(&mut ctx).await {
+            let ids = self
+                .finish_file_inputs(&ctx, crate::files::FileInputOutcome::NotDispatched)
+                .await;
+            attach_delivery_recovery(&mut error, &ids);
             let result = Err(error);
             self.enter_stage(InvocationStage::RecordOutcome);
+            self.record_outcome(&mut ctx, &result).await;
+            return result.map(InvocationResponse::Unary);
+        }
+        if let Err(mut error) = self.mark_file_dispatch(&ctx).await {
+            let ids = self
+                .finish_file_inputs(&ctx, crate::files::FileInputOutcome::NotDispatched)
+                .await;
+            attach_delivery_recovery(&mut error, &ids);
+            let result = Err(error);
             self.record_outcome(&mut ctx, &result).await;
             return result.map(InvocationResponse::Unary);
         }
@@ -935,6 +950,18 @@ impl InvocationService for DefaultInvocationService {
             ))),
             Err(error) => Err(error),
         };
+        let file_outcome = file_input_outcome(&result);
+        let delivery_ids = self.finish_file_inputs(&ctx, file_outcome).await;
+        match &mut result {
+            Err(error) => attach_delivery_recovery(error, &delivery_ids),
+            Ok(value) if !delivery_ids.is_empty() => {
+                value.meta.get_or_insert_with(Default::default).insert(
+                    "io.cacahuate.mcp-gateway/file-deliveries".into(),
+                    serde_json::json!({"delivery_ids":delivery_ids}),
+                );
+            }
+            _ => {}
+        }
         // Validate the value the
         // CALLER will see, not the upstream's original. If
         // validate_output ran first, inspect_response
@@ -2289,3 +2316,118 @@ mod tests;
 
 #[cfg(test)]
 mod count_tests;
+
+fn attach_delivery_recovery(error: &mut InvocationError, ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
+    if let InvocationError::Upstream(error) = error {
+        let data = error.data.get_or_insert_with(|| serde_json::json!({}));
+        if let Some(data) = data.as_object_mut() {
+            data.insert("delivery_ids".into(), serde_json::json!(ids));
+        }
+    }
+}
+
+/// Only an explicit pre-publication refusal or a proven pre-dispatch failure
+/// permits automatic cleanup. A transport envelope alone proves neither.
+fn file_input_outcome(
+    result: &Result<CallToolResult, InvocationError>,
+) -> crate::files::FileInputOutcome {
+    use crate::files::FileInputOutcome;
+    let data = match result {
+        Ok(value) if value.is_error != Some(true) => return FileInputOutcome::Completed,
+        Ok(value) => value
+            .structured_content
+            .as_ref()
+            .and_then(|v| v.get("error")),
+        Err(InvocationError::Upstream(error)) => error.data.as_ref(),
+        Err(_) => None,
+    };
+    if data
+        .and_then(|v| v.get("publication_attempted"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        || data
+            .and_then(|v| v.get("error").or_else(|| v.get("code")))
+            .and_then(serde_json::Value::as_str)
+            == Some("completion_unknown")
+    {
+        return FileInputOutcome::Unknown;
+    }
+    if data
+        .and_then(|v| v.get("publication_attempted"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+    {
+        return FileInputOutcome::Rejected;
+    }
+    if data
+        .and_then(|v| v.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|code| {
+            matches!(
+                code,
+                "upstream_call_failed" | "upstream_call_cancelled" | "upstream_admission_timeout"
+            )
+        })
+        && data
+            .and_then(|v| v.get("phase"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|phase| matches!(phase, "dial" | "initialize" | "pre_dispatch"))
+    {
+        return FileInputOutcome::NotDispatched;
+    }
+    FileInputOutcome::Unknown
+}
+
+#[cfg(test)]
+mod file_cleanup_classification_tests {
+    use super::*;
+    use crate::files::FileInputOutcome;
+
+    #[test]
+    fn publication_facts_override_response_envelopes_for_cleanup() {
+        for (facts, expected) in [
+            (
+                serde_json::json!({"publication_attempted":false}),
+                FileInputOutcome::Rejected,
+            ),
+            (
+                serde_json::json!({"publication_attempted":true}),
+                FileInputOutcome::Unknown,
+            ),
+            (serde_json::json!({}), FileInputOutcome::Unknown),
+            (
+                serde_json::json!({"code":"completion_unknown","publication_attempted":false}),
+                FileInputOutcome::Unknown,
+            ),
+        ] {
+            let mut result = CallToolResult::structured(serde_json::json!({"error":facts}));
+            result.is_error = Some(true);
+            assert_eq!(file_input_outcome(&Ok(result)), expected);
+        }
+        for (facts, expected) in [
+            (
+                serde_json::json!({"publication_attempted":false}),
+                FileInputOutcome::Rejected,
+            ),
+            (
+                serde_json::json!({"error":"upstream_call_failed","phase":"pre_dispatch"}),
+                FileInputOutcome::NotDispatched,
+            ),
+            (
+                serde_json::json!({"error":"upstream_call_failed","phase":"dispatched_unknown_outcome"}),
+                FileInputOutcome::Unknown,
+            ),
+            (
+                serde_json::json!({"error":"upstream_call_failed","phase":"pre_dispatch","publication_attempted":true}),
+                FileInputOutcome::Unknown,
+            ),
+        ] {
+            let error =
+                InvocationError::Upstream(ErrorData::internal_error("fixture", Some(facts)));
+            assert_eq!(file_input_outcome(&Err(error)), expected);
+        }
+    }
+}

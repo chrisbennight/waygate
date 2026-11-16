@@ -1,3 +1,6 @@
+mod deliveries;
+pub use deliveries::{GatewayFileDelivery, NewFileDelivery};
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -577,6 +580,8 @@ impl GatewayFileStorage {
     }
 
     pub async fn sweep_expired(&self, limit: i64) -> Result<u64, FileStorageError> {
+        sqlx::query("DELETE FROM gateway_file_deliveries WHERE id IN (SELECT id FROM gateway_file_deliveries WHERE expires_at <= now() ORDER BY expires_at LIMIT $1)")
+            .bind(limit).execute(&self.pool).await?;
         sqlx::query(
             r#"
             WITH expired AS (
