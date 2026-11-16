@@ -65,6 +65,13 @@ mod connector_result;
 
 use connector_result::connector_result_value;
 
+#[cfg(test)]
+pub(crate) fn project_connector_result_for_test(
+    result: rmcp::model::CallToolResult,
+) -> Result<Value, crate::process_mode::codemode_protocol::ConnectorCallError> {
+    connector_result_value(result)
+}
+
 pub const NAMESPACE: &str = waygate_core::CODEMODE_BUILTIN_NAMESPACE;
 const DEFAULT_SEARCH_LIMIT: usize = waygate_mcp::discovery::DEFAULT_SEARCH_RESULTS;
 const DEFAULT_ARTIFACT_LIMIT: usize = 50;

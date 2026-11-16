@@ -1764,6 +1764,21 @@ impl FileOutputProcessor for OutboundFileProcessor {
                 file_count: 0,
             });
         }
+        // Identify mirrors before rewriting: afterwards their original file URIs
+        // would make redundant JSON appear to be distinct upstream content.
+        let mirrors: Vec<_> = result
+            .content
+            .iter()
+            .enumerate()
+            .filter_map(|(index, block)| {
+                block
+                    .as_text()
+                    .filter(|text| {
+                        waygate_mcp::invocation::mirrors_structured(&text.text, structured)
+                    })
+                    .map(|_| index)
+            })
+            .collect();
         let principal = context.principal.as_ref().ok_or_else(|| {
             invalid_file_request(
                 FileTransferReason::AuthenticationRequired,
@@ -1810,6 +1825,14 @@ impl FileOutputProcessor for OutboundFileProcessor {
                     tracing::warn!(%batch_id, error = %cleanup_error, "file batch cleanup failed");
                 }
                 return Err(error);
+            }
+        }
+        if !mirrors.is_empty() {
+            let normalized = structured.to_string();
+            for index in mirrors {
+                if let rmcp::model::ContentBlock::Text(text) = &mut result.content[index] {
+                    text.text.clone_from(&normalized);
+                }
             }
         }
         Ok(PreparedFileOutput {
@@ -4362,6 +4385,131 @@ mod tests {
             .await
             .expect("seed tenant");
         tenant
+    }
+
+    #[tokio::test]
+    async fn normalized_file_mirrors_do_not_survive_as_distinct_codemode_content() {
+        let Some(pool) = waygate_test_support::pg::audit_pool_or_skip().await else {
+            return;
+        };
+        let tenant = seed_tenant(&pool, "file-mirror").await;
+        let root = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            GatewayFileStorage::new(pool.clone(), root.path())
+                .await
+                .unwrap(),
+        );
+        let body = "synthetic published model bytes";
+        let (file, authorization) = serve_printable_file(body, Duration::ZERO).await;
+        let (upstream, ..) = spawn_printable_upstream(vec![authorization], None).await;
+        let catalog = connect_printable_with_limits(upstream, "per_call", None).await;
+        let processor = OutboundFileProcessor::new(
+            catalog,
+            storage.clone(),
+            Arc::new(waygate_mcp::audit::InMemorySink::new()),
+            FileRetention::DEFAULT,
+            Some(1024),
+            FileTransferAdmission::new(2),
+            false,
+        )
+        .unwrap();
+        let mut actor = profile_principal(None, None);
+        actor.tenant = waygate_core::TenantId::parse(&tenant).unwrap();
+        let structured = json!({"file": file, "status": "published"});
+        let mut result = CallToolResult::structured(structured.clone());
+        if let ContentBlock::Text(text) = &mut result.content[0] {
+            text.meta = Some(serde_json::from_value(json!({"source": "synthetic"})).unwrap());
+        }
+        result.content.push(ContentBlock::text(
+            serde_json::to_string_pretty(&structured).unwrap(),
+        ));
+        let distinct = vec![
+            ContentBlock::text(r#"{"status":"additional","marker":"kept"}"#),
+            ContentBlock::image("c3ludGhldGlj", "image/png"),
+            ContentBlock::embedded_text("https://example.test/readme", "separate resource"),
+        ];
+        result.content.extend(distinct.clone());
+        let prepared = FileOutputProcessor::prepare(
+            &processor,
+            FileOutputContext {
+                principal: Some(actor.clone()),
+                server: "printable".to_owned(),
+                tool: "artifact.publish".to_owned(),
+                invocation_id: uuid::Uuid::new_v4().to_string(),
+            },
+            result,
+        )
+        .await
+        .expect("normalize inspected output");
+        assert_eq!(prepared.file_count, 1);
+        processor
+            .publish(prepared.batch_id.as_ref().unwrap(), 1)
+            .await
+            .unwrap();
+        let normalized = prepared.result.structured_content.as_ref().unwrap();
+        let uri = normalized["file"]["uri"].as_str().unwrap();
+        assert!(uri.starts_with("mcp-file://gateway/"));
+        assert_eq!(normalized["file"]["size"], body.len());
+        assert_eq!(normalized["file"]["digest"], structured["file"]["digest"]);
+        for block in &prepared.result.content[..2] {
+            assert_eq!(
+                serde_json::from_str::<Value>(&block.as_text().unwrap().text).unwrap(),
+                *normalized
+            );
+        }
+        assert_eq!(
+            prepared.result.content[0]
+                .as_text()
+                .unwrap()
+                .meta
+                .as_ref()
+                .unwrap()["source"],
+            "synthetic"
+        );
+        assert_eq!(&prepared.result.content[2..], distinct);
+        assert!(!serde_json::to_string(&prepared.result)
+            .unwrap()
+            .contains("mcp-file://printable/"));
+        let stored = storage
+            .find_ready(
+                &owner_from_principal(&actor),
+                parse_gateway_file_uri(uri).unwrap(),
+            )
+            .await
+            .unwrap()
+            .expect("owner can retrieve normalized file");
+        assert_eq!(
+            tokio::fs::read(storage.path_for(&stored)).await.unwrap(),
+            body.as_bytes()
+        );
+
+        let projected = crate::mcp_codemode::project_connector_result_for_test(prepared.result)
+            .expect("Code Mode connector projection");
+        assert_eq!(
+            projected["io.cacahuate.mcp-gateway/content"],
+            json!(distinct)
+        );
+        assert!(!projected.to_string().contains("mcp-file://printable/"));
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|context| {
+            context
+                .globals()
+                .set(
+                    "response",
+                    context.json_parse(projected.to_string()).unwrap(),
+                )
+                .unwrap();
+            let marker: String = context
+                .eval(r#"JSON.parse(response["io.cacahuate.mcp-gateway/content"][0].text).marker"#)
+                .unwrap();
+            assert_eq!(marker, "kept");
+        });
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     /// A server's `limits.file_max_bytes` replaces the gateway-wide limit for

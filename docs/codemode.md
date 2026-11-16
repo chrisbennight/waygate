@@ -699,8 +699,9 @@ authority. The upstream structured output schema remains separately validated.
 When an MCP result has structured data and additional content, Code Mode keeps
 the structured value's members and supplies distinct content blocks in
 `response["io.cacahuate.mcp-gateway/content"]`. Text blocks that only repeat the
-structured value are excluded. Other text, images and resource links retain
-their MCP block shapes. For example, a source reader can return a small status
+structured value are excluded. File normalization updates proven JSON mirrors
+alongside structured file references before this comparison. Other text, images
+and resource links retain their MCP block shapes. For example, a source reader can return a small status
 object and a complete JSON body in a separate text block:
 
 ```js

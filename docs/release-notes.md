@@ -1,5 +1,13 @@
 # Release notes
 
+## 3.1.2
+
+- File output normalization updates JSON text blocks that mirror the inspected
+  structured result, so redundant content carries the same gateway file
+  references. Code Mode excludes those normalized mirrors while preserving
+  distinct text, images and resources. Direct MCP clients retain a normalized
+  JSON text mirror. No migration or configuration change is required.
+
 ## 3.1.1
 
 - Code Mode connector errors expose optional bounded `fileRecovery` details for
