@@ -14,6 +14,8 @@ pub struct NewFileDelivery<'a> {
     pub source_tool: &'a str,
     pub upstream_uri: &'a str,
     pub lifecycle_supported: bool,
+    pub upstream_binding: &'a str,
+    pub authorization: &'a serde_json::Value,
     pub expires_at: OffsetDateTime,
 }
 
@@ -27,6 +29,8 @@ pub struct GatewayFileDelivery {
     pub source_tool: String,
     pub upstream_uri: String,
     pub lifecycle_supported: bool,
+    pub upstream_binding: String,
+    pub authorization: serde_json::Value,
     pub stage: String,
 }
 
@@ -40,16 +44,18 @@ fn decode(row: sqlx::postgres::PgRow) -> Result<GatewayFileDelivery, sqlx::Error
         source_tool: row.try_get("source_tool")?,
         upstream_uri: row.try_get("upstream_uri")?,
         lifecycle_supported: row.try_get("lifecycle_supported")?,
+        upstream_binding: row.try_get("upstream_binding")?,
+        authorization: row.try_get("recovery_authorization")?,
         stage: row.try_get("stage")?,
     })
 }
 
 impl GatewayFileStorage {
     pub async fn record_delivery(&self, new: NewFileDelivery<'_>) -> Result<(), FileStorageError> {
-        sqlx::query("INSERT INTO gateway_file_deliveries (id,tenant_id,principal_sub,principal_issuer,file_id,invocation_id,upstream_server,upstream_tool,source_server,source_tool,upstream_uri,lifecycle_supported,stage,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'prepared',$13)")
+        sqlx::query("INSERT INTO gateway_file_deliveries (id,tenant_id,principal_sub,principal_issuer,file_id,invocation_id,upstream_server,upstream_tool,source_server,source_tool,upstream_uri,lifecycle_supported,stage,expires_at,upstream_binding,recovery_authorization) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'prepared',$13,$14,$15)")
             .bind(new.id).bind(new.owner.tenant_id.as_str()).bind(&new.owner.principal_sub).bind(&new.owner.principal_issuer)
             .bind(new.file_id).bind(new.invocation_id).bind(new.server).bind(new.tool).bind(new.source_server).bind(new.source_tool)
-            .bind(new.upstream_uri).bind(new.lifecycle_supported).bind(new.expires_at).execute(&self.pool).await?;
+            .bind(new.upstream_uri).bind(new.lifecycle_supported).bind(new.expires_at).bind(new.upstream_binding).bind(new.authorization).execute(&self.pool).await?;
         Ok(())
     }
 

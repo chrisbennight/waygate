@@ -137,12 +137,20 @@ impl UpstreamPool {
         conn: &Connection,
         server: &str,
         principal: Option<&Principal>,
-        admitted_tool: Option<(&str, &InvocationContractIdentity)>,
+        admitted_tool: Option<(&str, &InvocationContractIdentity, Option<&str>)>,
     ) -> Result<(), McpError> {
-        let Some((tool_name, admitted)) = admitted_tool else {
+        let Some((tool_name, admitted, binding)) = admitted_tool else {
             return Ok(());
         };
         let current_manifest = entry.manifest_snapshot();
+        if binding
+            .is_some_and(|expected| tasks::binding(&current_manifest).as_deref() != Some(expected))
+        {
+            return Err(waygate_mcp::files::file_transfer_failure(
+                waygate_mcp::files::FileTransferReason::TemporarilyUnavailable,
+                "upload's originating upstream configuration changed; restore it before recovery",
+            ));
+        }
         let tenant = principal
             .map(|principal| principal.tenant.as_str())
             .unwrap_or(waygate_core::TenantId::DEFAULT);
@@ -183,11 +191,12 @@ impl UpstreamPool {
         server: &str,
         request: FileAuthorizationRequest,
         principal: Option<&Principal>,
-        admitted_tool: Option<(&str, &InvocationContractIdentity)>,
+        admitted_tool: Option<(&str, &InvocationContractIdentity, Option<&str>)>,
     ) -> Result<
         (
             FileAuthorizationResponse,
             waygate_mcp::files::FileTransferNetwork,
+            String,
         ),
         McpError,
     > {
@@ -464,7 +473,13 @@ impl UpstreamPool {
                         cleartext_control_plane,
                     }
                 };
-                Ok((response, network))
+                let binding = tasks::binding(&snapshot).ok_or_else(|| {
+                    waygate_mcp::files::file_transfer_failure(
+                        waygate_mcp::files::FileTransferReason::TransferFailed,
+                        "upstream configuration identity is unavailable",
+                    )
+                })?;
+                Ok((response, network, binding))
             }
             Err(ServiceError::McpError(error)) => {
                 let recovered = permit.success();
@@ -505,19 +520,18 @@ impl UpstreamPool {
     pub(super) async fn manage_upload(
         &self,
         server: &str,
-        uri: &str,
-        cancel: bool,
+        request: waygate_mcp::files::UploadRecoveryRequest,
         principal: Option<&Principal>,
     ) -> Result<Value, McpError> {
-        let (response, _) = self
+        let (response, _, _) = self
             .authorize_file_transfer_inner(
                 server,
                 FileAuthorizationRequest::Lifecycle {
-                    uri: uri.to_owned(),
-                    cancel,
+                    uri: request.uri,
+                    cancel: request.cancel,
                 },
                 principal,
-                None,
+                Some((&request.tool, &request.contract, Some(&request.binding))),
             )
             .await?;
         let FileAuthorizationResponse::Lifecycle(value) = response else {
@@ -532,7 +546,7 @@ impl UpstreamPool {
         params: AuthorizeDownloadParams,
         principal: Option<&Principal>,
     ) -> Result<waygate_mcp::files::AuthorizedFileDownload, McpError> {
-        let (response, network) = self
+        let (response, network, _) = self
             .authorize_file_transfer_inner(
                 server,
                 FileAuthorizationRequest::Download(params),
@@ -554,18 +568,22 @@ impl UpstreamPool {
         principal: Option<&Principal>,
         admitted: &InvocationContractIdentity,
     ) -> Result<waygate_mcp::files::AuthorizedFileUpload, McpError> {
-        let (response, network) = self
+        let (response, network, binding) = self
             .authorize_file_transfer_inner(
                 server,
                 FileAuthorizationRequest::Upload(params),
                 principal,
-                Some((tool_name, admitted)),
+                Some((tool_name, admitted, None)),
             )
             .await?;
         let FileAuthorizationResponse::Upload(response) = response else {
             unreachable!("upload authorization returned a download response")
         };
-        Ok(waygate_mcp::files::AuthorizedFileUpload { response, network })
+        Ok(waygate_mcp::files::AuthorizedFileUpload {
+            response,
+            network,
+            binding,
+        })
     }
 }
 

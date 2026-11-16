@@ -75,6 +75,7 @@ pub(crate) use crate::file_transfer_config::FileRetention;
 pub(crate) fn build_file_services(
     runtime: Option<&TransferRuntime>,
     catalog: SharedCatalog,
+    authz: waygate_mcp::authz::SharedAuthz,
     quota: Option<Arc<dyn waygate_quota::QuotaService>>,
     public_url: &str,
     config: &crate::file_transfer_config::FileTransferConfig,
@@ -112,7 +113,8 @@ pub(crate) fn build_file_services(
             admission.clone(),
             native_https,
         )?
-        .with_response_settings(response_settings),
+        .with_response_settings(response_settings)
+        .with_recovery_authz(authz.clone()),
     );
     Ok(FileServices {
         input_processor: Some(processor.clone()),
@@ -128,7 +130,8 @@ pub(crate) fn build_file_services(
                 public_transport.to_owned(),
             )
             .with_max_bytes(max_bytes)
-            .with_catalog(catalog),
+            .with_catalog(catalog)
+            .with_recovery_authz(authz),
         )),
         native_download_authorizer: Some(Arc::new(
             NativeFileAuthorizer::new(
@@ -362,6 +365,7 @@ impl waygate_admin::param_files::ProposalFileReader for StoredTextFileReader {
 #[derive(Clone)]
 pub(crate) struct OutboundFileProcessor {
     catalog: SharedCatalog,
+    recovery_authz: Option<waygate_mcp::authz::SharedAuthz>,
     storage: Arc<GatewayFileStorage>,
     audit: SharedEvidence,
     http: reqwest::Client,
@@ -409,6 +413,7 @@ impl OutboundFileProcessor {
                 .context("build outbound file client")?;
         Ok(Self {
             catalog,
+            recovery_authz: None,
             storage,
             audit,
             http,
@@ -425,6 +430,20 @@ impl OutboundFileProcessor {
             ),
             resource_preparation_timeout: resource_file_preparation_timeout(),
         })
+    }
+
+    fn with_recovery_authz(mut self, authz: waygate_mcp::authz::SharedAuthz) -> Self {
+        self.recovery_authz = Some(authz);
+        self
+    }
+
+    fn delivery_manager(&self) -> crate::file_delivery::DeliveryManager {
+        crate::file_delivery::DeliveryManager::new(
+            self.catalog.clone(),
+            self.storage.clone(),
+            self.audit.clone(),
+        )
+        .with_optional_authz(self.recovery_authz.clone())
     }
 
     fn with_response_settings(
@@ -805,6 +824,20 @@ impl OutboundFileProcessor {
             algorithm: "sha-256".to_owned(),
             value: URL_SAFE_NO_PAD.encode(&file.sha256),
         };
+        let recovery_authorization = context.recovery_authorization.clone().unwrap_or_else(|| {
+            waygate_mcp::files::UploadRecoveryAuthorization {
+                contract: context.admitted_contract.clone(),
+                operation_arguments: Map::new(),
+                request_facts: None,
+            }
+        });
+        let recovery_authorization =
+            serde_json::to_value(recovery_authorization).map_err(|_| {
+                file_transfer_failure(
+                    FileTransferReason::InvalidToolContract,
+                    "upload recovery authorization could not be encoded",
+                )
+            })?;
         let authorized = self
             .catalog
             .authorize_file_upload(
@@ -843,18 +876,41 @@ impl OutboundFileProcessor {
                 source_tool: &file.upstream_tool,
                 upstream_uri: &authorized.response.file.uri,
                 lifecycle_supported,
+                upstream_binding: &authorized.binding,
+                authorization: &recovery_authorization,
                 expires_at: OffsetDateTime::now_utc() + time::Duration::days(1),
             })
             .await
         {
             tracing::warn!(%delivery_id,%error,"upload delivery recovery could not be recorded");
-            if lifecycle_supported {
+            if lifecycle_supported
+                && self
+                    .audit
+                    .record_required(
+                        AuditEvent::new(
+                            "file_transfer.delivery.cancel_started",
+                            AuditOutcome::Success,
+                        )
+                        .with_category(EvidenceCategory::FileTransfer)
+                        .with_tenant(principal.tenant.clone())
+                        .with_principal(Some(principal))
+                        .with_tool(&context.server, &context.tool)
+                        .with_target(delivery_id.to_string()),
+                    )
+                    .await
+                    .is_ok()
+            {
                 if let Err(error) = self
                     .catalog
                     .manage_file_upload(
                         &context.server,
-                        &authorized.response.file.uri,
-                        true,
+                        waygate_mcp::files::UploadRecoveryRequest {
+                            uri: authorized.response.file.uri.clone(),
+                            cancel: true,
+                            tool: context.tool.clone(),
+                            contract: context.admitted_contract.clone(),
+                            binding: authorized.binding.clone(),
+                        },
                         Some(principal),
                     )
                     .await
@@ -1226,7 +1282,7 @@ impl FileInputProcessor for OutboundFileProcessor {
         let Some(principal) = context.principal.as_ref() else {
             return Ok(());
         };
-        crate::file_delivery::DeliveryManager::new(self.catalog.clone(), self.storage.clone())
+        self.delivery_manager()
             .dispatch_started(principal, &context.invocation_id)
             .await
     }
@@ -1239,7 +1295,7 @@ impl FileInputProcessor for OutboundFileProcessor {
         let Some(principal) = context.principal.as_ref() else {
             return Vec::new();
         };
-        crate::file_delivery::DeliveryManager::new(self.catalog.clone(), self.storage.clone())
+        self.delivery_manager()
             .settle(principal, &context.invocation_id, outcome)
             .await
     }
@@ -5043,6 +5099,7 @@ mod tests {
                 requires_approval_known: true,
             },
             compiled_input_schema: None,
+            recovery_authorization: None,
         };
         let schema = json!({
             "type": "object",
@@ -5173,6 +5230,7 @@ mod tests {
                 requires_approval_known: true,
             },
             compiled_input_schema: None,
+            recovery_authorization: None,
         };
 
         let mut with_file = std::collections::BTreeMap::from([(
@@ -5792,6 +5850,7 @@ mod tests {
         let admission = FileTransferAdmission::new(8);
         let processor = Arc::new(OutboundFileProcessor {
             catalog: catalog.clone(),
+            recovery_authz: None,
             storage: storage.clone(),
             audit: evidence.clone(),
             http,
@@ -6142,6 +6201,7 @@ mod tests {
                 invocation_id: "schema-refusal".to_owned(),
                 admitted_contract: admitted_contract.clone(),
                 compiled_input_schema: None,
+                recovery_authorization: None,
             },
             Some(&rejecting_schema),
             &mut rejecting_arguments,
@@ -6160,6 +6220,7 @@ mod tests {
                 invocation_id: "confined-import".to_owned(),
                 admitted_contract: admitted_contract.clone(),
                 compiled_input_schema: None,
+                recovery_authorization: None,
             },
             Some(&import_schema),
             &mut confined_arguments,
@@ -6278,6 +6339,7 @@ mod tests {
                 invocation_id: "elicited-import".to_owned(),
                 admitted_contract: admitted_contract.clone(),
                 compiled_input_schema: None,
+                recovery_authorization: None,
             },
             &mut continuation,
             &["attachment".to_owned()],
@@ -6323,6 +6385,7 @@ mod tests {
                 invocation_id: "elicited-oversized".to_owned(),
                 admitted_contract: admitted_contract.clone(),
                 compiled_input_schema: None,
+                recovery_authorization: None,
             },
             &mut oversized,
             &["attachment".to_owned()],
@@ -6353,6 +6416,7 @@ mod tests {
                 invocation_id: "elicited-repetitive".to_owned(),
                 admitted_contract: admitted_contract.clone(),
                 compiled_input_schema: None,
+                recovery_authorization: None,
             },
             &mut repetitive,
             &["attachment".to_owned()],

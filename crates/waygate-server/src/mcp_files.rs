@@ -44,6 +44,7 @@ pub struct GatewayFileTools {
     public_transport: String,
     max_bytes: Option<u64>,
     catalog: Option<waygate_mcp::SharedCatalog>,
+    recovery_authz: Option<waygate_mcp::authz::SharedAuthz>,
 }
 
 impl GatewayFileTools {
@@ -66,6 +67,7 @@ impl GatewayFileTools {
             public_transport,
             max_bytes: None,
             catalog: None,
+            recovery_authz: None,
         }
     }
 
@@ -79,6 +81,11 @@ impl GatewayFileTools {
         self
     }
 
+    pub fn with_recovery_authz(mut self, authz: waygate_mcp::authz::SharedAuthz) -> Self {
+        self.recovery_authz = Some(authz);
+        self
+    }
+
     fn delivery_manager(&self) -> Result<crate::file_delivery::DeliveryManager, McpError> {
         let catalog = self.catalog.clone().ok_or_else(|| {
             file_transfer_failure(
@@ -89,7 +96,9 @@ impl GatewayFileTools {
         Ok(crate::file_delivery::DeliveryManager::new(
             catalog,
             self.storage.clone(),
-        ))
+            self.audit.clone(),
+        )
+        .with_optional_authz(self.recovery_authz.clone()))
     }
 
     async fn delivery_status(
@@ -145,7 +154,19 @@ impl GatewayFileTools {
         let id=Uuid::parse_str(&input.delivery_id).map_err(|_|invalid_file_request(FileTransferReason::InvalidFileInput,"delivery_id must be a UUID returned by delivery_status or an ingestion error; example: {\"delivery_id\":\"01999999-9999-7999-8999-999999999999\"}"))?;
         self.check_quota(principal, CANCEL_DELIVERY).await?;
         let result = self.delivery_manager()?.cancel(principal, id).await?;
-        self.audit.record_required(AuditEvent::new("file_transfer.delivery.cancel_requested",AuditOutcome::Success).with_category(EvidenceCategory::FileTransfer).with_tenant(principal.tenant.clone()).with_principal(Some(principal)).with_tool(NAMESPACE,CANCEL_DELIVERY).with_target(id.to_string())).await.map_err(|_|file_transfer_failure(FileTransferReason::TransferFailed,"cancellation outcome could not be audited; inspect delivery_status before retrying"))?;
+        self.audit
+            .record_chained_best_effort(
+                AuditEvent::new(
+                    "file_transfer.delivery.cancel_requested",
+                    AuditOutcome::Success,
+                )
+                .with_category(EvidenceCategory::FileTransfer)
+                .with_tenant(principal.tenant.clone())
+                .with_principal(Some(principal))
+                .with_tool(NAMESPACE, CANCEL_DELIVERY)
+                .with_target(id.to_string()),
+            )
+            .await;
         Ok(structured(&result))
     }
 

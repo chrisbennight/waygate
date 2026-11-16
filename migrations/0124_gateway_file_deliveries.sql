@@ -13,6 +13,8 @@ CREATE TABLE gateway_file_deliveries (
     source_tool TEXT NOT NULL,
     upstream_uri TEXT NOT NULL,
     lifecycle_supported BOOLEAN NOT NULL,
+    upstream_binding TEXT NOT NULL,
+    recovery_authorization JSONB NOT NULL,
     stage TEXT NOT NULL CHECK (stage IN ('prepared','transferring','ready','dispatched','completed','rejected','completion_unknown','cancelled','cancelling')),
     expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()

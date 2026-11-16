@@ -523,8 +523,7 @@ pub trait UpstreamCatalog: Send + Sync + 'static {
     async fn manage_file_upload(
         &self,
         _server: &str,
-        _uri: &str,
-        _cancel: bool,
+        _request: crate::files::UploadRecoveryRequest,
         _principal: Option<&Principal>,
     ) -> Result<Value, McpError> {
         Err(McpError::new(

@@ -55,9 +55,28 @@ pub struct FileInputContext {
     /// pipeline already compiled it. Reusing it keeps delivery-time schema
     /// evaluation off the per-request compile path.
     pub compiled_input_schema: Option<Arc<jsonschema::Validator>>,
+    /// Immutable, credential-free authorization projection for later recovery.
+    pub recovery_authorization: Option<UploadRecoveryAuthorization>,
 }
 
-#[derive(Debug, Clone, Copy)]
+/// The existing invocation authority and reviewed operation selection. Full
+/// arguments, HTTP headers and credential values are never retained here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadRecoveryAuthorization {
+    pub contract: InvocationContractIdentity,
+    pub operation_arguments: Map<String, Value>,
+    pub request_facts: Option<waygate_core::RequestFacts>,
+}
+
+pub struct UploadRecoveryRequest {
+    pub uri: String,
+    pub cancel: bool,
+    pub tool: String,
+    pub contract: InvocationContractIdentity,
+    pub binding: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileInputOutcome {
     NotDispatched,
     Rejected,
@@ -633,6 +652,8 @@ pub struct AuthorizedFileDownload {
 
 #[derive(Debug, Clone)]
 pub struct AuthorizedFileUpload {
+    /// Upstream configuration identity captured at the authorization boundary.
+    pub binding: String,
     pub response: AuthorizeUploadResult,
     pub network: FileTransferNetwork,
 }

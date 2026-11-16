@@ -1078,7 +1078,14 @@ existing generic transfer failure. Recovery metadata is additive to error data;
 results carry the same IDs in
 `_meta["io.cacahuate.mcp-gateway/file-deliveries"]`.
 
-The invocation boundary cancels staging after a definite rejection or failure
-before dispatch when supported. It records unknown outcomes after transport
+Recovery re-evaluates the original tool's current policy and reviewed contract,
+using only its saved discriminator and request-fact projection. The upstream
+pool checks the original configuration identity and contract again after any
+slow connection setup, before sending the private upload URI. Cancellation
+requires durable attempt evidence before the RPC; failed outcome evidence does
+not erase a confirmed cancellation.
+
+The invocation boundary cancels staging only after an explicit pre-publication
+refusal or a proven failure before dispatch when supported. It records unknown outcomes after transport
 failure without replaying the tool or claiming that staging was deleted. The
 source gateway file remains unchanged and can be reused with corrected input.

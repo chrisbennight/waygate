@@ -229,6 +229,7 @@ impl DefaultInvocationService {
                     invocation_id: ctx.invocation_id.to_string(),
                     admitted_contract: ctx.tool_snapshot().contract_identity(),
                     compiled_input_schema: ctx.compiled_input_validator.clone(),
+                    recovery_authorization: Some(Self::file_recovery_authorization(ctx)),
                 },
                 schema.as_ref(),
                 &mut ctx.arguments,
@@ -262,6 +263,7 @@ impl DefaultInvocationService {
                 invocation_id: ctx.invocation_id.to_string(),
                 admitted_contract: ctx.tool_snapshot().contract_identity(),
                 compiled_input_schema: ctx.compiled_input_validator.clone(),
+                recovery_authorization: Some(Self::file_recovery_authorization(ctx)),
             };
             if let Some(input_responses) = ctx.mrtr.input_responses.as_mut() {
                 let rewritten = processor
@@ -274,6 +276,25 @@ impl DefaultInvocationService {
         Ok(())
     }
 
+    fn file_recovery_authorization(
+        ctx: &InvocationContext<'_>,
+    ) -> crate::files::UploadRecoveryAuthorization {
+        let mut operation_arguments = serde_json::Map::new();
+        if let Some(key) = ctx.tool_snapshot().discriminator() {
+            if let Some(value) = ctx.arguments.as_ref().and_then(|args| args.get(key)) {
+                operation_arguments.insert(key.to_owned(), value.clone());
+            }
+        }
+        crate::files::UploadRecoveryAuthorization {
+            contract: ctx.tool_snapshot().contract_identity(),
+            operation_arguments,
+            request_facts: ctx
+                .pip_facts
+                .as_ref()
+                .and_then(|facts| facts.request.clone()),
+        }
+    }
+
     pub(super) fn file_input_context(
         ctx: &InvocationContext<'_>,
     ) -> crate::files::FileInputContext {
@@ -284,6 +305,7 @@ impl DefaultInvocationService {
             invocation_id: ctx.invocation_id.to_string(),
             admitted_contract: ctx.tool_snapshot().contract_identity(),
             compiled_input_schema: ctx.compiled_input_validator.clone(),
+            recovery_authorization: Some(Self::file_recovery_authorization(ctx)),
         }
     }
 

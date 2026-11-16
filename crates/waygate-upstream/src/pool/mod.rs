@@ -1432,11 +1432,10 @@ impl UpstreamCatalog for UpstreamPool {
     async fn manage_file_upload(
         &self,
         server: &str,
-        uri: &str,
-        cancel: bool,
+        request: waygate_mcp::files::UploadRecoveryRequest,
         principal: Option<&Principal>,
     ) -> Result<Value, McpError> {
-        self.manage_upload(server, uri, cancel, principal).await
+        self.manage_upload(server, request, principal).await
     }
     async fn call_tool(
         &self,

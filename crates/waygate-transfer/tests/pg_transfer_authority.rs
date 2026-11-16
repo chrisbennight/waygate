@@ -1224,6 +1224,8 @@ async fn delivery_records_survive_reopen_and_enforce_exact_owner() {
             source_tool: "prepare_upload",
             upstream_uri: "mcp-file://printable/upload/private",
             lifecycle_supported: true,
+            upstream_binding: "fixture-binding",
+            authorization: &serde_json::json!({}),
             expires_at: OffsetDateTime::now_utc() + Duration::hours(1),
         })
         .await
@@ -1317,6 +1319,8 @@ async fn delivery_records_survive_reopen_and_enforce_exact_owner() {
                 source_tool: "prepare_upload",
                 upstream_uri: "mcp-file://printable/upload/private",
                 lifecycle_supported: true,
+                upstream_binding: "fixture-binding",
+                authorization: &serde_json::json!({}),
                 expires_at: OffsetDateTime::now_utc() + Duration::hours(1),
             })
             .await
@@ -1341,6 +1345,8 @@ async fn delivery_records_survive_reopen_and_enforce_exact_owner() {
             source_tool: "prepare_upload",
             upstream_uri: "mcp-file://printable/upload/private",
             lifecycle_supported: true,
+            upstream_binding: "fixture-binding",
+            authorization: &serde_json::json!({}),
             expires_at: OffsetDateTime::now_utc() + Duration::hours(1),
         })
         .await

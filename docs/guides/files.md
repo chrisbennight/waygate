@@ -58,7 +58,10 @@ The response is bounded; when `next_cursor` is present, pass it as `cursor`
 with the same URI to continue. New deliveries do not shift continuation pages.
 
 To abandon a delivery, call `gateway-files.cancel_delivery` with its
-`delivery_id`. Only its owner may cancel it. Cancellation preserves the source
+`delivery_id`. Only its owner may cancel it. Recovery rechecks the original tool's current
+policy, credential profile, reviewed contract and upstream configuration;
+changed authority or routing must be restored before the private upload can be
+accessed. Cancellation preserves the source
 file in gateway storage and refuses to delete committed files or uncertain
 publication. `cancelling` means resource release is pending; only
 `cancelled: true` confirms the upstream released staging. A status of `unknown`

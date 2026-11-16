@@ -950,11 +950,7 @@ impl InvocationService for DefaultInvocationService {
             ))),
             Err(error) => Err(error),
         };
-        let file_outcome = match &result {
-            Ok(value) if value.is_error == Some(true) => crate::files::FileInputOutcome::Rejected,
-            Ok(_) => crate::files::FileInputOutcome::Completed,
-            Err(_) => crate::files::FileInputOutcome::Unknown,
-        };
+        let file_outcome = file_input_outcome(&result);
         let delivery_ids = self.finish_file_inputs(&ctx, file_outcome).await;
         match &mut result {
             Err(error) => attach_delivery_recovery(error, &delivery_ids),
@@ -2329,6 +2325,109 @@ fn attach_delivery_recovery(error: &mut InvocationError, ids: &[String]) {
         let data = error.data.get_or_insert_with(|| serde_json::json!({}));
         if let Some(data) = data.as_object_mut() {
             data.insert("delivery_ids".into(), serde_json::json!(ids));
+        }
+    }
+}
+
+/// Only an explicit pre-publication refusal or a proven pre-dispatch failure
+/// permits automatic cleanup. A transport envelope alone proves neither.
+fn file_input_outcome(
+    result: &Result<CallToolResult, InvocationError>,
+) -> crate::files::FileInputOutcome {
+    use crate::files::FileInputOutcome;
+    let data = match result {
+        Ok(value) if value.is_error != Some(true) => return FileInputOutcome::Completed,
+        Ok(value) => value
+            .structured_content
+            .as_ref()
+            .and_then(|v| v.get("error")),
+        Err(InvocationError::Upstream(error)) => error.data.as_ref(),
+        Err(_) => None,
+    };
+    if data
+        .and_then(|v| v.get("publication_attempted"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        || data
+            .and_then(|v| v.get("error").or_else(|| v.get("code")))
+            .and_then(serde_json::Value::as_str)
+            == Some("completion_unknown")
+    {
+        return FileInputOutcome::Unknown;
+    }
+    if data
+        .and_then(|v| v.get("publication_attempted"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+    {
+        return FileInputOutcome::Rejected;
+    }
+    if data
+        .and_then(|v| v.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|code| {
+            matches!(
+                code,
+                "upstream_call_failed" | "upstream_call_cancelled" | "upstream_admission_timeout"
+            )
+        })
+        && data
+            .and_then(|v| v.get("phase"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|phase| matches!(phase, "dial" | "initialize" | "pre_dispatch"))
+    {
+        return FileInputOutcome::NotDispatched;
+    }
+    FileInputOutcome::Unknown
+}
+
+#[cfg(test)]
+mod file_cleanup_classification_tests {
+    use super::*;
+    use crate::files::FileInputOutcome;
+
+    #[test]
+    fn publication_facts_override_response_envelopes_for_cleanup() {
+        for (facts, expected) in [
+            (
+                serde_json::json!({"publication_attempted":false}),
+                FileInputOutcome::Rejected,
+            ),
+            (
+                serde_json::json!({"publication_attempted":true}),
+                FileInputOutcome::Unknown,
+            ),
+            (serde_json::json!({}), FileInputOutcome::Unknown),
+            (
+                serde_json::json!({"code":"completion_unknown","publication_attempted":false}),
+                FileInputOutcome::Unknown,
+            ),
+        ] {
+            let mut result = CallToolResult::structured(serde_json::json!({"error":facts}));
+            result.is_error = Some(true);
+            assert_eq!(file_input_outcome(&Ok(result)), expected);
+        }
+        for (facts, expected) in [
+            (
+                serde_json::json!({"publication_attempted":false}),
+                FileInputOutcome::Rejected,
+            ),
+            (
+                serde_json::json!({"error":"upstream_call_failed","phase":"pre_dispatch"}),
+                FileInputOutcome::NotDispatched,
+            ),
+            (
+                serde_json::json!({"error":"upstream_call_failed","phase":"dispatched_unknown_outcome"}),
+                FileInputOutcome::Unknown,
+            ),
+            (
+                serde_json::json!({"error":"upstream_call_failed","phase":"pre_dispatch","publication_attempted":true}),
+                FileInputOutcome::Unknown,
+            ),
+        ] {
+            let error =
+                InvocationError::Upstream(ErrorData::internal_error("fixture", Some(facts)));
+            assert_eq!(file_input_outcome(&Err(error)), expected);
         }
     }
 }
