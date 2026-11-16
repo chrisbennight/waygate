@@ -8,6 +8,8 @@
 pub(crate) mod codemode_protocol;
 #[path = "codemode_runner.rs"]
 mod codemode_runner;
+#[cfg(test)]
+pub(crate) use codemode_runner::execute_recovery_error_for_test;
 
 pub fn run_requested() -> anyhow::Result<bool> {
     if std::env::args().any(|arg| arg == codemode_protocol::RUNNER_FLAG) {

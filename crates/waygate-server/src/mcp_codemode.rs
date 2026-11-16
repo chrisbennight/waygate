@@ -154,8 +154,8 @@ const EXECUTION_CANCEL_SETTLE_INTERVAL: Duration = Duration::from_millis(25);
 /// runner that does not install it would replay an input-dependent program
 /// with no input and take a different path — so an older binary, which knows
 /// nothing of these numbers, fails the compatibility check instead.
-const SDK_CONTRACT_VERSION: i32 = 9;
-const RUNNER_CONTRACT_VERSION: i32 = 12;
+const SDK_CONTRACT_VERSION: i32 = 10;
+const RUNNER_CONTRACT_VERSION: i32 = 13;
 
 /// Every `(sdk, runner)` stamp this binary continues. Each surface change has
 /// kept earlier programs running unchanged, so a current binary can replay a
@@ -164,7 +164,7 @@ const RUNNER_CONTRACT_VERSION: i32 = 12;
 /// that used `await` as a name now fails to parse instead of running
 /// differently. A pair leaves this list only when its rows can no longer exist
 /// or its programs can no longer run unchanged.
-const CONTINUABLE_CONTRACTS: [(i32, i32); 10] = [
+const CONTINUABLE_CONTRACTS: [(i32, i32); 11] = [
     (2, 5),
     (3, 6),
     (4, 6),
@@ -174,6 +174,7 @@ const CONTINUABLE_CONTRACTS: [(i32, i32); 10] = [
     (6, 9),
     (7, 10),
     (8, 11),
+    (9, 12),
     (SDK_CONTRACT_VERSION, RUNNER_CONTRACT_VERSION),
 ];
 
@@ -3878,6 +3879,7 @@ impl CodeModeTools {
         let dispatches_effect = admitted
             .as_ref()
             .is_ok_and(|admitted| admitted.contract.side_effects());
+        let file_recovery = waygate_invocation::file_recovery::FileRecoveryHandle::default();
         let result = match admitted {
             Ok(admitted)
                 if admitted.contract.side_effects()
@@ -3896,6 +3898,7 @@ impl CodeModeTools {
                     hierarchy,
                     CodeExecutionProfile::Direct,
                     None,
+                    Some(file_recovery.clone()),
                 );
                 project_connector_result(
                     self.await_effect_with_claim_renewal(attempt.claim, dispatch)
@@ -3954,6 +3957,7 @@ impl CodeModeTools {
                             source_digest: attempt.source_digest.clone(),
                             call_id: hierarchy.call_id,
                         }),
+                        Some(file_recovery.clone()),
                     );
                     match self
                         .await_effect_with_claim_renewal(attempt.claim, dispatch)
@@ -3989,6 +3993,7 @@ impl CodeModeTools {
                             hierarchy,
                             attempt.profile,
                             None,
+                            Some(file_recovery.clone()),
                         )
                         .await,
                     ))
@@ -3997,6 +4002,7 @@ impl CodeModeTools {
             }
             Err(error) => Err(error),
         };
+        let result = attach_file_recovery(result, file_recovery.take());
         let event_kind = if result.is_ok() {
             ExecutionEventKind::ConnectorCallSucceeded
         } else {
@@ -4070,7 +4076,8 @@ impl CodeModeTools {
         expected_contract: InvocationContractIdentity,
         hierarchy: InvocationHierarchy,
     ) -> Result<Value, ConnectorCallError> {
-        project_connector_result(
+        let file_recovery = waygate_invocation::file_recovery::FileRecoveryHandle::default();
+        let result = project_connector_result(
             self.invoke_connector(
                 principal,
                 &AdmittedCall {
@@ -4085,11 +4092,14 @@ impl CodeModeTools {
                 hierarchy,
                 CodeExecutionProfile::Direct,
                 None,
+                Some(file_recovery.clone()),
             )
             .await,
-        )
+        );
+        attach_file_recovery(result, file_recovery.take())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn invoke_connector(
         &self,
         principal: &Principal,
@@ -4098,6 +4108,7 @@ impl CodeModeTools {
         hierarchy: InvocationHierarchy,
         profile: CodeExecutionProfile,
         approval_binding: Option<waygate_invocation::InvocationApprovalBinding>,
+        file_recovery: Option<waygate_invocation::file_recovery::FileRecoveryHandle>,
     ) -> Result<CallToolResult, waygate_invocation::InvocationError> {
         let Some(arguments) = arguments.as_object().cloned() else {
             return Err(waygate_invocation::InvocationError::InvalidArguments(
@@ -4179,6 +4190,7 @@ impl CodeModeTools {
                 }
             }
         }
+        request.file_recovery = file_recovery;
         match self.invocation.invoke(Some(principal), request).await? {
             InvocationResponse::Unary(result) => Ok(result),
             // Code Mode declares no input capabilities, so the pipeline
@@ -5414,6 +5426,19 @@ fn project_connector_result(
             Err(connector_error("upstream", error.message))
         }
         Err(error) => Err(connector_error(error.kind(), &error)),
+    }
+}
+
+fn attach_file_recovery(
+    result: Result<Value, ConnectorCallError>,
+    recovery: Option<waygate_invocation::file_recovery::FileRecovery>,
+) -> Result<Value, ConnectorCallError> {
+    match (result, recovery) {
+        (Err(failure), Some(file_recovery)) => Err(ConnectorCallError::FileRecovery {
+            file_recovery,
+            failure: Box::new(failure),
+        }),
+        (result, _) => result,
     }
 }
 
@@ -8030,14 +8055,11 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         Tool::new(
             format!("{NAMESPACE}.execute"),
             "Run JavaScript in a fresh, confined runtime and return its JSON-compatible result. \
-             Provide exactly one source: inline `source`, an uploaded `source_file`, a retained \
-             `source_sha256`, or a `skill_script` URI from the verified Agent Skills catalog. Pass \
-             arguments as `input`, which the program reads as `execution.input`, rather than \
-             editing them into the source: a program is identified by its exact bytes, so `input` \
-             keeps a retained source reusable. `retain_for_seconds` keeps inline, uploaded or skill \
-             source reusable by digest, and `source_ref` reports the digest and its retention \
-             state. The source is the body of an async function: it may `await`, and it returns \
-             the result. Beyond standard JavaScript it has `console`, whose output returns as \
+             Provide exactly one source selector: inline `source`, uploaded `source_file`, retained \
+             `source_sha256`, or a verified Agent Skills `skill_script` URI. Pass arguments as \
+             `input` (`execution.input`) to reuse unchanged source bytes. `retain_for_seconds` \
+             retains inline, uploaded or skill source by digest; `source_ref` reports that digest \
+             and retention. The source is an async function body: it may `await` and return a result. Beyond standard JavaScript it has `console`, whose output returns as \
              `console` (in the error data on failure), `TextEncoder`, `TextDecoder` (UTF-8), \
              `URL`, `URLSearchParams`, `structuredClone`, `crypto.randomUUID`, \
              `crypto.getRandomValues`, `atob`, `btoa`, `queueMicrotask` and `performance`; Node \
@@ -8047,7 +8069,9 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
              access. It exposes `connectors[server][operation]({...})` only for operations \
              `codemode.describe` returns to this caller, and each call goes through the gateway's \
              normal authorization, approval, validation, quota, inspection and audit under the same \
-             principal. `.start({...})` on a binding returns a promise, so independent calls \
+             principal. Catch connector errors; optional `error.fileRecovery` carries file refusal, \
+             limit, retry and publication facts. Keep the source URI for `gateway-files.delivery_status`. \
+             `.start({...})` on a binding returns a promise, so independent calls \
              overlap: `await Promise.all(ids.map(id => connectors.s.op.start({id})))`, up to \
              `connector_calls_in_flight` at once. A program can pace itself with `execution.wait(milliseconds)`, which spends \
              its execution budget, publish intermediate JSON with `execution.emitArtifact(value)`, \
@@ -8543,6 +8567,8 @@ mod tests {
         )
     }
 
+    mod file_recovery_tests;
+
     #[derive(Clone)]
     struct FakeCatalog {
         tools: Arc<BTreeMap<String, Vec<Tool>>>,
@@ -8551,6 +8577,8 @@ mod tests {
         resolve_calls: Arc<AtomicUsize>,
         error_generation: Arc<AtomicU64>,
         retained_body: Option<Arc<str>>,
+        file_error: Option<Value>,
+        file_error_legacy: bool,
     }
 
     impl FakeCatalog {
@@ -8621,6 +8649,8 @@ mod tests {
                 resolve_calls: Arc::new(AtomicUsize::new(0)),
                 error_generation: Arc::new(AtomicU64::new(0)),
                 retained_body: None,
+                file_error: None,
+                file_error_legacy: false,
             }
         }
 
@@ -8789,6 +8819,16 @@ mod tests {
             _principal: Option<&Principal>,
             _admitted: Option<&waygate_mcp::catalog::InvocationContractIdentity>,
         ) -> Result<CallToolResult, McpError> {
+            if let Some(error) = &self.file_error {
+                let body = json!({"result":"refused", "error":error});
+                let mut result = if self.file_error_legacy {
+                    CallToolResult::success(vec![rmcp::model::ContentBlock::text(body.to_string())])
+                } else {
+                    CallToolResult::structured(body)
+                };
+                result.is_error = Some(true);
+                return Ok(result);
+            }
             if let Some(body) = &self.retained_body {
                 return Ok(CallToolResult::structured(json!({
                     "result":"retained", "success":true, "status":200,
@@ -10596,6 +10636,7 @@ mod tests {
                 hierarchy,
                 CodeExecutionProfile::Direct,
                 None,
+                None,
             )
             .await
             .expect("built-in dispatch succeeds");
@@ -10711,6 +10752,7 @@ mod tests {
                     args,
                     test_hierarchy(1),
                     CodeExecutionProfile::Direct,
+                    None,
                     None,
                 )
                 .await;

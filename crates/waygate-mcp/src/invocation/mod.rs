@@ -870,7 +870,10 @@ impl InvocationService for DefaultInvocationService {
         // Deterministic file-input admission refuses (with denial evidence)
         // before quota and the one-time approval claim; rationale in
         // `files::admit_file_inputs`.
-        self.admit_file_inputs(&mut ctx).await?;
+        if let Err(error) = self.admit_file_inputs(&mut ctx).await {
+            observe_file_input_failure(req.file_recovery.as_ref(), &error, &[]);
+            return Err(error);
+        }
         self.prepare_task_origin(&mut ctx).await?;
         self.enter_stage(InvocationStage::CheckQuota);
         self.check_quota(&mut ctx).await?;
@@ -900,6 +903,7 @@ impl InvocationService for DefaultInvocationService {
                 .finish_file_inputs(&ctx, crate::files::FileInputOutcome::NotDispatched)
                 .await;
             attach_delivery_recovery(&mut error, &ids);
+            observe_file_input_failure(req.file_recovery.as_ref(), &error, &ids);
             let result = Err(error);
             self.enter_stage(InvocationStage::RecordOutcome);
             self.record_outcome(&mut ctx, &result).await;
@@ -910,6 +914,7 @@ impl InvocationService for DefaultInvocationService {
                 .finish_file_inputs(&ctx, crate::files::FileInputOutcome::NotDispatched)
                 .await;
             attach_delivery_recovery(&mut error, &ids);
+            observe_file_input_failure(req.file_recovery.as_ref(), &error, &ids);
             let result = Err(error);
             self.record_outcome(&mut ctx, &result).await;
             return result.map(InvocationResponse::Unary);
@@ -1005,6 +1010,24 @@ impl InvocationService for DefaultInvocationService {
             .await?;
         if result.is_ok() {
             self.flush_pending_redactions(&mut ctx).await;
+        }
+        // File facts are released only from the final inspected tool error.
+        // Uninspected transport error data cannot supply publication claims.
+        if let Some(observation) = req.file_recovery.as_ref() {
+            let data = match &result {
+                Ok(value) => waygate_invocation::file_recovery::inspected_tool_error(value),
+                _ => None,
+            };
+            if !delivery_ids.is_empty()
+                && !matches!(&result, Ok(value) if value.is_error != Some(true))
+            {
+                observation.record(
+                    waygate_invocation::file_recovery::FileRecovery::from_file_failure(
+                        data.as_deref(),
+                        &delivery_ids,
+                    ),
+                );
+            }
         }
         self.enter_stage(InvocationStage::RecordOutcome);
         self.record_outcome(&mut ctx, &result).await;
@@ -2316,6 +2339,22 @@ mod tests;
 
 #[cfg(test)]
 mod count_tests;
+
+/// Called only for failures produced by the gateway's file-input processor.
+fn observe_file_input_failure(
+    observation: Option<&waygate_invocation::file_recovery::FileRecoveryHandle>,
+    error: &InvocationError,
+    owned_ids: &[String],
+) {
+    if let (Some(observation), InvocationError::Upstream(error)) = (observation, error) {
+        observation.record(
+            waygate_invocation::file_recovery::FileRecovery::from_file_failure(
+                error.data.as_ref(),
+                owned_ids,
+            ),
+        );
+    }
+}
 
 fn attach_delivery_recovery(error: &mut InvocationError, ids: &[String]) {
     if ids.is_empty() {

@@ -2975,16 +2975,17 @@ fn enforce_file_input_constraints(
 /// is a picker hint, not a MIME pattern: it must never be compared against a
 /// media type, and a hints-only list cannot deny a file whose name is
 /// unknown — the server-side content policy stays with media type and size.
-fn enforce_file_input_constraint(
+pub(crate) fn enforce_file_input_constraint(
     constraints: &FileInputDescriptor,
     media_type: Option<&str>,
     file_name: Option<&str>,
     size: u64,
 ) -> Result<(), McpError> {
-    if constraints.max_size.is_some_and(|limit| size > limit) {
-        return Err(invalid_file_request(
-            FileTransferReason::InvalidFileInput,
+    if let Some(limit) = constraints.max_size.filter(|limit| size > *limit) {
+        return Err(file_input_constraint_refusal(
             "file exceeds the tool input size limit",
+            "file_too_large",
+            Some(limit),
         ));
     }
     let Some(accepted) = constraints.accept.as_deref() else {
@@ -3011,9 +3012,10 @@ fn enforce_file_input_constraint(
         // of them was refused above the picker line; a nameless file has
         // nothing for a hint to inspect and passes.
         return match file_name {
-            Some(_) => Err(invalid_file_request(
-                FileTransferReason::InvalidFileInput,
+            Some(_) => Err(file_input_constraint_refusal(
                 "file name does not match an extension accepted by the tool input",
+                "unsupported_type",
+                None,
             )),
             None => Ok(()),
         };
@@ -3024,9 +3026,10 @@ fn enforce_file_input_constraint(
             .map_or(value, |(essence, _)| essence)
             .trim()
     }) else {
-        return Err(invalid_file_request(
-            FileTransferReason::InvalidFileInput,
+        return Err(file_input_constraint_refusal(
             "file has no media type accepted by the tool input",
+            "unsupported_type",
+            None,
         ));
     };
     let matches = mime_patterns.iter().any(|pattern| {
@@ -3040,11 +3043,28 @@ fn enforce_file_input_constraint(
     if matches {
         Ok(())
     } else {
-        Err(invalid_file_request(
-            FileTransferReason::InvalidFileInput,
+        Err(file_input_constraint_refusal(
             "file media type is not accepted by the tool input",
+            "unsupported_type",
+            None,
         ))
     }
+}
+
+/// This rejection happens before upload authorization or consuming-tool dispatch.
+fn file_input_constraint_refusal(
+    message: &'static str,
+    reason: &'static str,
+    max_bytes: Option<u64>,
+) -> McpError {
+    let mut error = invalid_file_request(FileTransferReason::InvalidFileInput, message);
+    let mut data = serde_json::json!({"error":"invalid_file_input", "reason":reason,
+        "stage":"authorize_upload", "publication_attempted":false, "retryable":false});
+    if let Some(limit) = max_bytes {
+        data["max_bytes"] = limit.into();
+    }
+    error.data = Some(data);
+    error
 }
 
 fn is_gateway_file_uri(uri: &str) -> bool {

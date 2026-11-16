@@ -794,8 +794,44 @@ oversized detail is omitted and the call still fails. Extra context, raw
 diagnostics and MCP metadata are excluded. Inspection and sensitive-result
 release checks run before this projection; errors do not cause automatic retries.
 Synchronous calls and promises returned by `.start` use the same contract.
-JSON-RPC error data is not inspected as a tool result and is excluded from both
-this detail and the exception text.
+Arbitrary JSON-RPC error data is not inspected as a tool result and is excluded
+from both this detail and the exception text.
+
+A file-input failure may additionally carry `error.fileRecovery`. This bounded
+object contains only known `category`, `reason`, and `stage` values, known
+`publication_attempted`, `retryable`, and `cleanup_pending` booleans,
+`cleanup_state`, numeric `retry_after_seconds`, `max_bytes`, and `capacity`
+hints, and up to 20 caller-owned `delivery_ids`. Integers do not exceed
+JavaScript's safe integer range; the complete detail is at most 2048 bytes.
+Unknown facts are omitted. A missing `publication_attempted` does not mean
+publication was prevented. The detail comes from the gateway's file-input
+boundary or the final inspected tool error for an owned delivery; upstream
+metadata cannot create it. It contains no source URI, private upload URL,
+credential, raw diagnostic, or arbitrary error data.
+
+For example, keep the original gateway URI and catch the connector error:
+
+```javascript
+const {server, operation, args} = execution.input;
+const binding = connectors[server][operation];
+try {
+  return await binding(args);
+} catch (error) {
+  const recovery = error.fileRecovery;
+  return {code: error.code, fileRecovery: recovery ?? null};
+}
+```
+
+`file_too_large` and `unsupported_type` mean correct the declared file
+constraints; `upload_capacity_exhausted` and `receipt_capacity` mean retain
+the source URI and follow the returned retry hints. These refusals can occur
+before a delivery record exists. For staged deliveries, use
+`gateway-files.delivery_status` with the original gateway URI, follow its
+cursor for more handles, and use `cancel_delivery` only for disposable staging.
+Confirm `state: "cancelled"` and `cancelled: true`; pending or unknown cleanup
+is not confirmed release. Publication attempted or unknown requires status
+inspection before retrying, and cancellation does not undo a committed artifact.
+The `code`, message, and optional `toolError` retain their existing meanings.
 
 A direct-authority call
 surfaces the same approval or step-up refusal as the corresponding direct MCP
@@ -977,8 +1013,10 @@ SDK version 6 with runner version 9 adds `console` and its console frames, and
 SDK version 7 with runner version 10 adds `TextEncoder`, `TextDecoder`, `URL`,
 `URLSearchParams`, `crypto`, and `structuredClone`. SDK version 9 with runner
 version 12 adds the bounded `toolError` detail for inspected application errors.
+SDK version 10 with runner version 13 adds the optional bounded `fileRecovery`
+detail for gateway file-input failures.
 A current worker continues executions stamped 2/5, 3/6, 4/6, 3/7, 4/7, 5/8, 6/9,
-7/10, or 8/11 and atomically
+7/10, 8/11, or 9/12 and atomically
 restamps them with the current pair when it claims the next attempt. Rolling upgrades therefore preserve continuations while an older
 worker cannot claim an execution that may depend on a newer SDK surface.
 Success-result contract versioning remains independent.

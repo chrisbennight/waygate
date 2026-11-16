@@ -66,25 +66,8 @@ pub(super) fn connector_result_value(
 fn tool_error_detail(result: &CallToolResult) -> Option<ToolErrorDetail> {
     const MAX_CODE_BYTES: usize = 64;
     const MAX_MESSAGE_BYTES: usize = 1024;
-    const MAX_TEXT_BYTES: usize = 4096;
-
-    // Prefer structured content. Only a sole JSON text block is a legacy
-    // envelope; mixed content and transport errors are never interpreted.
-    let parsed;
-    let value = if let Some(value) = result.structured_content.as_ref() {
-        value
-    } else {
-        let [block] = result.content.as_slice() else {
-            return None;
-        };
-        let text = &block.as_text()?.text;
-        if text.len() > MAX_TEXT_BYTES {
-            return None;
-        }
-        parsed = serde_json::from_str::<Value>(text).ok()?;
-        &parsed
-    };
-    let error = value.get("error")?.as_object()?;
+    let value = waygate_invocation::file_recovery::inspected_tool_error(result)?;
+    let error = value.as_object()?;
     let code = error.get("code")?.as_str()?;
     let message = error.get("message")?.as_str()?;
     if code.is_empty()

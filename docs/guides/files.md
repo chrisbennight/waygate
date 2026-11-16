@@ -68,13 +68,23 @@ publication. `cancelling` means resource release is pending; only
 or `commit_uncertain` requires destination inspection before replaying a
 consuming mutation.
 
-Ingestion failures after staging may include `delivery_ids` in error data;
-successful tool results carry them under
+Direct MCP ingestion failures after staging may include `delivery_ids` in error
+data; successful tool results carry them under
 `_meta["io.cacahuate.mcp-gateway/file-deliveries"]`. Status lookup by original
 file URI also works when the tool response was lost. A definitely rejected
 request triggers automatic cancellation when supported. Terminal native task
 results settle the original delivery when polled. A timeout or lost mutation
 response remains unknown and does not trigger replay or cancellation.
+
+Through Code Mode, catch the connector error and inspect its optional
+`error.fileRecovery` detail. It distinguishes `file_too_large`,
+`unsupported_type`, `upload_capacity_exhausted`, and `receipt_capacity`, including
+refusals before any delivery record exists. Known limits, retry hints,
+publication facts and caller-owned delivery IDs are included; unknown facts
+are omitted. A missing publication fact never means publication was prevented.
+Retain the original URI and use status lookup for staging recovery. Arbitrary
+MCP error data and success metadata are not the Code Mode recovery interface;
+see [Code Mode error handling](../codemode.md#execution-model).
 
 A recovery-store failure after allocation stops before the consuming tool is
 dispatched. Keep `source_uri`; `cleanup_pending: true` and `cleanup_state`

@@ -1387,6 +1387,42 @@ fn console_frames(
     frames
 }
 
+/// Exercise the production error frame and JavaScript bridge with broker output.
+#[cfg(test)]
+pub(crate) fn execute_recovery_error_for_test(
+    failure: super::codemode_protocol::ConnectorCallError,
+) -> Value {
+    let channel = ConnectorChannel::new(tempfile::tempfile().expect("test spool"));
+    let encoded = channel.envelope(Err(failure)).expect("error envelope");
+    execute_with(
+        r#"
+const RealError = Error;
+globalThis.Error = () => ({tampered:true});
+Object.prototype.file_recovery = {reason:"poison"};
+Object.prototype.failure = "forbidden:poison";
+const out = [];
+for (const started of [false, true]) {
+  try {
+    if (started) await connectors.printable.ingest.start({});
+    else connectors.printable.ingest({});
+  } catch (e) {
+    out.push({code:e.code, message:e.message, toolError:e.toolError ?? null,
+      fileRecovery:e.fileRecovery ?? null, hasData:Object.hasOwn(e,"data"),
+      isError:e instanceof RealError});
+  }
+}
+return out;
+"#,
+        &[RunnerBinding {
+            connector: "printable".into(),
+            operation: "ingest".into(),
+            call_id: "ingest".into(),
+        }],
+        move |_| Ok(encoded.clone()),
+    )
+    .expect("program catches synchronous and started file errors")
+}
+
 #[cfg(test)]
 fn execute_with<F>(
     source: &str,
@@ -2054,6 +2090,18 @@ const gatewayConnectorSurface = (() => {{
     }}
     gatewayConnectorMaterialized();
     if (gatewayHasOwn(envelope, "err")) {{
+      let fileRecovery;
+      if (typeof envelope.err === "object" && envelope.err !== null
+          && gatewayHasOwn(envelope.err, "file_recovery")
+          && gatewayHasOwn(envelope.err, "failure")) {{
+        fileRecovery = envelope.err.file_recovery;
+        envelope.err = envelope.err.failure;
+      }}
+      const attachFileRecovery = (error) => {{
+        if (fileRecovery !== undefined) {{
+          gatewayDefineProperty(error, "fileRecovery", {{ value: fileRecovery, enumerable: true }});
+        }}
+      }};
       if (typeof envelope.err === "object" && envelope.err !== null
           && gatewayHasOwn(envelope.err, "tool_error")) {{
         const detail = envelope.err.tool_error;
@@ -2064,6 +2112,7 @@ const gatewayConnectorSurface = (() => {{
         if (envelope.err.tool_error !== null) {{
           gatewayDefineProperty(error, "toolError", {{ value: envelope.err.tool_error, enumerable: true }});
         }}
+        attachFileRecovery(error);
         throw error;
       }}
       const separator = gatewayStringIndexOf(envelope.err, ": ");
@@ -2079,6 +2128,7 @@ const gatewayConnectorSurface = (() => {{
         value: recognized ? candidate : "connector_failure",
         enumerable: true
       }});
+      attachFileRecovery(error);
       throw error;
     }}
     return envelope.ok;
