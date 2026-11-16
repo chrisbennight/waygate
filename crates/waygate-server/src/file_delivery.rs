@@ -227,7 +227,15 @@ impl DeliveryManager {
         };
         let mut deliveries = Vec::with_capacity(records.len());
         for record in records {
-            let (authorization, _) = self.authorize_delivery(principal, &record).await?;
+            let (authorization, _) = match self.authorize_delivery(principal, &record).await {
+                Ok(authorized) => authorized,
+                Err(error) => {
+                    // One stale or revoked delivery cannot hide other authorized
+                    // deliveries. Continuation still advances over owned history.
+                    tracing::debug!(delivery_id=%record.id, code=?error.code, "upload delivery omitted from current authorization view");
+                    continue;
+                }
+            };
             let state = self.state(principal, &record, &authorization).await;
             deliveries.push(DeliveryStatus {
                 delivery_id: record.id.to_string(),
@@ -590,7 +598,12 @@ mod tests {
         );
         current_policy.allowed.store(false, Ordering::SeqCst);
         assert!(manager.cancel(&principal, id).await.is_err());
-        assert!(manager.status(&principal, file_id, None).await.is_err());
+        assert!(manager
+            .status(&principal, file_id, None)
+            .await
+            .unwrap()
+            .deliveries
+            .is_empty());
         assert_eq!(
             catalog.cancels.load(Ordering::SeqCst),
             0,
@@ -600,7 +613,7 @@ mod tests {
         let mut changed = authorization.clone();
         changed["contract"]["input_schema_hash"] = serde_json::json!("changed");
         sqlx::query("UPDATE gateway_file_deliveries SET recovery_authorization=$1 WHERE id=$2")
-            .bind(changed)
+            .bind(&changed)
             .bind(id)
             .execute(&pool)
             .await
@@ -611,6 +624,57 @@ mod tests {
             0,
             "changed tool contract cannot receive a private upload URI"
         );
+        let history_file = Uuid::new_v4();
+        let mut current_delivery = Uuid::nil();
+        for index in 0..21 {
+            let delivery = Uuid::new_v4();
+            let is_current = index == 20;
+            if is_current {
+                current_delivery = delivery;
+            }
+            storage
+                .record_delivery(waygate_transfer::NewFileDelivery {
+                    id: delivery,
+                    owner: &owner,
+                    file_id: history_file,
+                    invocation_id: "history",
+                    server: "printable",
+                    tool: "artifact",
+                    source_server: "gateway",
+                    source_tool: "prepare_upload",
+                    upstream_uri: "mcp-file://printable/upload/private",
+                    lifecycle_supported: true,
+                    upstream_binding: "fixture-binding",
+                    authorization: if is_current { &authorization } else { &changed },
+                    expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+                })
+                .await
+                .unwrap();
+            sqlx::query("UPDATE gateway_file_deliveries SET created_at=$1 WHERE id=$2")
+                .bind(time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(index))
+                .bind(delivery)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let page = manager
+            .status(&principal, history_file, None)
+            .await
+            .unwrap();
+        assert_eq!(page.deliveries.len(), 1);
+        assert_eq!(page.deliveries[0].delivery_id, current_delivery.to_string());
+        assert!(page.limited);
+        let continuation = manager
+            .status(
+                &principal,
+                history_file,
+                Some(Uuid::parse_str(page.next_cursor.as_ref().unwrap()).unwrap()),
+            )
+            .await
+            .unwrap();
+        assert!(continuation.deliveries.is_empty());
+        assert!(!continuation.limited);
+        assert!(continuation.next_cursor.is_none());
         sqlx::query("UPDATE gateway_file_deliveries SET recovery_authorization=$1 WHERE id=$2")
             .bind(&authorization)
             .bind(id)
