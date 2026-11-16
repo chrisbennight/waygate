@@ -73,12 +73,18 @@ impl waygate_mcp::inspection::Inspector for StripFileFacts {
     }
 }
 
-async fn client_error(failure: Option<Value>, tool_error: Option<Value>, redact: bool) -> Value {
+async fn client_error(
+    failure: Option<Value>,
+    tool_error: Option<Value>,
+    redact: bool,
+    legacy: bool,
+) -> Value {
     let mut catalog = FakeCatalog::with_tools(&[("printable", "ingest", false)]);
     catalog.replace_input_schema("printable", "ingest", json!({
         "type":"object", "properties":{"value":{"type":"string", "x-mcp-file":{}}}, "required":["value"]
     }));
     catalog.file_error = tool_error;
+    catalog.file_error_legacy = legacy;
     let contract = catalog.contract_identity("printable", "ingest");
     let catalog: SharedCatalog = Arc::new(catalog);
     let authz: SharedAuthz = Arc::new(SelectiveAuthz);
@@ -176,7 +182,7 @@ async fn preauthorization_file_recovery_is_actionable_without_a_delivery_row() {
                 data[key] = value.clone();
             }
         }
-        let observed = client_error(Some(data), None, false).await;
+        let observed = client_error(Some(data), None, false, false).await;
         let detail = &observed["fileRecovery"];
         assert_eq!(detail["category"], category);
         assert_eq!(detail["reason"], reason);
@@ -204,13 +210,16 @@ async fn preauthorization_file_recovery_is_actionable_without_a_delivery_row() {
 
 #[tokio::test]
 async fn inspected_file_recovery_preserves_publication_uncertainty_and_owned_handles() {
-    for publication in [Some(false), Some(true), None] {
+    for (publication, legacy) in [Some(false), Some(true), None]
+        .into_iter()
+        .flat_map(|publication| [false, true].map(|legacy| (publication, legacy)))
+    {
         let mut error = json!({"code":"invalid_file_input", "message":"safe detail", "stage":"ingest",
             "delivery_ids":[FORGED], "uri":"mcp-file://printable/private", "token":"unreleased-credential"});
         if let Some(value) = publication {
             error["publication_attempted"] = json!(value);
         }
-        let observed = client_error(None, Some(error), false).await;
+        let observed = client_error(None, Some(error), false, legacy).await;
         let detail = &observed["fileRecovery"];
         assert_eq!(detail["stage"], "ingest");
         assert_eq!(detail["delivery_ids"], json!([OWNED]));
@@ -235,6 +244,7 @@ async fn recovery_does_not_resurrect_facts_removed_by_inspection() {
         Some(json!({"code":"invalid_file_input", "message":"safe detail",
         "stage":"ingest", "publication_attempted":true})),
         true,
+        false,
     )
     .await;
     let detail = &observed["fileRecovery"];

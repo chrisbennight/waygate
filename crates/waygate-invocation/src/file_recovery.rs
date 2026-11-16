@@ -4,6 +4,7 @@
 //! after inspection of a result from a call that actually prepared file inputs.
 //! This is not a classifier for arbitrary upstream JSON-RPC error data.
 
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -135,6 +136,27 @@ impl FileRecovery {
                 .collect(),
         }
     }
+}
+
+/// Extract an already-inspected tool error, preserving structured precedence.
+/// Legacy envelopes must be a sole JSON text block no larger than 4 KiB;
+/// mixed content and arbitrary transport error data are never interpreted.
+pub fn inspected_tool_error(result: &rmcp::model::CallToolResult) -> Option<Cow<'_, Value>> {
+    if result.is_error != Some(true) {
+        return None;
+    }
+    if let Some(value) = result.structured_content.as_ref() {
+        return value.get("error").map(Cow::Borrowed);
+    }
+    let [block] = result.content.as_slice() else {
+        return None;
+    };
+    let text = &block.as_text()?.text;
+    if text.len() > 4096 {
+        return None;
+    }
+    let mut value: Value = serde_json::from_str(text).ok()?;
+    value.get_mut("error").map(Value::take).map(Cow::Owned)
 }
 
 /// One ephemeral observation per invocation. The handle is skipped during

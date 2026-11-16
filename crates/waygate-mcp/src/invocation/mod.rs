@@ -1015,10 +1015,7 @@ impl InvocationService for DefaultInvocationService {
         // Uninspected transport error data cannot supply publication claims.
         if let Some(observation) = req.file_recovery.as_ref() {
             let data = match &result {
-                Ok(value) if value.is_error == Some(true) => value
-                    .structured_content
-                    .as_ref()
-                    .and_then(|value| value.get("error")),
+                Ok(value) => waygate_invocation::file_recovery::inspected_tool_error(value),
                 _ => None,
             };
             if !delivery_ids.is_empty()
@@ -1026,7 +1023,7 @@ impl InvocationService for DefaultInvocationService {
             {
                 observation.record(
                     waygate_invocation::file_recovery::FileRecovery::from_file_failure(
-                        data,
+                        data.as_deref(),
                         &delivery_ids,
                     ),
                 );

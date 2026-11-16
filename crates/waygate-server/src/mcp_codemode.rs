@@ -8578,6 +8578,7 @@ mod tests {
         error_generation: Arc<AtomicU64>,
         retained_body: Option<Arc<str>>,
         file_error: Option<Value>,
+        file_error_legacy: bool,
     }
 
     impl FakeCatalog {
@@ -8649,6 +8650,7 @@ mod tests {
                 error_generation: Arc::new(AtomicU64::new(0)),
                 retained_body: None,
                 file_error: None,
+                file_error_legacy: false,
             }
         }
 
@@ -8818,8 +8820,12 @@ mod tests {
             _admitted: Option<&waygate_mcp::catalog::InvocationContractIdentity>,
         ) -> Result<CallToolResult, McpError> {
             if let Some(error) = &self.file_error {
-                let mut result =
-                    CallToolResult::structured(json!({"result":"refused", "error":error}));
+                let body = json!({"result":"refused", "error":error});
+                let mut result = if self.file_error_legacy {
+                    CallToolResult::success(vec![rmcp::model::ContentBlock::text(body.to_string())])
+                } else {
+                    CallToolResult::structured(body)
+                };
                 result.is_error = Some(true);
                 return Ok(result);
             }
