@@ -609,26 +609,13 @@ fn classify_authorization_error(server: &str, error: &McpError) -> McpError {
     };
     let mut safe = Map::new();
     safe.insert("error".into(), category.into());
-    if let Some(reason) = data.get("reason").and_then(Value::as_str).filter(|v| {
-        matches!(
-            *v,
-            "upload_capacity_exhausted"
-                | "receipt_capacity"
-                | "file_too_large"
-                | "unsupported_type"
-                | "storage_budget_exceeded"
-                | "upload_not_found"
-                | "invalid_file_input"
-                | "completion_unknown"
-        )
+    if let Some(reason) = data.get("reason").and_then(Value::as_str).filter(|value| {
+        waygate_invocation::file_recovery::FileRecoveryReason::parse(value).is_some()
     }) {
         safe.insert("reason".into(), reason.into());
     }
-    if let Some(stage) = data.get("stage").and_then(Value::as_str).filter(|v| {
-        matches!(
-            *v,
-            "authorize_upload" | "receive" | "ingest" | "cancel" | "status"
-        )
+    if let Some(stage) = data.get("stage").and_then(Value::as_str).filter(|value| {
+        waygate_invocation::file_recovery::FileRecoveryStage::parse(value).is_some()
     }) {
         safe.insert("stage".into(), stage.into());
     }

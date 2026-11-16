@@ -85,8 +85,15 @@ pub struct ToolErrorDetail {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ConnectorCallError {
+    /// Gateway-owned file facts accompany the existing failure unchanged.
+    FileRecovery {
+        file_recovery: waygate_invocation::file_recovery::FileRecovery,
+        failure: Box<ConnectorCallError>,
+    },
     Message(String),
-    Tool { tool_error: Option<ToolErrorDetail> },
+    Tool {
+        tool_error: Option<ToolErrorDetail>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

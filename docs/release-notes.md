@@ -1,5 +1,17 @@
 # Release notes
 
+## 3.1.1
+
+- Code Mode connector errors expose optional bounded `fileRecovery` details for
+  gateway file-input failures. Agents can distinguish size, type, staging and
+  receipt-capacity refusals before a delivery record exists, retain their
+  original gateway file, and inspect known publication, retry and cleanup facts.
+  Only caller-owned delivery handles and safe typed facts are included; arbitrary
+  upstream error data, private upload addresses and credentials are excluded.
+  Existing error codes, messages and `toolError` details remain available, and
+  previous Code Mode continuations remain supported. No migration or
+  configuration change is required. See [Code Mode errors](codemode.md).
+
 ## 3.1.0
 
 - Large file ingestion has caller-owned delivery status and cancellation through

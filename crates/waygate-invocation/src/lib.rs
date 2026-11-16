@@ -68,6 +68,7 @@ use thiserror::Error;
 use waygate_oidc::Principal;
 
 pub use waygate_core::InvocationHierarchy;
+pub mod file_recovery;
 pub mod task_routes;
 
 /// Input to [`InvocationService::invoke`]. Carries the parsed
@@ -331,6 +332,9 @@ pub struct InvocationRequest {
     /// refusal ends the call without dispatching it. Absent for ordinary calls.
     #[serde(skip)]
     pub dispatch_admission: Option<DispatchAdmissionHandle>,
+    /// Ephemeral observation supplied by a trusted adapter, never by wire metadata.
+    #[serde(skip)]
+    pub file_recovery: Option<file_recovery::FileRecoveryHandle>,
 }
 
 impl InvocationRequest {
@@ -361,6 +365,7 @@ impl InvocationRequest {
             caller_capabilities: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
             dispatch_admission: None,
+            file_recovery: None,
         }
     }
 
