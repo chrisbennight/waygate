@@ -72,8 +72,15 @@ Ingestion failures after staging may include `delivery_ids` in error data;
 successful tool results carry them under
 `_meta["io.cacahuate.mcp-gateway/file-deliveries"]`. Status lookup by original
 file URI also works when the tool response was lost. A definitely rejected
-request triggers automatic cancellation when supported. A timeout or lost
-mutation response remains unknown and does not trigger replay or cancellation.
+request triggers automatic cancellation when supported. Terminal native task
+results settle the original delivery when polled. A timeout or lost mutation
+response remains unknown and does not trigger replay or cancellation.
+
+A recovery-store failure after allocation stops before the consuming tool is
+dispatched. Keep `source_uri`; `cleanup_pending: true` and `cleanup_state`
+`cancelling` or `unconfirmed` mean staging release is not confirmed. Do not retry
+automatically. If the allocation could not be recorded, an operator may need to
+wait for upstream staging expiry or clean it up at the upstream.
 
 Upstream lifecycle support is optional: the gateway interoperability extension
 uses `files/transferStatus` and `files/cancelUpload`, advertised through the

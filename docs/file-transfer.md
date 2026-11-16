@@ -820,7 +820,9 @@ and failure carries a bounded recovery category. On the MCP surfaces —
 native `files/authorize*` methods and the `gateway-files.*` fallback tools
 alike — the category travels as `error` inside the JSON-RPC `error.data`,
 the same bounded field name the gateway's other machine-readable envelopes
-use; wherever a `reason` field appears it is human prose. The file
+use. The gateway's explanatory messages are human prose; preserved upstream
+upload refusals may also include the allowlisted reason codes described under
+[upload delivery recovery](#upload-delivery-recovery-extension). The file
 vocabulary is: `unsupported_capability`, `authentication_required`,
 `invalid_file_input`, `invalid_tool_contract`, `file_unavailable`,
 `not_enabled`, `quota_exhausted`, `temporarily_unavailable`,
@@ -1086,6 +1088,19 @@ requires durable attempt evidence before the RPC; failed outcome evidence does
 not erase a confirmed cancellation.
 
 The invocation boundary cancels staging only after an explicit pre-publication
-refusal or a proven failure before dispatch when supported. It records unknown outcomes after transport
-failure without replaying the tool or claiming that staging was deleted. The
+refusal or a proven failure before dispatch when supported. Native task routes
+retain the originating file-delivery invocation; polling a terminal tool result
+settles it using the upstream publication facts before response inspection.
+Unknown outcomes never trigger replay or claim that staging was deleted. The
 source gateway file remains unchanged and can be reused with corrected input.
+
+If recovery storage fails after native allocation, the gateway attempts audited
+cancellation and stops before dispatching the consuming tool. The error reports
+`publication_attempted: false`, the original `source_uri`, and `cleanup_state`
+(`cancelled`, `cancelling`, or `unconfirmed`). `cleanup_pending: true` means
+release is unconfirmed and automatic retry is disabled. If the record could not
+be persisted, recovery tools cannot reconstruct its private upload URI after a
+restart. Upstream staging expiry bounds this failure when the upstream supplies
+one; operators should check the logged delivery ID and upstream expiry before
+retrying. Upstreams without bounded staging retention require their own
+operator cleanup. No second recovery store or background retry worker is used.

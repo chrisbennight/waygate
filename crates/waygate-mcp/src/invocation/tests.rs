@@ -2158,6 +2158,7 @@ mod mrtr_dispatch_tests {
     struct ScriptedCatalog {
         response: std::sync::Mutex<Option<CallToolResponse>>,
         seen_mrtr: std::sync::Mutex<Vec<ToolCallMrtr>>,
+        task_status: std::sync::Mutex<Option<rmcp::model::GetTaskResult>>,
         annotation_native: bool,
     }
 
@@ -2166,6 +2167,7 @@ mod mrtr_dispatch_tests {
             Self {
                 response: std::sync::Mutex::new(Some(response)),
                 seen_mrtr: std::sync::Mutex::new(Vec::new()),
+                task_status: std::sync::Mutex::new(None),
                 annotation_native: false,
             }
         }
@@ -2180,6 +2182,29 @@ mod mrtr_dispatch_tests {
 
     #[async_trait::async_trait]
     impl UpstreamCatalog for ScriptedCatalog {
+        async fn task_binding(&self, _server: &str) -> Option<String> {
+            Some("fixture-binding".into())
+        }
+
+        async fn task_request(
+            &self,
+            _server: &str,
+            _tool: &str,
+            _principal: &Principal,
+            _admitted: &crate::catalog::InvocationContractIdentity,
+            request: crate::tasks::TaskRpc,
+            _processor: &dyn crate::catalog::CallToolResultProcessor,
+        ) -> Result<waygate_invocation::TaskResponse, InvocationError> {
+            assert_eq!(request.task_id, "native-task");
+            Ok(waygate_invocation::TaskResponse::Status(Box::new(
+                self.task_status
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("terminal task fixture"),
+            )))
+        }
+
         async fn list_servers(&self) -> Vec<String> {
             vec!["mock".to_owned()]
         }
@@ -2637,6 +2662,137 @@ mod mrtr_dispatch_tests {
                 );
             }
             other => panic!("expected the collision to be refused, got {other:?}"),
+        }
+    }
+
+    #[derive(Default)]
+    struct TaskFiles {
+        prepared: std::sync::Mutex<Vec<String>>,
+        finished: std::sync::Mutex<Vec<(String, crate::files::FileInputOutcome)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::files::FileInputProcessor for TaskFiles {
+        fn admit(
+            &self,
+            _: Option<&serde_json::Value>,
+            _: Option<&jsonschema::Validator>,
+            _: &mut Option<serde_json::Map<String, serde_json::Value>>,
+            _: Option<&std::collections::BTreeMap<String, serde_json::Value>>,
+            _: &[String],
+        ) -> Result<(), ErrorData> {
+            Ok(())
+        }
+        async fn prepare(
+            &self,
+            context: crate::files::FileInputContext,
+            _: Option<&serde_json::Value>,
+            _: &mut Option<serde_json::Map<String, serde_json::Value>>,
+        ) -> Result<bool, ErrorData> {
+            self.prepared.lock().unwrap().push(context.invocation_id);
+            Ok(true)
+        }
+        async fn prepare_continuation(
+            &self,
+            _: crate::files::FileInputContext,
+            _: &mut std::collections::BTreeMap<String, serde_json::Value>,
+            _: &[String],
+        ) -> Result<bool, ErrorData> {
+            Ok(false)
+        }
+        async fn finish(
+            &self,
+            context: &crate::files::FileInputContext,
+            outcome: crate::files::FileInputOutcome,
+        ) -> Vec<String> {
+            self.finished
+                .lock()
+                .unwrap()
+                .push((context.invocation_id.clone(), outcome));
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_native_tasks_settle_original_file_delivery_without_replaying() {
+        use crate::files::FileInputOutcome;
+        for (publication, expected) in [
+            (Some(false), FileInputOutcome::Rejected),
+            (Some(true), FileInputOutcome::Unknown),
+            (None, FileInputOutcome::Unknown),
+        ] {
+            let created = waygate_core::fmt::format_ts_rfc3339(time::OffsetDateTime::now_utc());
+            let (service, catalog) = service(ScriptedCatalog::returning(CallToolResponse::Task(
+                rmcp::model::CreateTaskResult::new(Task::new(
+                    "native-task",
+                    TaskStatus::Working,
+                    &created,
+                    &created,
+                )),
+            )));
+            let store =
+                Arc::new(waygate_test_support::task_routes::InMemoryTaskRouteStore::default());
+            let router = Arc::new(crate::tasks::TaskRouter::new(
+                store,
+                crate::tasks::DEFAULT_RETENTION_SECONDS,
+            ));
+            let files = Arc::new(TaskFiles::default());
+            let service = service
+                .with_task_router(Some(router.clone()))
+                .with_file_input_processor(Some(files.clone()));
+            let principal: Principal = serde_json::from_value(serde_json::json!({
+                "sub":"alice", "email":null, "issuer":"fixture", "scopes":[]
+            }))
+            .unwrap();
+            let capabilities = ClientCapabilities::builder().enable_tasks().build();
+            let InvocationResponse::Task(task) = service
+                .invoke(
+                    Some(&principal),
+                    InvocationRequest::new("mock", "confirm")
+                        .with_caller_capabilities(Some(capabilities.clone())),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("native task must be accepted");
+            };
+            assert!(files.finished.lock().unwrap().is_empty());
+            let origin = files.prepared.lock().unwrap()[0].clone();
+            let route = router.open(&task.task.task_id, &principal).await.unwrap();
+            assert_eq!(route.file_input_invocation_id.unwrap().to_string(), origin);
+            let mut error = serde_json::json!({"stage":"ingest"});
+            if let Some(attempted) = publication {
+                error["publication_attempted"] = attempted.into();
+            }
+            let mut result = CallToolResult::structured(serde_json::json!({"error":error}));
+            result.is_error = Some(true);
+            *catalog.task_status.lock().unwrap() = Some(rmcp::model::GetTaskResult::new(
+                rmcp::model::DetailedTask::new(
+                    Task::new("native-task", TaskStatus::Completed, &created, &created),
+                    rmcp::model::TaskPayload::Completed {
+                        result: serde_json::to_value(result)
+                            .unwrap()
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    },
+                ),
+            ));
+            service
+                .task(
+                    Some(&principal),
+                    &task.task.task_id,
+                    waygate_invocation::TaskAction::Get,
+                    capabilities,
+                )
+                .await
+                .unwrap();
+            assert_eq!(*files.finished.lock().unwrap(), vec![(origin, expected)]);
+            assert_eq!(
+                catalog.seen_mrtr.lock().unwrap().len(),
+                1,
+                "polling never replays the consuming tool"
+            );
         }
     }
 

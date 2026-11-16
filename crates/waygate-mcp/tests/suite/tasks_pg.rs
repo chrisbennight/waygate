@@ -9,7 +9,7 @@ async fn routes_survive_reconnection_and_expiry_precedes_cleanup() {
         return;
     };
     let tenant = uuid::Uuid::new_v4().to_string();
-    let route: TaskRoute = serde_json::from_value(serde_json::json!({
+    let mut route: TaskRoute = serde_json::from_value(serde_json::json!({
         "sub": "alice", "issuer": "test", "tenant": tenant,
         "profile": null, "auth_method": "oauth", "server": "service",
         "tool": "work", "upstream_id": "original-task", "binding": "original-manifest",
@@ -25,6 +25,11 @@ async fn routes_survive_reconnection_and_expiry_precedes_cleanup() {
         "exp": time::OffsetDateTime::now_utc().unix_timestamp() + 129600
     }))
     .unwrap();
+    assert!(
+        route.file_input_invocation_id.is_none(),
+        "older task routes remain readable"
+    );
+    route.file_input_invocation_id = Some(uuid::Uuid::new_v4());
     let id = uuid::Uuid::new_v4();
     let store = PgTaskRouteStore::new(pool.clone());
     store.insert(id, &route).await.unwrap();

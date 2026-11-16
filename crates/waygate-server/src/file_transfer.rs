@@ -883,6 +883,7 @@ impl OutboundFileProcessor {
             .await
         {
             tracing::warn!(%delivery_id,%error,"upload delivery recovery could not be recorded");
+            let mut cleanup_state = "unconfirmed";
             if lifecycle_supported
                 && self
                     .audit
@@ -900,7 +901,7 @@ impl OutboundFileProcessor {
                     .await
                     .is_ok()
             {
-                if let Err(error) = self
+                match self
                     .catalog
                     .manage_file_upload(
                         &context.server,
@@ -915,13 +916,37 @@ impl OutboundFileProcessor {
                     )
                     .await
                 {
-                    tracing::warn!(%delivery_id,code=?error.code,"unrecorded upload cleanup remains unconfirmed");
+                    Ok(value) => {
+                        if value.get("state").and_then(Value::as_str) == Some("cancelled")
+                            && value.get("cancelled").and_then(Value::as_bool) == Some(true)
+                        {
+                            cleanup_state = "cancelled";
+                        } else if value.get("state").and_then(Value::as_str) == Some("cancelling") {
+                            cleanup_state = "cancelling";
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%delivery_id,code=?error.code,"unrecorded upload cleanup remains unconfirmed");
+                    }
                 }
             }
-            return Err(file_transfer_failure(
+            let cleanup_pending = cleanup_state != "cancelled";
+            tracing::warn!(%delivery_id, cleanup_state, cleanup_pending, "upload recovery unavailable; pending staging may require upstream expiry");
+            let mut error = file_transfer_failure(
                 FileTransferReason::TemporarilyUnavailable,
-                "upload delivery recovery is unavailable; the consuming tool was not dispatched",
-            ));
+                "upload delivery recovery is unavailable; the consuming tool was not dispatched; retain the source file and inspect cleanup_state before retrying",
+            );
+            error.data = Some(serde_json::json!({
+                "error": FileTransferReason::TemporarilyUnavailable.as_str(),
+                "reason": "delivery_recovery_unavailable",
+                "stage": "authorize_upload",
+                "publication_attempted": false,
+                "cleanup_state": cleanup_state,
+                "cleanup_pending": cleanup_pending,
+                "retryable": !cleanup_pending,
+                "source_uri": format!("mcp-file://gateway/{}", file.id),
+            }));
+            return Err(error);
         }
         let mut upstream_file = validate_authorized_upload(
             &authorized.response.file,

@@ -8,7 +8,7 @@
 //! response. Any other bounded request, such as a tool call, keeps its event
 //! stream: rmcp still receives the upstream's notifications, requests and
 //! resumable event IDs, and only the byte count is enforced here.
-//! File-authorization replies are also consumed here, under the transport's
+//! File authorization and lifecycle replies are consumed here, under the transport's
 //! event-size ceiling, to preserve custom fields alongside ordinary `_meta`
 //! until the pool's method-specific file parser validates them.
 //!
@@ -237,30 +237,32 @@ impl BoundedResponseClient {
         }))
     }
 
-    fn is_file_authorization(message: &ClientJsonRpcMessage) -> bool {
+    fn requires_custom_file_result(message: &ClientJsonRpcMessage) -> bool {
         matches!(message, JsonRpcMessage::Request(request)
             if matches!(&request.request, ClientRequest::CustomRequest(custom)
                 if matches!(custom.method.as_str(),
                     waygate_mcp::files::AUTHORIZE_UPLOAD_METHOD
-                    | waygate_mcp::files::AUTHORIZE_DOWNLOAD_METHOD)))
+                    | waygate_mcp::files::AUTHORIZE_DOWNLOAD_METHOD
+                    | "files/transferStatus"
+                    | "files/cancelUpload")))
     }
 
-    /// Resource reads and file authorization consume one response here;
+    /// Resource reads and file requests consume one response here;
     /// tool calls keep their event stream for the SDK's interactive handling.
     fn materializes_reply(message: &ClientJsonRpcMessage) -> bool {
         matches!(
             message,
             JsonRpcMessage::Request(request)
                 if matches!(request.request, ClientRequest::ReadResourceRequest(_))
-        ) || Self::is_file_authorization(message)
+        ) || Self::requires_custom_file_result(message)
     }
 
     fn decode_response(
         request: &ClientJsonRpcMessage,
         body: &[u8],
     ) -> Result<ServerJsonRpcMessage, serde_json::Error> {
-        if Self::is_file_authorization(request) {
-            // File authorization has a method-specific custom result. Select
+        if Self::requires_custom_file_result(request) {
+            // File requests have a method-specific custom result. Select
             // it by the originating method so extension fields remain intact
             // even if they overlap another result shape.
             let decoded: JsonRpcMessage<ServerRequest, serde_json::Value, ServerNotification> =
@@ -402,7 +404,7 @@ impl BoundedResponseClient {
         if let Some(session_id) = session_id {
             request = request.header(SESSION_HEADER, session_id.as_ref());
         }
-        let control_request = Self::is_file_authorization(&message).then(|| {
+        let control_request = Self::requires_custom_file_result(&message).then(|| {
             request
                 .try_clone()
                 .expect("an HTTP request without a body can be cloned")
@@ -436,7 +438,7 @@ impl BoundedResponseClient {
             .map(str::to_owned);
         let status = response.status();
         if !status.is_success() {
-            if materialize && !Self::is_file_authorization(&message) {
+            if materialize && !Self::requires_custom_file_result(&message) {
                 return Err(StreamableHttpError::UnexpectedServerResponse(
                     format!("HTTP {status} during bounded resource read").into(),
                 ));
@@ -586,7 +588,7 @@ impl StreamableHttpClient for BoundedResponseClient {
         let exchange = self.exchanges.post(&message);
         let uri = self.request_uri(uri);
         let limit = Self::response_limit(&message)
-            .or_else(|| Self::is_file_authorization(&message).then_some(max_sse_event_size));
+            .or_else(|| Self::requires_custom_file_result(&message).then_some(max_sse_event_size));
         let result = if let Some(limit) = limit {
             self.until_closed(self.post_bounded(
                 uri,
@@ -682,10 +684,12 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn file_authorization_preserves_metadata_and_transfer_fields_on_the_wire() {
+    async fn file_requests_preserve_custom_fields_and_metadata_on_the_wire() {
         for method in [
             waygate_mcp::files::AUTHORIZE_UPLOAD_METHOD,
             waygate_mcp::files::AUTHORIZE_DOWNLOAD_METHOD,
+            "files/transferStatus",
+            "files/cancelUpload",
         ] {
             for event_stream in [false, true] {
                 let transfer = if method == waygate_mcp::files::AUTHORIZE_UPLOAD_METHOD {
@@ -693,11 +697,21 @@ mod tests {
                 } else {
                     "download"
                 };
-                let expected = json!({
-                    "_meta": {"serverInfo": {"name": "fixture"}},
-                    "file": {"uri": "mcp-file://fixture/file"},
-                    (transfer): {"url": "https://fixture.invalid/bytes", "method": "GET"}
-                });
+                let expected = match method {
+                    "files/transferStatus" => json!({
+                        "_meta": {"serverInfo": {"name": "fixture"}},
+                        "state": "ready", "size_bytes": 123
+                    }),
+                    "files/cancelUpload" => json!({
+                        "_meta": {"serverInfo": {"name": "fixture"}},
+                        "state": "cancelled", "cancelled": true
+                    }),
+                    _ => json!({
+                        "_meta": {"serverInfo": {"name": "fixture"}},
+                        "file": {"uri": "mcp-file://fixture/file"},
+                        (transfer): {"url": "https://fixture.invalid/bytes", "method": "GET"}
+                    }),
+                };
                 let reply = json!({"jsonrpc": "2.0", "id": 7, "result": expected});
                 let body = if event_stream {
                     format!("event: message\ndata: {reply}\n\n")
@@ -775,10 +789,10 @@ mod tests {
                 let StreamableHttpPostResponse::Json(JsonRpcMessage::Response(response), _) =
                     response
                 else {
-                    panic!("file authorization must return its correlated response");
+                    panic!("file request must return its correlated response");
                 };
                 let ServerResult::CustomResult(result) = response.result else {
-                    panic!("custom authorization fields must survive the SDK result union");
+                    panic!("custom file fields must survive the SDK result union");
                 };
                 assert_eq!(result.0, expected);
                 server.abort();

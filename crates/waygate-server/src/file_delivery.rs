@@ -340,6 +340,9 @@ impl DeliveryManager {
         let mut ids = Vec::with_capacity(records.len());
         for record in records {
             ids.push(record.id.to_string());
+            if record.stage == "cancelled" {
+                continue;
+            }
             let stage = match outcome {
                 FileInputOutcome::NotDispatched | FileInputOutcome::Rejected => "rejected",
                 FileInputOutcome::Completed => "completed",
@@ -704,6 +707,10 @@ mod tests {
                 .stage,
             "completion_unknown"
         );
+        manager
+            .settle(&principal, "call", FileInputOutcome::Rejected)
+            .await;
+        assert_eq!(catalog.cancels.load(Ordering::SeqCst), 1);
         manager
             .settle(&principal, "call", FileInputOutcome::Rejected)
             .await;
