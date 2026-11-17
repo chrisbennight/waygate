@@ -1,5 +1,15 @@
 # Release notes
 
+## 3.1.3
+
+- Upstream delivery status preserves `publishing` while publication I/O is
+  unfinished. Recovery guidance supports upstreams that retire terminal upload
+  entries: missing status never proves failed or prevented publication, and
+  callers inspect the known destination's size and digest rather than waiting
+  for a retained receipt or replaying blindly. Cancellation still requires
+  explicit release confirmation and never deletes committed artifacts. No
+  new receipt cache, storage, migration or configuration is introduced.
+
 ## 3.1.2
 
 - File output normalization updates JSON text blocks that mirror the inspected

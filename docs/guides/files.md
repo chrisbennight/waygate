@@ -46,7 +46,9 @@ be resolved in the execution host's network permissions.
 A successful helper upload means the gateway has the source file. The consuming
 tool must still ingest it. Keep the original gateway URI for retry; do not split
 large files, rename fragments, or wrap them in archives to work around a
-capacity error. Declared tool file constraints are checked before forwarding.
+capacity error. Keep the intended destination and the source's expected size
+and digest before calling the consuming tool. Declared tool file constraints
+are checked before forwarding.
 
 Call `gateway-files.delivery_status` with `{}` to inspect the gateway's file
 size and global/per-owner active-transfer limits. Those limits differ from an
@@ -54,6 +56,10 @@ upstream's staged-file capacity. Pass `{"uri":"mcp-file://gateway/<file-id>"}`
 to inspect recent deliveries owned by the caller. Each record has an opaque
 `delivery_id`, its receiving server/tool, the last gateway-observed stage, and
 an upstream-confirmed state when the upstream supports lifecycle inspection.
+`receiving`, `publishing` and `cancelling` describe unfinished work; do not
+start another consuming mutation while that work is pending. An upstream may
+retire a finished upload instead of retaining its result. Its missing entry
+then appears as `unknown`, not as proof of failure or non-publication.
 The response is bounded; when `next_cursor` is present, pass it as `cursor`
 with the same URI to continue. New deliveries do not shift continuation pages.
 
@@ -64,22 +70,30 @@ changed authority or routing must be restored before the private upload can be
 accessed. Cancellation preserves the source
 file in gateway storage and refuses to delete committed files or uncertain
 publication. `cancelling` means resource release is pending; only
-`cancelled: true` confirms the upstream released staging. A status of `unknown`
-or `commit_uncertain` requires destination inspection before replaying a
-consuming mutation.
+`cancelled: true` confirms the upstream released staging. A finished entry may
+be retired before a status poll observes it, so do not wait indefinitely for a
+retained `cancelled` result. `unknown` or `commit_uncertain` requires inspecting
+the known destination through the receiving service and comparing the expected
+size and digest before deciding what to do next. A matching destination proves
+its current contents, not the historical outcome of a particular request.
+An absent or different destination does not prove that an in-flight operation
+failed or that overwriting it is safe. Do not replay the mutation blindly.
 
 Direct MCP ingestion failures after staging may include `delivery_ids` in error
 data; successful tool results carry them under
 `_meta["io.cacahuate.mcp-gateway/file-deliveries"]`. Status lookup by original
 file URI also works when the tool response was lost. A definitely rejected
-request triggers automatic cancellation when supported. Terminal native task
+request triggers automatic cancellation when supported. An `upload_not_found`
+cleanup reply does not replace explicit publication facts or imply a capacity
+refusal or expiry-based retry delay. Terminal native task
 results settle the original delivery when polled. A timeout or lost mutation
 response remains unknown and does not trigger replay or cancellation.
 
 Through Code Mode, catch the connector error and inspect its optional
 `error.fileRecovery` detail. It distinguishes `file_too_large`,
-`unsupported_type`, `upload_capacity_exhausted`, and `receipt_capacity`, including
-refusals before any delivery record exists. Known limits, retry hints,
+`unsupported_type` and `upload_capacity_exhausted`, including refusals before
+any delivery record exists. Older upstreams may also return `receipt_capacity`;
+the gateway retains that error vocabulary for compatibility. Known limits, retry hints,
 publication facts and caller-owned delivery IDs are included; unknown facts
 are omitted. A missing publication fact never means publication was prevented.
 Retain the original URI and use status lookup for staging recovery. Arbitrary

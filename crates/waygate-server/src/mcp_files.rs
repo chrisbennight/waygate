@@ -893,13 +893,13 @@ pub(crate) fn tool_defs() -> Vec<Tool> {
         ),
         Tool::new(
             format!("{NAMESPACE}.{DELIVERY_STATUS}"),
-            "Inspect gateway upload limits and caller-owned deliveries into an upstream. Omit uri for limits; pass the original gateway file URI to find delivery IDs and upstream staging states. CallToolResult.structuredContent is authoritative. Gateway upload readiness alone does not mean the consuming tool ingested the file. An unknown or commit_uncertain state requires destination inspection before retrying. Retain the original URI; do not split or repackage the file to recover from capacity errors.",
+            "Inspect gateway limits and owned deliveries. Omit uri for limits; use the original gateway URI for delivery IDs and upstream states. structuredContent is authoritative. Gateway readiness does not mean ingestion. Publishing or cancelling means unfinished work. Unknown or commit_uncertain does not prove non-publication; an entry may be retired. Inspect the known destination's size/digest before retrying. Keep the source URI; do not split or repackage files for capacity errors.",
             schema_obj(serde_json::to_value(schemars::schema_for!(DeliveryStatusInput)).expect("delivery status schema")),
         ).with_title("Inspect file deliveries and limits").with_output_schema::<crate::file_delivery::DeliveryStatuses>()
         .annotate(ToolAnnotations::new().read_only(true).destructive(false).idempotent(true)),
         Tool::new(
             format!("{NAMESPACE}.{CANCEL_DELIVERY}"),
-            "Cancel an owned upstream upload delivery by delivery_id from delivery_status or an ingestion error. The original gateway file remains available. Requires upstream lifecycle support; committed files and uncertain publication are not deleted. A cancelling result means cleanup is pending: inspect delivery_status until the upstream confirms cancelled. This operation does not replay the consuming tool.",
+            "Cancel an owned unfinished delivery by delivery_id from delivery_status or an ingestion error. Keeps the source file; committed artifacts and uncertain publication are not deleted. Requires upstream lifecycle support. Cancelling means cleanup is pending; only cancelled:true confirms release. Retired or unknown status requires destination size/digest inspection. Never replays the consuming tool.",
             schema_obj(serde_json::to_value(schemars::schema_for!(CancelDeliveryInput)).expect("cancel delivery schema")),
         ).with_title("Cancel an upstream file delivery").with_output_schema::<crate::file_delivery::DeliveryCancellation>()
         .annotate(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true)),
