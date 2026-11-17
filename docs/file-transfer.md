@@ -1071,6 +1071,17 @@ these known method names. The extension is optional and is not described as a
 standard MCP method. The upstream must serialize cancellation with reception and
 publication: committed and uncertain publication cannot be deleted by cancel.
 
+`publishing` denotes unfinished publication I/O. Upstreams may retain only
+unfinished operations and retire terminal entries after I/O and cleanup end.
+Missing or unavailable lifecycle status is `unknown`; it never proves failure,
+non-publication or confirmed cancellation. Pending cancellation may therefore
+be followed by missing status rather than a retained terminal result. Consumers
+inspect their known destination and compare expected size and digest through
+the receiving service. Matching contents establish current state, not exact
+historical request results; absence or conflict alone is not proof that pending
+work failed and does not authorize blind replay or overwrite. No completed-result
+cache, acknowledgment protocol or replacement history store is required.
+
 Authorization refusals may return typed error data. The gateway preserves only
 allowlisted categories, reasons, stages, boolean retry/publication facts and
 unsigned size/capacity/retry values. It never forwards arbitrary upstream error

@@ -2438,6 +2438,10 @@ mod file_cleanup_classification_tests {
             ),
             (serde_json::json!({}), FileInputOutcome::Unknown),
             (
+                serde_json::json!({"code":"file_unavailable", "reason":"upload_not_found", "stage":"ingest"}),
+                FileInputOutcome::Unknown,
+            ),
+            (
                 serde_json::json!({"code":"completion_unknown","publication_attempted":false}),
                 FileInputOutcome::Unknown,
             ),

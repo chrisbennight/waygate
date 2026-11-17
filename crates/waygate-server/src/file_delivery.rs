@@ -31,7 +31,7 @@ pub(crate) struct DeliveryStatus {
     pub tool: String,
     /// Last gateway-observed delivery or invocation stage.
     pub stage: String,
-    /// Current upstream staging state, or unknown when it cannot be confirmed.
+    /// Current upstream work state, or unknown if unavailable or retired.
     pub state: String,
     /// Whether the upstream advertised the optional upload lifecycle extension.
     pub cancel_supported: bool,
@@ -57,7 +57,7 @@ pub(crate) struct DeliveryStatuses {
 pub(crate) struct DeliveryCancellation {
     /// Opaque caller-owned delivery identifier.
     pub delivery_id: String,
-    /// Upstream-confirmed staging state, including cancelling or committed.
+    /// Upstream-confirmed state, including publishing or cancelling.
     pub state: String,
     /// True only when the upstream confirms cancellation and resource release.
     pub cancelled: bool,
@@ -409,8 +409,8 @@ fn storage_error(error: waygate_transfer::FileStorageError) -> McpError {
 fn safe_state(state: Option<&str>) -> &str {
     match state {
         Some(
-            v @ ("prepared" | "receiving" | "ready" | "failed" | "cancelling" | "cancelled"
-            | "committed" | "commit_uncertain"),
+            v @ ("prepared" | "receiving" | "ready" | "publishing" | "failed" | "cancelling"
+            | "cancelled" | "committed" | "commit_uncertain"),
         ) => v,
         _ => "unknown",
     }
@@ -465,6 +465,8 @@ mod tests {
     struct LifecycleCatalog {
         cancelled: AtomicBool,
         committed: AtomicBool,
+        publishing: AtomicBool,
+        missing: AtomicBool,
         cancels: AtomicUsize,
     }
     #[async_trait::async_trait]
@@ -496,14 +498,24 @@ mod tests {
             assert_eq!(request.binding, "fixture-binding");
             if request.cancel {
                 self.cancels.fetch_add(1, Ordering::SeqCst);
-                if !self.committed.load(Ordering::SeqCst) {
-                    self.cancelled.store(true, Ordering::SeqCst);
-                }
+            }
+            if self.missing.load(Ordering::SeqCst) {
+                return Err(McpError::invalid_params(
+                    "upload is unavailable",
+                    Some(serde_json::json!({
+                        "error":"file_unavailable", "reason":"upload_not_found",
+                        "stage":if request.cancel {"cancel"} else {"status"}
+                    })),
+                ));
+            }
+            let publishing = self.publishing.load(Ordering::SeqCst);
+            if request.cancel && !publishing && !self.committed.load(Ordering::SeqCst) {
+                self.cancelled.store(true, Ordering::SeqCst);
             }
             let committed = self.committed.load(Ordering::SeqCst);
-            let cancelled = self.cancelled.load(Ordering::SeqCst) && !committed;
+            let cancelled = self.cancelled.load(Ordering::SeqCst) && !committed && !publishing;
             Ok(
-                serde_json::json!({"state":if committed {"committed"}else if cancelled{"cancelled"}else{"ready"},"cancelled":cancelled}),
+                serde_json::json!({"state":if publishing {"publishing"}else if committed {"committed"}else if cancelled{"cancelled"}else{"ready"},"cancelled":cancelled}),
             )
         }
     }
@@ -545,6 +557,8 @@ mod tests {
         let catalog = Arc::new(LifecycleCatalog {
             cancelled: AtomicBool::new(false),
             committed: AtomicBool::new(false),
+            publishing: AtomicBool::new(false),
+            missing: AtomicBool::new(false),
             cancels: AtomicUsize::new(0),
         });
         let waygate_mcp::catalog::ResolvedInvocationTool::Ready(snapshot) = catalog
@@ -732,6 +746,91 @@ mod tests {
         let cancellation = manager.cancel(&principal, id).await.unwrap();
         assert_eq!(cancellation.state, "committed");
         assert!(!cancellation.cancelled);
+        let pending_id = Uuid::new_v4();
+        let pending_file = Uuid::new_v4();
+        storage
+            .record_delivery(waygate_transfer::NewFileDelivery {
+                id: pending_id,
+                owner: &owner,
+                file_id: pending_file,
+                invocation_id: "publication-call",
+                server: "printable",
+                tool: "artifact",
+                source_server: "gateway",
+                source_tool: "prepare_upload",
+                upstream_uri: "mcp-file://printable/upload/private",
+                lifecycle_supported: true,
+                upstream_binding: "fixture-binding",
+                authorization: &authorization,
+                expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+            })
+            .await
+            .unwrap();
+        assert!(storage
+            .set_delivery_stage(&owner, pending_id, "ready")
+            .await
+            .unwrap());
+        manager
+            .dispatch_started(&principal, "publication-call")
+            .await
+            .unwrap();
+        catalog.committed.store(false, Ordering::SeqCst);
+        catalog.cancelled.store(false, Ordering::SeqCst);
+        catalog.publishing.store(true, Ordering::SeqCst);
+        let pending = manager
+            .status(&principal, pending_file, None)
+            .await
+            .unwrap();
+        assert_eq!(pending.deliveries[0].state, "publishing");
+        assert_eq!(pending.deliveries[0].stage, "dispatched");
+        let cancellation = manager.cancel(&principal, pending_id).await.unwrap();
+        assert_eq!(cancellation.state, "publishing");
+        assert!(!cancellation.cancelled);
+
+        catalog.missing.store(true, Ordering::SeqCst);
+        let retired = manager
+            .status(&principal, pending_file, None)
+            .await
+            .unwrap();
+        assert_eq!(retired.deliveries[0].state, "unknown");
+        assert_eq!(retired.deliveries[0].stage, "dispatched");
+        let absent = manager
+            .cancel(&principal, pending_id)
+            .await
+            .err()
+            .expect("no cancellation confirmation");
+        assert_eq!(absent.data.as_ref().unwrap()["reason"], "upload_not_found");
+        assert!(absent
+            .data
+            .as_ref()
+            .unwrap()
+            .get("publication_attempted")
+            .is_none());
+        let before = catalog.cancels.load(Ordering::SeqCst);
+        manager
+            .settle(&principal, "publication-call", FileInputOutcome::Unknown)
+            .await;
+        assert_eq!(catalog.cancels.load(Ordering::SeqCst), before);
+        assert_eq!(
+            storage
+                .owned_delivery(&owner, pending_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .stage,
+            "completion_unknown"
+        );
+        let rejected = manager
+            .settle(&principal, "publication-call", FileInputOutcome::Rejected)
+            .await;
+        assert_eq!(rejected, vec![pending_id.to_string()]);
+        assert_eq!(catalog.cancels.load(Ordering::SeqCst), before + 1);
+        let rejected_status = manager
+            .status(&principal, pending_file, None)
+            .await
+            .unwrap();
+        assert_eq!(rejected_status.deliveries[0].stage, "rejected");
+        assert_eq!(rejected_status.deliveries[0].state, "unknown");
         sqlx::query("DELETE FROM tenants WHERE id=$1")
             .bind(&tenant)
             .execute(&pool)

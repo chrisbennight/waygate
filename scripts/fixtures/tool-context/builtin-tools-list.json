@@ -4066,7 +4066,7 @@
       {
         "name": "gateway-files.cancel_delivery",
         "title": "Cancel an upstream file delivery",
-        "description": "Cancel an owned upstream upload delivery by delivery_id from delivery_status or an ingestion error. The original gateway file remains available. Requires upstream lifecycle support; committed files and uncertain publication are not deleted. A cancelling result means cleanup is pending: inspect delivery_status until the upstream confirms cancelled. This operation does not replay the consuming tool.",
+        "description": "Cancel an owned unfinished delivery by delivery_id from delivery_status or an ingestion error. Keeps the source file; committed artifacts and uncertain publication are not deleted. Requires upstream lifecycle support. Cancelling means cleanup is pending; only cancelled:true confirms release. Retired or unknown status requires destination size/digest inspection. Never replays the consuming tool.",
         "inputSchema": {
           "required": [
             "delivery_id"
@@ -4088,7 +4088,7 @@
               "type": "string"
             },
             "state": {
-              "description": "Upstream-confirmed staging state, including cancelling or committed.",
+              "description": "Upstream-confirmed state, including publishing or cancelling.",
               "type": "string"
             },
             "cancelled": {
@@ -4112,7 +4112,7 @@
       {
         "name": "gateway-files.delivery_status",
         "title": "Inspect file deliveries and limits",
-        "description": "Inspect gateway upload limits and caller-owned deliveries into an upstream. Omit uri for limits; pass the original gateway file URI to find delivery IDs and upstream staging states. CallToolResult.structuredContent is authoritative. Gateway upload readiness alone does not mean the consuming tool ingested the file. An unknown or commit_uncertain state requires destination inspection before retrying. Retain the original URI; do not split or repackage the file to recover from capacity errors.",
+        "description": "Inspect gateway limits and owned deliveries. Omit uri for limits; use the original gateway URI for delivery IDs and upstream states. structuredContent is authoritative. Gateway readiness does not mean ingestion. Publishing or cancelling means unfinished work. Unknown or commit_uncertain does not prove non-publication; an entry may be retired. Inspect the known destination's size/digest before retrying. Keep the source URI; do not split or repackage files for capacity errors.",
         "inputSchema": {
           "additionalProperties": false,
           "title": "DeliveryStatusInput",
@@ -4178,7 +4178,7 @@
                   "type": "string"
                 },
                 "state": {
-                  "description": "Current upstream staging state, or unknown when it cannot be confirmed.",
+                  "description": "Current upstream work state, or unknown if unavailable or retired.",
                   "type": "string"
                 },
                 "cancel_supported": {

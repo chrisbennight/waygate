@@ -829,9 +829,14 @@ the source URI and follow the returned retry hints. These refusals can occur
 before a delivery record exists. For staged deliveries, use
 `gateway-files.delivery_status` with the original gateway URI, follow its
 cursor for more handles, and use `cancel_delivery` only for disposable staging.
-Confirm `state: "cancelled"` and `cancelled: true`; pending or unknown cleanup
-is not confirmed release. Publication attempted or unknown requires status
-inspection before retrying, and cancellation does not undo a committed artifact.
+Only `state: "cancelled"` and `cancelled: true` confirm release; pending or
+unknown cleanup is unconfirmed. `publishing` means real I/O is still running.
+An upstream may retire finished uploads, so do not poll indefinitely for a
+terminal receipt. Missing status does not prove failure or non-publication.
+Inspect the known destination and compare expected size and digest before
+retrying; matching bytes establish its current contents, not request history.
+An absent or conflicting destination alone does not establish that pending
+work failed. Cancellation never undoes a committed artifact.
 The `code`, message, and optional `toolError` retain their existing meanings.
 
 A direct-authority call
