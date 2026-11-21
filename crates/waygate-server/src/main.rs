@@ -717,8 +717,13 @@ async fn gateway_main() -> anyhow::Result<()> {
     // injected (Infisical) and read by the store; we're a pure consumer (I4).
     // Provider calls are bounded by the same upstream call timeout as MCP tool
     // calls.
-    let mut llm_deps =
-        llm::build_from_env(cfg.upstream_call_timeout, !discovery_targets.is_empty())?;
+    let pins = llm::configured_models_from_env()?;
+    let model_catalog_seed = db_pool.as_ref().map(|pool| (pool, pins.catalog_rows()));
+    let mut llm_deps = llm::build_from_pins(
+        pins,
+        cfg.upstream_call_timeout,
+        !discovery_targets.is_empty(),
+    )?;
     // The SAME in-process credential store the dispatcher resolves
     // bearers from, handed to the admin credential-status panel so it reads live
     // pool health (not a separate snapshot that could drift). `None` when no LLM
@@ -745,8 +750,7 @@ async fn gateway_main() -> anyhow::Result<()> {
     // (audit-less dev mode); routing still works from the env resolver.
     // Runs before the listener accepts, so no call observes a half-seeded
     // catalog.
-    if let Some(pool) = db_pool.as_ref() {
-        let rows = llm::configured_model_rows()?;
+    if let Some((pool, rows)) = model_catalog_seed {
         if !rows.is_empty() {
             llm::seed_models(pool, &rows).await?;
             tracing::info!(
