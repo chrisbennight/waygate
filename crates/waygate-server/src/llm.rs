@@ -53,7 +53,7 @@ const MODELS_ENV: &str = "GATEWAY_LLM_MODELS";
 #[cfg(test)]
 mod audio_qualification;
 mod audio_resources;
-mod embedding_config;
+mod authentication;
 mod embedding_errors;
 mod images;
 mod messages;
@@ -376,7 +376,7 @@ fn routes_for_target(
             path: resolved_path.clone(),
             upstream_model: upstream_model.clone(),
             protocol,
-            embeddings_no_auth: false,
+            upstream_no_auth: false,
             openai_chatgpt: false,
         })
         .collect())
@@ -544,7 +544,7 @@ fn build_from_defs(
         speech::validate_config(&def)?;
         transcription::validate_config(&def)?;
         realtime::validate_config(&def)?;
-        let no_auth = embedding_config::no_auth(&def)?;
+        let no_auth = authentication::no_auth(&def)?;
         if is_img
             && (!def.provider.eq_ignore_ascii_case("openai")
                 || def.surface.is_some()
@@ -589,7 +589,7 @@ fn build_from_defs(
             def.surface.as_deref(),
             is_emb,
         )?;
-        routes[0].embeddings_no_auth = no_auth;
+        routes[0].upstream_no_auth = no_auth;
         for fb in &def.fallbacks {
             let fb_model = fb
                 .upstream_model
@@ -728,7 +728,7 @@ fn resolved_from_catalog_row(row: &waygate_storage::LlmModelRow) -> Option<Resol
             path: row.path.clone(),
             upstream_model: row.upstream_model.clone(),
             protocol,
-            embeddings_no_auth: false,
+            upstream_no_auth: false,
             // Retain the legacy marker so invocation refuses unmigrated rows.
             openai_chatgpt: row.openai_chatgpt,
         },
@@ -2202,7 +2202,7 @@ mod tests {
                         path: "chat/completions".into(),
                         upstream_model: (*a).into(),
                         protocol: UpstreamProtocol::OpenAiChat,
-                        embeddings_no_auth: false,
+                        upstream_no_auth: false,
                         openai_chatgpt: false,
                     },
                     operation: LlmOperation::Chat,

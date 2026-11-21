@@ -6,6 +6,17 @@ account identifier. The gateway's client credential is separate from the
 upstream API credential; clients continue to use the gateway's authenticated
 `/v1` endpoint and authorized model aliases.
 
+## OpenAI-compatible chat backends without an upstream token
+
+For a backend that accepts Chat Completions without authentication, configure an
+OpenAI-compatible pin with `"authentication": "none"` and omit
+`credential_label`. Set `base_url` to the backend's API base and
+`upstream_model` to its model ID. Both streaming and non-streaming requests are
+sent without a provider credential. Clients authenticate to Waygate in the usual
+way, and the ordinary model authorization, quota, and audit checks apply. Use one
+route without a credential pool or fallback targets.
+
+
 ## Credentials and routes
 
 Inject `LLM_CRED_OPENAI_API` through the deployment's secret provider using a

@@ -24,9 +24,7 @@ impl DefaultInvocationService {
         };
         let request = SpeechRequest::parse(ctx.arguments.take().unwrap_or_default(), caps)
             .map_err(|e| InvocationError::InvalidArguments(e.to_string()))?;
-        if model.route.openai_chatgpt
-            || model.route.embeddings_no_auth
-            || !model.fallbacks.is_empty()
+        if model.route.openai_chatgpt || model.route.upstream_no_auth || !model.fallbacks.is_empty()
         {
             return Err(InvocationError::InvalidArguments(
                 "speech requires one standard bearer provider route without fallbacks".into(),

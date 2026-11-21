@@ -28,7 +28,7 @@ fn resolver(addr: SocketAddr, measured: bool) -> Arc<dyn LlmModelResolver> {
                 path: "realtime".into(),
                 upstream_model: "upstream-live".into(),
                 protocol: UpstreamProtocol::OpenAiChat,
-                embeddings_no_auth: false,
+                upstream_no_auth: false,
                 openai_chatgpt: false,
             },
             fallbacks: vec![],

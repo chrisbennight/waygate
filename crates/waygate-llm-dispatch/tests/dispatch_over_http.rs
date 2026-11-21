@@ -71,9 +71,18 @@ async fn unary_handler(
         .unwrap()
 }
 
-async fn stream_handler(State(captured): State<Arc<Mutex<Captured>>>, body: String) -> Response {
+async fn stream_handler(
+    State(captured): State<Arc<Mutex<Captured>>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     if let Ok(v) = serde_json::from_str::<Value>(&body) {
         let mut c = captured.lock().unwrap();
+        c.authorization = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .map(str::to_string);
+        c.model = v.get("model").and_then(Value::as_str).map(str::to_string);
         c.stream_options_include_usage = v
             .get("stream_options")
             .and_then(|s| s.get("include_usage"))
@@ -117,7 +126,7 @@ fn route(addr: SocketAddr, label: &str) -> ResolvedRoute {
         path: "chat/completions".to_string(),
         upstream_model: "openrouter/served-x".to_string(),
         protocol: UpstreamProtocol::OpenAiChat,
-        embeddings_no_auth: false,
+        upstream_no_auth: false,
         openai_chatgpt: false,
     }
 }
@@ -365,7 +374,7 @@ fn anthropic_route(addr: SocketAddr) -> ResolvedRoute {
         path: "messages".to_string(),
         upstream_model: "claude-served-x".to_string(),
         protocol: UpstreamProtocol::AnthropicMessages,
-        embeddings_no_auth: false,
+        upstream_no_auth: false,
         openai_chatgpt: false,
     }
 }
@@ -388,7 +397,7 @@ fn gemini_route(addr: SocketAddr) -> ResolvedRoute {
         path: "v1beta".to_string(),
         upstream_model: "gemini-served-x".to_string(),
         protocol: UpstreamProtocol::Gemini,
-        embeddings_no_auth: false,
+        upstream_no_auth: false,
         openai_chatgpt: false,
     }
 }
@@ -713,7 +722,7 @@ fn responses_route(addr: SocketAddr) -> ResolvedRoute {
         path: "responses".to_string(),
         upstream_model: "gpt-5.4".to_string(),
         protocol: UpstreamProtocol::OpenAiResponses,
-        embeddings_no_auth: false,
+        upstream_no_auth: false,
         openai_chatgpt: false,
     }
 }
@@ -723,7 +732,7 @@ fn responses_route(addr: SocketAddr) -> ResolvedRoute {
 fn codex_route(addr: SocketAddr) -> ResolvedRoute {
     ResolvedRoute {
         credential_label: "LEGACY".to_string(),
-        embeddings_no_auth: false,
+        upstream_no_auth: false,
         openai_chatgpt: true,
         upstream_model: "gpt-5.5".to_string(),
         ..responses_route(addr)
@@ -1293,7 +1302,7 @@ fn embeddings_route(addr: SocketAddr, label: &str) -> ResolvedRoute {
         // Inert for an embeddings route (dispatch_embeddings never reads it);
         // OpenAI-compatible embeddings auth is plain Bearer, matching OpenAiChat.
         protocol: UpstreamProtocol::OpenAiChat,
-        embeddings_no_auth: false,
+        upstream_no_auth: false,
         openai_chatgpt: false,
     }
 }
@@ -1426,6 +1435,50 @@ async fn embeddings_non_retryable_error_does_not_fail_over() {
 }
 
 #[tokio::test]
+async fn private_chat_sends_no_credential_for_unary_or_streaming_requests() {
+    let captured = Arc::new(Mutex::new(Captured::default()));
+    let app = Router::new()
+        .route("/unary", post(unary_handler))
+        .route("/stream", post(stream_handler))
+        .with_state(captured.clone());
+    let addr = spawn(app).await;
+    let dispatcher = LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), store());
+    let mut route = route(addr, "");
+    route.provider = LlmProvider::OpenAi;
+    route.upstream_no_auth = true;
+    route.upstream_model = "private-model".into();
+    route.path = "unary".into();
+
+    let outcome = dispatcher
+        .dispatch_with_failover(&chat(false), &route, &[], None)
+        .await
+        .unwrap();
+    let DispatchOutcome::Unary { body, .. } = outcome else {
+        panic!("expected a unary completion");
+    };
+    assert_eq!(body["choices"][0]["message"]["content"], "hi");
+    {
+        let got = captured.lock().unwrap();
+        assert!(got.authorization.is_none());
+        assert_eq!(got.model.as_deref(), Some("private-model"));
+    }
+
+    route.path = "stream".into();
+    let outcome = dispatcher
+        .dispatch_with_failover(&chat(true), &route, &[], None)
+        .await
+        .unwrap();
+    let DispatchOutcome::Stream { mut frames, .. } = outcome else {
+        panic!("expected a streaming completion");
+    };
+    assert!(frames.next().await.expect("first SSE frame").is_ok());
+    let got = captured.lock().unwrap();
+    assert!(got.authorization.is_none());
+    assert_eq!(got.stream_options_include_usage, Some(true));
+    assert_eq!(got.model.as_deref(), Some("private-model"));
+}
+
+#[tokio::test]
 async fn private_embeddings_preserve_base64_options_without_sending_credentials() {
     let captured = Arc::new(Mutex::new(Captured::default()));
     async fn backend(
@@ -1451,7 +1504,7 @@ async fn private_embeddings_preserve_base64_options_without_sending_credentials(
     .await;
     let dispatcher = LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), store());
     let mut route = embeddings_route(addr, "NOT_CONFIGURED");
-    route.embeddings_no_auth = true;
+    route.upstream_no_auth = true;
     route.upstream_model = "voyageai/voyage-4-nano".into();
     let request = parse_embeddings(&json!({"model":"voyage-4-nano","input":["technical text"],
         "encoding_format":"base64","dimensions":2048,"input_type":"document",

@@ -449,9 +449,8 @@ machinery (§7), the unified pipeline gates (§5), `InferenceRecord`/usage, and 
   sends no provider authorization header and does not resolve a provider secret.
   This requires provider "openai", kind "embeddings", and one route without
   credential pools or fallbacks. Client authentication and the gateway's existing
-  authorization, quota and audit gates still apply. Other routes require their
-  configured credential. Restrict the backend network to trusted gateway and
-  monitoring containers. This setting lives in the environment pin; discovered
+  authorization, quota and audit gates still apply. Restrict the backend
+  network to trusted gateway and monitoring containers. This setting lives in the environment pin; discovered
   catalog rows never opt into credential-free authentication.
 - **Backend options and failures.** The optional prompt_mode and timeout_seconds
   fields are forwarded when supplied; the backend validates their values.

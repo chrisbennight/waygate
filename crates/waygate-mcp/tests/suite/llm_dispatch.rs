@@ -399,7 +399,7 @@ fn resolver_named(addr: SocketAddr, model: &str) -> Arc<dyn LlmModelResolver> {
                 path: "chat/completions".into(),
                 upstream_model: "openrouter/served-x".into(),
                 protocol: UpstreamProtocol::OpenAiChat,
-                embeddings_no_auth: false,
+                upstream_no_auth: false,
                 openai_chatgpt: false,
             },
             fallbacks: vec![],
@@ -465,7 +465,7 @@ fn anthropic_resolver(addr: SocketAddr) -> Arc<dyn LlmModelResolver> {
                 path: "messages".into(),
                 upstream_model: "claude-served-x".into(),
                 protocol: UpstreamProtocol::AnthropicMessages,
-                embeddings_no_auth: false,
+                upstream_no_auth: false,
                 openai_chatgpt: false,
             },
             fallbacks: vec![],
@@ -540,7 +540,7 @@ fn responses_resolver(addr: SocketAddr) -> Arc<dyn LlmModelResolver> {
                 path: "responses".into(),
                 upstream_model: "gpt-served-x".into(),
                 protocol: UpstreamProtocol::OpenAiResponses,
-                embeddings_no_auth: false,
+                upstream_no_auth: false,
                 openai_chatgpt: false,
             },
             fallbacks: vec![],
@@ -1302,7 +1302,7 @@ async fn authorize_denies_on_the_llm_path_before_dispatch() {
                 path: "chat/completions".into(),
                 upstream_model: "openrouter/served-x".into(),
                 protocol: UpstreamProtocol::OpenAiChat,
-                embeddings_no_auth: false,
+                upstream_no_auth: false,
                 openai_chatgpt: false,
             },
             fallbacks: vec![],
@@ -1962,7 +1962,7 @@ fn caching_resolver(addr: SocketAddr) -> Arc<dyn LlmModelResolver> {
                 path: "chat/completions".into(),
                 upstream_model: "openrouter/served-x".into(),
                 protocol: UpstreamProtocol::OpenAiChat,
-                embeddings_no_auth: false,
+                upstream_no_auth: false,
                 openai_chatgpt: false,
             },
             fallbacks: vec![],
@@ -2471,7 +2471,7 @@ async fn translated_stream_cache_entry_keeps_usage_for_a_later_request_that_asks
                 path: "messages".into(),
                 upstream_model: "claude-served-x".into(),
                 protocol: UpstreamProtocol::AnthropicMessages,
-                embeddings_no_auth: false,
+                upstream_no_auth: false,
                 openai_chatgpt: false,
             },
             fallbacks: vec![],
@@ -2596,7 +2596,7 @@ fn embeddings_resolver(addr: SocketAddr) -> Arc<dyn LlmModelResolver> {
                 path: "embeddings".into(),
                 upstream_model: "openrouter/served-embed-x".into(),
                 protocol: UpstreamProtocol::OpenAiChat,
-                embeddings_no_auth: false,
+                upstream_no_auth: false,
                 openai_chatgpt: false,
             },
             fallbacks: vec![],
@@ -2747,7 +2747,7 @@ fn caching_embeddings_resolver(addr: SocketAddr) -> Arc<dyn LlmModelResolver> {
                 path: "embeddings".into(),
                 upstream_model: "openrouter/served-embed-x".into(),
                 protocol: UpstreamProtocol::OpenAiChat,
-                embeddings_no_auth: false,
+                upstream_no_auth: false,
                 openai_chatgpt: false,
             },
             fallbacks: vec![],
@@ -2910,7 +2910,7 @@ async fn oversized_embeddings_explain_the_limit_without_exposing_the_backend_bod
         .unwrap();
     });
     let mut model = embeddings_resolver(addr).resolve("llm", "embed-x").unwrap();
-    model.route.embeddings_no_auth = true;
+    model.route.upstream_no_auth = true;
     model.route.credential_label.clear();
     let resolver = Arc::new(StaticModelResolver::new().with_model("llm", "embed-x", model));
     let dispatcher = LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), store());
@@ -2958,7 +2958,7 @@ async fn private_embeddings_keep_authorization_and_safe_backend_error_metadata()
         .with_state(cap.clone());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let mut model = embeddings_resolver(addr).resolve("llm", "embed-x").unwrap();
-    model.route.embeddings_no_auth = true;
+    model.route.upstream_no_auth = true;
     model.route.credential_label.clear();
     let resolver = Arc::new(StaticModelResolver::new().with_model("llm", "embed-x", model));
     let dispatcher = LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), store());
