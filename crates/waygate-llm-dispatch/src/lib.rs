@@ -538,17 +538,23 @@ impl LlmDispatcher {
                 stream: req.stream,
             })
             .await
-            .map_err(|error| match error {
-                ProviderError::Status {
-                    status,
-                    retry_after,
-                    ..
-                } if auth == ProviderAuth::None => ProviderError::Status {
+            .map_err(|error| match (auth, error) {
+                (
+                    ProviderAuth::None,
+                    ProviderError::Status {
+                        status,
+                        retry_after,
+                        ..
+                    },
+                ) => ProviderError::Status {
                     status,
                     retry_after,
                     body: "response details omitted".into(),
                 },
-                other => other,
+                (ProviderAuth::None, ProviderError::Transport(_)) => {
+                    ProviderError::Transport("could not complete backend request".into())
+                }
+                (_, other) => other,
             })
             .inspect_err(|_| {
                 waygate_telemetry::metrics::record_llm_request_failure(

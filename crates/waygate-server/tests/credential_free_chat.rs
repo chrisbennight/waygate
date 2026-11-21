@@ -68,11 +68,19 @@ async fn credential_free_chat_supports_streamed_and_non_streamed_requests() {
         }),
     );
     let backend_task = tokio::spawn(async move { axum::serve(provider, backend).await.unwrap() });
+    let disconnected = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let disconnected_addr = disconnected.local_addr().unwrap().to_string();
+    let disconnected_task = tokio::spawn(async move {
+        while let Ok((socket, _)) = disconnected.accept().await {
+            drop(socket);
+        }
+    });
     let models = json!([
         {"alias":"valid-chat", "model":"openai:upstream-chat", "base_url":provider_url, "credential_label":"TEST"},
         {"alias":"private-chat", "model":"openai:upstream-private", "base_url":provider_url, "authentication":"none"},
         {"alias":"restricted-chat", "model":"openai:upstream-private", "base_url":provider_url, "authentication":"none", "risk":"high"},
         {"alias":"error-chat", "model":"openai:upstream-error", "base_url":provider_url, "authentication":"none"},
+        {"alias":"disconnected-chat", "model":"openai:upstream-private", "base_url":format!("http://{disconnected_addr}/v1"), "authentication":"none"},
     ])
     .to_string();
 
@@ -186,12 +194,19 @@ async fn credential_free_chat_supports_streamed_and_non_streamed_requests() {
     assert!(events.contains("local completion"));
     assert!(events.contains("data: [DONE]"));
     let failure = chat(&client, &base, "error-chat", false, Some(&token)).await;
-    assert!(failure.status().is_server_error());
+    assert_eq!(failure.status(), StatusCode::BAD_GATEWAY);
     let message = failure.text().await.unwrap();
+    assert!(message.contains("provider returned HTTP 429"));
     assert!(!message.contains("fixture provider diagnostics"));
+    let failure = chat(&client, &base, "disconnected-chat", false, Some(&token)).await;
+    assert_eq!(failure.status(), StatusCode::BAD_GATEWAY);
+    let message = failure.text().await.unwrap();
+    assert!(message.contains("could not complete backend request"));
+    assert!(!message.contains(&disconnected_addr));
     gateway.kill().await.unwrap();
     issuer_task.abort();
     backend_task.abort();
+    disconnected_task.abort();
 }
 
 async fn chat(
