@@ -24,7 +24,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::StreamExt;
-use serde::Deserialize;
+use serde::{de, Deserialize};
 use serde_json::{json, value::RawValue, Value};
 
 use waygate_core::http_client::{self, Profile};
@@ -335,8 +335,11 @@ fn routes_for_target(
     let url = reqwest::Url::parse(&base_url)
         .map_err(|_| anyhow::anyhow!("model base_url must be an absolute HTTP(S) URL"))?;
     anyhow::ensure!(
-        matches!(url.scheme(), "http" | "https") && url.has_host(),
-        "model base_url must be an absolute HTTP(S) URL"
+        matches!(url.scheme(), "http" | "https")
+            && url.has_host()
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "model base_url must be an absolute HTTP(S) URL without a query or fragment"
     );
     anyhow::ensure!(!surface_is_codex(surface),
         "surface codex is retired; explicitly migrate the endpoint, model and credential to a supported provider API");
@@ -428,9 +431,36 @@ pub fn build_from_env(
     Ok((Some(deps), rows))
 }
 
-#[derive(Deserialize)]
-struct ModelAlias {
-    alias: String,
+/// Collect every alias named by an invalid entry, including repeated fields.
+#[derive(Default)]
+struct ModelAliases(Vec<String>);
+
+impl<'de> Deserialize<'de> for ModelAliases {
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Aliases;
+        impl<'de> de::Visitor<'de> for Aliases {
+            type Value = ModelAliases;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a model configuration object")
+            }
+
+            fn visit_map<M: de::MapAccess<'de>>(
+                self,
+                mut fields: M,
+            ) -> Result<Self::Value, M::Error> {
+                let mut aliases = Vec::new();
+                while let Some((key, value)) = fields.next_entry::<String, &RawValue>()? {
+                    if key == "alias" {
+                        aliases.extend(serde_json::from_str::<String>(value.get()).ok());
+                    }
+                }
+                Ok(ModelAliases(aliases))
+            }
+        }
+
+        deserializer.deserialize_map(Aliases)
+    }
 }
 
 fn compile_pins(
@@ -463,19 +493,18 @@ fn compile_pins(
                     error.column()
                 )
             })
-            .and_then(|def| compile_pin(def, &pins));
+            .and_then(compile_pin);
         match result {
             Ok((row, model)) => {
                 pins = pins.with_model(LLM_SERVER, row.alias.clone(), model);
                 rows.push(row);
             }
             Err(error) => {
-                let alias = serde_json::from_str::<ModelAlias>(entry.get())
-                    .ok()
-                    .map(|entry| entry.alias);
-                let diagnostic_alias = alias
-                    .as_deref()
-                    .filter(|alias| alias.len() <= MAX_MODEL_ALIAS_BYTES);
+                let aliases: ModelAliases = serde_json::from_str(entry.get()).unwrap_or_default();
+                let diagnostic_alias = aliases
+                    .0
+                    .iter()
+                    .find(|alias| alias.len() <= MAX_MODEL_ALIAS_BYTES);
                 tracing::error!(
                     setting = MODELS_ENV,
                     index,
@@ -483,9 +512,7 @@ fn compile_pins(
                     %error,
                     "inference model configuration rejected"
                 );
-                if let Some(alias) = alias {
-                    rejected.insert(alias);
-                }
+                rejected.extend(aliases.0);
             }
         }
     }
@@ -494,7 +521,6 @@ fn compile_pins(
 
 fn compile_pin(
     mut def: ModelDef,
-    pins: &StaticModelResolver,
 ) -> anyhow::Result<(waygate_storage::LlmModelUpsert, ResolvedModel)> {
     anyhow::ensure!(
         def.alias.len() <= MAX_MODEL_ALIAS_BYTES,
@@ -502,16 +528,6 @@ fn compile_pin(
     );
     normalize_model_defs(std::slice::from_mut(&mut def))?;
     let model = resolve_pin(&def)?;
-    anyhow::ensure!(
-        model.audio_resource_operations().is_empty()
-            || pins.audio_resource_model(LLM_SERVER).is_none(),
-        "an earlier valid model already owns the standard audio resource routes"
-    );
-    anyhow::ensure!(
-        !matches!(&model.operation, LlmOperation::Realtime(caps) if caps.webrtc)
-            || pins.realtime_call_model(LLM_SERVER).is_none(),
-        "an earlier valid model already owns the WebRTC call routes"
-    );
     let row = model_def_to_upsert(&def);
     // PostgreSQL text cannot represent a null byte.
     anyhow::ensure!(
@@ -590,7 +606,7 @@ fn build_from_defs(
 ) -> anyhow::Result<Option<LlmDeps>> {
     let mut resolver = StaticModelResolver::new();
     for def in defs {
-        let (row, model) = compile_pin(def, &resolver)?;
+        let (row, model) = compile_pin(def)?;
         resolver = resolver.with_model(LLM_SERVER, row.alias, model);
     }
     build_dispatcher(resolver, HashSet::new(), call_timeout).map(Some)
@@ -725,7 +741,13 @@ fn build_dispatcher(
     // unary and streaming calls without killing a working stream.
     // Both clients inherit the same optional egress proxy (which can contain
     // credentials and must never be logged), TLS defaults, and timeouts.
-    let egress_proxy = std::env::var("GATEWAY_LLM_EGRESS_PROXY").ok();
+    let egress_proxy = match std::env::var("GATEWAY_LLM_EGRESS_PROXY") {
+        Ok(proxy) => Some(proxy),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("GATEWAY_LLM_EGRESS_PROXY is not valid UTF-8")
+        }
+    };
     let build_http = || {
         let mut builder = http_client::builder(Profile::NoTotalTimeout);
         if let Some(timeout) = call_timeout {
@@ -2194,6 +2216,9 @@ mod tests {
             r#"[
                 {{"alias":"duplicate","provider":"openai","base_url":"http://first/v1","base_url":"http://second/v1","credential_label":"API"}},
                 {{"alias":"relative-url","provider":"openai","base_url":"/v1","credential_label":"API"}},
+                {{"alias":"query-url","provider":"openai","base_url":"http://backend/v1?param=test","credential_label":"API"}},
+                {{"alias":"fragment-url","provider":"openai","base_url":"http://backend/v1#fragment","credential_label":"API"}},
+                {{"alias":"first-alias","alias":"second-alias","provider":"openai","base_url":"http://backend/v1","credential_label":"API"}},
                 {{"alias":"deep","provider":"openai","base_url":{nested}}},
                 {{"alias":"{oversized}","provider":"openai","base_url":"http://backend/v1","credential_label":"API"}},
                 {{"alias":"valid-chat","provider":"openai","base_url":"http://backend/v1","credential_label":"API"}}
@@ -2209,6 +2234,10 @@ mod tests {
             HashSet::from([
                 "duplicate".into(),
                 "relative-url".into(),
+                "query-url".into(),
+                "fragment-url".into(),
+                "first-alias".into(),
+                "second-alias".into(),
                 "deep".into(),
                 oversized
             ])

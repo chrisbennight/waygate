@@ -242,31 +242,30 @@ mod tests {
         }
     }
 
-    fn definition(alias: &str) -> ModelDef {
-        serde_json::from_value(json!({"alias":alias,"provider":"openai","credential_label":"AUDIO","base_url":"http://provider.invalid/v1","kind":"speech","speech":{"formats":["pcm"],"voices":["narrator"],"resources":["voice_create","voice_delete","consent_create","consent_list","consent_retrieve","consent_update","consent_delete"]}})).unwrap()
+    fn definition(alias: &str) -> Value {
+        json!({"alias":alias,"provider":"openai","credential_label":"AUDIO","base_url":"http://provider.invalid/v1","kind":"speech","speech":{"formats":["pcm"],"voices":["narrator"],"resources":["voice_create","voice_delete","consent_create","consent_list","consent_retrieve","consent_update","consent_delete"]}})
     }
 
     #[test]
-    fn resource_routes_require_one_explicit_provider_and_are_not_guessed_from_catalog() {
-        assert!(build_from_defs(vec![definition("one"), definition("two")], None).is_err());
-        let (_, resolver) = build_from_defs(vec![definition("one")], None)
-            .unwrap()
-            .unwrap();
+    fn only_shared_audio_resources_require_an_unambiguous_model() {
+        let (multiple, _, rejected) =
+            compile_pins(&json!([definition("one"), definition("two")]).to_string());
+        assert!(rejected.is_empty());
+        assert!(multiple.audio_resource_model(LLM_SERVER).is_none());
+        assert!(multiple.resolve(LLM_SERVER, "one").is_some());
+        assert!(multiple.resolve(LLM_SERVER, "two").is_some());
+        let (single, _, _) = compile_pins(&json!([definition("one")]).to_string());
         assert_eq!(
-            resolver.audio_resource_model(LLM_SERVER).as_deref(),
+            single.audio_resource_model(LLM_SERVER).as_deref(),
             Some("one")
         );
-        assert!(StaticModelResolver::new()
-            .audio_resource_model(LLM_SERVER)
-            .is_none());
     }
 
     #[tokio::test]
     async fn standard_consent_metadata_query_and_deletion_keep_the_same_provider() {
         let capture = Arc::new(Capture::default());
-        let (_, resolver) = build_from_defs(vec![definition("resource-provider")], None)
-            .unwrap()
-            .unwrap();
+        let def = serde_json::from_value(definition("resource-provider")).unwrap();
+        let (_, resolver) = build_from_defs(vec![def], None).unwrap().unwrap();
         let app = router(capture.clone(), None, resolver);
         for (method, path, body) in [
             (

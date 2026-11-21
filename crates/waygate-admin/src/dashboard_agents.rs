@@ -33,7 +33,9 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use serde::Deserialize;
 use uuid::Uuid;
+use waygate_core::LLM_RESERVED_NAMESPACE;
 use waygate_dashboard_stores::agent_config::{AgentConfig, AgentKind};
+use waygate_llm_dispatch::LlmOperation;
 use waygate_oidc::{AuthMethod, Principal, Scope};
 
 use crate::agent_configs::{
@@ -148,17 +150,20 @@ async fn agents_page(
     // just yields no suggestions, the field is still a free text input).
     let available_models = if insufficient_scope {
         Vec::new()
-    } else if let Some(catalog) = state.llm.llm_models.get() {
+    } else if let (Some(catalog), Some(resolver)) =
+        (state.llm.llm_models.get(), &state.llm.llm_resolver)
+    {
         match catalog.list_models(&read_tenant).await {
             Ok(rows) => rows
                 .into_iter()
-                .filter(|m| {
-                    matches!(
-                        m.upstream_api.as_str(),
-                        "chat_completions" | "responses" | "messages" | "generate_content"
-                    )
+                .map(|row| row.alias)
+                .filter(|alias| {
+                    resolver
+                        .resolve(LLM_RESERVED_NAMESPACE, alias)
+                        .is_some_and(|model| {
+                            model.operation == LlmOperation::Chat && !model.route.openai_chatgpt
+                        })
                 })
-                .map(|m| m.alias)
                 .collect(),
             Err(e) => {
                 tracing::warn!(error = %e, "agents page: model catalog list failed");

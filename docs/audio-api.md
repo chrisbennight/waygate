@@ -246,8 +246,9 @@ consent operations. Add only the operations its provider supports to that model'
 
 Resource requests do not carry a model selector. The explicitly configured model
 supplies the provider, credential, model authorization, profile, quota, budget,
-and audit boundary. Configuring more than one resource provider fails startup;
-without one the resource routes report that no provider is configured. Discovered
+and audit boundary. Shared resource routes require exactly one configured
+provider. If none or several qualify, those requests return an error while
+model-specific requests can still use their configured models. Discovered
 catalog rows cannot opt into these routes. No provider-specific client selector
 or separate gateway voice ownership system is introduced. Authorized callers see
 the resources their configured provider makes available.
@@ -367,10 +368,10 @@ setup triggers bounded hangup cleanup once a provider call ID is known; failures
 before an ID is returned leave the remote outcome unknown. Session termination
 also attempts bounded provider hangup.
 
-Only one configured Realtime model may enable WebRTC. This is a gateway routing
-limit, not an OpenAI requirement: model-less call controls resolve consistently
-on every replica without a gateway call ownership database. WebSocket-only models
-can coexist. External client-secret minting and external sideband attachment are
+WebRTC requires a single configured call model so model-less call controls
+resolve consistently on every replica. If multiple models enable WebRTC, call
+creation and hangup are unavailable while the model-specific WebSocket routes
+remain usable. External client-secret minting and external sideband attachment are
 not exposed. Browser applications can use the unified offer flow through an
 authenticated application server. Provider-global resources retain their
 provider authorization model; the gateway adds no per-user voice overlay.

@@ -729,15 +729,24 @@ async fn gateway_main() -> anyhow::Result<()> {
     // leaves MCP serving and prevents requests against mismatched model rows.
     if let Some(pool) = db_pool.as_ref() {
         if !configured_rows.is_empty() {
-            match llm::seed_models(pool, &configured_rows).await {
-                Ok(()) => tracing::info!(
+            let catalog_deadline = pool.options().get_acquire_timeout();
+            match tokio::time::timeout(catalog_deadline, llm::seed_models(pool, &configured_rows))
+                .await
+            {
+                Ok(Ok(())) => tracing::info!(
                     models = configured_rows.len(),
                     "seeded llm_models catalog from GATEWAY_LLM_MODELS"
                 ),
-                Err(error) => {
+                Ok(Err(error)) => {
                     tracing::error!(
                         sqlstate = ?error.as_database_error().and_then(|error| error.code()),
                         "inference catalog publication failed; MCP remains available"
+                    );
+                    llm_deps = None;
+                }
+                Err(_) => {
+                    tracing::error!(
+                        "inference catalog publication timed out; MCP remains available"
                     );
                     llm_deps = None;
                 }
@@ -768,15 +777,18 @@ async fn gateway_main() -> anyhow::Result<()> {
     // the resolver resolves env pins only (behavior-preserving). Runs before the
     // listener accepts, so no call observes a half-loaded resolver.
     if let (Some(pool), Some((_, resolver))) = (db_pool.as_ref(), llm_deps.as_ref()) {
-        match llm::boot_load_discovered(pool, resolver).await {
-            Ok(loaded) if loaded > 0 => {
+        let catalog_deadline = pool.options().get_acquire_timeout();
+        match tokio::time::timeout(catalog_deadline, llm::boot_load_discovered(pool, resolver))
+            .await
+        {
+            Ok(Ok(loaded)) if loaded > 0 => {
                 tracing::info!(
                     discovered = loaded,
                     "loaded discovered models into the resolver"
                 );
             }
-            Ok(_) => {}
-            Err(_) => {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => {
                 tracing::warn!(
                     "stored model discovery could not be loaded; configured pins remain available"
                 );

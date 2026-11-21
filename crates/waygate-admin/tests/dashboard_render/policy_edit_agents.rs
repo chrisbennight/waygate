@@ -1041,6 +1041,13 @@ pub(crate) async fn assist_context_resolves_review_agent_beyond_the_first_page()
 
 #[tokio::test]
 async fn agent_model_suggestions_only_include_chat_models() {
+    use waygate_core::LLM_RESERVED_NAMESPACE;
+    use waygate_llm_credentials::LlmProvider;
+    use waygate_llm_dispatch::{
+        LlmOperation, ModelRisk, ResolvedModel, ResolvedRoute, StaticModelResolver,
+    };
+    use waygate_llm_translate::UpstreamProtocol;
+
     struct Catalog;
     #[async_trait::async_trait]
     impl waygate_storage::LlmModelCatalog for Catalog {
@@ -1056,6 +1063,7 @@ async fn agent_model_suggestions_only_include_chat_models() {
                 "generate_content",
                 "images",
                 "embeddings",
+                "stale",
             ]
             .into_iter()
             .map(|api| waygate_storage::LlmModelRow {
@@ -1066,7 +1074,12 @@ async fn agent_model_suggestions_only_include_chat_models() {
                 upstream_model: api.into(),
                 base_url: "http://127.0.0.1:1".into(),
                 path: api.into(),
-                upstream_api: api.into(),
+                upstream_api: if api == "stale" {
+                    "chat_completions"
+                } else {
+                    api
+                }
+                .into(),
                 openai_chatgpt: false,
                 risk: "low".into(),
                 requires_approval: false,
@@ -1085,11 +1098,40 @@ async fn agent_model_suggestions_only_include_chat_models() {
     }
     let store = Arc::new(waygate_dashboard_stores::agent_config::InMemoryAgentConfigStore::new());
     let mut state = state_with_agent_store(store).await;
-    Arc::get_mut(&mut state)
-        .unwrap()
-        .llm
-        .llm_models
-        .set(Some(Arc::new(Catalog)));
+    let llm = &mut Arc::get_mut(&mut state).unwrap().llm;
+    llm.llm_models.set(Some(Arc::new(Catalog)));
+    let mut resolver = StaticModelResolver::new();
+    for (api, operation) in [
+        ("chat_completions", LlmOperation::Chat),
+        ("responses", LlmOperation::Chat),
+        ("messages", LlmOperation::Chat),
+        ("generate_content", LlmOperation::Chat),
+        ("images", LlmOperation::Images),
+        ("embeddings", LlmOperation::Embeddings),
+    ] {
+        resolver = resolver.with_model(
+            LLM_RESERVED_NAMESPACE,
+            format!("suggest-{api}"),
+            ResolvedModel {
+                route: ResolvedRoute {
+                    provider: LlmProvider::OpenAi,
+                    credential_label: "TEST".into(),
+                    base_url: "http://127.0.0.1:1".into(),
+                    path: api.into(),
+                    upstream_model: api.into(),
+                    protocol: UpstreamProtocol::OpenAiChat,
+                    embeddings_no_auth: false,
+                    openai_chatgpt: false,
+                },
+                operation,
+                fallbacks: Vec::new(),
+                risk: ModelRisk::Low,
+                ttfb: None,
+                cache_ttl: None,
+            },
+        );
+    }
+    llm.llm_resolver = Some(Arc::new(resolver));
     let app = dashboard_router(state, DashboardAuth::Disabled);
     let (status, body) = body_of(app, "/agents").await;
     assert_eq!(status, StatusCode::OK);
@@ -1103,4 +1145,5 @@ async fn agent_model_suggestions_only_include_chat_models() {
     }
     assert!(!body.contains("suggest-images"));
     assert!(!body.contains("suggest-embeddings"));
+    assert!(!body.contains("suggest-stale"));
 }
