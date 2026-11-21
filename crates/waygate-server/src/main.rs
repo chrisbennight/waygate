@@ -718,7 +718,7 @@ async fn gateway_main() -> anyhow::Result<()> {
     // Provider calls are bounded by the same upstream call timeout as MCP tool
     // calls.
     let pins = llm::configured_models_from_env()?;
-    let configured_rows = pins.catalog_rows();
+    let model_catalog_seed = db_pool.as_ref().map(|pool| (pool, pins.catalog_rows()));
     let mut llm_deps = llm::build_from_pins(
         pins,
         cfg.upstream_call_timeout,
@@ -750,11 +750,11 @@ async fn gateway_main() -> anyhow::Result<()> {
     // (audit-less dev mode); routing still works from the env resolver.
     // Runs before the listener accepts, so no call observes a half-seeded
     // catalog.
-    if let Some(pool) = db_pool.as_ref() {
-        if !configured_rows.is_empty() {
-            llm::seed_models(pool, &configured_rows).await?;
+    if let Some((pool, rows)) = model_catalog_seed {
+        if !rows.is_empty() {
+            llm::seed_models(pool, &rows).await?;
             tracing::info!(
-                models = configured_rows.len(),
+                models = rows.len(),
                 "seeded llm_models catalog from GATEWAY_LLM_MODELS"
             );
         }
