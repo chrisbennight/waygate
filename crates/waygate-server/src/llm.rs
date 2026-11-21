@@ -407,12 +407,18 @@ fn default_path_for(provider: LlmProvider) -> String {
     }
 }
 
+#[derive(Default)]
+pub struct ConfiguredModelCatalog {
+    pub rows: Vec<waygate_storage::LlmModelUpsert>,
+    pub rejected_aliases: Vec<String>,
+}
+
 /// Compile the configured pins once for routing and catalog publication.
 /// Discovery can still start when no configured pin is usable.
 pub fn build_from_env(
     call_timeout: Option<std::time::Duration>,
     discovery_configured: bool,
-) -> anyhow::Result<(Option<LlmDeps>, Vec<waygate_storage::LlmModelUpsert>)> {
+) -> anyhow::Result<(Option<LlmDeps>, ConfiguredModelCatalog)> {
     let raw = match std::env::var(MODELS_ENV) {
         Ok(raw) => raw,
         Err(std::env::VarError::NotPresent) => String::new(),
@@ -425,11 +431,20 @@ pub fn build_from_env(
         }
     };
     let (pins, rows, rejected) = compile_pins(&raw);
+    let catalog = ConfiguredModelCatalog {
+        rows,
+        // Catalog text cannot contain null bytes, so no stored row can match these aliases.
+        rejected_aliases: rejected
+            .iter()
+            .filter(|alias| !alias.contains('\0'))
+            .cloned()
+            .collect(),
+    };
     if pins.is_empty() && !discovery_configured {
-        return Ok((None, rows));
+        return Ok((None, catalog));
     }
     let deps = build_dispatcher(pins, rejected, call_timeout)?;
-    Ok((Some(deps), rows))
+    Ok((Some(deps), catalog))
 }
 
 /// Collect every alias named by an invalid entry, including repeated fields.
@@ -443,7 +458,7 @@ impl<'de> Deserialize<'de> for ModelAliases {
             type Value = ModelAliases;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a model configuration object")
+                formatter.write_str("a model configuration object or positional entry")
             }
 
             fn visit_map<M: de::MapAccess<'de>>(
@@ -458,9 +473,25 @@ impl<'de> Deserialize<'de> for ModelAliases {
                 }
                 Ok(ModelAliases(aliases))
             }
+
+            fn visit_seq<S: de::SeqAccess<'de>>(
+                self,
+                mut fields: S,
+            ) -> Result<Self::Value, S::Error> {
+                // The positional ModelDef starts with Realtime, speech and transcription
+                // capabilities, followed by the alias.
+                for _ in 0..3 {
+                    fields.next_element::<de::IgnoredAny>()?;
+                }
+                let alias = fields
+                    .next_element::<&RawValue>()?
+                    .and_then(|value| serde_json::from_str(value.get()).ok());
+                while fields.next_element::<de::IgnoredAny>()?.is_some() {}
+                Ok(ModelAliases(alias.into_iter().collect()))
+            }
         }
 
-        deserializer.deserialize_map(Aliases)
+        deserializer.deserialize_any(Aliases)
     }
 }
 
@@ -520,6 +551,7 @@ fn compile_pins(
             }
         }
     }
+    rejected.retain(|alias| !rows.contains_key(alias));
     (pins, rows.into_values().collect(), rejected)
 }
 
@@ -948,11 +980,20 @@ fn model_risk_str(r: ModelRisk) -> &'static str {
 pub async fn seed_models(
     pool: &sqlx::PgPool,
     rows: &[waygate_storage::LlmModelUpsert],
+    rejected_aliases: &[String],
 ) -> Result<(), sqlx::Error> {
-    if rows.is_empty() {
+    if rows.is_empty() && rejected_aliases.is_empty() {
         return Ok(());
     }
     let mut tx = pool.begin().await?;
+    if !rejected_aliases.is_empty() {
+        waygate_storage::disable_configured_llm_models(
+            &mut *tx,
+            waygate_core::TenantId::DEFAULT,
+            rejected_aliases,
+        )
+        .await?;
+    }
     for row in rows {
         waygate_storage::upsert_llm_model(&mut *tx, row).await?;
     }
@@ -2071,13 +2112,16 @@ mod tests {
             .await
             .expect("apply migrations");
 
-        let alias = format!("seed-test-{}", uuid::Uuid::now_v7());
+        let suffix = uuid::Uuid::now_v7();
+        let alias = format!("seed-test-a-{suffix}");
+        let valid_alias = format!("seed-test-z-{suffix}");
+        let served = format!("seed-test-model-{suffix}");
         let row = waygate_storage::LlmModelUpsert {
             tenant_id: "default".into(),
             alias: alias.clone(),
             provider: "openrouter".into(),
             credential_label: "MAIN".into(),
-            upstream_model: "openai/x".into(),
+            upstream_model: served.clone(),
             base_url: "https://x".into(),
             path: "chat/completions".into(),
             upstream_api: "chat_completions".into(),
@@ -2089,10 +2133,10 @@ mod tests {
         };
 
         // Idempotent: running twice must not error or duplicate.
-        seed_models(&pool, std::slice::from_ref(&row))
+        seed_models(&pool, std::slice::from_ref(&row), &[])
             .await
             .expect("first seed");
-        seed_models(&pool, std::slice::from_ref(&row))
+        seed_models(&pool, std::slice::from_ref(&row), &[])
             .await
             .expect("second seed (idempotent)");
 
@@ -2101,10 +2145,27 @@ mod tests {
             .expect("get")
             .expect("seeded row present");
         assert_eq!(got.provider, "openrouter");
-        assert_eq!(got.upstream_model, "openai/x");
+        assert_eq!(got.upstream_model, served);
 
-        sqlx::query("DELETE FROM llm_models WHERE tenant_id = 'default' AND alias = $1")
-            .bind(&alias)
+        let mut healthy_row = row.clone();
+        healthy_row.alias.clone_from(&valid_alias);
+        seed_models(&pool, &[healthy_row], std::slice::from_ref(&alias))
+            .await
+            .expect("publish healthy pin and deactivate rejected pin");
+        let rejected = waygate_storage::get_llm_model(&pool, "default", &alias)
+            .await
+            .expect("get rejected catalog row")
+            .expect("rejected row is retained");
+        assert!(!rejected.enabled);
+        let priced =
+            waygate_storage::get_llm_model_by_served(&pool, "default", "openrouter", &served)
+                .await
+                .expect("look up served model pricing")
+                .expect("served model remains priced");
+        assert_eq!(priced.alias, valid_alias);
+
+        sqlx::query("DELETE FROM llm_models WHERE tenant_id = 'default' AND alias = ANY($1)")
+            .bind(&[alias, valid_alias])
             .execute(&pool)
             .await
             .expect("cleanup");
@@ -2225,6 +2286,7 @@ mod tests {
         let raw = format!(
             r#"[
                 {positional},
+                [null,null,null,"positional-schema","openai",42,null,null,"http://backend/v1"],
                 {{"alias":"duplicate","provider":"openai","base_url":"http://first/v1","base_url":"http://second/v1","credential_label":"API"}},
                 {{"alias":"relative-url","provider":"openai","base_url":"/v1","credential_label":"API"}},
                 {{"alias":"query-url","provider":"openai","base_url":"http://backend/v1?param=test","credential_label":"API"}},
@@ -2244,6 +2306,7 @@ mod tests {
             rejected,
             HashSet::from([
                 "positional".into(),
+                "positional-schema".into(),
                 "duplicate".into(),
                 "relative-url".into(),
                 "query-url".into(),

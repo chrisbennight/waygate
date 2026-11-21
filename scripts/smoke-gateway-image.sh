@@ -295,3 +295,12 @@ if [ "$ok" != "1" ]; then
   exit 1
 fi
 echo "Reachability smoke passed: legacy upstream bridged, stateless upstream not downgraded."
+
+# Verify the mixed-pin boot published the healthy route to the catalog.
+active_model_pins="$(sudo docker exec gw-smoke-db psql -U gateway -d "$REACH_DB" -At -v ON_ERROR_STOP=1 \
+  -c "SELECT alias FROM llm_models WHERE tenant_id = 'default' AND source = 'config' AND enabled ORDER BY alias")"
+if [ "$active_model_pins" != "valid-chat" ]; then
+  echo "INFERENCE SMOKE FAILED: the catalog did not publish the expected healthy pin."
+  exit 1
+fi
+echo "Inference smoke passed: the catalog published the healthy pin beside the rejected input."

@@ -717,24 +717,28 @@ async fn gateway_main() -> anyhow::Result<()> {
     // injected (Infisical) and read by the store; we're a pure consumer (I4).
     // Provider calls are bounded by the same upstream call timeout as MCP tool
     // calls.
-    let (mut llm_deps, configured_rows) =
+    let (mut llm_deps, model_catalog) =
         match llm::build_from_env(cfg.upstream_call_timeout, !discovery_targets.is_empty()) {
             Ok(configured) => configured,
             Err(error) => {
                 tracing::error!(%error, "inference initialization failed; MCP remains available");
-                (None, Vec::new())
+                (None, llm::ConfiguredModelCatalog::default())
             }
         };
     // Publish the catalog and routes together. An inference catalog failure
     // leaves MCP serving and prevents requests against mismatched model rows.
     if let Some(pool) = db_pool.as_ref() {
-        if !configured_rows.is_empty() {
+        if !model_catalog.rows.is_empty() || !model_catalog.rejected_aliases.is_empty() {
             let catalog_deadline = pool.options().get_acquire_timeout();
-            match tokio::time::timeout(catalog_deadline, llm::seed_models(pool, &configured_rows))
-                .await
+            match tokio::time::timeout(
+                catalog_deadline,
+                llm::seed_models(pool, &model_catalog.rows, &model_catalog.rejected_aliases),
+            )
+            .await
             {
                 Ok(Ok(())) => tracing::info!(
-                    models = configured_rows.len(),
+                    models = model_catalog.rows.len(),
+                    rejected = model_catalog.rejected_aliases.len(),
                     "seeded llm_models catalog from GATEWAY_LLM_MODELS"
                 ),
                 Ok(Err(error)) => {
