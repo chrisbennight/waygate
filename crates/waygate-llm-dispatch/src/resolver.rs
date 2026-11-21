@@ -8,7 +8,7 @@
 //! catalog slot in behind the same [`LlmModelResolver`] trait, so the
 //! pipeline integration does not change when they land.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -198,6 +198,7 @@ type DiscoveredModels = HashMap<(String, String), ResolvedModel>;
 /// pin keeps its full routing and a stale discovered row can never shadow it.
 pub struct DbModelResolver {
     pins: StaticModelResolver,
+    rejected_pins: HashSet<String>,
     discovered: RwLock<Arc<DiscoveredModels>>,
     /// The LLM namespace this resolver reserves. It is **owned unconditionally**
     /// (see [`owns_server`](LlmModelResolver::owns_server)) — even with zero
@@ -222,9 +223,18 @@ impl DbModelResolver {
     ) -> Self {
         Self {
             pins,
+            rejected_pins: HashSet::new(),
             discovered: RwLock::new(Arc::new(discovered)),
             reserved_server: reserved_server.into(),
         }
+    }
+
+    /// Reserve aliases named by rejected pins so discovery cannot route them
+    /// to a different backend. A valid pin still wins for the same alias.
+    #[must_use]
+    pub fn with_rejected_pins(mut self, rejected_pins: HashSet<String>) -> Self {
+        self.rejected_pins = rejected_pins;
+        self
     }
 
     /// Replace the discovered layer with a fresh snapshot (the refresher calls
@@ -266,6 +276,9 @@ impl LlmModelResolver for DbModelResolver {
         // A pin wins; otherwise consult the discovered layer.
         if let Some(pinned) = self.pins.resolve(server, model) {
             return Some(pinned);
+        }
+        if server == self.reserved_server && self.rejected_pins.contains(model) {
+            return None;
         }
         self.discovered_snapshot()
             .iter()

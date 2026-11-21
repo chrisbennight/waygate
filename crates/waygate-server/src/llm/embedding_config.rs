@@ -8,7 +8,8 @@ pub(super) fn no_auth(def: &ModelDef) -> anyhow::Result<bool> {
         Some(_) => anyhow::bail!("model authentication must be bearer or none"),
     };
     if no_auth {
-        let url = reqwest::Url::parse(&def.base_url)?;
+        let url = reqwest::Url::parse(&def.base_url)
+            .map_err(|_| anyhow::anyhow!("credential-free backend URL is invalid"))?;
         if !matches!(url.scheme(), "http" | "https")
             || !url.username().is_empty()
             || url.password().is_some()

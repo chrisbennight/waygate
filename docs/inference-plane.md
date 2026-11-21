@@ -641,6 +641,14 @@ settings fail configuration instead of selecting a consumer backend. The discove
 the env pins (`GATEWAY_LLM_MODELS`) coexist — discovery only *adds* to what an
 operator pins.
 
+Waygate validates each boot-time pin before routing or recording it in the
+catalog. A rejected entry is logged with its alias when known and cannot fall
+through to a discovered route for that alias. The last valid entry wins for a
+repeated alias, and the first valid model owns a shared model-less audio route.
+If the setting is unreadable, Waygate
+logs the error and loads no pins. MCP and any independently configured model
+discovery can still start.
+
 An operator pin names its upstream identity either as separate `provider` +
 `upstream_model` fields or as a single `model: "provider:upstream"` shorthand
 (e.g. `openrouter:qwen/qwen3-embedding-8b`) — the same `provider:id` form a
@@ -910,7 +918,7 @@ Postgres stores the inference configuration and usage records:
 
 Inference uses supported provider API endpoints and credentials. Consumer CLI
 fingerprints, subscription token refresh and consumer model listing are removed.
-Retired configured selectors fail startup; historical catalog rows keep their
+Retired model selectors fail route validation. Historical catalog rows keep their
 legacy marker so invocation refuses them before cache or provider access.
 Migration requires an explicit endpoint, model and credential choice; Waygate
 does not infer equivalent entitlements or silently reroute a legacy alias.

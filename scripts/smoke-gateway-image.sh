@@ -91,6 +91,7 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
   # disabled keeps this hermetic; an empty servers dir = zero upstreams so
   # /readyz isn't gated on dialing real upstreams; the ed25519 key exercises
   # the identity keyring (jsonwebtoken key construction) under hardening.
+  # Unreadable model configuration must leave MCP ready.
   sudo docker run -d --name gw-smoke --network "$NET" \
     --read-only --tmpfs /tmp --cap-drop ALL --security-opt=no-new-privileges --user 65532:65532 \
     -v /tmp/gw-smoke-empty-servers:/etc/mcp-gateway/servers:ro \
@@ -101,6 +102,7 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
     -e GATEWAY_DATABASE_URL=postgres://gateway:smoke@gw-smoke-db:5432/gateway \
     -e GATEWAY_IDENTITY_SIGNING_KEY_PEM="$PEM" \
     -e GATEWAY_IDENTITY_KID=smoke-kid \
+    -e GATEWAY_LLM_MODELS='[' \
     "$SMOKE_IMG" >/dev/null
   ok=0
   for i in $(seq 1 "$READY_TIMEOUT"); do
@@ -194,6 +196,7 @@ for boot in $(seq 1 "$ATTEMPTS"); do
     -e GATEWAY_DATABASE_URL=postgres://gateway:smoke@gw-smoke-db:5432/${REACH_DB} \
     -e GATEWAY_IDENTITY_SIGNING_KEY_PEM="$PEM" \
     -e GATEWAY_IDENTITY_KID=smoke-kid \
+    -e GATEWAY_LLM_MODELS='[{"alias":"broken-chat","provider":"openai","base_url":"http://example.invalid/v1","authentication":"none"},{"alias":"valid-chat","provider":"openai","base_url":"http://example.invalid/v1","credential_label":"TEST"}]' \
     "$UPSTREAM_IMG" >/dev/null
 
 # A bare "is /readyz 200?" poll is NOT a reachability assertion. The
