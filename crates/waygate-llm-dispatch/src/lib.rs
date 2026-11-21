@@ -43,6 +43,7 @@ pub use resolver::{
 };
 use waygate_llm_providers::{
     ProviderAuth, ProviderClient, ProviderRequest, ProviderResponse, SseStream,
+    MAX_CHAT_RESPONSE_BYTES,
 };
 use waygate_llm_translate::{
     anthropic_to_canonical_response, canonical_response_to_openai_chat,
@@ -527,33 +528,31 @@ impl LlmDispatcher {
         );
         let started = std::time::Instant::now();
 
-        let response = self
-            .providers
-            .send(ProviderRequest {
-                base_url: route.base_url.clone(),
-                path,
-                bearer,
-                auth,
-                body,
-                stream: req.stream,
-            })
-            .await
-            .map_err(|error| {
-                if auth == ProviderAuth::None {
-                    credential_free_chat_error(error)
-                } else {
-                    error
-                }
-            })
-            .inspect_err(|_| {
-                waygate_telemetry::metrics::record_llm_request_failure(
-                    route.provider.as_str(),
-                    &record_base.model_requested,
-                    record_base.provider_account_id.as_deref(),
-                    started.elapsed().as_secs_f64(),
-                    waygate_telemetry::metrics::LlmFailurePhase::Dispatch,
-                )
-            })?;
+        let request = ProviderRequest {
+            base_url: route.base_url.clone(),
+            path,
+            bearer,
+            auth,
+            body,
+            stream: req.stream,
+        };
+        let response = if auth == ProviderAuth::None {
+            self.providers
+                .send_once(request, MAX_CHAT_RESPONSE_BYTES)
+                .await
+                .map_err(credential_free_chat_error)
+        } else {
+            self.providers.send(request).await
+        }
+        .inspect_err(|_| {
+            waygate_telemetry::metrics::record_llm_request_failure(
+                route.provider.as_str(),
+                &record_base.model_requested,
+                record_base.provider_account_id.as_deref(),
+                started.elapsed().as_secs_f64(),
+                waygate_telemetry::metrics::LlmFailurePhase::Dispatch,
+            )
+        })?;
 
         Ok(match response {
             // A unary body from any supported protocol. The metadata record is

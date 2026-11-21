@@ -675,7 +675,7 @@ fn build_from_defs(
     // unary calls, so streams keep relying on idle-read.
     let providers = ProviderClient::new(http)
         .with_single_attempt_http(build_http()?)
-        .map_err(|e| anyhow::anyhow!("building the image HTTP client: {e}"))?
+        .map_err(|e| anyhow::anyhow!("building the single-attempt provider HTTP client: {e}"))?
         .with_unary_timeout(call_timeout);
     let dispatcher = LlmDispatcher::new(providers, credentials);
     // Wrap the env pins in a DB-backed resolver with an empty discovered layer.

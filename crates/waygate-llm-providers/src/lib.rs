@@ -173,8 +173,8 @@ impl ProviderClient {
         }
     }
 
-    /// Configure bounded image calls with the caller's proxy/TLS/timeout
-    /// settings while refusing redirects and transport-level automatic retries.
+    /// Use the caller's proxy, TLS, and timeout settings for calls that refuse
+    /// redirects and transport-level automatic retries.
     pub fn with_single_attempt_http(
         mut self,
         builder: reqwest::ClientBuilder,
@@ -244,8 +244,18 @@ impl ProviderClient {
                 "bounded unary transport cannot stream".into(),
             ));
         }
+        self.send_once(req, max_bytes).await
+    }
+
+    /// Send a unary or streaming request without redirects or automatic
+    /// transport retries. Requires [`Self::with_single_attempt_http`].
+    pub async fn send_once(
+        &self,
+        req: ProviderRequest,
+        max_bytes: usize,
+    ) -> Result<ProviderResponse, ProviderError> {
         let http = self.single_attempt_http.as_ref().ok_or_else(|| {
-            ProviderError::Protocol("single-attempt image transport is not configured".into())
+            ProviderError::Protocol("single-attempt provider transport is not configured".into())
         })?;
         self.send_inner(req, max_bytes, http, None)
             .await

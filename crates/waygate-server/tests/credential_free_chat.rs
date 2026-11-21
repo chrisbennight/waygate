@@ -11,7 +11,7 @@ use std::{
 };
 
 use axum::{
-    http::HeaderMap,
+    http::{header, HeaderMap},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -27,51 +27,65 @@ async fn credential_free_chat_supports_streamed_and_non_streamed_requests() {
     let provider_url = format!("http://{}/v1", provider.local_addr().unwrap());
     let provider_calls = Arc::new(AtomicUsize::new(0));
     let calls = provider_calls.clone();
-    let backend = Router::new().route(
-        "/v1/chat/completions",
-        post(move |headers: HeaderMap, Json(request): Json<Value>| {
-            calls.fetch_add(1, Ordering::Relaxed);
-            async move {
-                let authorization = headers.get("authorization");
-                let model = request["model"].as_str();
-                match (model, authorization.and_then(|value| value.to_str().ok())) {
-                    (Some("upstream-chat"), Some("Bearer synthetic-test-fixture")) => {}
-                    (Some("upstream-private"), _) if authorization.is_none() => {}
-                    (Some("upstream-error"), _) if authorization.is_none() => {
-                        return (
-                            StatusCode::TOO_MANY_REQUESTS,
-                            "fixture provider diagnostics",
-                        )
-                            .into_response();
+    let disconnected = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let disconnected_addr = disconnected.local_addr().unwrap().to_string();
+    let redirect_target = format!("http://{disconnected_addr}/v1");
+    let backend = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(move |headers: HeaderMap, Json(request): Json<Value>| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    let authorization = headers.get("authorization");
+                    let model = request["model"].as_str();
+                    match (model, authorization.and_then(|value| value.to_str().ok())) {
+                        (Some("upstream-chat"), Some("Bearer synthetic-test-fixture")) => {}
+                        (Some("upstream-private"), _) if authorization.is_none() => {}
+                        (Some("upstream-error"), _) if authorization.is_none() => {
+                            return (
+                                StatusCode::TOO_MANY_REQUESTS,
+                                "fixture provider diagnostics",
+                            )
+                                .into_response();
+                        }
+                        _ => return StatusCode::BAD_REQUEST.into_response(),
                     }
-                    _ => return StatusCode::BAD_REQUEST.into_response(),
-                }
-                if request["stream"] == true {
-                    let events = concat!(
+                    if request["stream"] == true {
+                        let events = concat!(
                         "data: {\"id\":\"chatcmpl-local\",\"model\":\"upstream-private\",",
                         "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"local completion\"},",
                         "\"finish_reason\":\"stop\"}]}\n\n",
                         "data: [DONE]\n\n",
                     );
-                    return ([("content-type", "text/event-stream")], events).into_response();
+                        return ([("content-type", "text/event-stream")], events).into_response();
+                    }
+                    Json(json!({
+                        "id": "chatcmpl-local",
+                        "model": model,
+                        "choices": [{
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "local completion"}
+                        }]
+                    }))
+                    .into_response()
                 }
-                Json(json!({
-                    "id": "chatcmpl-local",
-                    "model": model,
-                    "choices": [{
-                        "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": "local completion"}
-                    }]
-                }))
-                .into_response()
-            }
-        }),
-    );
+            }),
+        )
+        .route(
+            "/v1/redirect",
+            post(move || async move {
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [(header::LOCATION, redirect_target)],
+                )
+            }),
+        );
     let backend_task = tokio::spawn(async move { axum::serve(provider, backend).await.unwrap() });
-    let disconnected = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let disconnected_addr = disconnected.local_addr().unwrap().to_string();
+    let disconnected_calls = Arc::new(AtomicUsize::new(0));
+    let calls = disconnected_calls.clone();
     let disconnected_task = tokio::spawn(async move {
         while let Ok((socket, _)) = disconnected.accept().await {
+            calls.fetch_add(1, Ordering::Relaxed);
             drop(socket);
         }
     });
@@ -80,6 +94,7 @@ async fn credential_free_chat_supports_streamed_and_non_streamed_requests() {
         {"alias":"private-chat", "model":"openai:upstream-private", "base_url":provider_url, "authentication":"none"},
         {"alias":"restricted-chat", "model":"openai:upstream-private", "base_url":provider_url, "authentication":"none", "risk":"high"},
         {"alias":"error-chat", "model":"openai:upstream-error", "base_url":provider_url, "authentication":"none"},
+        {"alias":"redirect-chat", "model":"openai:upstream-private", "base_url":provider_url, "path":"redirect", "authentication":"none"},
         {"alias":"disconnected-chat", "model":"openai:upstream-private", "base_url":format!("http://{disconnected_addr}/v1"), "authentication":"none"},
     ])
     .to_string();
@@ -198,6 +213,11 @@ async fn credential_free_chat_supports_streamed_and_non_streamed_requests() {
     let message = failure.text().await.unwrap();
     assert!(message.contains("provider returned HTTP 429"));
     assert!(!message.contains("fixture provider diagnostics"));
+    let failure = chat(&client, &base, "redirect-chat", false, Some(&token)).await;
+    assert_eq!(failure.status(), StatusCode::BAD_GATEWAY);
+    let message = failure.text().await.unwrap();
+    assert!(message.contains("provider returned HTTP 307"));
+    assert_eq!(disconnected_calls.load(Ordering::Relaxed), 0);
     let failure = chat(&client, &base, "disconnected-chat", false, Some(&token)).await;
     assert_eq!(failure.status(), StatusCode::BAD_GATEWAY);
     let message = failure.text().await.unwrap();

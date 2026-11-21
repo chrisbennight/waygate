@@ -13,7 +13,10 @@ pin with `"provider": "openai"` and `"authentication": "none"`, and omit
 `upstream_model` to its model ID. Both streaming and non-streaming requests are
 sent without a provider credential. Clients authenticate to Waygate in the usual
 way, and the ordinary model authorization, quota, and audit checks apply. Use one
-route without a credential pool or fallback targets.
+route without a credential pool or fallback targets. Use an HTTP(S) base URL
+without user information, a query string, or a fragment. An explicit `path` also
+excludes queries and fragments. Configure the final endpoint because Waygate
+does not follow redirects for these routes.
 
 ## Credentials and routes
 

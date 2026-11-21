@@ -1442,7 +1442,10 @@ async fn private_chat_sends_no_credential_for_unary_or_streaming_requests() {
         .route("/stream", post(stream_handler))
         .with_state(captured.clone());
     let addr = spawn(app).await;
-    let dispatcher = LlmDispatcher::new(ProviderClient::new(reqwest::Client::new()), store());
+    let client = ProviderClient::new(reqwest::Client::new())
+        .with_single_attempt_http(reqwest::Client::builder())
+        .unwrap();
+    let dispatcher = LlmDispatcher::new(client, store());
     let mut route = route(addr, "");
     route.provider = LlmProvider::OpenAi;
     route.upstream_no_auth = true;
@@ -1476,6 +1479,51 @@ async fn private_chat_sends_no_credential_for_unary_or_streaming_requests() {
     assert!(got.authorization.is_none());
     assert_eq!(got.stream_options_include_usage, Some(true));
     assert_eq!(got.model.as_deref(), Some("private-model"));
+}
+
+#[tokio::test]
+async fn private_chat_redacts_transport_errors_after_streaming_starts() {
+    let interrupt = Arc::new(tokio::sync::Notify::new());
+    let backend_interrupt = interrupt.clone();
+    let addr = spawn(Router::new().route(
+        "/chat/completions",
+        post(move || async move {
+            let first = futures::stream::iter([Ok::<_, std::io::Error>("data: {}\n\n")]);
+            let failure = futures::stream::once(async move {
+                backend_interrupt.notified().await;
+                Err(std::io::Error::other("fixture stream interrupted"))
+            });
+            Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(Body::from_stream(first.chain(failure)))
+                .unwrap()
+        }),
+    ))
+    .await;
+    let client = ProviderClient::new(reqwest::Client::new())
+        .with_single_attempt_http(
+            reqwest::Client::builder().read_timeout(std::time::Duration::from_secs(5)),
+        )
+        .unwrap();
+    let dispatcher = LlmDispatcher::new(client, store());
+    let mut route = route(addr, "");
+    route.provider = LlmProvider::OpenAi;
+    route.upstream_no_auth = true;
+    let outcome = dispatcher.dispatch(&chat(true), &route).await.unwrap();
+    let DispatchOutcome::Stream { mut frames, .. } = outcome else {
+        panic!("expected a streaming completion");
+    };
+    assert!(frames.next().await.expect("first SSE frame").is_ok());
+    interrupt.notify_one();
+    let error = frames
+        .next()
+        .await
+        .expect("stream transport error")
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ProviderError::Transport(reason) if reason == "could not complete backend request"
+    ));
 }
 
 #[tokio::test]
