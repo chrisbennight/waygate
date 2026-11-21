@@ -342,8 +342,10 @@ mod tests {
         assert_eq!(row.path, "realtime");
         assert!(ModelKindFilter::Realtime.matches(&row.upstream_api));
         assert!(!ModelKindFilter::Chat.matches(&row.upstream_api));
-        let (multiple, _, rejected) =
-            compile_pins(&json!([definition("live", true), definition("other", true)]).to_string());
+        let (multiple, _, rejected) = compile_pins(
+            &json!([definition("live", true), definition("other", true)]).to_string(),
+            true,
+        );
         assert!(rejected.is_empty());
         assert!(multiple.realtime_call_model(LLM_SERVER).is_none());
         assert!(multiple.resolve(LLM_SERVER, "live").is_some());
@@ -351,6 +353,7 @@ mod tests {
 
         let (single, _, _) = compile_pins(
             &json!([definition("live", true), definition("other", false)]).to_string(),
+            true,
         );
         assert_eq!(
             single.realtime_call_model(LLM_SERVER).as_deref(),

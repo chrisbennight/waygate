@@ -717,28 +717,30 @@ async fn gateway_main() -> anyhow::Result<()> {
     // injected (Infisical) and read by the store; we're a pure consumer (I4).
     // Provider calls are bounded by the same upstream call timeout as MCP tool
     // calls.
-    let (mut llm_deps, model_catalog) =
-        match llm::build_from_env(cfg.upstream_call_timeout, !discovery_targets.is_empty()) {
-            Ok(configured) => configured,
-            Err(error) => {
-                tracing::error!(%error, "inference initialization failed; MCP remains available");
-                (None, llm::ConfiguredModelCatalog::default())
-            }
-        };
+    let (mut llm_deps, model_catalog) = match llm::build_from_env(
+        cfg.upstream_call_timeout,
+        !discovery_targets.is_empty(),
+        db_pool.is_some(),
+    ) {
+        Ok(configured) => configured,
+        Err(error) => {
+            tracing::error!(%error, "inference initialization failed; MCP remains available");
+            (None, llm::ConfiguredModelCatalog::default())
+        }
+    };
     // Publish the catalog and routes together. An inference catalog failure
     // leaves MCP serving and prevents requests against mismatched model rows.
     if let Some(pool) = db_pool.as_ref() {
-        if !model_catalog.rows.is_empty() || !model_catalog.rejected_aliases.is_empty() {
+        if !model_catalog.rows.is_empty() {
             let catalog_deadline = pool.options().get_acquire_timeout();
             match tokio::time::timeout(
                 catalog_deadline,
-                llm::seed_models(pool, &model_catalog.rows, &model_catalog.rejected_aliases),
+                llm::seed_models(pool, &model_catalog.rows),
             )
             .await
             {
                 Ok(Ok(())) => tracing::info!(
                     models = model_catalog.rows.len(),
-                    rejected = model_catalog.rejected_aliases.len(),
                     "seeded llm_models catalog from GATEWAY_LLM_MODELS"
                 ),
                 Ok(Err(error)) => {
@@ -854,7 +856,10 @@ async fn gateway_main() -> anyhow::Result<()> {
     // and admin try-it pipelines (cloned into both below) so usage is recorded
     // identically regardless of entry point.
     let llm_usage_store: Option<waygate_mcp::SharedLlmUsage> = match (&db_pool, &llm_deps) {
-        (Some(pool), Some(_)) => Some(Arc::new(waygate_storage::PgLlmUsageSink::new(pool.clone()))),
+        (Some(pool), Some(_)) => Some(Arc::new(
+            waygate_storage::PgLlmUsageSink::new(pool.clone())
+                .with_rejected_aliases(model_catalog.rejected_aliases),
+        )),
         _ => None,
     };
     // The lagging LLM budget gate. Same wiring conditions as the

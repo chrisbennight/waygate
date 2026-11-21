@@ -248,13 +248,15 @@ mod tests {
 
     #[test]
     fn only_shared_audio_resources_require_an_unambiguous_model() {
-        let (multiple, _, rejected) =
-            compile_pins(&json!([definition("one"), definition("two")]).to_string());
+        let (multiple, _, rejected) = compile_pins(
+            &json!([definition("one"), definition("two")]).to_string(),
+            true,
+        );
         assert!(rejected.is_empty());
         assert!(multiple.audio_resource_model(LLM_SERVER).is_none());
         assert!(multiple.resolve(LLM_SERVER, "one").is_some());
         assert!(multiple.resolve(LLM_SERVER, "two").is_some());
-        let (single, _, _) = compile_pins(&json!([definition("one")]).to_string());
+        let (single, _, _) = compile_pins(&json!([definition("one")]).to_string(), true);
         assert_eq!(
             single.audio_resource_model(LLM_SERVER).as_deref(),
             Some("one")

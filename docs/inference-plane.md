@@ -645,11 +645,11 @@ Waygate validates each boot-time pin before routing or recording it in the
 catalog. A rejected entry is logged with its alias when known and cannot fall
 through to a discovered route for that alias. The last valid entry wins for a
 repeated alias. Shared audio and WebRTC routes require an unambiguous model.
-Previously configured rows for rejected aliases are retained as disabled.
-Pricing prefers enabled aliases for the served model.
+Rejected pins leave existing catalog rows available for operator inspection.
+The serving replica excludes rejected aliases when pricing inference.
 If the setting is unreadable, Waygate logs the error and loads no pins. MCP
-and any independently configured model discovery can still start. Model aliases
-are limited to 1,024 UTF-8 bytes to fit the catalog's primary key. The model
+and any independently configured model discovery can still start. With a database,
+model aliases are limited to 1,024 UTF-8 bytes to fit the catalog's primary key. The model
 dashboard shows whether a catalog entry has an active local route.
 
 An operator pin names its upstream identity either as separate `provider` +

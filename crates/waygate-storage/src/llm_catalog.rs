@@ -200,15 +200,15 @@ where
 /// string can exist under two providers with different rates (e.g. a model
 /// name served by both OpenAI directly and via OpenRouter), so the served
 /// lookup must match the call's resolved provider to avoid borrowing another
-/// provider's pricing. Prefer enabled aliases so a rejected pin does not shadow
-/// a working route. Retained rates price responses for which only a historical
-/// catalog entry exists. Within each group, choose by alias. Cost is `Unknown`
-/// when the catalog has no matching provider and served model.
+/// provider's pricing. Exclude aliases rejected by the serving replica. Prefer
+/// enabled aliases and use retained rates when only a historical row matches.
+/// Within each group, choose by alias.
 pub async fn get_llm_model_by_served<'e, E>(
     executor: E,
     tenant_id: &str,
     provider: &str,
     served: &str,
+    rejected_aliases: &[String],
 ) -> Result<Option<LlmModelRow>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -222,6 +222,7 @@ where
                enabled, created_at, updated_at
           FROM llm_models
          WHERE tenant_id = $1 AND provider = $2 AND upstream_model = $3
+           AND alias <> ALL($4)
          ORDER BY enabled DESC, alias
          LIMIT 1
         "#,
@@ -229,6 +230,7 @@ where
     .bind(tenant_id)
     .bind(provider)
     .bind(served)
+    .bind(rejected_aliases)
     .fetch_optional(executor)
     .await
 }
@@ -265,26 +267,6 @@ impl LlmModelCatalog for PgLlmModelCatalog {
 
 /// Shared handle to the model catalog, mirroring `SharedCatalogStore`.
 pub type SharedLlmModelCatalog = std::sync::Arc<dyn LlmModelCatalog>;
-
-/// Deactivate previously configured pins rejected by the current configuration.
-pub async fn disable_configured_llm_models<'e, E>(
-    executor: E,
-    tenant_id: &str,
-    aliases: &[String],
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(
-        "UPDATE llm_models SET enabled = FALSE, updated_at = now()
-         WHERE tenant_id = $1 AND source = 'config' AND enabled AND alias = ANY($2)",
-    )
-    .bind(tenant_id)
-    .bind(aliases)
-    .execute(executor)
-    .await
-    .map(|_| ())
-}
 
 /// Insert or update one **operator-pinned** model (`source = 'config'`),
 /// keyed on `(tenant_id, alias)`.

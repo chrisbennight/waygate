@@ -61,10 +61,10 @@ pub use llm_cache::{
     sweep_expired_llm_cache, CacheEntry, CachedResponse, PgLlmCache,
 };
 pub use llm_catalog::{
-    disable_configured_llm_models, get_llm_model, get_llm_model_by_served,
-    list_discovered_llm_models, list_llm_models, mark_discovered_absent,
-    upsert_discovered_llm_model, upsert_llm_model, LlmDiscoveredModelUpsert, LlmModelCatalog,
-    LlmModelRow, LlmModelUpsert, PgLlmModelCatalog, SharedLlmModelCatalog,
+    get_llm_model, get_llm_model_by_served, list_discovered_llm_models, list_llm_models,
+    mark_discovered_absent, upsert_discovered_llm_model, upsert_llm_model,
+    LlmDiscoveredModelUpsert, LlmModelCatalog, LlmModelRow, LlmModelUpsert, PgLlmModelCatalog,
+    SharedLlmModelCatalog,
 };
 pub use llm_usage::{compute_cost, insert_llm_usage, CostBreakdown, CostSource, PgLlmUsageSink};
 pub use outbox::{dequeue_ready, enqueue, mark_delivered, mark_failed, OutboxEntry, OutboxStatus};

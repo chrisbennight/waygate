@@ -418,6 +418,7 @@ pub struct ConfiguredModelCatalog {
 pub fn build_from_env(
     call_timeout: Option<std::time::Duration>,
     discovery_configured: bool,
+    catalog_backed: bool,
 ) -> anyhow::Result<(Option<LlmDeps>, ConfiguredModelCatalog)> {
     let raw = match std::env::var(MODELS_ENV) {
         Ok(raw) => raw,
@@ -430,7 +431,7 @@ pub fn build_from_env(
             String::new()
         }
     };
-    let (pins, rows, rejected) = compile_pins(&raw);
+    let (pins, rows, rejected) = compile_pins(&raw, catalog_backed);
     let catalog = ConfiguredModelCatalog {
         rows,
         // Catalog text cannot contain null bytes, so no stored row can match these aliases.
@@ -497,6 +498,7 @@ impl<'de> Deserialize<'de> for ModelAliases {
 
 fn compile_pins(
     raw: &str,
+    catalog_backed: bool,
 ) -> (
     StaticModelResolver,
     Vec<waygate_storage::LlmModelUpsert>,
@@ -529,7 +531,7 @@ fn compile_pins(
             })
             .and_then(|def| {
                 let alias = def.alias.clone();
-                compile_pin(def).map_err(|error| (error, vec![alias]))
+                compile_pin(def, catalog_backed).map_err(|error| (error, vec![alias]))
             });
         match result {
             Ok((row, model)) => {
@@ -557,9 +559,10 @@ fn compile_pins(
 
 fn compile_pin(
     mut def: ModelDef,
+    catalog_backed: bool,
 ) -> anyhow::Result<(waygate_storage::LlmModelUpsert, ResolvedModel)> {
     anyhow::ensure!(
-        def.alias.len() <= MAX_MODEL_ALIAS_BYTES,
+        !catalog_backed || def.alias.len() <= MAX_MODEL_ALIAS_BYTES,
         "model alias exceeds the {MAX_MODEL_ALIAS_BYTES} byte catalog limit"
     );
     normalize_model_defs(std::slice::from_mut(&mut def))?;
@@ -568,15 +571,16 @@ fn compile_pin(
     row.base_url.clone_from(&model.route.base_url);
     // PostgreSQL text cannot represent a null byte.
     anyhow::ensure!(
-        [
-            &row.alias,
-            &row.credential_label,
-            &row.upstream_model,
-            &row.base_url,
-            &row.path
-        ]
-        .into_iter()
-        .all(|field| !field.contains('\0')),
+        !catalog_backed
+            || [
+                &row.alias,
+                &row.credential_label,
+                &row.upstream_model,
+                &row.base_url,
+                &row.path
+            ]
+            .into_iter()
+            .all(|field| !field.contains('\0')),
         "model catalog fields cannot contain null bytes"
     );
     Ok((row, model))
@@ -643,7 +647,7 @@ fn build_from_defs(
 ) -> anyhow::Result<Option<LlmDeps>> {
     let mut resolver = StaticModelResolver::new();
     for def in defs {
-        let (row, model) = compile_pin(def)?;
+        let (row, model) = compile_pin(def, true)?;
         resolver = resolver.with_model(LLM_SERVER, row.alias, model);
     }
     build_dispatcher(resolver, HashSet::new(), call_timeout).map(Some)
@@ -980,20 +984,11 @@ fn model_risk_str(r: ModelRisk) -> &'static str {
 pub async fn seed_models(
     pool: &sqlx::PgPool,
     rows: &[waygate_storage::LlmModelUpsert],
-    rejected_aliases: &[String],
 ) -> Result<(), sqlx::Error> {
-    if rows.is_empty() && rejected_aliases.is_empty() {
+    if rows.is_empty() {
         return Ok(());
     }
     let mut tx = pool.begin().await?;
-    if !rejected_aliases.is_empty() {
-        waygate_storage::disable_configured_llm_models(
-            &mut *tx,
-            waygate_core::TenantId::DEFAULT,
-            rejected_aliases,
-        )
-        .await?;
-    }
     for row in rows {
         waygate_storage::upsert_llm_model(&mut *tx, row).await?;
     }
@@ -2133,10 +2128,10 @@ mod tests {
         };
 
         // Idempotent: running twice must not error or duplicate.
-        seed_models(&pool, std::slice::from_ref(&row), &[])
+        seed_models(&pool, std::slice::from_ref(&row))
             .await
             .expect("first seed");
-        seed_models(&pool, std::slice::from_ref(&row), &[])
+        seed_models(&pool, std::slice::from_ref(&row))
             .await
             .expect("second seed (idempotent)");
 
@@ -2149,19 +2144,29 @@ mod tests {
 
         let mut healthy_row = row.clone();
         healthy_row.alias.clone_from(&valid_alias);
-        seed_models(&pool, &[healthy_row], std::slice::from_ref(&alias))
+        seed_models(&pool, &[healthy_row])
             .await
-            .expect("publish healthy pin and deactivate rejected pin");
+            .expect("publish healthy pin");
+        sqlx::query("UPDATE llm_models SET source = 'discovered' WHERE tenant_id = 'default' AND alias = $1")
+            .bind(&alias)
+            .execute(&pool)
+            .await
+            .expect("create a discovered alias that a rejected pin shadows");
         let rejected = waygate_storage::get_llm_model(&pool, "default", &alias)
             .await
             .expect("get rejected catalog row")
             .expect("rejected row is retained");
-        assert!(!rejected.enabled);
-        let priced =
-            waygate_storage::get_llm_model_by_served(&pool, "default", "openrouter", &served)
-                .await
-                .expect("look up served model pricing")
-                .expect("served model remains priced");
+        assert!(rejected.enabled);
+        let priced = waygate_storage::get_llm_model_by_served(
+            &pool,
+            "default",
+            "openrouter",
+            &served,
+            std::slice::from_ref(&alias),
+        )
+        .await
+        .expect("look up served model pricing")
+        .expect("served model remains priced");
         assert_eq!(priced.alias, valid_alias);
 
         sqlx::query("DELETE FROM llm_models WHERE tenant_id = 'default' AND alias = ANY($1)")
@@ -2252,7 +2257,7 @@ mod tests {
             {"alias":"valid-chat","model":"openai:chat-model","base_url":"http://backend ","credential_label":"API"},
             {"alias":"valid-chat","model":"openai:alternate","base_url":"http://other/v1","authentication":"none"}
         ]"#;
-        let (pins, rows, rejected) = compile_pins(raw);
+        let (pins, rows, rejected) = compile_pins(raw, true);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].alias, "valid-chat");
         assert_eq!(rows[0].upstream_model, "chat-model");
@@ -2298,7 +2303,7 @@ mod tests {
             ]"#
         );
 
-        let (pins, rows, rejected) = compile_pins(&raw);
+        let (pins, rows, rejected) = compile_pins(&raw, true);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].alias, "valid-chat");
         assert!(pins.resolve(LLM_SERVER, "valid-chat").is_some());
@@ -2320,9 +2325,20 @@ mod tests {
     }
 
     #[test]
+    fn long_aliases_are_usable_when_no_catalog_is_configured() {
+        let alias = "a".repeat(MAX_MODEL_ALIAS_BYTES + 1);
+        let raw = json!([{"alias":alias, "provider":"openai",
+            "base_url":"http://backend/v1", "credential_label":"API"}])
+        .to_string();
+        let (pins, _, rejected) = compile_pins(&raw, false);
+        assert!(rejected.is_empty());
+        assert!(pins.resolve(LLM_SERVER, &alias).is_some());
+    }
+
+    #[test]
     fn unreadable_model_pins_produce_no_routes_or_catalog_rows() {
         for raw in ["[", "{}", "null"] {
-            let (pins, rows, rejected) = compile_pins(raw);
+            let (pins, rows, rejected) = compile_pins(raw, true);
             assert!(pins.is_empty());
             assert!(rows.is_empty());
             assert!(rejected.is_empty());

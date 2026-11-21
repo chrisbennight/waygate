@@ -116,11 +116,21 @@ pub fn compute_cost(
 #[derive(Clone)]
 pub struct PgLlmUsageSink {
     pool: sqlx::PgPool,
+    rejected_aliases: std::sync::Arc<[String]>,
 }
 
 impl PgLlmUsageSink {
     pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            rejected_aliases: std::sync::Arc::from([]),
+        }
+    }
+
+    #[must_use]
+    pub fn with_rejected_aliases(mut self, aliases: Vec<String>) -> Self {
+        self.rejected_aliases = aliases.into();
+        self
     }
 }
 
@@ -137,7 +147,14 @@ impl LlmUsageRecorder for PgLlmUsageSink {
         // best-effort metadata, not a gate).
         let lookup = match row.model_served.as_deref() {
             Some(served) => {
-                get_llm_model_by_served(&self.pool, &row.tenant_id, &row.provider, served).await
+                get_llm_model_by_served(
+                    &self.pool,
+                    &row.tenant_id,
+                    &row.provider,
+                    served,
+                    &self.rejected_aliases,
+                )
+                .await
             }
             None => get_llm_model(&self.pool, &row.tenant_id, &row.model_alias).await,
         };
