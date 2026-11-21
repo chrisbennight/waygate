@@ -28,7 +28,7 @@ pub fn is_public_ip(ip: &IpAddr) -> bool {
                 return is_public_ip(&IpAddr::V4(v4));
             }
             let segments = v6.segments();
-            if is_ipv4_compatible_v6(v6)
+            !(is_ipv4_compatible_v6(v6)
                 || is_ipv4_mapped_v6(v6)
                 || matches!(segments, [0x64, 0xff9b, 1, _, _, _, _, _])
                 || matches!(segments, [0x100, 0, 0, 0, _, _, _, _])
@@ -38,11 +38,7 @@ pub fn is_public_ip(ip: &IpAddr) -> bool {
                 || matches!(segments, [0x5f00, ..])
                 || (segments[0] & 0xfe00) == 0xfc00
                 || (segments[0] & 0xffc0) == 0xfe80
-                || (segments[0] & 0xffc0) == 0xfec0
-            {
-                return false;
-            }
-            true
+                || (segments[0] & 0xffc0) == 0xfec0)
         }
     }
 }

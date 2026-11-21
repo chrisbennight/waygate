@@ -1351,26 +1351,26 @@ pub(crate) async fn server_classifications_save(
                     "Form is out of sync with the bundle — reopen the tab and re-apply.".to_owned(),
                 );
             }
-            for i in 0..n {
+            for (i, tool) in m.tools.iter_mut().enumerate() {
                 let name = form.get(&format!("name_{i}")).cloned().unwrap_or_default();
                 // base_hash matched, so the tool list is identical to render
                 // time and index i must line up with m.tools[i]; verify the
                 // name as a guard.
-                if name != m.tools[i].name {
+                if name != tool.name {
                     return Err(
                         "Form is out of sync with the bundle — reopen the tab and re-apply."
                             .to_owned(),
                     );
                 }
-                m.tools[i].risk = match form.get(&format!("risk_{i}")).map(String::as_str) {
+                tool.risk = match form.get(&format!("risk_{i}")).map(String::as_str) {
                     Some("high") => waygate_mcp::protocol::RiskTier::High,
                     Some("medium") => waygate_mcp::protocol::RiskTier::Medium,
                     Some("low") => waygate_mcp::protocol::RiskTier::Low,
                     _ => return Err(format!("Invalid risk tier for tool '{name}'.")),
                 };
                 // Unchecked checkboxes are absent from the form body.
-                m.tools[i].side_effects = form.contains_key(&format!("se_{i}"));
-                m.tools[i].pii = form.contains_key(&format!("pii_{i}"));
+                tool.side_effects = form.contains_key(&format!("se_{i}"));
+                tool.pii = form.contains_key(&format!("pii_{i}"));
             }
             Ok(())
         },
