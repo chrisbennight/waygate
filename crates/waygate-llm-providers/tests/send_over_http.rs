@@ -262,6 +262,7 @@ async fn non_2xx_status_surfaces_as_status_error_with_body() {
         .await
         .expect_err("should be an HTTP error");
 
+    assert_eq!(err.to_string(), "provider returned HTTP 429");
     match err {
         ProviderError::Status {
             status,

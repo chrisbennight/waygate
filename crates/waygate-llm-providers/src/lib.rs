@@ -48,13 +48,14 @@ pub enum ProviderError {
     /// status was obtained.
     #[error("transport error: {0}")]
     Transport(String),
-    /// The provider returned a non-2xx status. `body` is a bounded snippet of
-    /// the error body for diagnostics (never the request payload). `retry_after`
+    /// The provider returned a non-2xx status. `body` holds a bounded snippet
+    /// and may contain provider or request data. The display message omits it.
+    /// `retry_after`
     /// carries the `Retry-After` header (delta-seconds form) when the provider
     /// sent one — the dispatcher's failover cooldown honors it so a rate-limited
     /// credential backs off for at least that long. The HTTP-date form is not
     /// parsed (left `None`); providers' 429s use delta-seconds in practice.
-    #[error("provider returned HTTP {status}: {body}")]
+    #[error("provider returned HTTP {status}")]
     Status {
         status: u16,
         body: String,
