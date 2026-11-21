@@ -539,14 +539,16 @@ fn compile_pins(
                 rows.insert(row.alias.clone(), row);
             }
             Err((error, aliases)) => {
-                let diagnostic_alias = aliases
-                    .first()
-                    .map(|alias| alias.chars().take(256).collect::<String>());
+                let diagnostic_aliases: Vec<_> = aliases
+                    .iter()
+                    .take(8)
+                    .map(|alias| alias.chars().take(256).collect::<String>())
+                    .collect();
                 tracing::error!(
                     setting = MODELS_ENV,
                     index,
-                    alias = ?diagnostic_alias,
-                    alias_bytes = ?aliases.first().map(String::len),
+                    aliases = ?diagnostic_aliases,
+                    alias_count = aliases.len(),
                     %error,
                     "inference model configuration rejected"
                 );

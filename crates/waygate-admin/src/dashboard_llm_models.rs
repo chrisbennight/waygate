@@ -31,7 +31,7 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::{Extension, Router};
 use waygate_core::LLM_RESERVED_NAMESPACE;
-use waygate_llm_dispatch::LlmModelResolver;
+use waygate_llm_dispatch::{LlmModelResolver, LlmOperation};
 use waygate_oidc::{AuthMethod, Principal, Scope};
 use waygate_storage::{LlmModelRow, SharedLlmModelCatalog};
 
@@ -194,8 +194,17 @@ fn model_row(m: LlmModelRow, resolver: Option<&dyn LlmModelResolver>) -> ModelRo
         .and_then(|resolver| resolver.resolve(LLM_RESERVED_NAMESPACE, &m.alias))
         .is_some_and(|model| {
             let route = model.route;
+            let upstream_api = match model.operation {
+                LlmOperation::Chat => route.protocol.wire_name(),
+                LlmOperation::Embeddings => "embeddings",
+                LlmOperation::Images => "images",
+                LlmOperation::Speech(_) => "speech",
+                LlmOperation::Transcription(_) => "transcription",
+                LlmOperation::Realtime(_) => "realtime",
+            };
             !route.openai_chatgpt
                 && route.provider.as_str() == m.provider
+                && m.upstream_api.eq_ignore_ascii_case(upstream_api)
                 && route.upstream_model == m.upstream_model
                 && route.base_url == m.base_url
                 && route.path == m.path
@@ -340,9 +349,7 @@ mod tests {
     #[test]
     fn model_row_only_marks_the_displayed_backend_routable() {
         use waygate_llm_credentials::LlmProvider;
-        use waygate_llm_dispatch::{
-            LlmOperation, ModelRisk, ResolvedModel, ResolvedRoute, StaticModelResolver,
-        };
+        use waygate_llm_dispatch::{ModelRisk, ResolvedModel, ResolvedRoute, StaticModelResolver};
         use waygate_llm_translate::UpstreamProtocol;
 
         let mut row = seeded_row();
@@ -368,6 +375,9 @@ mod tests {
             },
         );
         assert!(model_row(row.clone(), Some(&resolver)).routable);
+        let mut other_operation = row.clone();
+        other_operation.upstream_api = "embeddings".into();
+        assert!(!model_row(other_operation, Some(&resolver)).routable);
         row.base_url = "https://replacement.invalid".into();
         assert!(!model_row(row, Some(&resolver)).routable);
     }
