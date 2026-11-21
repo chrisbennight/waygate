@@ -1270,14 +1270,20 @@ impl AsServerConfig {
 /// selects the writer key and is optional only for a one-key keyring.
 fn load_upstream_token_keyring() -> Result<(Vec<(String, String)>, String)> {
     let mut keyed: Vec<(String, String)> = Vec::new();
-    for (k, v) in std::env::vars() {
-        let Some(rest) = k.strip_prefix("GATEWAY_UPSTREAM_TOKEN_KEY_") else {
+    for (name, value) in std::env::vars_os() {
+        let Some(rest) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("GATEWAY_UPSTREAM_TOKEN_KEY_"))
+        else {
             continue;
         };
         if rest == "ACTIVE_ID" {
             continue;
         }
-        keyed.push((rest.to_ascii_lowercase(), v));
+        let value = value
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("GATEWAY_UPSTREAM_TOKEN_KEY_{rest} is not valid UTF-8"))?;
+        keyed.push((rest.to_ascii_lowercase(), value));
     }
     let active_env = std::env::var("GATEWAY_UPSTREAM_TOKEN_KEY_ACTIVE_ID").ok();
 

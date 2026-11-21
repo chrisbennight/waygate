@@ -53,7 +53,7 @@ tower.workspace = true
 tower-http.workspace = true
 
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 # Derives JSON Schema for built-in tool response types (output_schema via
 # Tool::with_output_schema); schemars is the single source of truth for those
 # schemas.

@@ -725,6 +725,25 @@ async fn gateway_main() -> anyhow::Result<()> {
                 (None, Vec::new())
             }
         };
+    // Publish the catalog and routes together. An inference catalog failure
+    // leaves MCP serving and prevents requests against mismatched model rows.
+    if let Some(pool) = db_pool.as_ref() {
+        if !configured_rows.is_empty() {
+            match llm::seed_models(pool, &configured_rows).await {
+                Ok(()) => tracing::info!(
+                    models = configured_rows.len(),
+                    "seeded llm_models catalog from GATEWAY_LLM_MODELS"
+                ),
+                Err(error) => {
+                    tracing::error!(
+                        sqlstate = ?error.as_database_error().and_then(|error| error.code()),
+                        "inference catalog publication failed; MCP remains available"
+                    );
+                    llm_deps = None;
+                }
+            }
+        }
+    }
     // The SAME in-process credential store the dispatcher resolves
     // bearers from, handed to the admin credential-status panel so it reads live
     // pool health (not a separate snapshot that could drift). `None` when no LLM
@@ -742,24 +761,6 @@ async fn gateway_main() -> anyhow::Result<()> {
              responses; LLM response inspection lands with the streaming-inspector slice"
         );
     }
-    // Materialize the configured models into the `llm_models` catalog so
-    // the inference plane's governance reads (cost via the usage ledger,
-    // budgets via the budget gate, both wired below) and discovery have a
-    // DB row per configured model. Idempotent — the upsert is keyed on
-    // (tenant, alias) and preserves operator-set costing on conflict — so
-    // it is safe on every boot. Skipped when no DB pool is wired
-    // (audit-less dev mode); routing still works from the env resolver.
-    // Runs before the listener accepts, so no call observes a half-seeded
-    // catalog.
-    if let Some(pool) = db_pool.as_ref() {
-        if !configured_rows.is_empty() {
-            llm::seed_models(pool, &configured_rows).await?;
-            tracing::info!(
-                models = configured_rows.len(),
-                "seeded llm_models catalog from GATEWAY_LLM_MODELS"
-            );
-        }
-    }
     // Load any persisted discovered models from the catalog into the
     // resolver's discovered layer, so a restart after a prior discovery run
     // makes them routable immediately (before the first refresh cycle). Empty
@@ -767,12 +768,19 @@ async fn gateway_main() -> anyhow::Result<()> {
     // the resolver resolves env pins only (behavior-preserving). Runs before the
     // listener accepts, so no call observes a half-loaded resolver.
     if let (Some(pool), Some((_, resolver))) = (db_pool.as_ref(), llm_deps.as_ref()) {
-        let loaded = llm::boot_load_discovered(pool, resolver).await?;
-        if loaded > 0 {
-            tracing::info!(
-                discovered = loaded,
-                "loaded discovered models into the resolver"
-            );
+        match llm::boot_load_discovered(pool, resolver).await {
+            Ok(loaded) if loaded > 0 => {
+                tracing::info!(
+                    discovered = loaded,
+                    "loaded discovered models into the resolver"
+                );
+            }
+            Ok(_) => {}
+            Err(_) => {
+                tracing::warn!(
+                    "stored model discovery could not be loaded; configured pins remain available"
+                );
+            }
         }
     }
     // Spawn the discovery refresher when GATEWAY_LLM_DISCOVERY names at

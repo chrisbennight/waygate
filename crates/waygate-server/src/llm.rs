@@ -25,7 +25,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::StreamExt;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, value::RawValue, Value};
 
 use waygate_core::http_client::{self, Profile};
 use waygate_invocation::{
@@ -49,6 +49,8 @@ pub const LLM_SERVER: &str = waygate_core::LLM_RESERVED_NAMESPACE;
 
 /// Env var carrying the model catalog as a JSON array of [`ModelDef`].
 const MODELS_ENV: &str = "GATEWAY_LLM_MODELS";
+/// The alias is part of the model catalog's PostgreSQL primary key.
+const MAX_MODEL_ALIAS_BYTES: usize = 1024;
 
 #[cfg(test)]
 mod audio_qualification;
@@ -330,6 +332,12 @@ fn routes_for_target(
 ) -> anyhow::Result<Vec<ResolvedRoute>> {
     let provider =
         parse_provider(provider_str).map_err(|_| anyhow::anyhow!("unknown LLM provider"))?;
+    let url = reqwest::Url::parse(&base_url)
+        .map_err(|_| anyhow::anyhow!("model base_url must be an absolute HTTP(S) URL"))?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https") && url.has_host(),
+        "model base_url must be an absolute HTTP(S) URL"
+    );
     anyhow::ensure!(!surface_is_codex(surface),
         "surface codex is retired; explicitly migrate the endpoint, model and credential to a supported provider API");
     let (protocol, default_path) = if is_embeddings {
@@ -401,13 +409,28 @@ pub fn build_from_env(
     call_timeout: Option<std::time::Duration>,
     discovery_configured: bool,
 ) -> anyhow::Result<(Option<LlmDeps>, Vec<waygate_storage::LlmModelUpsert>)> {
-    let raw = std::env::var(MODELS_ENV).unwrap_or_default();
+    let raw = match std::env::var(MODELS_ENV) {
+        Ok(raw) => raw,
+        Err(std::env::VarError::NotPresent) => String::new(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            tracing::error!(
+                setting = MODELS_ENV,
+                "inference model configuration is not UTF-8"
+            );
+            String::new()
+        }
+    };
     let (pins, rows, rejected) = compile_pins(&raw);
     if pins.is_empty() && !discovery_configured {
         return Ok((None, rows));
     }
     let deps = build_dispatcher(pins, rejected, call_timeout)?;
     Ok((Some(deps), rows))
+}
+
+#[derive(Deserialize)]
+struct ModelAlias {
+    alias: String,
 }
 
 fn compile_pins(
@@ -423,7 +446,7 @@ fn compile_pins(
     if raw.trim().is_empty() {
         return (pins, rows, rejected);
     }
-    let Ok(entries) = serde_json::from_str::<Vec<Value>>(raw) else {
+    let Ok(entries) = serde_json::from_str::<Vec<&RawValue>>(raw) else {
         tracing::error!(
             setting = MODELS_ENV,
             "inference model configuration is not a readable JSON array"
@@ -431,12 +454,15 @@ fn compile_pins(
         return (pins, rows, rejected);
     };
     for (index, entry) in entries.into_iter().enumerate() {
-        let alias = entry
-            .get("alias")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let result = serde_json::from_value(entry)
-            .map_err(|_| anyhow::anyhow!("entry does not match the model configuration schema"))
+        // Preserve the raw entry so typed decoding can detect duplicate fields.
+        let result = serde_json::from_str(entry.get())
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "entry does not match the model configuration schema at line {}, column {}",
+                    error.line(),
+                    error.column()
+                )
+            })
             .and_then(|def| compile_pin(def, &pins));
         match result {
             Ok((row, model)) => {
@@ -444,10 +470,16 @@ fn compile_pins(
                 rows.push(row);
             }
             Err(error) => {
+                let alias = serde_json::from_str::<ModelAlias>(entry.get())
+                    .ok()
+                    .map(|entry| entry.alias);
+                let diagnostic_alias = alias
+                    .as_deref()
+                    .filter(|alias| alias.len() <= MAX_MODEL_ALIAS_BYTES);
                 tracing::error!(
                     setting = MODELS_ENV,
                     index,
-                    alias = ?alias.as_deref(),
+                    alias = ?diagnostic_alias,
                     %error,
                     "inference model configuration rejected"
                 );
@@ -464,6 +496,10 @@ fn compile_pin(
     mut def: ModelDef,
     pins: &StaticModelResolver,
 ) -> anyhow::Result<(waygate_storage::LlmModelUpsert, ResolvedModel)> {
+    anyhow::ensure!(
+        def.alias.len() <= MAX_MODEL_ALIAS_BYTES,
+        "model alias exceeds the {MAX_MODEL_ALIAS_BYTES} byte catalog limit"
+    );
     normalize_model_defs(std::slice::from_mut(&mut def))?;
     let model = resolve_pin(&def)?;
     anyhow::ensure!(
@@ -487,8 +523,6 @@ fn compile_pin(
             &row.path
         ]
         .into_iter()
-        .map(String::as_str)
-        .chain(row.description.as_deref())
         .all(|field| !field.contains('\0')),
         "model catalog fields cannot contain null bytes"
     );
@@ -887,7 +921,7 @@ fn model_risk_str(r: ModelRisk) -> &'static str {
 pub async fn seed_models(
     pool: &sqlx::PgPool,
     rows: &[waygate_storage::LlmModelUpsert],
-) -> anyhow::Result<()> {
+) -> Result<(), sqlx::Error> {
     if rows.is_empty() {
         return Ok(());
     }
@@ -2149,6 +2183,35 @@ mod tests {
                 .route
                 .upstream_model,
             "chat-model"
+        );
+    }
+
+    #[test]
+    fn model_pin_decoding_retains_duplicates_and_isolates_deep_invalid_fields() {
+        let nested = format!("{}0{}", "[".repeat(160), "]".repeat(160));
+        let oversized = "a".repeat(MAX_MODEL_ALIAS_BYTES + 1);
+        let raw = format!(
+            r#"[
+                {{"alias":"duplicate","provider":"openai","base_url":"http://first/v1","base_url":"http://second/v1","credential_label":"API"}},
+                {{"alias":"relative-url","provider":"openai","base_url":"/v1","credential_label":"API"}},
+                {{"alias":"deep","provider":"openai","base_url":{nested}}},
+                {{"alias":"{oversized}","provider":"openai","base_url":"http://backend/v1","credential_label":"API"}},
+                {{"alias":"valid-chat","provider":"openai","base_url":"http://backend/v1","credential_label":"API"}}
+            ]"#
+        );
+
+        let (pins, rows, rejected) = compile_pins(&raw);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].alias, "valid-chat");
+        assert!(pins.resolve(LLM_SERVER, "valid-chat").is_some());
+        assert_eq!(
+            rejected,
+            HashSet::from([
+                "duplicate".into(),
+                "relative-url".into(),
+                "deep".into(),
+                oversized
+            ])
         );
     }
 

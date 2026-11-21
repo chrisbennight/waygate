@@ -75,7 +75,7 @@
                         <th>Credential</th>
                         <th>Upstream API</th>
                         <th>Risk</th>
-                        <th>Enabled</th>
+                        <th>Routing</th>
                         <th>Approval</th>
                         <th>Cost (in/out)</th>
                         <th>Description</th>
@@ -114,10 +114,12 @@
                             {% endif %}
                         </td>
                         <td>
-                            {% if m.enabled %}
-                                <span class="chip chip--ok">enabled</span>
-                            {% else %}
+                            {% if !m.enabled %}
                                 <span class="chip">disabled</span>
+                            {% else if m.routable %}
+                                <span class="chip chip--ok">routable</span>
+                            {% else %}
+                                <span class="chip chip--warn">unavailable</span>
                             {% endif %}
                         </td>
                         <td>
