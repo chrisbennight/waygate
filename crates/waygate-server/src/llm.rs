@@ -14,7 +14,7 @@
 //!   (`data: <delta>` frames, a `data: [DONE]` sentinel, and an `event: error`
 //!   frame for a mid-stream failure).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
@@ -341,6 +341,7 @@ fn routes_for_target(
             && url.fragment().is_none(),
         "model base_url must be an absolute HTTP(S) URL without a query or fragment"
     );
+    let base_url = url.to_string();
     anyhow::ensure!(!surface_is_codex(surface),
         "surface codex is retired; explicitly migrate the endpoint, model and credential to a supported provider API");
     let (protocol, default_path) = if is_embeddings {
@@ -471,38 +472,41 @@ fn compile_pins(
     HashSet<String>,
 ) {
     let mut pins = StaticModelResolver::new();
-    let mut rows = Vec::new();
+    let mut rows = BTreeMap::new();
     let mut rejected = HashSet::new();
     if raw.trim().is_empty() {
-        return (pins, rows, rejected);
+        return (pins, Vec::new(), rejected);
     }
     let Ok(entries) = serde_json::from_str::<Vec<&RawValue>>(raw) else {
         tracing::error!(
             setting = MODELS_ENV,
             "inference model configuration is not a readable JSON array"
         );
-        return (pins, rows, rejected);
+        return (pins, Vec::new(), rejected);
     };
     for (index, entry) in entries.into_iter().enumerate() {
         // Preserve the raw entry so typed decoding can detect duplicate fields.
-        let result = serde_json::from_str(entry.get())
+        let result = serde_json::from_str::<ModelDef>(entry.get())
             .map_err(|error| {
-                anyhow::anyhow!(
+                let aliases: ModelAliases = serde_json::from_str(entry.get()).unwrap_or_default();
+                let diagnostic = anyhow::anyhow!(
                     "entry does not match the model configuration schema at line {}, column {}",
                     error.line(),
                     error.column()
-                )
+                );
+                (diagnostic, aliases.0)
             })
-            .and_then(compile_pin);
+            .and_then(|def| {
+                let alias = def.alias.clone();
+                compile_pin(def).map_err(|error| (error, vec![alias]))
+            });
         match result {
             Ok((row, model)) => {
                 pins = pins.with_model(LLM_SERVER, row.alias.clone(), model);
-                rows.push(row);
+                rows.insert(row.alias.clone(), row);
             }
-            Err(error) => {
-                let aliases: ModelAliases = serde_json::from_str(entry.get()).unwrap_or_default();
+            Err((error, aliases)) => {
                 let diagnostic_alias = aliases
-                    .0
                     .iter()
                     .find(|alias| alias.len() <= MAX_MODEL_ALIAS_BYTES);
                 tracing::error!(
@@ -512,11 +516,11 @@ fn compile_pins(
                     %error,
                     "inference model configuration rejected"
                 );
-                rejected.extend(aliases.0);
+                rejected.extend(aliases);
             }
         }
     }
-    (pins, rows, rejected)
+    (pins, rows.into_values().collect(), rejected)
 }
 
 fn compile_pin(
@@ -528,7 +532,8 @@ fn compile_pin(
     );
     normalize_model_defs(std::slice::from_mut(&mut def))?;
     let model = resolve_pin(&def)?;
-    let row = model_def_to_upsert(&def);
+    let mut row = model_def_to_upsert(&def);
+    row.base_url.clone_from(&model.route.base_url);
     // PostgreSQL text cannot represent a null byte.
     anyhow::ensure!(
         [
@@ -2182,14 +2187,17 @@ mod tests {
             {"alias":"invalid-schema","provider":"openai","base_url":42},
             {"alias":"invalid-chat","provider":"openai","base_url":"http://backend/v1","authentication":"none"},
             {"alias":"invalid-catalog","provider":"openai","base_url":"http://backend/v1","credential_label":"API","path":"chat/\u0000completions"},
-            {"alias":"valid-chat","model":"openai:chat-model","base_url":"http://backend/v1","credential_label":"API"},
+            {"alias":"valid-chat","model":"openai:old-route","base_url":"http://legacy/v1","credential_label":"API"},
+            {"alias":"valid-chat","model":"openai:chat-model","base_url":"http://backend ","credential_label":"API"},
             {"alias":"valid-chat","model":"openai:alternate","base_url":"http://other/v1","authentication":"none"}
         ]"#;
         let (pins, rows, rejected) = compile_pins(raw);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].alias, "valid-chat");
         assert_eq!(rows[0].upstream_model, "chat-model");
+        assert_eq!(rows[0].base_url, "http://backend/");
         let model = pins.resolve(LLM_SERVER, "valid-chat").expect("valid pin");
+        assert_eq!(model.route.base_url, rows[0].base_url);
         let discovered =
             HashMap::from([((LLM_SERVER.to_owned(), "invalid-chat".to_owned()), model)]);
         let resolver =
@@ -2212,8 +2220,11 @@ mod tests {
     fn model_pin_decoding_retains_duplicates_and_isolates_deep_invalid_fields() {
         let nested = format!("{}0{}", "[".repeat(160), "]".repeat(160));
         let oversized = "a".repeat(MAX_MODEL_ALIAS_BYTES + 1);
+        let positional = r#"[null,null,null,"positional","openai","API","invalid",null,"http://backend/v1",null,null,null,null,null,null,[],null,null]"#;
+        assert!(serde_json::from_str::<ModelDef>(positional).is_ok());
         let raw = format!(
             r#"[
+                {positional},
                 {{"alias":"duplicate","provider":"openai","base_url":"http://first/v1","base_url":"http://second/v1","credential_label":"API"}},
                 {{"alias":"relative-url","provider":"openai","base_url":"/v1","credential_label":"API"}},
                 {{"alias":"query-url","provider":"openai","base_url":"http://backend/v1?param=test","credential_label":"API"}},
@@ -2232,6 +2243,7 @@ mod tests {
         assert_eq!(
             rejected,
             HashSet::from([
+                "positional".into(),
                 "duplicate".into(),
                 "relative-url".into(),
                 "query-url".into(),

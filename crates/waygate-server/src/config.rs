@@ -1270,6 +1270,7 @@ impl AsServerConfig {
 /// selects the writer key and is optional only for a one-key keyring.
 fn load_upstream_token_keyring() -> Result<(Vec<(String, String)>, String)> {
     let mut keyed: Vec<(String, String)> = Vec::new();
+    let mut active_env = None;
     for (name, value) in std::env::vars_os() {
         let Some(rest) = name
             .to_str()
@@ -1277,15 +1278,15 @@ fn load_upstream_token_keyring() -> Result<(Vec<(String, String)>, String)> {
         else {
             continue;
         };
-        if rest == "ACTIVE_ID" {
-            continue;
-        }
         let value = value
             .into_string()
             .map_err(|_| anyhow::anyhow!("GATEWAY_UPSTREAM_TOKEN_KEY_{rest} is not valid UTF-8"))?;
-        keyed.push((rest.to_ascii_lowercase(), value));
+        if rest == "ACTIVE_ID" {
+            active_env = Some(value);
+        } else {
+            keyed.push((rest.to_ascii_lowercase(), value));
+        }
     }
-    let active_env = std::env::var("GATEWAY_UPSTREAM_TOKEN_KEY_ACTIVE_ID").ok();
 
     if keyed.is_empty() {
         anyhow::bail!(
@@ -2197,6 +2198,27 @@ mod tests {
                 "single-key keyring's only id is the active id"
             );
             restore_env(&prev);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn unreadable_active_id_does_not_choose_a_default_key() {
+            use std::os::unix::ffi::OsStringExt;
+
+            let _g = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = snapshot_env();
+            clear_env();
+            std::env::set_var("GATEWAY_UPSTREAM_TOKEN_KEY_V1", "synthetic");
+            std::env::set_var(
+                "GATEWAY_UPSTREAM_TOKEN_KEY_ACTIVE_ID",
+                std::ffi::OsString::from_vec(vec![0xff]),
+            );
+            let result = load_upstream_token_keyring();
+            restore_env(&prev);
+            let error = result.expect_err("an unreadable selector cannot select any key");
+            assert!(error
+                .to_string()
+                .contains("GATEWAY_UPSTREAM_TOKEN_KEY_ACTIVE_ID"));
         }
 
         #[test]
