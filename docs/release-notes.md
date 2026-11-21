@@ -1,5 +1,16 @@
 # Release notes
 
+## 3.1.4
+
+- OpenAI-compatible Chat Completions routes can use a backend that requires
+  no upstream token. Set the provider to `openai` and the route authentication
+  to `none`. Both streaming and non-streaming requests remain subject to
+  Waygate caller authentication and model access policy. See
+  [OpenAI API upstreams](openai-api-upstreams.md).
+- Startup compiles configured model routes once and uses those same routes for
+  dispatch and catalog publication. Catalog write order is preserved during
+  rolling upgrades. This release requires no database migration.
+
 ## 3.1.3
 
 - Upstream delivery status preserves `publishing` while publication I/O is
