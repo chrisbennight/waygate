@@ -196,7 +196,7 @@ for boot in $(seq 1 "$ATTEMPTS"); do
     -e GATEWAY_DATABASE_URL=postgres://gateway:smoke@gw-smoke-db:5432/${REACH_DB} \
     -e GATEWAY_IDENTITY_SIGNING_KEY_PEM="$PEM" \
     -e GATEWAY_IDENTITY_KID=smoke-kid \
-    -e GATEWAY_LLM_MODELS='[{"alias":"broken-chat","provider":"openai","base_url":"http://example.invalid/v1","authentication":"none"},{"alias":"valid-chat","provider":"openai","base_url":"http://example.invalid/v1","credential_label":"TEST"}]' \
+    -e GATEWAY_LLM_MODELS='[{"alias":"broken-chat","provider":"openai","base_url":"http://example.invalid/v1","authentication":"invalid"},{"alias":"valid-chat","provider":"openai","base_url":"http://example.invalid/v1","credential_label":"TEST"}]' \
     "$UPSTREAM_IMG" >/dev/null
 
 # A bare "is /readyz 200?" poll is NOT a reachability assertion. The

@@ -31,9 +31,7 @@ impl DefaultInvocationService {
             unreachable!()
         };
         let mut request = ctx.realtime.take().expect("Realtime surface admitted");
-        if model.route.openai_chatgpt
-            || model.route.embeddings_no_auth
-            || !model.fallbacks.is_empty()
+        if model.route.openai_chatgpt || model.route.upstream_no_auth || !model.fallbacks.is_empty()
         {
             return Err(InvocationError::InvalidArguments(
                 "Realtime requires one standard bearer route without fallbacks".into(),

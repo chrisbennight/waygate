@@ -55,7 +55,7 @@ const MAX_MODEL_ALIAS_BYTES: usize = 1024;
 #[cfg(test)]
 mod audio_qualification;
 mod audio_resources;
-mod embedding_config;
+mod authentication;
 mod embedding_errors;
 mod images;
 mod messages;
@@ -387,7 +387,7 @@ fn routes_for_target(
             path: resolved_path.clone(),
             upstream_model: upstream_model.clone(),
             protocol,
-            embeddings_no_auth: false,
+            upstream_no_auth: false,
             openai_chatgpt: false,
         })
         .collect())
@@ -562,7 +562,10 @@ fn compile_pin(
     mut def: ModelDef,
     catalog_backed: bool,
 ) -> anyhow::Result<(waygate_storage::LlmModelUpsert, ResolvedModel)> {
-    anyhow::ensure!(!def.alias.is_empty(), "model alias must not be empty");
+    anyhow::ensure!(
+        !def.alias.trim().is_empty(),
+        "model alias must not be blank"
+    );
     anyhow::ensure!(
         !catalog_backed || def.alias.len() <= MAX_MODEL_ALIAS_BYTES,
         "model alias exceeds the {MAX_MODEL_ALIAS_BYTES} byte catalog limit"
@@ -668,7 +671,7 @@ fn resolve_pin(def: &ModelDef) -> anyhow::Result<ResolvedModel> {
     speech::validate_config(def)?;
     transcription::validate_config(def)?;
     realtime::validate_config(def)?;
-    let no_auth = embedding_config::no_auth(def)?;
+    let no_auth = authentication::no_auth(def)?;
     if is_img
         && (!def.provider.eq_ignore_ascii_case("openai")
             || def.surface.is_some()
@@ -713,7 +716,7 @@ fn resolve_pin(def: &ModelDef) -> anyhow::Result<ResolvedModel> {
         def.surface.as_deref(),
         is_emb,
     )?;
-    routes[0].embeddings_no_auth = no_auth;
+    routes[0].upstream_no_auth = no_auth;
     for fb in &def.fallbacks {
         let fb_model = fb
             .upstream_model
@@ -807,7 +810,7 @@ fn build_dispatcher(
     // unary calls, so streams keep relying on idle-read.
     let providers = ProviderClient::new(http)
         .with_single_attempt_http(build_http()?)
-        .map_err(|e| anyhow::anyhow!("building the image HTTP client: {e}"))?
+        .map_err(|e| anyhow::anyhow!("building the single-attempt provider HTTP client: {e}"))?
         .with_unary_timeout(call_timeout);
     let dispatcher = LlmDispatcher::new(providers, credentials);
     // Wrap the env pins in a DB-backed resolver with an empty discovered layer.
@@ -860,7 +863,7 @@ fn resolved_from_catalog_row(row: &waygate_storage::LlmModelRow) -> Option<Resol
             path: row.path.clone(),
             upstream_model: row.upstream_model.clone(),
             protocol,
-            embeddings_no_auth: false,
+            upstream_no_auth: false,
             // Retain the legacy marker so invocation refuses unmigrated rows.
             openai_chatgpt: row.openai_chatgpt,
         },
@@ -2253,15 +2256,17 @@ mod tests {
     fn invalid_model_pins_preserve_valid_routes_and_catalog_rows() {
         let raw = r#"[
             {"alias":"","provider":"openai","base_url":"http://backend/v1","credential_label":"API"},
+            {"alias":"  ","provider":"openai","base_url":"http://backend/v1","credential_label":"API"},
             {"alias":"invalid-schema","provider":"openai","base_url":42},
-            {"alias":"invalid-chat","provider":"openai","base_url":"http://backend/v1","authentication":"none"},
+            {"alias":"invalid-chat","provider":"openai","base_url":"http://backend/v1","authentication":"invalid"},
             {"alias":"invalid-catalog","provider":"openai","base_url":"http://backend/v1","credential_label":"API","path":"chat/\u0000completions"},
             {"alias":"valid-chat","model":"openai:old-route","base_url":"http://legacy/v1","credential_label":"API"},
             {"alias":"valid-chat","model":"openai:chat-model","base_url":"http://backend ","credential_label":"API"},
-            {"alias":"valid-chat","model":"openai:alternate","base_url":"http://other/v1","authentication":"none"}
+            {"alias":"valid-chat","model":"openai:alternate","base_url":"http://other/v1","authentication":"invalid"}
         ]"#;
         let (pins, rows, rejected) = compile_pins(raw, true);
         assert!(rejected.contains(""));
+        assert!(rejected.contains("  "));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].alias, "valid-chat");
         assert_eq!(rows[0].upstream_model, "chat-model");
@@ -2448,7 +2453,7 @@ mod tests {
                         path: "chat/completions".into(),
                         upstream_model: (*a).into(),
                         protocol: UpstreamProtocol::OpenAiChat,
-                        embeddings_no_auth: false,
+                        upstream_no_auth: false,
                         openai_chatgpt: false,
                     },
                     operation: LlmOperation::Chat,

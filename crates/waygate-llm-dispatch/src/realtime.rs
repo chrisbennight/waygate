@@ -37,7 +37,7 @@ pub struct RealtimeCallSetup {
 }
 
 fn validate_route(route: &ResolvedRoute) -> Result<(), DispatchError> {
-    if route.openai_chatgpt || route.embeddings_no_auth {
+    if route.openai_chatgpt || route.upstream_no_auth {
         return Err(
             ProviderError::Protocol("Realtime requires a standard API-key route".into()).into(),
         );

@@ -29,7 +29,7 @@ fn speech_resolver(addr: SocketAddr) -> Arc<dyn LlmModelResolver> {
                 path: "audio/speech".into(),
                 upstream_model: "voice-model".into(),
                 protocol: UpstreamProtocol::OpenAiChat,
-                embeddings_no_auth: false,
+                upstream_no_auth: false,
                 openai_chatgpt: false,
             },
             fallbacks: vec![],

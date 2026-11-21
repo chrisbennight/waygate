@@ -16,7 +16,7 @@ fn image_resolver(addr: SocketAddr) -> Arc<dyn LlmModelResolver> {
                 path: "images".into(),
                 upstream_model: "gpt-image-2".into(),
                 protocol: UpstreamProtocol::OpenAiResponses,
-                embeddings_no_auth: false,
+                upstream_no_auth: false,
                 openai_chatgpt: false,
             },
             fallbacks: vec![],

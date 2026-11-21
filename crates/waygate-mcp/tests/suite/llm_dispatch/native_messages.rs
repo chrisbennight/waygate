@@ -115,7 +115,7 @@ fn openrouter_route(addr: SocketAddr) -> ResolvedRoute {
         path: "chat/completions".into(),
         upstream_model: "openrouter/served-x".into(),
         protocol: UpstreamProtocol::OpenAiChat,
-        embeddings_no_auth: false,
+        upstream_no_auth: false,
         openai_chatgpt: false,
     }
 }

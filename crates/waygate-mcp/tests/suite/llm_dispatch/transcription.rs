@@ -21,7 +21,7 @@ fn dependencies(addr: SocketAddr) -> (LlmDispatcher, Arc<dyn LlmModelResolver>) 
             path: "audio/transcriptions".into(),
             upstream_model: "provider-asr".into(),
             protocol: UpstreamProtocol::OpenAiChat,
-            embeddings_no_auth: false,
+            upstream_no_auth: false,
             openai_chatgpt: false,
         },
         fallbacks: vec![],

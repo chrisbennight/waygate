@@ -47,7 +47,7 @@ async fn api_tool_conversation_preserves_context_and_governance_through_invocati
                 path: "v1beta".into(),
                 upstream_model: "qualified-gemini".into(),
                 protocol: UpstreamProtocol::Gemini,
-                embeddings_no_auth: false,
+                upstream_no_auth: false,
                 openai_chatgpt: false,
             },
             fallbacks: vec![],

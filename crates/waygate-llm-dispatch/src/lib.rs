@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use serde_json::Value;
 
 use waygate_llm_credentials::{CredentialError, LlmCredentialStore, LlmProvider};
@@ -43,6 +43,7 @@ pub use resolver::{
 };
 use waygate_llm_providers::{
     ProviderAuth, ProviderClient, ProviderRequest, ProviderResponse, SseStream,
+    MAX_CHAT_RESPONSE_BYTES,
 };
 use waygate_llm_translate::{
     anthropic_to_canonical_response, canonical_response_to_openai_chat,
@@ -66,9 +67,9 @@ pub use waygate_llm_providers::{ProviderError, SseEvent, SseStream as ProviderSs
 /// (stubbed-for-now) model resolver; carries transport + identity, no policy.
 #[derive(Debug, Clone)]
 pub struct ResolvedRoute {
-    /// Explicit opt-in for an embedding backend without upstream authentication.
-    /// Other inference operations always require their configured credential.
-    pub embeddings_no_auth: bool,
+    /// Explicit opt-in for an OpenAI-compatible chat or embedding backend
+    /// that needs no upstream credential.
+    pub upstream_no_auth: bool,
     /// The provider that owns the credential.
     pub provider: LlmProvider,
     /// Which pooled credential label to use (`bearer(provider, label)`).
@@ -271,11 +272,13 @@ impl LlmDispatcher {
 
     /// Whether `route`'s credential is currently in failover cooldown.
     fn is_cooled(&self, route: &ResolvedRoute) -> bool {
-        self.cooldowns
-            .lock()
-            .expect("cooldown mutex poisoned")
-            .get(&(route.provider, route.credential_label.clone()))
-            .is_some_and(|cd| cd.until > Instant::now())
+        !route.upstream_no_auth
+            && self
+                .cooldowns
+                .lock()
+                .expect("cooldown mutex poisoned")
+                .get(&(route.provider, route.credential_label.clone()))
+                .is_some_and(|cd| cd.until > Instant::now())
     }
 
     /// Record a retryable failure for `route`'s credential: bump the consecutive
@@ -283,6 +286,9 @@ impl LlmDispatcher {
     /// exponential `COOLDOWN_BASE · 2^(failures-1)` capped at `COOLDOWN_MAX`, then
     /// raised to a provider `Retry-After` if it asked for longer.
     fn record_failure(&self, route: &ResolvedRoute, retry_after: Option<Duration>) {
+        if route.upstream_no_auth {
+            return;
+        }
         let now = Instant::now();
         let mut map = self.cooldowns.lock().expect("cooldown mutex poisoned");
         let cd = map
@@ -307,6 +313,9 @@ impl LlmDispatcher {
 
     /// Clear any cooldown for `route`'s credential after a success — it recovered.
     fn clear_cooldown(&self, route: &ResolvedRoute) {
+        if route.upstream_no_auth {
+            return;
+        }
         self.cooldowns
             .lock()
             .expect("cooldown mutex poisoned")
@@ -421,7 +430,7 @@ impl LlmDispatcher {
                         provider = route.provider.as_str(),
                         credential_label = %route.credential_label,
                         error = %e,
-                        "llm dispatch failed on a pool candidate; cooling it and failing over"
+                        "llm dispatch candidate failed with a retryable error"
                     );
                     last_err = Some(e);
                 }
@@ -432,6 +441,19 @@ impl LlmDispatcher {
         // `order` is non-empty (candidates always has the primary) and only
         // retryable failures fall through, so `last_err` is set.
         Err(last_err.expect("the candidate order is non-empty"))
+    }
+
+    async fn provider_key(
+        &self,
+        route: &ResolvedRoute,
+        auth: ProviderAuth,
+    ) -> Result<String, CredentialError> {
+        if auth == ProviderAuth::None {
+            return Ok(String::new());
+        }
+        self.credentials
+            .api_key(route.provider, &route.credential_label)
+            .await
     }
 
     /// Dispatch `req` to `route`: read the API key, render the provider body,
@@ -453,7 +475,11 @@ impl LlmDispatcher {
         let (body, auth, path) = match route.protocol {
             UpstreamProtocol::OpenAiChat => (
                 render_openai_chat(req, &route.upstream_model)?,
-                ProviderAuth::Bearer,
+                if route.upstream_no_auth {
+                    ProviderAuth::None
+                } else {
+                    ProviderAuth::Bearer
+                },
                 route.path.clone(),
             ),
             UpstreamProtocol::AnthropicMessages => {
@@ -492,10 +518,7 @@ impl LlmDispatcher {
             ),
         };
 
-        let bearer = self
-            .credentials
-            .api_key(route.provider, &route.credential_label)
-            .await?;
+        let bearer = self.provider_key(route, auth).await?;
         let record_base = InferenceRecord::new(
             route.provider,
             route.credential_label.as_str(),
@@ -505,26 +528,31 @@ impl LlmDispatcher {
         );
         let started = std::time::Instant::now();
 
-        let response = self
-            .providers
-            .send(ProviderRequest {
-                base_url: route.base_url.clone(),
-                path,
-                bearer,
-                auth,
-                body,
-                stream: req.stream,
-            })
-            .await
-            .inspect_err(|_| {
-                waygate_telemetry::metrics::record_llm_request_failure(
-                    route.provider.as_str(),
-                    &record_base.model_requested,
-                    record_base.provider_account_id.as_deref(),
-                    started.elapsed().as_secs_f64(),
-                    waygate_telemetry::metrics::LlmFailurePhase::Dispatch,
-                )
-            })?;
+        let request = ProviderRequest {
+            base_url: route.base_url.clone(),
+            path,
+            bearer,
+            auth,
+            body,
+            stream: req.stream,
+        };
+        let response = if auth == ProviderAuth::None {
+            self.providers
+                .send_once(request, MAX_CHAT_RESPONSE_BYTES)
+                .await
+                .map_err(credential_free_chat_error)
+        } else {
+            self.providers.send(request).await
+        }
+        .inspect_err(|_| {
+            waygate_telemetry::metrics::record_llm_request_failure(
+                route.provider.as_str(),
+                &record_base.model_requested,
+                record_base.provider_account_id.as_deref(),
+                started.elapsed().as_secs_f64(),
+                waygate_telemetry::metrics::LlmFailurePhase::Dispatch,
+            )
+        })?;
 
         Ok(match response {
             // A unary body from any supported protocol. The metadata record is
@@ -581,7 +609,11 @@ impl LlmDispatcher {
             }
             ProviderResponse::Stream(frames) => DispatchOutcome::Stream {
                 record_base,
-                frames,
+                frames: if auth == ProviderAuth::None {
+                    frames.map_err(credential_free_chat_error).boxed()
+                } else {
+                    frames
+                },
                 metadata: None,
             },
         })
@@ -673,7 +705,7 @@ impl LlmDispatcher {
     ///
     /// Only the OpenAI-compatible shape is supported. Authentication defaults to
     /// `Bearer`, resolved through the injected credential store (I4). Routes
-    /// explicitly configured with `embeddings_no_auth` skip credential lookup
+    /// explicitly configured with `upstream_no_auth` skip credential lookup
     /// and send no provider authorization header.
     pub async fn dispatch_embeddings(
         &self,
@@ -682,17 +714,12 @@ impl LlmDispatcher {
     ) -> Result<(InferenceRecord, Value), DispatchError> {
         ensure_api_route(route)?;
         let body = render_openai_embeddings(req, &route.upstream_model);
-        // I4: the bearer is injected and managed by the credential store.
-        let (bearer, auth) = if route.embeddings_no_auth {
-            (String::new(), ProviderAuth::None)
+        let auth = if route.upstream_no_auth {
+            ProviderAuth::None
         } else {
-            (
-                self.credentials
-                    .api_key(route.provider, &route.credential_label)
-                    .await?,
-                ProviderAuth::Bearer,
-            )
+            ProviderAuth::Bearer
         };
+        let bearer = self.provider_key(route, auth).await?;
         // `Surface::Embeddings` marks the durable usage row; the chat
         // `upstream_protocol` is a benign placeholder (inert on this path — it
         // only selects the chat stream translator, which embeddings never use).
@@ -772,7 +799,7 @@ impl LlmDispatcher {
                         provider = route.provider.as_str(),
                         credential_label = %route.credential_label,
                         status = ?e.provider_status(),
-                        "llm embeddings dispatch failed on a pool candidate; cooling it and failing over"
+                        "llm embeddings candidate failed with a retryable error"
                     );
                     last_err = Some(e);
                 }
@@ -783,6 +810,15 @@ impl LlmDispatcher {
         // `order` always has the primary, and only retryable failures fall
         // through, so `last_err` is set.
         Err(last_err.expect("the candidate order is non-empty"))
+    }
+}
+
+fn credential_free_chat_error(error: ProviderError) -> ProviderError {
+    match error {
+        ProviderError::Transport(_) => {
+            ProviderError::Transport("could not complete backend request".into())
+        }
+        other => other,
     }
 }
 
@@ -952,7 +988,7 @@ mod cooldown_tests {
             path: "p".into(),
             upstream_model: "m".into(),
             protocol: UpstreamProtocol::OpenAiChat,
-            embeddings_no_auth: false,
+            upstream_no_auth: false,
             openai_chatgpt: false,
         }
     }

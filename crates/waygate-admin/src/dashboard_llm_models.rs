@@ -357,7 +357,7 @@ mod tests {
                     path: row.path.clone(),
                     upstream_model: row.upstream_model.clone(),
                     protocol: UpstreamProtocol::AnthropicMessages,
-                    embeddings_no_auth: false,
+                    upstream_no_auth: false,
                     openai_chatgpt: false,
                 },
                 operation: LlmOperation::Chat,

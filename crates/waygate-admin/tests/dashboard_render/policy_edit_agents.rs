@@ -1120,7 +1120,7 @@ async fn agent_model_suggestions_only_include_chat_models() {
                     path: api.into(),
                     upstream_model: api.into(),
                     protocol: UpstreamProtocol::OpenAiChat,
-                    embeddings_no_auth: false,
+                    upstream_no_auth: false,
                     openai_chatgpt: false,
                 },
                 operation,

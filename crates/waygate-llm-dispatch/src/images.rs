@@ -24,7 +24,7 @@ impl LlmDispatcher {
         req: ImagesRequest,
         route: &ResolvedRoute,
     ) -> Result<(InferenceRecord, Value), DispatchError> {
-        if route.provider != LlmProvider::OpenAi || route.embeddings_no_auth {
+        if route.provider != LlmProvider::OpenAi || route.upstream_no_auth {
             return Err(ProviderError::Protocol(
                 "image route requires an authenticated OpenAI credential".into(),
             )
