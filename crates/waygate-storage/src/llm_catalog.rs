@@ -200,9 +200,8 @@ where
 /// string can exist under two providers with different rates (e.g. a model
 /// name served by both OpenAI directly and via OpenRouter), so the served
 /// lookup must match the call's resolved provider to avoid borrowing another
-/// provider's pricing. Exclude aliases rejected by the serving replica. Prefer
-/// enabled aliases and use retained rates when only a historical row matches.
-/// Within each group, choose by alias.
+/// provider's pricing. Exclude aliases rejected by the serving replica and use
+/// alias order as the tiebreaker for the remaining catalog rows.
 pub async fn get_llm_model_by_served<'e, E>(
     executor: E,
     tenant_id: &str,
@@ -223,7 +222,7 @@ where
           FROM llm_models
          WHERE tenant_id = $1 AND provider = $2 AND upstream_model = $3
            AND alias <> ALL($4)
-         ORDER BY enabled DESC, alias
+         ORDER BY alias
          LIMIT 1
         "#,
     )

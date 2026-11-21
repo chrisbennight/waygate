@@ -192,7 +192,15 @@ async fn load_llm_models(
 fn model_row(m: LlmModelRow, resolver: Option<&dyn LlmModelResolver>) -> ModelRow {
     let routable = resolver
         .and_then(|resolver| resolver.resolve(LLM_RESERVED_NAMESPACE, &m.alias))
-        .is_some_and(|model| !model.route.openai_chatgpt);
+        .is_some_and(|model| {
+            let route = model.route;
+            !route.openai_chatgpt
+                && route.provider.as_str() == m.provider
+                && route.upstream_model == m.upstream_model
+                && route.base_url == m.base_url
+                && route.path == m.path
+                && route.credential_label == m.credential_label
+        });
     let is_embeddings = m.upstream_api.eq_ignore_ascii_case("embeddings");
     let is_images = m.upstream_api.eq_ignore_ascii_case("images");
     let is_speech = m.upstream_api.eq_ignore_ascii_case("speech");
@@ -327,6 +335,41 @@ mod tests {
             !row.is_embeddings,
             "a `messages` (chat-family) row is not embeddings"
         );
+    }
+
+    #[test]
+    fn model_row_only_marks_the_displayed_backend_routable() {
+        use waygate_llm_credentials::LlmProvider;
+        use waygate_llm_dispatch::{
+            LlmOperation, ModelRisk, ResolvedModel, ResolvedRoute, StaticModelResolver,
+        };
+        use waygate_llm_translate::UpstreamProtocol;
+
+        let mut row = seeded_row();
+        let resolver = StaticModelResolver::new().with_model(
+            LLM_RESERVED_NAMESPACE,
+            row.alias.clone(),
+            ResolvedModel {
+                route: ResolvedRoute {
+                    provider: LlmProvider::Anthropic,
+                    credential_label: row.credential_label.clone(),
+                    base_url: row.base_url.clone(),
+                    path: row.path.clone(),
+                    upstream_model: row.upstream_model.clone(),
+                    protocol: UpstreamProtocol::AnthropicMessages,
+                    embeddings_no_auth: false,
+                    openai_chatgpt: false,
+                },
+                operation: LlmOperation::Chat,
+                fallbacks: Vec::new(),
+                risk: ModelRisk::Low,
+                ttfb: None,
+                cache_ttl: None,
+            },
+        );
+        assert!(model_row(row.clone(), Some(&resolver)).routable);
+        row.base_url = "https://replacement.invalid".into();
+        assert!(!model_row(row, Some(&resolver)).routable);
     }
 
     #[test]

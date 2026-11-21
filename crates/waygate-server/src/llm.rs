@@ -540,12 +540,13 @@ fn compile_pins(
             }
             Err((error, aliases)) => {
                 let diagnostic_alias = aliases
-                    .iter()
-                    .find(|alias| alias.len() <= MAX_MODEL_ALIAS_BYTES);
+                    .first()
+                    .map(|alias| alias.chars().take(256).collect::<String>());
                 tracing::error!(
                     setting = MODELS_ENV,
                     index,
                     alias = ?diagnostic_alias,
+                    alias_bytes = ?aliases.first().map(String::len),
                     %error,
                     "inference model configuration rejected"
                 );
@@ -561,6 +562,7 @@ fn compile_pin(
     mut def: ModelDef,
     catalog_backed: bool,
 ) -> anyhow::Result<(waygate_storage::LlmModelUpsert, ResolvedModel)> {
+    anyhow::ensure!(!def.alias.is_empty(), "model alias must not be empty");
     anyhow::ensure!(
         !catalog_backed || def.alias.len() <= MAX_MODEL_ALIAS_BYTES,
         "model alias exceeds the {MAX_MODEL_ALIAS_BYTES} byte catalog limit"
@@ -2250,6 +2252,7 @@ mod tests {
     #[test]
     fn invalid_model_pins_preserve_valid_routes_and_catalog_rows() {
         let raw = r#"[
+            {"alias":"","provider":"openai","base_url":"http://backend/v1","credential_label":"API"},
             {"alias":"invalid-schema","provider":"openai","base_url":42},
             {"alias":"invalid-chat","provider":"openai","base_url":"http://backend/v1","authentication":"none"},
             {"alias":"invalid-catalog","provider":"openai","base_url":"http://backend/v1","credential_label":"API","path":"chat/\u0000completions"},
@@ -2258,6 +2261,7 @@ mod tests {
             {"alias":"valid-chat","model":"openai:alternate","base_url":"http://other/v1","authentication":"none"}
         ]"#;
         let (pins, rows, rejected) = compile_pins(raw, true);
+        assert!(rejected.contains(""));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].alias, "valid-chat");
         assert_eq!(rows[0].upstream_model, "chat-model");
