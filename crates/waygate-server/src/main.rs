@@ -729,21 +729,8 @@ async fn gateway_main() -> anyhow::Result<()> {
         }
     };
     // A replica can dispatch its validated routes before its catalog writes.
-    // Pricing uses configured rows only after this replica publishes them.
-    let configured_aliases = model_catalog
-        .rows
-        .iter()
-        .map(|row| row.alias.clone())
-        .collect();
-    let catalog_published = Arc::new(std::sync::atomic::AtomicBool::new(false));
     if let Some(pool) = db_pool.as_ref() {
-        llm::publish_configured_catalog(
-            pool.clone(),
-            model_catalog.rows,
-            catalog_published.clone(),
-            ct.clone(),
-        )
-        .await;
+        llm::publish_configured_catalog(pool.clone(), model_catalog.rows.clone(), ct.clone()).await;
     }
     // The SAME in-process credential store the dispatcher resolves
     // bearers from, handed to the admin credential-status panel so it reads live
@@ -843,11 +830,8 @@ async fn gateway_main() -> anyhow::Result<()> {
     // identically regardless of entry point.
     let llm_usage_store: Option<waygate_mcp::SharedLlmUsage> = match (&db_pool, &llm_deps) {
         (Some(pool), Some(_)) => Some(Arc::new(
-            waygate_storage::PgLlmUsageSink::new(pool.clone()).with_local_catalog(
-                configured_aliases,
-                model_catalog.rejected_aliases,
-                catalog_published,
-            ),
+            waygate_storage::PgLlmUsageSink::new(pool.clone())
+                .with_local_catalog(model_catalog.rows, model_catalog.rejected_aliases),
         )),
         _ => None,
     };

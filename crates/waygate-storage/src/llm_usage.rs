@@ -12,10 +12,7 @@
 //! logged and dropped — a usage-ledger write must never fail a call the user
 //! already paid for.
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use rust_decimal::prelude::ToPrimitive;
@@ -24,7 +21,7 @@ use uuid::Uuid;
 
 use waygate_evidence::usage::{LlmUsageRecorder, LlmUsageRow};
 
-use crate::llm_catalog::{get_model_for_usage, CatalogPricingFilter, LlmModelRow};
+use crate::llm_catalog::{get_model_for_usage, CatalogPricingFilter, LlmModelRow, LlmModelUpsert};
 
 /// Where a usage row's cost came from (design §4.2). Stored as the
 /// `llm_usage.cost_source` string.
@@ -125,9 +122,8 @@ pub struct PgLlmUsageSink {
 }
 
 struct LocalCatalog {
-    configured_aliases: Vec<String>,
+    configured: HashMap<String, LlmModelUpsert>,
     rejected_aliases: Vec<String>,
-    published: Arc<AtomicBool>,
 }
 
 impl PgLlmUsageSink {
@@ -141,14 +137,15 @@ impl PgLlmUsageSink {
     #[must_use]
     pub fn with_local_catalog(
         mut self,
-        configured_aliases: Vec<String>,
+        configured: Vec<LlmModelUpsert>,
         rejected_aliases: Vec<String>,
-        published: Arc<AtomicBool>,
     ) -> Self {
         self.local_catalog = Some(Arc::new(LocalCatalog {
-            configured_aliases,
+            configured: configured
+                .into_iter()
+                .map(|pin| (pin.alias.clone(), pin))
+                .collect(),
             rejected_aliases,
-            published,
         }));
         self
     }
@@ -169,9 +166,8 @@ impl LlmUsageRecorder for PgLlmUsageSink {
             .local_catalog
             .as_ref()
             .map(|catalog| CatalogPricingFilter {
-                configured_aliases: &catalog.configured_aliases,
+                configured: &catalog.configured,
                 rejected_aliases: &catalog.rejected_aliases,
-                published: catalog.published.load(Ordering::Acquire),
             });
         let lookup = get_model_for_usage(
             &self.pool,

@@ -1011,10 +1011,8 @@ pub async fn seed_models(
 pub async fn publish_configured_catalog(
     pool: sqlx::PgPool,
     rows: Vec<waygate_storage::LlmModelUpsert>,
-    published: Arc<std::sync::atomic::AtomicBool>,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     if rows.is_empty() {
@@ -1024,7 +1022,6 @@ pub async fn publish_configured_catalog(
     // holding readiness or stopping configured routes and discovery.
     match tokio::time::timeout(Duration::from_secs(5), seed_models(&pool, &rows)).await {
         Ok(Ok(())) => {
-            published.store(true, Ordering::Release);
             tracing::info!(models = rows.len(), "published configured model catalog");
             return;
         }
@@ -1049,7 +1046,6 @@ pub async fn publish_configured_catalog(
             };
             match outcome {
                 Ok(()) => {
-                    published.store(true, Ordering::Release);
                     tracing::info!(models = rows.len(), "published configured model catalog");
                     return;
                 }
@@ -1173,25 +1169,14 @@ pub fn router(
         })
 }
 
-/// Project catalog rows into the OpenAI `GET /v1/models` list body
-/// (`{ "object": "list", "data": [...] }`). Each row becomes an OpenAI model
-/// object keyed by its client-facing `alias` (`id`), with the provider as
-/// `owned_by` and the catalog `created_at` as the unix `created` timestamp — the
-/// fields an OpenAI SDK reads off a models listing.
-fn models_list_json(rows: Vec<waygate_storage::LlmModelRow>) -> Value {
-    let data: Vec<Value> = rows
-        .into_iter()
-        .map(|m| {
-            json!({
-                "id": m.alias,
-                "object": "model",
-                "created": m.created_at.unix_timestamp(),
-                "owned_by": m.provider,
-                "modality": model_modality(&m.upstream_api),
-            })
-        })
-        .collect();
-    json!({ "object": "list", "data": data })
+fn model_list_entry(alias: &str, created: i64, provider: &str, upstream_api: &str) -> Value {
+    json!({
+        "id": alias,
+        "object": "model",
+        "created": created,
+        "owned_by": provider,
+        "modality": model_modality(upstream_api),
+    })
 }
 
 /// The `/v1/models` `modality` discriminator derived from a catalog row's
@@ -1253,7 +1238,7 @@ impl ModelKindFilter {
         })
     }
 
-    /// Whether a catalog row matches this filter, by its `upstream_api`.
+    /// Whether the local route's wire API matches this filter.
     fn matches(self, upstream_api: &str) -> bool {
         let is_emb = upstream_api.eq_ignore_ascii_case("embeddings");
         match self {
@@ -1274,8 +1259,8 @@ impl ModelKindFilter {
 }
 
 /// `GET /v1/models` — OpenAI-compatible model discovery. Lists the calling
-/// principal's tenant's **enabled** catalog models (the same store the admin
-/// `/llm_models` page reads), so an OpenAI SDK client can enumerate what it may
+/// principal's tenant's enabled catalog models and local default-tenant pins,
+/// so an OpenAI SDK client can enumerate what it may
 /// call — a combined listing of chat and embeddings models, each callable on its
 /// matching surface (chat/responses on `/v1/chat/completions` · `/v1/responses`,
 /// embeddings on `/v1/embeddings`). Each entry carries a `modality` field
@@ -1298,73 +1283,79 @@ async fn list_models(State(state): State<LlmRouterState>, req: Request) -> Respo
     .await
 }
 
-/// Build the `GET /v1/models` response for `tenant` from the catalog store:
-/// `None` (DB-less dev) ⇒ an empty list; a store read error ⇒ `503`; otherwise
-/// the tenant's enabled rows projected by [`models_list_json`]. Factored out of
-/// the handler so tenant-scoping, error mapping, and the OpenAI shape are
-/// unit-testable without constructing a full invocation service / HTTP request.
-///
-/// The rows are filtered to those `resolver` can currently resolve — i.e. models
-/// the inference plane can actually dispatch (each on its matching surface). The
-/// catalog is upsert-seeded from `GATEWAY_LLM_MODELS` and never auto-prunes a row
-/// dropped from the env config, so an enabled-but-orphaned alias can linger in
-/// the DB; without this filter the discovery endpoint would advertise a model the
-/// `/v1` routes would then reject as unknown. Once the catalog becomes the routing
-/// authority (the dynamic-resolver slice), every listed row resolves and the
-/// filter is a no-op.
+/// Use the tenant catalog for membership and timestamps. The local resolver
+/// decides whether an alias is callable and which API it currently serves.
+/// Default-tenant pins can appear before their catalog rows are published.
 async fn models_response(
     store: Option<&waygate_storage::SharedLlmModelCatalog>,
     tenant: &str,
     resolver: &dyn LlmModelResolver,
     type_filter: Option<ModelKindFilter>,
 ) -> Response {
+    let mut pins = if store.is_some() && tenant == waygate_core::TenantId::default().as_str() {
+        resolver.configured_aliases(LLM_SERVER)
+    } else {
+        Vec::new()
+    };
     let rows = match store {
         Some(store) => match store.list_models(tenant).await {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::error!(error = %e, tenant = %tenant, "GET /v1/models: list_models failed");
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "api_error",
-                    "the model catalog is temporarily unavailable",
-                );
+                if pins.is_empty() {
+                    return error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "api_error",
+                        "the model catalog is temporarily unavailable",
+                    );
+                }
+                Vec::new()
             }
         },
         None => Vec::new(),
     };
-    let rows: Vec<waygate_storage::LlmModelRow> = rows
+    let stored_aliases: HashSet<_> = rows.iter().map(|row| row.alias.clone()).collect();
+    pins.sort_unstable();
+    let entries = rows
         .into_iter()
-        .filter(|r| {
-            resolver
-                .resolve(LLM_SERVER, &r.alias)
-                .is_some_and(|model| !model.route.openai_chatgpt)
-        })
-        .filter(|r| match type_filter {
-            Some(f) => f.matches(&r.upstream_api),
-            None => true,
+        .map(|row| (row.alias, row.created_at.unix_timestamp()))
+        .chain(
+            pins.into_iter()
+                .filter(|alias| !stored_aliases.contains(alias))
+                .map(|alias| (alias, 0)),
+        );
+    let data: Vec<Value> = entries
+        .filter_map(|(alias, created)| {
+            let resolved = resolver.resolve(LLM_SERVER, &alias)?;
+            let upstream_api = resolved.upstream_api();
+            if resolved.route.openai_chatgpt
+                || type_filter.is_some_and(|f| !f.matches(upstream_api))
+            {
+                return None;
+            }
+            let mut model = model_list_entry(
+                &alias,
+                created,
+                resolved.route.provider.as_str(),
+                upstream_api,
+            );
+            let capabilities = match resolved.operation {
+                LlmOperation::Speech(caps) => Some(json!({"speech":caps})),
+                LlmOperation::Transcription(caps) => Some(json!({"transcription":caps})),
+                LlmOperation::Realtime(caps) => Some(json!({"realtime":caps})),
+                _ => None,
+            };
+            if let Some(capabilities) = capabilities {
+                model["capabilities"] = capabilities;
+            }
+            Some(model)
         })
         .collect();
-    let mut body = models_list_json(rows);
-    if let Some(models) = body.get_mut("data").and_then(Value::as_array_mut) {
-        for model in models {
-            if let Some(resolved) = model
-                .get("id")
-                .and_then(Value::as_str)
-                .and_then(|alias| resolver.resolve(LLM_SERVER, alias))
-            {
-                let capabilities = match resolved.operation {
-                    LlmOperation::Speech(caps) => Some(json!({"speech":caps})),
-                    LlmOperation::Transcription(caps) => Some(json!({"transcription":caps})),
-                    LlmOperation::Realtime(caps) => Some(json!({"realtime":caps})),
-                    _ => None,
-                };
-                if let Some(capabilities) = capabilities {
-                    model["capabilities"] = capabilities;
-                }
-            }
-        }
-    }
-    (StatusCode::OK, Json(body)).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "object": "list", "data": data })),
+    )
+        .into_response()
 }
 
 /// Chunk size for bounded response delivery.
@@ -2506,11 +2497,11 @@ mod tests {
         // The /v1/models body is a translation contract: an OpenAI client reads
         // `object: "list"` and each entry's `id`/`object`/`owned_by`/`created`,
         // plus the `modality` extension that distinguishes embeddings from chat.
-        let body = models_list_json(vec![
-            catalog_row("gpt-x", "openrouter"),
-            catalog_row("claude", "anthropic"),
-            embeddings_row("embed-3", "openrouter"),
-        ]);
+        let body = json!({"object": "list", "data": [
+            model_list_entry("gpt-x", 1_700_000_000, "openrouter", "chat_completions"),
+            model_list_entry("claude", 1_700_000_000, "anthropic", "messages"),
+            model_list_entry("embed-3", 1_700_000_000, "openrouter", "embeddings"),
+        ]});
         assert_eq!(body["object"], "list");
         let data = body["data"].as_array().expect("data is an array");
         assert_eq!(data.len(), 3);
@@ -2570,6 +2561,9 @@ mod tests {
             seen_tenant: std::sync::Mutex::new(None),
         });
         let resolver = test_resolver(&["gpt-x", "embed-y"]);
+        let mut embedding = resolver.resolve(LLM_SERVER, "embed-y").unwrap();
+        embedding.operation = LlmOperation::Embeddings;
+        let resolver = resolver.with_model(LLM_SERVER, "embed-y", embedding);
         let ids = |resp: Response| async {
             let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
                 .await

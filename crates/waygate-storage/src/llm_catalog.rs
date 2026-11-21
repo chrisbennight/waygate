@@ -15,7 +15,11 @@
 //! them on a pool or inside a transaction (the boot seeder upserts a
 //! batch in one transaction).
 
+use std::collections::HashMap;
+
+use futures::TryStreamExt;
 use rust_decimal::Decimal;
+use sqlx::{FromRow, Row};
 use time::OffsetDateTime;
 
 /// One catalog row, projected with the discovery + routing columns plus the
@@ -214,9 +218,8 @@ where
 }
 
 pub(crate) struct CatalogPricingFilter<'a> {
-    pub(crate) configured_aliases: &'a [String],
+    pub(crate) configured: &'a HashMap<String, LlmModelUpsert>,
     pub(crate) rejected_aliases: &'a [String],
-    pub(crate) published: bool,
 }
 
 pub(crate) async fn get_model_for_usage<'e, E>(
@@ -230,33 +233,22 @@ pub(crate) async fn get_model_for_usage<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let (configured, rejected, published) = match filter {
-        Some(filter) => (
-            Some(filter.configured_aliases),
-            filter.rejected_aliases,
-            filter.published,
-        ),
-        None => (None, &[][..], false),
-    };
-    sqlx::query_as::<_, LlmModelRow>(
+    let rejected = filter
+        .as_ref()
+        .map_or(&[][..], |scope| scope.rejected_aliases);
+    let mut candidates = sqlx::query(
         r#"
         SELECT tenant_id, alias, provider, credential_label, upstream_model,
                base_url, path, upstream_api, openai_chatgpt, risk, requires_approval,
                description, input_cost_per_mtok, output_cost_per_mtok,
                cached_read_cost_per_mtok, cache_write_cost_per_mtok, currency,
-               enabled, created_at, updated_at
+               enabled, created_at, updated_at, source
           FROM llm_models
          WHERE tenant_id = $1
-           AND (($3::text IS NULL AND alias = $4)
-             OR (provider = $2 AND upstream_model = $3))
+           AND (($3::text IS NULL AND alias = $4 AND (NOT $6 OR provider = $2))
+             OR (upstream_model = $3 AND provider = $2))
            AND alias <> ALL($5)
-           AND ($6::text[] IS NULL OR CASE WHEN $7 THEN
-               source <> 'config' OR alias = ANY($6)
-             ELSE
-               source <> 'config' AND alias <> ALL($6)
-             END)
          ORDER BY alias
-         LIMIT 1
         "#,
     )
     .bind(tenant_id)
@@ -264,10 +256,33 @@ where
     .bind(served)
     .bind(alias)
     .bind(rejected)
-    .bind(configured)
-    .bind(published)
-    .fetch_optional(executor)
-    .await
+    .bind(filter.is_some())
+    .fetch(executor);
+    while let Some(row) = candidates.try_next().await? {
+        let model = LlmModelRow::from_row(&row)?;
+        if let Some(scope) = &filter {
+            let discovered = row.try_get::<&str, _>("source")? == "discovered";
+            let matches_local_route = scope
+                .configured
+                .get(&model.alias)
+                .filter(|pin| pin.tenant_id == model.tenant_id)
+                .map_or(discovered, |pin| {
+                    model.provider == pin.provider
+                        && model.upstream_model == pin.upstream_model
+                        && model.base_url.trim_end_matches('/')
+                            == pin.base_url.trim_end_matches('/')
+                        && model.path == pin.path
+                        && model.upstream_api == pin.upstream_api
+                        && model.credential_label == pin.credential_label
+                        && model.openai_chatgpt == pin.openai_chatgpt
+                });
+            if !matches_local_route {
+                continue;
+            }
+        }
+        return Ok(Some(model));
+    }
+    Ok(None)
 }
 
 /// Admin-side read trait over the model catalog. Kept as a trait so the

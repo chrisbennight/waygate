@@ -646,9 +646,11 @@ through to a discovered route for that alias. The last valid entry wins for a
 repeated alias. Shared audio and WebRTC routes require an unambiguous model.
 Rejected pins leave existing catalog rows available for operator inspection.
 If the catalog is slow or unavailable, validated pins and discovery continue
-serving while Waygate retries catalog publication. A replica uses configured
-rates after it publishes the corresponding pins. Rejected and inactive pins
-cannot supply rates for the replica's inference requests.
+serving while Waygate retries catalog publication. The model listing uses the
+local route to determine the API and lists valid default-tenant pins before
+their catalog rows appear. A stored rate remains usable while the write waits
+if its route matches the local pin. Rejected pins and rows for a different
+backend cannot supply that pin's rates.
 If the setting is unreadable, Waygate logs the error and loads no pins. MCP
 and any independently configured model discovery can still start. With a database,
 model aliases are limited to 1,024 UTF-8 bytes to fit the catalog's primary key. The model
@@ -745,8 +747,8 @@ two fields at parse time, and is mutually exclusive with them.
   model to `/v1/chat/completions` (or a chat model to `/v1/embeddings`) is the
   surface/operation mismatch the pipeline rejects (§4.7). Each entry carries a
   **`modality`** field (`text->embedding`, `text->text`, `text+image->image`,
-  `text->audio`, `audio->text`, or `realtime-audio`, derived from the row's
-  `upstream_api`; a non-standard OpenAI field SDKs ignore), and the listing accepts
+  `text->audio`, `audio->text`, or `realtime-audio`, derived from the locally
+  resolved API), and the listing accepts
   **`?type=embeddings|chat|images|speech|transcription|realtime`** to filter to one
   kind — so a client discovers non-chat models as *distinct* from chat without
   probing each surface. The same operation distinction is projected into the

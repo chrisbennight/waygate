@@ -77,11 +77,15 @@ async fn stalled_catalog_recovers_without_losing_routes_or_mispricing_usage() {
     let backend = Router::new().route(
         "/v1/chat/completions",
         post(|Json(request): Json<Value>| async move {
-            Json(json!({
+            let mut response = json!({
                 "id": "chatcmpl-local", "model": request["model"],
                 "choices": [{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],
                 "usage": {"prompt_tokens":1000000,"completion_tokens":0}
-            }))
+            });
+            if request["messages"][0]["content"] == "omit upstream model" {
+                response.as_object_mut().unwrap().remove("model");
+            }
+            Json(response)
         }),
     );
     let backend_task = tokio::spawn(async move { axum::serve(provider, backend).await.unwrap() });
@@ -91,6 +95,8 @@ async fn stalled_catalog_recovers_without_losing_routes_or_mispricing_usage() {
     let rejected = format!("a-rejected-{suffix}");
     let historical = format!("a-historical-{suffix}");
     let discovered = format!("z-discovered-{suffix}");
+    let missing_pin = format!("z-new-pin-{suffix}");
+    let changed_kind = format!("z-changed-kind-{suffix}");
     let pinned_model = format!("pinned-model-{suffix}");
     let discovered_model = format!("discovered-model-{suffix}");
     for (alias, served, source, rate) in [
@@ -98,6 +104,7 @@ async fn stalled_catalog_recovers_without_losing_routes_or_mispricing_usage() {
         (&rejected, &pinned_model, "discovered", 70),
         (&historical, &discovered_model, "config", 90),
         (&discovered, &discovered_model, "discovered", 2),
+        (&changed_kind, &pinned_model, "config", 7),
     ] {
         sqlx::query(
             "INSERT INTO llm_models
@@ -129,7 +136,10 @@ async fn stalled_catalog_recovers_without_losing_routes_or_mispricing_usage() {
     let models = json!([
         {"alias": rejected, "provider": "openai", "base_url": provider_url, "authentication": "invalid"},
         {"alias": gated_pin, "provider": "openai", "upstream_model": pinned_model,
-         "base_url": provider_url, "credential_label": "TEST"}
+         "base_url": provider_url, "credential_label": "TEST"},
+        {"alias": missing_pin, "provider": "openai", "base_url": provider_url, "credential_label": "TEST"},
+        {"alias": changed_kind, "provider": "openai", "base_url": provider_url,
+         "credential_label": "TEST", "kind": "embeddings"},
     ])
     .to_string();
     let client = test_client();
@@ -137,11 +147,18 @@ async fn stalled_catalog_recovers_without_losing_routes_or_mispricing_usage() {
     let mut logs = BufReader::new(gateway.stdout.take().unwrap()).lines();
     wait_for_gateway(&mut gateway, &client, &base).await;
     assert_mcp_tool_works(&client, &base).await;
+    let chat_models = listed_models(&client, &base, "chat").await;
+    assert!(chat_models.iter().any(|model| model["id"] == missing_pin));
+    assert!(!chat_models.iter().any(|model| model["id"] == changed_kind));
+    let embeddings = listed_models(&client, &base, "embeddings").await;
+    assert!(embeddings
+        .iter()
+        .any(|model| model["id"] == changed_kind && model["modality"] == "text->embedding"));
     assert_eq!(
         chat(&client, &base, &gated_pin).await.status(),
         StatusCode::OK
     );
-    assert_eq!(usage_cost(&pool, &gated_pin).await, (None, 1));
+    assert_eq!(usage_cost(&pool, &gated_pin).await, (Some(7), 1));
     assert_eq!(
         chat(&client, &base, &discovered).await.status(),
         StatusCode::OK
@@ -163,6 +180,21 @@ async fn stalled_catalog_recovers_without_losing_routes_or_mispricing_usage() {
         StatusCode::OK
     );
     assert_eq!(usage_cost(&pool, &gated_pin).await, (Some(7), 2));
+    sqlx::query(
+        "UPDATE llm_models SET upstream_model = 'replacement', input_cost_per_mtok = 99
+                 WHERE tenant_id = 'default' AND alias = $1",
+    )
+    .bind(&gated_pin)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        chat_with_prompt(&client, &base, &gated_pin, "omit upstream model")
+            .await
+            .status(),
+        StatusCode::OK,
+    );
+    assert_eq!(usage_cost(&pool, &gated_pin).await, (None, 3));
     gateway.kill().await.unwrap();
 
     let (mut gateway, base, _servers) = start_gateway("[", Some((&database_url, &discovery)));
@@ -188,6 +220,8 @@ async fn stalled_catalog_recovers_without_losing_routes_or_mispricing_usage() {
                 rejected.as_str(),
                 historical.as_str(),
                 discovered.as_str(),
+                missing_pin.as_str(),
+                changed_kind.as_str(),
             ]
             .as_slice(),
         )
@@ -210,6 +244,22 @@ fn test_client() -> Client {
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap()
+}
+
+async fn listed_models(client: &Client, base: &str, kind: &str) -> Vec<Value> {
+    let mut url = reqwest::Url::parse(&format!("{base}/v1/models")).unwrap();
+    url.query_pairs_mut().append_pair("type", kind);
+    let body = client
+        .get(url)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    body["data"].as_array().unwrap().clone()
 }
 
 fn start_gateway(
@@ -271,9 +321,18 @@ async fn wait_for_gateway(gateway: &mut Child, client: &Client, base: &str) {
 }
 
 async fn chat(client: &Client, base: &str, alias: &str) -> reqwest::Response {
+    chat_with_prompt(client, base, alias, "hello").await
+}
+
+async fn chat_with_prompt(
+    client: &Client,
+    base: &str,
+    alias: &str,
+    prompt: &str,
+) -> reqwest::Response {
     client
         .post(format!("{base}/v1/chat/completions"))
-        .json(&json!({"model": alias, "messages":[{"role":"user","content":"hello"}]}))
+        .json(&json!({"model": alias, "messages":[{"role":"user","content":prompt}]}))
         .send()
         .await
         .unwrap()
