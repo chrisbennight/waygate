@@ -1,7 +1,7 @@
 //! Inference-plane composition + HTTP surface for `waygate-server`.
 //!
-//! - [`build_from_env`] reads the configured model catalog and builds the
-//!   [`LlmDispatcher`] + [`LlmModelResolver`] that the unified invocation
+//! - [`configured_models_from_env`] compiles the configured models.
+//!   [`build_from_pins`] attaches them to the dispatcher and resolver that the unified invocation
 //!   pipeline's LLM fast-path uses. Credentials are *injected* into the
 //!   container (Infisical) and read from the environment by the credential
 //!   store — the gateway is a pure consumer (invariant I4).
@@ -37,7 +37,7 @@ use waygate_llm_dispatch::{
     ResolvedRoute, StaticModelResolver,
 };
 use waygate_llm_providers::ProviderClient;
-use waygate_llm_translate::{EmbeddingsProtocol, UpstreamProtocol};
+use waygate_llm_translate::UpstreamProtocol;
 use waygate_mcp::SharedInvocation;
 
 /// Reserved server namespace for LLM models in the invocation pipeline. The
@@ -247,37 +247,6 @@ fn is_embeddings(def: &ModelDef) -> bool {
         .is_some_and(|k| k.eq_ignore_ascii_case("embeddings"))
 }
 
-/// The model's upstream wire API for the catalog's `upstream_api` column.
-/// An embeddings model is `embeddings`; otherwise the resolved
-/// [`UpstreamProtocol`]'s name: `surface: responses` → `responses`; else the
-/// provider's native shape (Anthropic → `messages`, Google → `generate_content`,
-/// OpenAI/OpenRouter → `chat_completions`). Mirrors the protocol/path
-/// [`routes_for_target`] resolves, so the catalog never disagrees with the live
-/// route (#395).
-fn upstream_api_for(def: &ModelDef) -> &'static str {
-    if is_realtime(def) {
-        return "realtime";
-    }
-    if is_speech(def) {
-        return "speech";
-    }
-    if is_transcription(def) {
-        return "transcription";
-    }
-    if is_images(def) {
-        return "images";
-    }
-    if is_embeddings(def) {
-        return EmbeddingsProtocol::OpenAi.wire_name();
-    }
-    let protocol = if wants_responses(def) {
-        UpstreamProtocol::OpenAiResponses
-    } else {
-        protocol_for(parse_provider(&def.provider).unwrap_or(LlmProvider::OpenAi))
-    };
-    protocol.wire_name()
-}
-
 /// Build the ordered `ResolvedRoute`s for one target group: its primary
 /// Apply an optional egress proxy (env `GATEWAY_LLM_EGRESS_PROXY`) to the LLM
 /// provider HTTP client builder, scoped to this client ONLY so it does not
@@ -409,40 +378,30 @@ fn default_path_for(provider: LlmProvider) -> String {
 /// `GATEWAY_LLM_MODELS`) still needs the dispatcher, resolver, credentials, and
 /// `/v1` routes so the refresher can populate the catalog and the discovered
 /// models become routable. `Ok(None)` only when neither is configured (MCP-only).
-pub fn build_from_env(
+pub fn build_from_pins(
+    pins: StaticModelResolver,
     call_timeout: Option<std::time::Duration>,
     discovery_configured: bool,
 ) -> anyhow::Result<Option<LlmDeps>> {
-    let defs = parse_model_defs()?.unwrap_or_default();
-    if defs.is_empty() && !discovery_configured {
+    if pins.is_empty() && !discovery_configured {
         return Ok(None);
     }
-    build_from_defs(defs, call_timeout)
+    build_dispatcher(pins, call_timeout).map(Some)
 }
 
-/// Parse the configured model catalog from `GATEWAY_LLM_MODELS`. `Ok(None)`
-/// when the var is unset or blank (the gateway runs MCP-only). Shared by
-/// [`build_from_env`] (which builds the routing resolver) and
-/// [`configured_model_rows`] (the boot seeder), so both see exactly the same
-/// catalog.
-fn parse_model_defs() -> anyhow::Result<Option<Vec<ModelDef>>> {
+/// Compile the route table once for dispatch and catalog publication.
+pub fn configured_models_from_env() -> anyhow::Result<StaticModelResolver> {
     let raw = match std::env::var(MODELS_ENV) {
         Ok(v) if !v.trim().is_empty() => v,
-        _ => return Ok(None),
+        _ => return Ok(StaticModelResolver::new()),
     };
-    let mut defs: Vec<ModelDef> = serde_json::from_str(&raw)
+    let defs = serde_json::from_str(&raw)
         .map_err(|e| anyhow::anyhow!("{MODELS_ENV} is not a valid JSON array of models: {e}"))?;
-    normalize_model_defs(&mut defs)?;
-    Ok(Some(defs))
+    compile_model_defs(defs)
 }
 
 /// Resolve each model's `model: "provider:upstream"` shorthand into the explicit
-/// `provider` + `upstream_model` fields, in place, BEFORE any consumer reads
-/// them. Both real consumers — the routing resolver ([`build_from_defs`]) and the
-/// catalog seeder ([`configured_model_rows`]) — flow through [`parse_model_defs`],
-/// so normalizing there is the single seam that keeps them seeing one catalog.
-/// Split out as a pure function over `&mut [ModelDef]` so the shorthand contract
-/// is unit-testable without touching the process environment.
+/// `provider` + `upstream_model` fields before compiling the routes.
 ///
 /// Rules, fail-closed (a malformed pin fails boot loudly rather than routing
 /// somewhere unintended):
@@ -501,14 +460,8 @@ fn normalize_model_defs(defs: &mut [ModelDef]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build the dispatcher + DB-backed resolver from the configured pins. `defs`
-/// MAY be empty (a discovery-only deployment): the pins layer is then empty and
-/// the discovery refresher fills the discovered layer. Always returns `Some` —
-/// the "no LLM path at all" decision lives in [`build_from_env`].
-fn build_from_defs(
-    defs: Vec<ModelDef>,
-    call_timeout: Option<std::time::Duration>,
-) -> anyhow::Result<Option<LlmDeps>> {
+fn compile_model_defs(mut defs: Vec<ModelDef>) -> anyhow::Result<StaticModelResolver> {
+    normalize_model_defs(&mut defs)?;
     let mut resolver = StaticModelResolver::new();
     anyhow::ensure!(
         defs.iter()
@@ -644,6 +597,13 @@ fn build_from_defs(
             },
         );
     }
+    Ok(resolver)
+}
+
+fn build_dispatcher(
+    pins: StaticModelResolver,
+    call_timeout: Option<std::time::Duration>,
+) -> anyhow::Result<LlmDeps> {
     // Only injected provider API keys are accepted. Scoped external rotation
     // may replace them; the process does not refresh consumer credentials.
     let credentials = Arc::new(
@@ -680,10 +640,17 @@ fn build_from_defs(
     let dispatcher = LlmDispatcher::new(providers, credentials);
     // Wrap the env pins in a DB-backed resolver with an empty discovered layer.
     // The boot loader fills it from the catalog (and the discovery refresher
-    // reloads it at runtime); with no discovered rows it resolves exactly like
-    // the bare pins, so this is behavior-preserving until discovery lands.
-    let resolver = Arc::new(DbModelResolver::new(resolver, HashMap::new(), LLM_SERVER));
-    Ok(Some((dispatcher, resolver)))
+    // reloads it at runtime).
+    let resolver = Arc::new(DbModelResolver::new(pins, HashMap::new(), LLM_SERVER));
+    Ok((dispatcher, resolver))
+}
+
+#[cfg(test)]
+fn build_from_defs(
+    defs: Vec<ModelDef>,
+    call_timeout: Option<std::time::Duration>,
+) -> anyhow::Result<Option<LlmDeps>> {
+    build_from_pins(compile_model_defs(defs)?, call_timeout, true)
 }
 
 /// Convert a catalog row into a routable [`ResolvedModel`] — a simple
@@ -787,54 +754,19 @@ pub async fn boot_load_discovered(
     Ok(n)
 }
 
-/// Map one configured [`ModelDef`] to its catalog upsert row for the boot
-/// seeder. Costing is absent from the env config — operators set it in the DB
-/// and the upsert preserves it on conflict — so it is left unset here. Provider
-/// and risk are normalized to the lowercase vocabulary the `llm_models` CHECK
-/// constraints accept. `upstream_api` records the model's real upstream wire API
-/// — the resolved `UpstreamProtocol` via [`upstream_api_for`]: `messages` for
-/// Anthropic, `generate_content` for Gemini, `responses` for
-/// `surface: responses`, `chat_completions` otherwise (#395).
-fn model_def_to_upsert(def: &ModelDef) -> waygate_storage::LlmModelUpsert {
-    let responses = wants_responses(def);
+fn configured_model_row(alias: &str, model: &ResolvedModel) -> waygate_storage::LlmModelUpsert {
+    let route = &model.route;
     waygate_storage::LlmModelUpsert {
         tenant_id: waygate_core::TenantId::default().as_str().to_owned(),
-        alias: def.alias.clone(),
-        provider: def.provider.to_ascii_lowercase(),
-        credential_label: def.credential_label.clone(),
-        upstream_model: def
-            .upstream_model
-            .clone()
-            .unwrap_or_else(|| def.alias.clone()),
-        base_url: def.base_url.clone(),
-        // Same default resolution as the route (build_from_defs): an embeddings
-        // model defaults to `embeddings`; a `surface: responses` entry to
-        // `responses`; otherwise an omitted path becomes `messages` for Anthropic,
-        // else `chat/completions`. Falls back to the OpenAI-chat path if the
-        // provider string doesn't parse (build_from_defs surfaces that as a hard
-        // error).
-        path: def.path.clone().unwrap_or_else(|| {
-            if is_realtime(def) {
-                "realtime".to_string()
-            } else if is_speech(def) {
-                "audio/speech".to_string()
-            } else if is_transcription(def) {
-                "audio/transcriptions".to_string()
-            } else if is_images(def) {
-                "images".to_string()
-            } else if is_embeddings(def) {
-                "embeddings".to_string()
-            } else if responses {
-                "responses".to_string()
-            } else {
-                parse_provider(&def.provider)
-                    .map(default_path_for)
-                    .unwrap_or_else(|_| "chat/completions".to_string())
-            }
-        }),
-        upstream_api: upstream_api_for(def).to_owned(),
-        openai_chatgpt: false,
-        risk: model_risk_str(parse_risk(def.risk.as_deref())).to_owned(),
+        alias: alias.to_owned(),
+        provider: route.provider.as_str().to_owned(),
+        credential_label: route.credential_label.clone(),
+        upstream_model: route.upstream_model.clone(),
+        base_url: route.base_url.clone(),
+        path: route.path.clone(),
+        upstream_api: model.upstream_api().to_owned(),
+        openai_chatgpt: route.openai_chatgpt,
+        risk: model_risk_str(model.risk).to_owned(),
         requires_approval: false,
         description: None,
         enabled: true,
@@ -851,16 +783,21 @@ fn model_risk_str(r: ModelRisk) -> &'static str {
     }
 }
 
-/// The configured models as catalog upsert rows. `Ok(vec![])` when none are
-/// configured. Re-parses `GATEWAY_LLM_MODELS` — already validated by
-/// `build_from_env` at boot — to keep the seeder decoupled from the resolver
-/// build.
-pub fn configured_model_rows() -> anyhow::Result<Vec<waygate_storage::LlmModelUpsert>> {
-    Ok(parse_model_defs()?
-        .unwrap_or_default()
-        .iter()
-        .map(model_def_to_upsert)
-        .collect())
+/// Project only the effective configured routes. Sort by alias so replicas
+/// write catalog rows in the same order.
+pub fn configured_model_rows(pins: &StaticModelResolver) -> Vec<waygate_storage::LlmModelUpsert> {
+    let mut rows: Vec<_> = pins
+        .models_for(LLM_SERVER)
+        .map(|(alias, model)| configured_model_row(alias, model))
+        .collect();
+    rows.sort_unstable_by(|left, right| left.alias.cmp(&right.alias));
+    rows
+}
+
+#[cfg(test)]
+fn model_def_to_upsert(def: &ModelDef) -> waygate_storage::LlmModelUpsert {
+    let pins = compile_model_defs(vec![def.clone()]).unwrap();
+    configured_model_rows(&pins).pop().unwrap()
 }
 
 /// Seed the configured models into `llm_models`. Idempotent: each
@@ -1898,7 +1835,7 @@ mod tests {
         // A discovery-only deployment has no env pins: build_from_defs must still
         // produce the dispatcher + resolver (so the refresher can populate it and
         // /v1 can route), with an empty resolver until discovery runs. The
-        // "no LLM path at all" decision lives in build_from_env, not here.
+        // build_from_pins applies the deployment's discovery setting.
         let (_dispatcher, resolver) = build_from_defs(vec![], None)
             .unwrap()
             .expect("deps are built even with no pins");
@@ -1906,6 +1843,39 @@ mod tests {
             resolver.resolve(LLM_SERVER, "anything").is_none(),
             "the resolver is empty until discovery fills it"
         );
+    }
+
+    #[test]
+    fn configured_catalog_projects_the_effective_routes() {
+        let defs = serde_json::from_value(json!([
+            {"alias":"model", "provider":"openrouter", "credential_label":"OLD",
+             "base_url":"https://old.example.invalid/v1", "surface":"responses"},
+            {"alias":"other", "model":"anthropic:messages-model", "credential_label":"API",
+             "base_url":"https://messages.example.invalid/v1"},
+            {"alias":"model", "model":"openai:local-model", "authentication":"none",
+             "base_url":"http://local.example.invalid/v1", "path":"completions", "risk":"medium"}
+        ]))
+        .unwrap();
+        let pins = compile_model_defs(defs).unwrap();
+        let rows = configured_model_rows(&pins);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.alias.as_str())
+                .collect::<Vec<_>>(),
+            ["model", "other"]
+        );
+        let resolved = pins.resolve(LLM_SERVER, "model").unwrap();
+        assert!(resolved.route.upstream_no_auth);
+        let row = &rows[0];
+        assert_eq!(row.provider, "openai");
+        assert_eq!(row.upstream_model, "local-model");
+        assert_eq!(row.base_url, "http://local.example.invalid/v1");
+        assert_eq!(row.path, "completions");
+        assert_eq!(row.upstream_api, "chat_completions");
+        assert_eq!(row.risk, "medium");
+        assert!(row.credential_label.is_empty());
+        assert_eq!(rows[1].path, "messages");
+        assert_eq!(rows[1].upstream_api, "messages");
     }
 
     #[test]

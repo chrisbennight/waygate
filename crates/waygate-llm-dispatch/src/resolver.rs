@@ -83,6 +83,20 @@ pub struct ResolvedModel {
 }
 
 impl ResolvedModel {
+    /// Wire API of the primary route for discovery and catalog metadata.
+    pub fn upstream_api(&self) -> &'static str {
+        match &self.operation {
+            LlmOperation::Chat => self.route.protocol.wire_name(),
+            LlmOperation::Embeddings => {
+                waygate_llm_translate::EmbeddingsProtocol::OpenAi.wire_name()
+            }
+            LlmOperation::Images => "images",
+            LlmOperation::Speech(_) => "speech",
+            LlmOperation::Transcription(_) => "transcription",
+            LlmOperation::Realtime(_) => "realtime",
+        }
+    }
+
     /// Resource operations use the same configured provider and model gates.
     pub fn audio_resource_operations(&self) -> &[waygate_core::audio::AudioResourceOperation] {
         match &self.operation {
@@ -145,6 +159,16 @@ impl StaticModelResolver {
     /// fast-path entirely when no models are configured).
     pub fn is_empty(&self) -> bool {
         self.models.is_empty()
+    }
+
+    /// Iterate over the effective models in one namespace.
+    pub fn models_for<'a>(
+        &'a self,
+        server: &'a str,
+    ) -> impl Iterator<Item = (&'a str, &'a ResolvedModel)> + 'a {
+        self.models.iter().filter_map(move |((key, alias), model)| {
+            (key == server).then_some((alias.as_str(), model))
+        })
     }
 }
 
