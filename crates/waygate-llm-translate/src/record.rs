@@ -77,6 +77,9 @@ pub struct InferenceRecord {
     pub provider_account_id: Option<String>,
     /// What the client asked for (alias).
     pub model_requested: String,
+    /// Local request destination. Used for costing and kept out of export.
+    #[serde(skip)]
+    pub backend: Option<waygate_core::ModelBackend>,
     /// What the upstream actually ran — can differ from `model_requested`
     /// (aliasing, fallback, OpenRouter auto-routing). `None` if unreported.
     pub model_served: Option<String>,
@@ -122,6 +125,7 @@ impl InferenceRecord {
             credential_label: credential_label.into(),
             provider_account_id: None,
             model_requested: model_requested.into(),
+            backend: None,
             model_served: None,
             inbound_surface,
             upstream_protocol,

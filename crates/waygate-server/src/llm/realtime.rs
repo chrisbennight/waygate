@@ -317,8 +317,12 @@ pub(super) async fn hangup(
 mod tests {
     use super::*;
 
+    fn definition(alias: &str, webrtc: bool) -> Value {
+        json!({"alias":alias,"provider":"openai","credential_label":"TEST","base_url":"http://provider.invalid/v1","kind":"realtime","realtime":{"websocket":true,"webrtc":webrtc,"voices":["narrator"]}})
+    }
+
     fn config() -> ModelDef {
-        serde_json::from_value(json!({"alias":"live","provider":"openai","credential_label":"TEST","base_url":"http://provider.invalid/v1","kind":"realtime","realtime":{"websocket":true,"webrtc":true,"voices":["narrator"]}})).unwrap()
+        serde_json::from_value(definition("live", true)).unwrap()
     }
 
     #[test]
@@ -338,11 +342,23 @@ mod tests {
         assert_eq!(row.path, "realtime");
         assert!(ModelKindFilter::Realtime.matches(&row.upstream_api));
         assert!(!ModelKindFilter::Chat.matches(&row.upstream_api));
-        let mut second = def.clone();
-        second.alias = "other".into();
-        assert!(build_from_defs(vec![def.clone(), second.clone()], None).is_err());
-        second.realtime.as_mut().unwrap().webrtc = false;
-        assert!(build_from_defs(vec![def.clone(), second], None).is_ok());
+        let (multiple, _, rejected) = compile_pins(
+            &json!([definition("live", true), definition("other", true)]).to_string(),
+            true,
+        );
+        assert!(rejected.is_empty());
+        assert!(multiple.realtime_call_model(LLM_SERVER).is_none());
+        assert!(multiple.resolve(LLM_SERVER, "live").is_some());
+        assert!(multiple.resolve(LLM_SERVER, "other").is_some());
+
+        let (single, _, _) = compile_pins(
+            &json!([definition("live", true), definition("other", false)]).to_string(),
+            true,
+        );
+        assert_eq!(
+            single.realtime_call_model(LLM_SERVER).as_deref(),
+            Some("live")
+        );
         for extra in [
             json!({"realtime":null}),
             json!({"cache_ttl_ms":1}),

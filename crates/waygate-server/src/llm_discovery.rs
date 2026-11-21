@@ -7,6 +7,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::collections::HashSet;
+
 use serde::Deserialize;
 use waygate_llm_credentials::LlmCredentialStore;
 use waygate_llm_discovery::{
@@ -139,6 +141,7 @@ async fn refresh_target(
     http: &reqwest::Client,
     credentials: &LlmCredentialStore,
     pool: &sqlx::PgPool,
+    pinned_aliases: &HashSet<String>,
 ) -> anyhow::Result<usize> {
     let provider = crate::llm::parse_provider(&target.provider)?;
     let surface = DiscoverySurface::for_provider(&target.provider);
@@ -261,9 +264,19 @@ async fn refresh_target(
     // become routable on the resolver reload.
     let tenant = waygate_core::TenantId::default();
     let mut tx = pool.begin().await?;
+    // A catalog writer in another process may hold a conflicting row lock.
+    // Keep this target's last-good state and let the other targets proceed.
+    sqlx::query("SET LOCAL lock_timeout = '2s'")
+        .execute(&mut *tx)
+        .await?;
     let mut seen = Vec::with_capacity(models.len());
+    seen.extend(pinned_aliases.iter().cloned());
+    let mut upserted = 0;
     for m in &models {
         let alias = discovered_alias(&target.provider, &m.id);
+        if pinned_aliases.contains(&alias) {
+            continue;
+        }
         // Per-model routing: an embeddings row speaks the embeddings surface
         // (`upstream_api = embeddings`, path `embeddings` → the resolver's
         // `LlmOperation::Embeddings`, dispatched to `/v1/embeddings`); every other
@@ -298,6 +311,7 @@ async fn refresh_target(
         };
         waygate_storage::upsert_discovered_llm_model(&mut *tx, &upsert).await?;
         seen.push(alias);
+        upserted += 1;
     }
     // Skip reconcile when the listing was incomplete (a best-effort sub-listing
     // failed): soft-disabling here would clear the operation whose listing failed.
@@ -311,11 +325,11 @@ async fn refresh_target(
     tx.commit().await?;
     tracing::info!(
         provider = %target.provider,
-        discovered = models.len(),
+        discovered = upserted,
         soft_disabled,
         "discovery cycle complete"
     );
-    Ok(models.len())
+    Ok(upserted)
 }
 
 /// Run one cycle across all targets (each fail-open), then reload the resolver's
@@ -328,8 +342,9 @@ async fn run_cycle(
     pool: &sqlx::PgPool,
     resolver: &DbModelResolver,
 ) {
+    let pinned_aliases = resolver.reserved_config_aliases();
     for target in targets {
-        if let Err(e) = refresh_target(target, http, credentials, pool).await {
+        if let Err(e) = refresh_target(target, http, credentials, pool, &pinned_aliases).await {
             tracing::warn!(
                 provider = %target.provider,
                 error = %e,
@@ -430,9 +445,15 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
-        let error = refresh_target(&target, &raw_test_http_client(), &credentials, &pool)
-            .await
-            .unwrap_err();
+        let error = refresh_target(
+            &target,
+            &raw_test_http_client(),
+            &credentials,
+            &pool,
+            &HashSet::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(error
             .to_string()
             .contains("requires non-empty generate_content_models"));
@@ -463,9 +484,15 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
-        let error = refresh_target(&target, &raw_test_http_client(), &credentials, &pool)
-            .await
-            .unwrap_err();
+        let error = refresh_target(
+            &target,
+            &raw_test_http_client(),
+            &credentials,
+            &pool,
+            &HashSet::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(error
             .to_string()
             .contains("requires non-empty responses_models"));
@@ -611,7 +638,7 @@ mod tests {
             "LLM_CRED_OPENAI_API".into(),
             r#"{"api_key":"synthetic-api-key"}"#.into(),
         )]);
-        let target = DiscoveryTarget {
+        let mut target = DiscoveryTarget {
             provider: "openai".into(),
             credential_label: "API".into(),
             base_url,
@@ -620,7 +647,7 @@ mod tests {
         };
         let http = raw_test_http_client();
         assert_eq!(
-            refresh_target(&target, &http, &credentials, &pool)
+            refresh_target(&target, &http, &credentials, &pool, &HashSet::new())
                 .await
                 .unwrap(),
             1
@@ -634,19 +661,47 @@ mod tests {
         assert!(!row.openai_chatgpt);
         assert!(row.input_cost_per_mtok.is_none());
         assert_eq!(row.credential_label, "API");
+
+        let second_id = format!("api-{}", uuid::Uuid::now_v7().simple());
+        let second_alias = discovered_alias("openai", &second_id);
+        target.responses_models.push(second_id.clone());
+        *body.lock().unwrap() = body_with(&[&id, &second_id]);
+        let mut lock = pool.begin().await.unwrap();
+        sqlx::query("SELECT alias FROM llm_models WHERE tenant_id=$1 AND alias=$2 FOR UPDATE")
+            .bind(&tenant)
+            .bind(&alias)
+            .execute(&mut *lock)
+            .await
+            .unwrap();
+        let resolver = DbModelResolver::new(
+            Default::default(),
+            Default::default(),
+            crate::llm::LLM_SERVER,
+        )
+        .with_rejected_pins(HashSet::from([alias.clone()]));
+        let pinned = resolver.reserved_config_aliases();
+        assert_eq!(
+            refresh_target(&target, &http, &credentials, &pool, &pinned)
+                .await
+                .unwrap(),
+            1,
+        );
+        assert!(present_upstream(&pool, &tenant, &second_alias).await);
+        lock.commit().await.unwrap();
+
         *body.lock().unwrap() = r#"{"data":[]}"#.into();
-        refresh_target(&target, &http, &credentials, &pool)
+        refresh_target(&target, &http, &credentials, &pool, &HashSet::new())
             .await
             .unwrap();
         assert!(present_upstream(&pool, &tenant, &alias).await);
         *body.lock().unwrap() = body_with(&["gpt-image-2"]);
-        refresh_target(&target, &http, &credentials, &pool)
+        refresh_target(&target, &http, &credentials, &pool, &HashSet::new())
             .await
             .unwrap();
         assert!(!present_upstream(&pool, &tenant, &alias).await);
-        sqlx::query("DELETE FROM llm_models WHERE tenant_id=$1 AND alias=$2")
+        sqlx::query("DELETE FROM llm_models WHERE tenant_id=$1 AND alias = ANY($2)")
             .bind(&tenant)
-            .bind(&alias)
+            .bind(&[alias, second_alias])
             .execute(&pool)
             .await
             .unwrap();
@@ -696,7 +751,7 @@ mod tests {
         };
         let http = raw_test_http_client();
         assert_eq!(
-            refresh_target(&target, &http, &credentials, &pool)
+            refresh_target(&target, &http, &credentials, &pool, &HashSet::new())
                 .await
                 .unwrap(),
             1
@@ -719,12 +774,14 @@ mod tests {
         );
         *body.lock().unwrap() =
             serde_json::json!({"models":[{"name":format!("models/{id}")}]}).to_string();
-        assert!(refresh_target(&target, &http, &credentials, &pool)
-            .await
-            .is_err());
+        assert!(
+            refresh_target(&target, &http, &credentials, &pool, &HashSet::new())
+                .await
+                .is_err()
+        );
         assert!(present_upstream(&pool, &tenant, &alias).await);
         *body.lock().unwrap()=serde_json::json!({"models":[{"name":format!("models/{id}"),"supportedGenerationMethods":["embedContent"]}]}).to_string();
-        refresh_target(&target, &http, &credentials, &pool)
+        refresh_target(&target, &http, &credentials, &pool, &HashSet::new())
             .await
             .unwrap();
         assert!(!present_upstream(&pool, &tenant, &alias).await);
@@ -775,7 +832,7 @@ mod tests {
         };
 
         // Cycle 1: both models discovered, priced, present.
-        let n = refresh_target(&target, &http, &credentials, &pool)
+        let n = refresh_target(&target, &http, &credentials, &pool, &HashSet::new())
             .await
             .expect("cycle 1");
         assert_eq!(n, 2);
@@ -801,7 +858,7 @@ mod tests {
 
         // Cycle 2: m2 disappears from the listing → soft-disabled, m1 stays.
         *body.lock().unwrap() = body_with(&[&m1]);
-        refresh_target(&target, &http, &credentials, &pool)
+        refresh_target(&target, &http, &credentials, &pool, &HashSet::new())
             .await
             .expect("cycle 2");
         assert!(
@@ -815,7 +872,7 @@ mod tests {
 
         // Cycle 3: an empty listing must NOT reconcile (fail-open) — m1 stays present.
         *body.lock().unwrap() = r#"{"data":[]}"#.to_string();
-        let n3 = refresh_target(&target, &http, &credentials, &pool)
+        let n3 = refresh_target(&target, &http, &credentials, &pool, &HashSet::new())
             .await
             .expect("cycle 3");
         assert_eq!(n3, 0);
@@ -921,7 +978,7 @@ mod tests {
         let emb_alias = discovered_alias("openrouter", &emb_id);
 
         // Cycle 1: a chat model and an embeddings model discovered in one cycle.
-        let n = refresh_target(&target, &http, &credentials, &pool)
+        let n = refresh_target(&target, &http, &credentials, &pool, &HashSet::new())
             .await
             .expect("cycle 1");
         assert_eq!(n, 2, "both the chat and embeddings models are discovered");
@@ -982,7 +1039,7 @@ mod tests {
         // so the previously-discovered embeddings row stays present — a partial
         // embeddings failure must never soft-disable last-good embeddings models.
         *emb_body.lock().unwrap() = "__FAIL__".to_string();
-        refresh_target(&target, &http, &credentials, &pool)
+        refresh_target(&target, &http, &credentials, &pool, &HashSet::new())
             .await
             .expect("cycle 2 (embeddings listing fails)");
         assert!(
@@ -1001,7 +1058,7 @@ mod tests {
         // so this cycle isolates the chat-empty condition.
         *chat_body.lock().unwrap() = r#"{"data":[]}"#.to_string();
         *emb_body.lock().unwrap() = body_with(&[&emb_id]);
-        refresh_target(&target, &http, &credentials, &pool)
+        refresh_target(&target, &http, &credentials, &pool, &HashSet::new())
             .await
             .expect("cycle 2b (chat listing empty)");
         assert!(
@@ -1016,7 +1073,7 @@ mod tests {
         // stays. Proves reconcile acts on embeddings rows too, scoped to the
         // provider, without disturbing chat.
         *emb_body.lock().unwrap() = r#"{"data":[]}"#.to_string();
-        refresh_target(&target, &http, &credentials, &pool)
+        refresh_target(&target, &http, &credentials, &pool, &HashSet::new())
             .await
             .expect("cycle 3");
         assert!(

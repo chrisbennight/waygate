@@ -5,7 +5,7 @@
 //! when replacement material is invalid.
 
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, ffi::OsString, sync::Arc};
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -86,6 +86,8 @@ pub enum CredentialConfigError {
     },
     #[error("consumer OAuth setting {name} is no longer supported; remove it and configure provider API credentials")]
     RemovedOAuthSetting { name: String },
+    #[error("inference credential setting {name} is not valid UTF-8")]
+    NotUnicode { name: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -166,7 +168,26 @@ pub struct LlmCredentialStore {
 
 impl LlmCredentialStore {
     pub fn from_env() -> Result<Self, CredentialConfigError> {
-        Self::try_from_vars(std::env::vars())
+        Self::try_from_os_vars(std::env::vars_os())
+    }
+
+    fn try_from_os_vars(
+        vars: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> Result<Self, CredentialConfigError> {
+        let settings = vars
+            .into_iter()
+            .filter_map(|(name, value)| {
+                let name = name.into_string().ok()?;
+                if parse_env_key(&name).is_none() && !name.starts_with("LLM_OAUTH_") {
+                    return None;
+                }
+                Some(match value.into_string() {
+                    Ok(value) => Ok((name, value)),
+                    Err(_) => Err(CredentialConfigError::NotUnicode { name }),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::try_from_vars(settings)
     }
 
     /// Convenience constructor for explicit valid fixture configuration.
@@ -281,6 +302,27 @@ impl LlmCredentialStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_environment_is_scoped_to_credential_settings() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let invalid = OsString::from_vec(vec![0xff]);
+        let settings = [
+            ("GATEWAY_LLM_MODELS".into(), invalid.clone()),
+            (
+                "LLM_CRED_OPENAI_TEST".into(),
+                r#"{"api_key":"synthetic"}"#.into(),
+            ),
+        ];
+        let store = LlmCredentialStore::try_from_os_vars(settings).unwrap();
+        assert_eq!(store.labels(LlmProvider::OpenAi), ["TEST"]);
+        assert!(matches!(
+            LlmCredentialStore::try_from_os_vars([("LLM_CRED_OPENAI_TEST".into(), invalid)]),
+            Err(CredentialConfigError::NotUnicode { name }) if name == "LLM_CRED_OPENAI_TEST"
+        ));
+    }
 
     #[test]
     fn persisted_identifiers_and_configuration_aliases_remain_distinct() {

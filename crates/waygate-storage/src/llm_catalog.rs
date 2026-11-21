@@ -15,7 +15,11 @@
 //! them on a pool or inside a transaction (the boot seeder upserts a
 //! batch in one transaction).
 
+use std::collections::HashMap;
+
+use futures::TryStreamExt;
 use rust_decimal::Decimal;
+use sqlx::{FromRow, Row};
 use time::OffsetDateTime;
 
 /// One catalog row, projected with the discovery + routing columns plus the
@@ -200,11 +204,7 @@ where
 /// string can exist under two providers with different rates (e.g. a model
 /// name served by both OpenAI directly and via OpenRouter), so the served
 /// lookup must match the call's resolved provider to avoid borrowing another
-/// provider's pricing. Returns `None` when no configured model routes to
-/// `served` on that provider (then cost is `Unknown`). `ORDER BY alias LIMIT 1`
-/// is a deterministic tiebreak if several aliases share one
-/// `(provider, upstream_model)` — their costing prices the same model and
-/// should agree.
+/// provider's pricing. Use alias order as the tiebreaker for matching rows.
 pub async fn get_llm_model_by_served<'e, E>(
     executor: E,
     tenant_id: &str,
@@ -214,24 +214,90 @@ pub async fn get_llm_model_by_served<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    sqlx::query_as::<_, LlmModelRow>(
+    get_model_for_usage(executor, tenant_id, provider, Some(served), "", None, None).await
+}
+
+pub(crate) struct CatalogPricingFilter<'a> {
+    pub(crate) configured: &'a HashMap<String, LlmModelUpsert>,
+    pub(crate) rejected_aliases: &'a [String],
+}
+
+pub(crate) async fn get_model_for_usage<'e, E>(
+    executor: E,
+    tenant_id: &str,
+    provider: &str,
+    served: Option<&str>,
+    alias: &str,
+    backend: Option<&waygate_core::ModelBackend>,
+    filter: Option<CatalogPricingFilter<'_>>,
+) -> Result<Option<LlmModelRow>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let rejected = filter
+        .as_ref()
+        .map_or(&[][..], |scope| scope.rejected_aliases);
+    let priced_model = served.or_else(|| backend.map(|route| route.upstream_model.as_str()));
+    let mut candidates = sqlx::query(
         r#"
         SELECT tenant_id, alias, provider, credential_label, upstream_model,
                base_url, path, upstream_api, openai_chatgpt, risk, requires_approval,
                description, input_cost_per_mtok, output_cost_per_mtok,
                cached_read_cost_per_mtok, cache_write_cost_per_mtok, currency,
-               enabled, created_at, updated_at
+               enabled, created_at, updated_at, source
           FROM llm_models
-         WHERE tenant_id = $1 AND provider = $2 AND upstream_model = $3
-         ORDER BY alias
-         LIMIT 1
+         WHERE tenant_id = $1
+           AND (($3::text IS NULL AND alias = $4 AND (NOT $6 OR provider = $2))
+             OR (upstream_model = $3 AND provider = $2))
+           AND alias <> ALL($5)
+         ORDER BY (alias = $4) DESC, alias
         "#,
     )
     .bind(tenant_id)
     .bind(provider)
-    .bind(served)
-    .fetch_optional(executor)
-    .await
+    .bind(priced_model)
+    .bind(alias)
+    .bind(rejected)
+    .bind(filter.is_some())
+    .fetch(executor);
+    while let Some(row) = candidates.try_next().await? {
+        let model = LlmModelRow::from_row(&row)?;
+        if backend.is_some_and(|route| {
+            !waygate_core::model_endpoints_match(
+                &route.base_url,
+                &route.path,
+                &model.base_url,
+                &model.path,
+            )
+        }) {
+            continue;
+        }
+        if let Some(scope) = &filter {
+            let discovered = row.try_get::<&str, _>("source")? == "discovered";
+            let matches_local_route =
+                scope
+                    .configured
+                    .get(&model.alias)
+                    .map_or(discovered, |pin| {
+                        model.provider == pin.provider
+                            && model.upstream_model == pin.upstream_model
+                            && waygate_core::model_endpoints_match(
+                                &model.base_url,
+                                &model.path,
+                                &pin.base_url,
+                                &pin.path,
+                            )
+                            && model.upstream_api == pin.upstream_api
+                            && model.credential_label == pin.credential_label
+                            && model.openai_chatgpt == pin.openai_chatgpt
+                    });
+            if !matches_local_route {
+                continue;
+            }
+        }
+        return Ok(Some(model));
+    }
+    Ok(None)
 }
 
 /// Admin-side read trait over the model catalog. Kept as a trait so the

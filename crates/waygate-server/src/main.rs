@@ -717,8 +717,21 @@ async fn gateway_main() -> anyhow::Result<()> {
     // injected (Infisical) and read by the store; we're a pure consumer (I4).
     // Provider calls are bounded by the same upstream call timeout as MCP tool
     // calls.
-    let mut llm_deps =
-        llm::build_from_env(cfg.upstream_call_timeout, !discovery_targets.is_empty())?;
+    let (mut llm_deps, model_catalog) = match llm::build_from_env(
+        cfg.upstream_call_timeout,
+        !discovery_targets.is_empty(),
+        db_pool.is_some(),
+    ) {
+        Ok(configured) => configured,
+        Err(error) => {
+            tracing::error!(%error, "inference initialization failed; MCP remains available");
+            (None, llm::ConfiguredModelCatalog::default())
+        }
+    };
+    // A replica can dispatch its validated routes before its catalog writes.
+    if let Some(pool) = db_pool.as_ref() {
+        llm::publish_configured_catalog(pool.clone(), model_catalog.rows.clone(), ct.clone()).await;
+    }
     // The SAME in-process credential store the dispatcher resolves
     // bearers from, handed to the admin credential-status panel so it reads live
     // pool health (not a separate snapshot that could drift). `None` when no LLM
@@ -736,25 +749,6 @@ async fn gateway_main() -> anyhow::Result<()> {
              responses; LLM response inspection lands with the streaming-inspector slice"
         );
     }
-    // Materialize the configured models into the `llm_models` catalog so
-    // the inference plane's governance reads (cost via the usage ledger,
-    // budgets via the budget gate, both wired below) and discovery have a
-    // DB row per configured model. Idempotent — the upsert is keyed on
-    // (tenant, alias) and preserves operator-set costing on conflict — so
-    // it is safe on every boot. Skipped when no DB pool is wired
-    // (audit-less dev mode); routing still works from the env resolver.
-    // Runs before the listener accepts, so no call observes a half-seeded
-    // catalog.
-    if let Some(pool) = db_pool.as_ref() {
-        let rows = llm::configured_model_rows()?;
-        if !rows.is_empty() {
-            llm::seed_models(pool, &rows).await?;
-            tracing::info!(
-                models = rows.len(),
-                "seeded llm_models catalog from GATEWAY_LLM_MODELS"
-            );
-        }
-    }
     // Load any persisted discovered models from the catalog into the
     // resolver's discovered layer, so a restart after a prior discovery run
     // makes them routable immediately (before the first refresh cycle). Empty
@@ -762,12 +756,22 @@ async fn gateway_main() -> anyhow::Result<()> {
     // the resolver resolves env pins only (behavior-preserving). Runs before the
     // listener accepts, so no call observes a half-loaded resolver.
     if let (Some(pool), Some((_, resolver))) = (db_pool.as_ref(), llm_deps.as_ref()) {
-        let loaded = llm::boot_load_discovered(pool, resolver).await?;
-        if loaded > 0 {
-            tracing::info!(
-                discovered = loaded,
-                "loaded discovered models into the resolver"
-            );
+        let catalog_deadline = pool.options().get_acquire_timeout();
+        match tokio::time::timeout(catalog_deadline, llm::boot_load_discovered(pool, resolver))
+            .await
+        {
+            Ok(Ok(loaded)) if loaded > 0 => {
+                tracing::info!(
+                    discovered = loaded,
+                    "loaded discovered models into the resolver"
+                );
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => {
+                tracing::warn!(
+                    "stored model discovery could not be loaded; configured pins remain available"
+                );
+            }
         }
     }
     // Spawn the discovery refresher when GATEWAY_LLM_DISCOVERY names at
@@ -825,7 +829,10 @@ async fn gateway_main() -> anyhow::Result<()> {
     // and admin try-it pipelines (cloned into both below) so usage is recorded
     // identically regardless of entry point.
     let llm_usage_store: Option<waygate_mcp::SharedLlmUsage> = match (&db_pool, &llm_deps) {
-        (Some(pool), Some(_)) => Some(Arc::new(waygate_storage::PgLlmUsageSink::new(pool.clone()))),
+        (Some(pool), Some(_)) => Some(Arc::new(
+            waygate_storage::PgLlmUsageSink::new(pool.clone())
+                .with_local_catalog(model_catalog.rows, model_catalog.rejected_aliases),
+        )),
         _ => None,
     };
     // The lagging LLM budget gate. Same wiring conditions as the

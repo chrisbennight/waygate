@@ -30,6 +30,8 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::get;
 use axum::{Extension, Router};
+use waygate_core::LLM_RESERVED_NAMESPACE;
+use waygate_llm_dispatch::LlmModelResolver;
 use waygate_oidc::{AuthMethod, Principal, Scope};
 use waygate_storage::{LlmModelRow, SharedLlmModelCatalog};
 
@@ -79,6 +81,7 @@ struct ModelRow {
     is_realtime: bool,
     risk: String,
     enabled: bool,
+    routable: bool,
     requires_approval: bool,
     /// Per-MILLION-token input rate, pre-formatted; `None` ⇒ no pricing.
     input_cost: Option<String>,
@@ -114,7 +117,9 @@ async fn llm_models_page(
         LoadResult::default()
     } else {
         match state.llm.llm_models.get() {
-            Some(store) => load_llm_models(store, &read_tenant).await,
+            Some(store) => {
+                load_llm_models(store, &read_tenant, state.llm.llm_resolver.as_deref()).await
+            }
             None => LoadResult::default(),
         }
     };
@@ -157,10 +162,17 @@ struct LoadResult {
     models_load_error: bool,
 }
 
-async fn load_llm_models(store: &SharedLlmModelCatalog, tenant: &str) -> LoadResult {
+async fn load_llm_models(
+    store: &SharedLlmModelCatalog,
+    tenant: &str,
+    resolver: Option<&dyn LlmModelResolver>,
+) -> LoadResult {
     match store.list_models(tenant).await {
         Ok(rows) => LoadResult {
-            models: rows.into_iter().map(model_row).collect(),
+            models: rows
+                .into_iter()
+                .map(|row| model_row(row, resolver))
+                .collect(),
             models_load_error: false,
         },
         Err(e) => {
@@ -177,7 +189,24 @@ async fn load_llm_models(store: &SharedLlmModelCatalog, tenant: &str) -> LoadRes
     }
 }
 
-fn model_row(m: LlmModelRow) -> ModelRow {
+fn model_row(m: LlmModelRow, resolver: Option<&dyn LlmModelResolver>) -> ModelRow {
+    let routable = resolver
+        .and_then(|resolver| resolver.resolve(LLM_RESERVED_NAMESPACE, &m.alias))
+        .is_some_and(|model| {
+            let upstream_api = model.upstream_api();
+            let route = model.route;
+            !route.openai_chatgpt
+                && route.provider.as_str() == m.provider
+                && m.upstream_api.eq_ignore_ascii_case(upstream_api)
+                && route.upstream_model == m.upstream_model
+                && waygate_core::model_endpoints_match(
+                    &route.base_url,
+                    &route.path,
+                    &m.base_url,
+                    &m.path,
+                )
+                && route.credential_label == m.credential_label
+        });
     let is_embeddings = m.upstream_api.eq_ignore_ascii_case("embeddings");
     let is_images = m.upstream_api.eq_ignore_ascii_case("images");
     let is_speech = m.upstream_api.eq_ignore_ascii_case("speech");
@@ -196,6 +225,7 @@ fn model_row(m: LlmModelRow) -> ModelRow {
         is_realtime,
         risk: m.risk,
         enabled: m.enabled,
+        routable,
         requires_approval: m.requires_approval,
         input_cost: m.input_cost_per_mtok.map(|c| c.to_string()),
         output_cost: m.output_cost_per_mtok.map(|c| c.to_string()),
@@ -295,7 +325,7 @@ mod tests {
             models: vec![seeded_row()],
         });
 
-        let load = load_llm_models(&store, "default").await;
+        let load = load_llm_models(&store, "default", None).await;
 
         assert!(!load.models_load_error, "fake never errors");
         assert_eq!(load.models.len(), 1);
@@ -304,18 +334,64 @@ mod tests {
         assert_eq!(row.provider, "anthropic");
         assert!(row.enabled, "the enabled flag must survive into the row");
         assert!(
+            !row.routable,
+            "a catalog row without a route is unavailable"
+        );
+        assert!(
             !row.is_embeddings,
             "a `messages` (chat-family) row is not embeddings"
         );
     }
 
     #[test]
+    fn model_row_only_marks_the_displayed_backend_routable() {
+        use waygate_llm_credentials::LlmProvider;
+        use waygate_llm_dispatch::{
+            LlmOperation, ModelRisk, ResolvedModel, ResolvedRoute, StaticModelResolver,
+        };
+        use waygate_llm_translate::UpstreamProtocol;
+
+        let mut row = seeded_row();
+        let resolver = StaticModelResolver::new().with_model(
+            LLM_RESERVED_NAMESPACE,
+            row.alias.clone(),
+            ResolvedModel {
+                route: ResolvedRoute {
+                    provider: LlmProvider::Anthropic,
+                    credential_label: row.credential_label.clone(),
+                    base_url: row.base_url.clone(),
+                    path: row.path.clone(),
+                    upstream_model: row.upstream_model.clone(),
+                    protocol: UpstreamProtocol::AnthropicMessages,
+                    upstream_no_auth: false,
+                    openai_chatgpt: false,
+                },
+                operation: LlmOperation::Chat,
+                fallbacks: Vec::new(),
+                risk: ModelRisk::Low,
+                ttfb: None,
+                cache_ttl: None,
+            },
+        );
+        assert!(model_row(row.clone(), Some(&resolver)).routable);
+        let mut same_endpoint = row.clone();
+        same_endpoint.base_url.push('/');
+        same_endpoint.path.insert(0, '/');
+        assert!(model_row(same_endpoint, Some(&resolver)).routable);
+        let mut other_operation = row.clone();
+        other_operation.upstream_api = "embeddings".into();
+        assert!(!model_row(other_operation, Some(&resolver)).routable);
+        row.base_url = "https://replacement.invalid".into();
+        assert!(!model_row(row, Some(&resolver)).routable);
+    }
+
+    #[test]
     fn model_row_flags_embeddings_by_upstream_api() {
-        assert!(!model_row(seeded_row()).is_embeddings);
+        assert!(!model_row(seeded_row(), None).is_embeddings);
         let mut emb = seeded_row();
         emb.upstream_api = "embeddings".into();
         assert!(
-            model_row(emb).is_embeddings,
+            model_row(emb, None).is_embeddings,
             "an embeddings upstream_api flags the Kind badge"
         );
     }

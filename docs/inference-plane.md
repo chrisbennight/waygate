@@ -450,8 +450,8 @@ machinery (§7), the unified pipeline gates (§5), `InferenceRecord`/usage, and 
   This requires provider "openai", kind "embeddings", and one route without
   credential pools or fallbacks. Client authentication and the gateway's existing
   authorization, quota and audit gates still apply. Restrict the backend
-  network to trusted gateway and monitoring containers. This setting lives in the environment pin; discovered
-  catalog rows never opt into credential-free authentication.
+  network to trusted gateway and monitoring containers. This setting lives in
+  the environment pin. Discovered catalog rows retain their configured credentials.
 - **Backend options and failures.** The optional prompt_mode and timeout_seconds
   fields are forwarded when supplied; the backend validates their values.
   Base64 embedding strings remain strings throughout the gateway. Backend
@@ -640,6 +640,23 @@ settings fail configuration instead of selecting a consumer backend. The discove
 the env pins (`GATEWAY_LLM_MODELS`) coexist — discovery only *adds* to what an
 operator pins.
 
+Waygate validates each boot-time pin before routing or recording it in the
+catalog. A rejected entry is logged with its alias when known and cannot fall
+through to a discovered route for that alias. The last valid entry wins for a
+repeated alias. Shared audio and WebRTC routes require an unambiguous model.
+Rejected pins leave existing catalog rows available for operator inspection.
+If the catalog is slow or unavailable, validated pins and discovery continue
+serving while Waygate retries catalog publication. The model listing uses the
+local route to determine the API and lists valid default-tenant pins before
+their catalog rows appear. A stored rate remains usable while the write waits
+if its route matches the local pin. Usage pricing stays scoped to the caller's
+tenant and the endpoint that served the request, including after failover.
+Rejected aliases and rates for a different backend are excluded.
+If the setting is unreadable, Waygate logs the error and loads no pins. MCP
+and any independently configured model discovery can still start. With a database,
+model aliases are limited to 1,024 UTF-8 bytes to fit the catalog's primary key. The model
+dashboard shows whether a catalog entry has an active local route.
+
 An operator pin names its upstream identity either as separate `provider` +
 `upstream_model` fields or as a single `model: "provider:upstream"` shorthand
 (e.g. `openrouter:qwen/qwen3-embedding-8b`) — the same `provider:id` form a
@@ -731,8 +748,8 @@ two fields at parse time, and is mutually exclusive with them.
   model to `/v1/chat/completions` (or a chat model to `/v1/embeddings`) is the
   surface/operation mismatch the pipeline rejects (§4.7). Each entry carries a
   **`modality`** field (`text->embedding`, `text->text`, `text+image->image`,
-  `text->audio`, `audio->text`, or `realtime-audio`, derived from the row's
-  `upstream_api`; a non-standard OpenAI field SDKs ignore), and the listing accepts
+  `text->audio`, `audio->text`, or `realtime-audio`, derived from the locally
+  resolved API), and the listing accepts
   **`?type=embeddings|chat|images|speech|transcription|realtime`** to filter to one
   kind — so a client discovers non-chat models as *distinct* from chat without
   probing each surface. The same operation distinction is projected into the
@@ -909,7 +926,7 @@ Postgres stores the inference configuration and usage records:
 
 Inference uses supported provider API endpoints and credentials. Consumer CLI
 fingerprints, subscription token refresh and consumer model listing are removed.
-Retired configured selectors fail startup; historical catalog rows keep their
+Retired model selectors fail route validation. Historical catalog rows keep their
 legacy marker so invocation refuses them before cache or provider access.
 Migration requires an explicit endpoint, model and credential choice; Waygate
 does not infer equivalent entitlements or silently reroute a legacy alias.

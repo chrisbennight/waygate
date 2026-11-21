@@ -14,7 +14,7 @@
 //!   (`data: <delta>` frames, a `data: [DONE]` sentinel, and an `event: error`
 //!   frame for a mid-stream failure).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
@@ -24,8 +24,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::StreamExt;
-use serde::Deserialize;
-use serde_json::{json, Value};
+use serde::{de, Deserialize};
+use serde_json::{json, value::RawValue, Value};
 
 use waygate_core::http_client::{self, Profile};
 use waygate_invocation::{
@@ -49,6 +49,8 @@ pub const LLM_SERVER: &str = waygate_core::LLM_RESERVED_NAMESPACE;
 
 /// Env var carrying the model catalog as a JSON array of [`ModelDef`].
 const MODELS_ENV: &str = "GATEWAY_LLM_MODELS";
+/// The alias is part of the model catalog's PostgreSQL primary key.
+const MAX_MODEL_ALIAS_BYTES: usize = 1024;
 
 #[cfg(test)]
 mod audio_qualification;
@@ -285,9 +287,8 @@ fn upstream_api_for(def: &ModelDef) -> &'static str {
 /// is a uTLS-terminating sidecar that re-originates the upstream TLS with a
 /// CLI-like ClientHello — the JA3/JA4 transport fingerprint that header/body
 /// fidelity cannot address (see `docs/inference-plane.md` §13.1). `None`/blank ⇒
-/// unchanged (reqwest still honors the system `*_PROXY` vars). A malformed URL is
-/// a hard error (fail boot loudly); the URL is never logged (it may embed proxy
-/// credentials).
+/// unchanged (reqwest still honors the system `*_PROXY` vars). An invalid URL
+/// disables inference initialization. The URL may contain proxy credentials.
 fn apply_egress_proxy(
     builder: reqwest::ClientBuilder,
     proxy_url: Option<&str>,
@@ -308,7 +309,7 @@ fn apply_egress_proxy(
                 ));
             }
             let proxy = reqwest::Proxy::all(url)
-                .map_err(|e| anyhow::anyhow!("invalid GATEWAY_LLM_EGRESS_PROXY: {e}"))?;
+                .map_err(|_| anyhow::anyhow!("invalid GATEWAY_LLM_EGRESS_PROXY URL"))?;
             tracing::info!("LLM provider egress is routed through GATEWAY_LLM_EGRESS_PROXY");
             Ok(builder.proxy(proxy))
         }
@@ -329,7 +330,18 @@ fn routes_for_target(
     surface: Option<&str>,
     is_embeddings: bool,
 ) -> anyhow::Result<Vec<ResolvedRoute>> {
-    let provider = parse_provider(provider_str)?;
+    let provider =
+        parse_provider(provider_str).map_err(|_| anyhow::anyhow!("unknown LLM provider"))?;
+    let url = reqwest::Url::parse(&base_url)
+        .map_err(|_| anyhow::anyhow!("model base_url must be an absolute HTTP(S) URL"))?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https")
+            && url.has_host()
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "model base_url must be an absolute HTTP(S) URL without a query or fragment"
+    );
+    let base_url = url.to_string();
     anyhow::ensure!(!surface_is_codex(surface),
         "surface codex is retired; explicitly migrate the endpoint, model and credential to a supported provider API");
     let (protocol, default_path) = if is_embeddings {
@@ -354,7 +366,6 @@ fn routes_for_target(
     {
         tracing::warn!(
             provider = provider_str,
-            base_url = %base_url,
             "anthropic base_url has no `/v1` segment; the Messages path is `messages`, so the \
              request URL becomes `<base_url>/messages` — set base_url to e.g. \
              https://api.anthropic.com/v1 or the upstream returns 404"
@@ -396,56 +407,196 @@ fn default_path_for(provider: LlmProvider) -> String {
     }
 }
 
-/// Build the dispatcher + resolver from `GATEWAY_LLM_MODELS`. `Ok(None)` when no
-/// models are configured (the gateway runs MCP-only, unchanged). `call_timeout`
-/// (the operator's `upstream_call_timeout`) bounds a slow/wedged provider: it is
-/// the connect + idle-read timeout for every call, and additionally the total
-/// per-request deadline for *non-streaming* calls (a streaming response is
-/// long-lived, so it is bounded by the idle-read gap only — a total deadline
-/// would sever a healthy stream).
-/// `discovery_configured` is `true` when `GATEWAY_LLM_DISCOVERY` names at least
-/// one usable target. The LLM path is built when there are configured pins OR
-/// discovery is enabled — a **discovery-only** deployment (no
-/// `GATEWAY_LLM_MODELS`) still needs the dispatcher, resolver, credentials, and
-/// `/v1` routes so the refresher can populate the catalog and the discovered
-/// models become routable. `Ok(None)` only when neither is configured (MCP-only).
+#[derive(Default)]
+pub struct ConfiguredModelCatalog {
+    pub rows: Vec<waygate_storage::LlmModelUpsert>,
+    pub rejected_aliases: Vec<String>,
+}
+
+/// Compile the configured pins once for routing and catalog publication.
+/// Discovery can still start when no configured pin is usable.
 pub fn build_from_env(
     call_timeout: Option<std::time::Duration>,
     discovery_configured: bool,
-) -> anyhow::Result<Option<LlmDeps>> {
-    let defs = parse_model_defs()?.unwrap_or_default();
-    if defs.is_empty() && !discovery_configured {
-        return Ok(None);
+    catalog_backed: bool,
+) -> anyhow::Result<(Option<LlmDeps>, ConfiguredModelCatalog)> {
+    let raw = match std::env::var(MODELS_ENV) {
+        Ok(raw) => raw,
+        Err(std::env::VarError::NotPresent) => String::new(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            tracing::error!(
+                setting = MODELS_ENV,
+                "inference model configuration is not UTF-8"
+            );
+            String::new()
+        }
+    };
+    let (pins, rows, rejected) = compile_pins(&raw, catalog_backed);
+    let catalog = ConfiguredModelCatalog {
+        rows,
+        // Catalog text cannot contain null bytes, so no stored row can match these aliases.
+        rejected_aliases: rejected
+            .iter()
+            .filter(|alias| !alias.contains('\0'))
+            .cloned()
+            .collect(),
+    };
+    if pins.is_empty() && !discovery_configured {
+        return Ok((None, catalog));
     }
-    build_from_defs(defs, call_timeout)
+    let deps = build_dispatcher(pins, rejected, call_timeout)?;
+    Ok((Some(deps), catalog))
 }
 
-/// Parse the configured model catalog from `GATEWAY_LLM_MODELS`. `Ok(None)`
-/// when the var is unset or blank (the gateway runs MCP-only). Shared by
-/// [`build_from_env`] (which builds the routing resolver) and
-/// [`configured_model_rows`] (the boot seeder), so both see exactly the same
-/// catalog.
-fn parse_model_defs() -> anyhow::Result<Option<Vec<ModelDef>>> {
-    let raw = match std::env::var(MODELS_ENV) {
-        Ok(v) if !v.trim().is_empty() => v,
-        _ => return Ok(None),
+/// Collect every alias named by an invalid entry, including repeated fields.
+#[derive(Default)]
+struct ModelAliases(Vec<String>);
+
+impl<'de> Deserialize<'de> for ModelAliases {
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Aliases;
+        impl<'de> de::Visitor<'de> for Aliases {
+            type Value = ModelAliases;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a model configuration object or positional entry")
+            }
+
+            fn visit_map<M: de::MapAccess<'de>>(
+                self,
+                mut fields: M,
+            ) -> Result<Self::Value, M::Error> {
+                let mut aliases = Vec::new();
+                while let Some((key, value)) = fields.next_entry::<String, &RawValue>()? {
+                    if key == "alias" {
+                        aliases.extend(serde_json::from_str::<String>(value.get()).ok());
+                    }
+                }
+                Ok(ModelAliases(aliases))
+            }
+
+            fn visit_seq<S: de::SeqAccess<'de>>(
+                self,
+                mut fields: S,
+            ) -> Result<Self::Value, S::Error> {
+                // The positional ModelDef starts with Realtime, speech and transcription
+                // capabilities, followed by the alias.
+                for _ in 0..3 {
+                    fields.next_element::<de::IgnoredAny>()?;
+                }
+                let alias = fields
+                    .next_element::<&RawValue>()?
+                    .and_then(|value| serde_json::from_str(value.get()).ok());
+                while fields.next_element::<de::IgnoredAny>()?.is_some() {}
+                Ok(ModelAliases(alias.into_iter().collect()))
+            }
+        }
+
+        deserializer.deserialize_any(Aliases)
+    }
+}
+
+fn compile_pins(
+    raw: &str,
+    catalog_backed: bool,
+) -> (
+    StaticModelResolver,
+    Vec<waygate_storage::LlmModelUpsert>,
+    HashSet<String>,
+) {
+    let mut pins = StaticModelResolver::new();
+    let mut rows = BTreeMap::new();
+    let mut rejected = HashSet::new();
+    if raw.trim().is_empty() {
+        return (pins, Vec::new(), rejected);
+    }
+    let Ok(entries) = serde_json::from_str::<Vec<&RawValue>>(raw) else {
+        tracing::error!(
+            setting = MODELS_ENV,
+            "inference model configuration is not a readable JSON array"
+        );
+        return (pins, Vec::new(), rejected);
     };
-    let mut defs: Vec<ModelDef> = serde_json::from_str(&raw)
-        .map_err(|e| anyhow::anyhow!("{MODELS_ENV} is not a valid JSON array of models: {e}"))?;
-    normalize_model_defs(&mut defs)?;
-    Ok(Some(defs))
+    for (index, entry) in entries.into_iter().enumerate() {
+        // Preserve the raw entry so typed decoding can detect duplicate fields.
+        let result = serde_json::from_str::<ModelDef>(entry.get())
+            .map_err(|error| {
+                let aliases: ModelAliases = serde_json::from_str(entry.get()).unwrap_or_default();
+                let diagnostic = anyhow::anyhow!(
+                    "entry does not match the model configuration schema at line {}, column {}",
+                    error.line(),
+                    error.column()
+                );
+                (diagnostic, aliases.0)
+            })
+            .and_then(|def| {
+                let alias = def.alias.clone();
+                compile_pin(def, catalog_backed).map_err(|error| (error, vec![alias]))
+            });
+        match result {
+            Ok((row, model)) => {
+                pins = pins.with_model(LLM_SERVER, row.alias.clone(), model);
+                rows.insert(row.alias.clone(), row);
+            }
+            Err((error, aliases)) => {
+                let diagnostic_aliases: Vec<_> = aliases
+                    .iter()
+                    .take(8)
+                    .map(|alias| alias.chars().take(256).collect::<String>())
+                    .collect();
+                tracing::error!(
+                    setting = MODELS_ENV,
+                    index,
+                    aliases = ?diagnostic_aliases,
+                    alias_count = aliases.len(),
+                    %error,
+                    "inference model configuration rejected"
+                );
+                rejected.extend(aliases);
+            }
+        }
+    }
+    rejected.retain(|alias| !rows.contains_key(alias));
+    (pins, rows.into_values().collect(), rejected)
+}
+
+fn compile_pin(
+    mut def: ModelDef,
+    catalog_backed: bool,
+) -> anyhow::Result<(waygate_storage::LlmModelUpsert, ResolvedModel)> {
+    anyhow::ensure!(
+        !def.alias.trim().is_empty(),
+        "model alias must not be blank"
+    );
+    anyhow::ensure!(
+        !catalog_backed || def.alias.len() <= MAX_MODEL_ALIAS_BYTES,
+        "model alias exceeds the {MAX_MODEL_ALIAS_BYTES} byte catalog limit"
+    );
+    normalize_model_defs(std::slice::from_mut(&mut def))?;
+    let model = resolve_pin(&def)?;
+    let mut row = model_def_to_upsert(&def);
+    row.base_url.clone_from(&model.route.base_url);
+    // PostgreSQL text cannot represent a null byte.
+    anyhow::ensure!(
+        !catalog_backed
+            || [
+                &row.alias,
+                &row.credential_label,
+                &row.upstream_model,
+                &row.base_url,
+                &row.path
+            ]
+            .into_iter()
+            .all(|field| !field.contains('\0')),
+        "model catalog fields cannot contain null bytes"
+    );
+    Ok((row, model))
 }
 
 /// Resolve each model's `model: "provider:upstream"` shorthand into the explicit
-/// `provider` + `upstream_model` fields, in place, BEFORE any consumer reads
-/// them. Both real consumers — the routing resolver ([`build_from_defs`]) and the
-/// catalog seeder ([`configured_model_rows`]) — flow through [`parse_model_defs`],
-/// so normalizing there is the single seam that keeps them seeing one catalog.
-/// Split out as a pure function over `&mut [ModelDef]` so the shorthand contract
-/// is unit-testable without touching the process environment.
+/// `provider` + `upstream_model` fields before resolving the route.
 ///
-/// Rules, fail-closed (a malformed pin fails boot loudly rather than routing
-/// somewhere unintended):
+/// The rules are:
 /// - `model` splits on the FIRST `:` into `(provider, upstream_model)`; both
 ///   halves must be non-empty, and a value with no `:` is rejected.
 /// - `model` is mutually exclusive with `provider` / `upstream_model` — setting
@@ -461,30 +612,26 @@ fn normalize_model_defs(defs: &mut [ModelDef]) -> anyhow::Result<()> {
         if let Some(model) = def.model.take() {
             if !def.provider.is_empty() {
                 return Err(anyhow::anyhow!(
-                    "model \"{}\": set either `model` (the provider:upstream shorthand) \
-                     or `provider`, not both",
-                    def.alias
+                    "set either `model` (the provider:upstream shorthand) \
+                     or `provider`, not both"
                 ));
             }
             if def.upstream_model.is_some() {
                 return Err(anyhow::anyhow!(
-                    "model \"{}\": set either `model` (the provider:upstream shorthand) \
-                     or `upstream_model`, not both",
-                    def.alias
+                    "set either `model` (the provider:upstream shorthand) \
+                     or `upstream_model`, not both"
                 ));
             }
             let (provider, upstream) = model.split_once(':').ok_or_else(|| {
                 anyhow::anyhow!(
-                    "model \"{}\": `model` must be \"provider:upstream\" \
-                     (e.g. openrouter:qwen/qwen3-embedding-8b), got \"{model}\"",
-                    def.alias
+                    "`model` must be \"provider:upstream\" \
+                     (e.g. openrouter:qwen/qwen3-embedding-8b)"
                 )
             })?;
             if provider.is_empty() || upstream.is_empty() {
                 return Err(anyhow::anyhow!(
-                    "model \"{}\": `model` must be \"provider:upstream\" with both halves \
-                     non-empty, got \"{model}\"",
-                    def.alias
+                    "`model` must be \"provider:upstream\" with both halves \
+                     non-empty"
                 ));
             }
             def.provider = provider.to_owned();
@@ -492,158 +639,142 @@ fn normalize_model_defs(defs: &mut [ModelDef]) -> anyhow::Result<()> {
         }
         if def.provider.is_empty() {
             return Err(anyhow::anyhow!(
-                "model \"{}\": missing `provider` (set it, or use the `model` \
-                 provider:upstream shorthand)",
-                def.alias
+                "missing `provider` (set it, or use the `model` \
+                 provider:upstream shorthand)"
             ));
         }
     }
     Ok(())
 }
 
-/// Build the dispatcher + DB-backed resolver from the configured pins. `defs`
-/// MAY be empty (a discovery-only deployment): the pins layer is then empty and
-/// the discovery refresher fills the discovered layer. Always returns `Some` —
-/// the "no LLM path at all" decision lives in [`build_from_env`].
+#[cfg(test)]
 fn build_from_defs(
     defs: Vec<ModelDef>,
     call_timeout: Option<std::time::Duration>,
 ) -> anyhow::Result<Option<LlmDeps>> {
     let mut resolver = StaticModelResolver::new();
-    anyhow::ensure!(
-        defs.iter()
-            .filter(|def| def
-                .speech
-                .as_ref()
-                .is_some_and(|caps| !caps.resources.is_empty())
-                || def
-                    .realtime
-                    .as_ref()
-                    .is_some_and(|caps| !caps.resources.is_empty()))
-            .count()
-            <= 1,
-        "only one configured model may own standard audio resource routes"
-    );
-    anyhow::ensure!(
-        defs.iter()
-            .filter(|def| def.realtime.as_ref().is_some_and(|caps| caps.webrtc))
-            .count()
-            <= 1,
-        "only one configured Realtime model may enable WebRTC call routes"
-    );
     for def in defs {
-        let risk = parse_risk(def.risk.as_deref());
-        // A model is wholly chat or wholly embeddings; the operation applies to
-        // the primary AND every fallback target (you cannot fail an embeddings
-        // call over to a chat endpoint).
-        let is_emb = is_embeddings(&def);
-        let is_img = is_images(&def);
-        let is_speech = is_speech(&def);
-        let is_transcription = is_transcription(&def);
-        let is_realtime = is_realtime(&def);
-        speech::validate_config(&def)?;
-        transcription::validate_config(&def)?;
-        realtime::validate_config(&def)?;
-        let no_auth = authentication::no_auth(&def)?;
-        if is_img
-            && (!def.provider.eq_ignore_ascii_case("openai")
-                || def.surface.is_some()
-                || !def.fallbacks.is_empty()
-                || def
-                    .credential_labels
-                    .as_ref()
-                    .is_some_and(|labels| !labels.is_empty())
-                || def.cache_ttl_ms.is_some()
-                || def.ttfb_ms.is_some())
-        {
-            anyhow::bail!("image models require one OpenAI credential, no surface selector, and no fallbacks, caching, or streaming deadlines");
-        }
-        // Build the primary group's routes (its credential pool), then each
-        // cross-provider fallback group's routes, flattened in order. The first
-        // route is the model's primary; the rest are its ordered fallbacks (§7).
-        let primary_model = def
+        let (row, model) = compile_pin(def, true)?;
+        resolver = resolver.with_model(LLM_SERVER, row.alias, model);
+    }
+    build_dispatcher(resolver, HashSet::new(), call_timeout).map(Some)
+}
+
+fn resolve_pin(def: &ModelDef) -> anyhow::Result<ResolvedModel> {
+    let risk = parse_risk(def.risk.as_deref());
+    // A model is wholly chat or wholly embeddings; the operation applies to
+    // the primary AND every fallback target (you cannot fail an embeddings
+    // call over to a chat endpoint).
+    let is_emb = is_embeddings(def);
+    let is_img = is_images(def);
+    let is_speech = is_speech(def);
+    let is_transcription = is_transcription(def);
+    let is_realtime = is_realtime(def);
+    speech::validate_config(def)?;
+    transcription::validate_config(def)?;
+    realtime::validate_config(def)?;
+    let no_auth = authentication::no_auth(def)?;
+    if is_img
+        && (!def.provider.eq_ignore_ascii_case("openai")
+            || def.surface.is_some()
+            || !def.fallbacks.is_empty()
+            || def
+                .credential_labels
+                .as_ref()
+                .is_some_and(|labels| !labels.is_empty())
+            || def.cache_ttl_ms.is_some()
+            || def.ttfb_ms.is_some())
+    {
+        anyhow::bail!("image models require one OpenAI credential, no surface selector, and no fallbacks, caching, or streaming deadlines");
+    }
+    // Build the primary group's routes (its credential pool), then each
+    // cross-provider fallback group's routes, flattened in order. The first
+    // route is the model's primary; the rest are its ordered fallbacks (§7).
+    let primary_model = def
+        .upstream_model
+        .clone()
+        .unwrap_or_else(|| def.alias.clone());
+    let mut routes = routes_for_target(
+        &def.provider,
+        def.credential_label.clone(),
+        def.credential_labels.clone(),
+        def.base_url.clone(),
+        if is_realtime {
+            Some("realtime".into())
+        } else if is_speech {
+            Some(def.path.clone().unwrap_or_else(|| "audio/speech".into()))
+        } else if is_transcription {
+            Some(
+                def.path
+                    .clone()
+                    .unwrap_or_else(|| "audio/transcriptions".into()),
+            )
+        } else if is_img {
+            Some(def.path.clone().unwrap_or_else(|| "images".into()))
+        } else {
+            def.path.clone()
+        },
+        primary_model,
+        def.surface.as_deref(),
+        is_emb,
+    )?;
+    routes[0].upstream_no_auth = no_auth;
+    for fb in &def.fallbacks {
+        let fb_model = fb
             .upstream_model
             .clone()
             .unwrap_or_else(|| def.alias.clone());
-        let mut routes = routes_for_target(
-            &def.provider,
-            def.credential_label.clone(),
-            def.credential_labels.clone(),
-            def.base_url.clone(),
-            if is_realtime {
-                Some("realtime".into())
-            } else if is_speech {
-                Some(def.path.clone().unwrap_or_else(|| "audio/speech".into()))
-            } else if is_transcription {
-                Some(
-                    def.path
-                        .clone()
-                        .unwrap_or_else(|| "audio/transcriptions".into()),
-                )
-            } else if is_img {
-                Some(def.path.clone().unwrap_or_else(|| "images".into()))
-            } else {
-                def.path.clone()
-            },
-            primary_model,
-            def.surface.as_deref(),
+        routes.extend(routes_for_target(
+            &fb.provider,
+            fb.credential_label.clone(),
+            fb.credential_labels.clone(),
+            fb.base_url.clone(),
+            fb.path.clone(),
+            fb_model,
+            fb.surface.as_deref(),
             is_emb,
-        )?;
-        routes[0].upstream_no_auth = no_auth;
-        for fb in &def.fallbacks {
-            let fb_model = fb
-                .upstream_model
-                .clone()
-                .unwrap_or_else(|| def.alias.clone());
-            routes.extend(routes_for_target(
-                &fb.provider,
-                fb.credential_label.clone(),
-                fb.credential_labels.clone(),
-                fb.base_url.clone(),
-                fb.path.clone(),
-                fb_model,
-                fb.surface.as_deref(),
-                is_emb,
-            )?);
-        }
-        let mut routes = routes.into_iter();
-        let route = routes
-            .next()
-            .expect("a target group yields at least its primary route");
-        let fallbacks: Vec<ResolvedRoute> = routes.collect();
-        resolver = resolver.with_model(
-            LLM_SERVER,
-            def.alias,
-            ResolvedModel {
-                route,
-                operation: if is_realtime {
-                    LlmOperation::Realtime(
-                        def.realtime
-                            .clone()
-                            .expect("validated Realtime capabilities"),
-                    )
-                } else if is_speech {
-                    LlmOperation::Speech(def.speech.clone().expect("validated speech capabilities"))
-                } else if is_transcription {
-                    LlmOperation::Transcription(
-                        def.transcription
-                            .clone()
-                            .expect("validated transcription capabilities"),
-                    )
-                } else if is_img {
-                    LlmOperation::Images
-                } else if is_emb {
-                    LlmOperation::Embeddings
-                } else {
-                    LlmOperation::Chat
-                },
-                fallbacks,
-                risk,
-                ttfb: def.ttfb_ms.map(std::time::Duration::from_millis),
-                cache_ttl: def.cache_ttl_ms.map(std::time::Duration::from_millis),
-            },
-        );
+        )?);
     }
+    let mut routes = routes.into_iter();
+    let route = routes
+        .next()
+        .expect("a target group yields at least its primary route");
+    let fallbacks: Vec<ResolvedRoute> = routes.collect();
+    Ok(ResolvedModel {
+        route,
+        operation: if is_realtime {
+            LlmOperation::Realtime(
+                def.realtime
+                    .clone()
+                    .expect("validated Realtime capabilities"),
+            )
+        } else if is_speech {
+            LlmOperation::Speech(def.speech.clone().expect("validated speech capabilities"))
+        } else if is_transcription {
+            LlmOperation::Transcription(
+                def.transcription
+                    .clone()
+                    .expect("validated transcription capabilities"),
+            )
+        } else if is_img {
+            LlmOperation::Images
+        } else if is_emb {
+            LlmOperation::Embeddings
+        } else {
+            LlmOperation::Chat
+        },
+        fallbacks,
+        risk,
+        ttfb: def.ttfb_ms.map(std::time::Duration::from_millis),
+        cache_ttl: def.cache_ttl_ms.map(std::time::Duration::from_millis),
+    })
+}
+
+fn build_dispatcher(
+    resolver: StaticModelResolver,
+    rejected: HashSet<String>,
+    call_timeout: Option<std::time::Duration>,
+) -> anyhow::Result<LlmDeps> {
     // Only injected provider API keys are accepted. Scoped external rotation
     // may replace them; the process does not refresh consumer credentials.
     let credentials = Arc::new(
@@ -658,7 +789,13 @@ fn build_from_defs(
     // unary and streaming calls without killing a working stream.
     // Both clients inherit the same optional egress proxy (which can contain
     // credentials and must never be logged), TLS defaults, and timeouts.
-    let egress_proxy = std::env::var("GATEWAY_LLM_EGRESS_PROXY").ok();
+    let egress_proxy = match std::env::var("GATEWAY_LLM_EGRESS_PROXY") {
+        Ok(proxy) => Some(proxy),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("GATEWAY_LLM_EGRESS_PROXY is not valid UTF-8")
+        }
+    };
     let build_http = || {
         let mut builder = http_client::builder(Profile::NoTotalTimeout);
         if let Some(timeout) = call_timeout {
@@ -682,8 +819,8 @@ fn build_from_defs(
     // The boot loader fills it from the catalog (and the discovery refresher
     // reloads it at runtime); with no discovered rows it resolves exactly like
     // the bare pins, so this is behavior-preserving until discovery lands.
-    let resolver = Arc::new(DbModelResolver::new(resolver, HashMap::new(), LLM_SERVER));
-    Ok(Some((dispatcher, resolver)))
+    let resolver = DbModelResolver::new(resolver, HashMap::new(), LLM_SERVER);
+    Ok((dispatcher, Arc::new(resolver.with_rejected_pins(rejected))))
 }
 
 /// Convert a catalog row into a routable [`ResolvedModel`] — a simple
@@ -807,12 +944,8 @@ fn model_def_to_upsert(def: &ModelDef) -> waygate_storage::LlmModelUpsert {
             .clone()
             .unwrap_or_else(|| def.alias.clone()),
         base_url: def.base_url.clone(),
-        // Same default resolution as the route (build_from_defs): an embeddings
-        // model defaults to `embeddings`; a `surface: responses` entry to
-        // `responses`; otherwise an omitted path becomes `messages` for Anthropic,
-        // else `chat/completions`. Falls back to the OpenAI-chat path if the
-        // provider string doesn't parse (build_from_defs surfaces that as a hard
-        // error).
+        // Match the route's operation-specific defaults. The compiler
+        // rejects unsupported providers before publishing a catalog row.
         path: def.path.clone().unwrap_or_else(|| {
             if is_realtime(def) {
                 "realtime".to_string()
@@ -851,18 +984,6 @@ fn model_risk_str(r: ModelRisk) -> &'static str {
     }
 }
 
-/// The configured models as catalog upsert rows. `Ok(vec![])` when none are
-/// configured. Re-parses `GATEWAY_LLM_MODELS` — already validated by
-/// `build_from_env` at boot — to keep the seeder decoupled from the resolver
-/// build.
-pub fn configured_model_rows() -> anyhow::Result<Vec<waygate_storage::LlmModelUpsert>> {
-    Ok(parse_model_defs()?
-        .unwrap_or_default()
-        .iter()
-        .map(model_def_to_upsert)
-        .collect())
-}
-
 /// Seed the configured models into `llm_models`. Idempotent: each
 /// upsert is keyed on `(tenant_id, alias)` and the ON CONFLICT path preserves
 /// operator-set costing, so this is safe to run on every boot. One transaction
@@ -870,16 +991,72 @@ pub fn configured_model_rows() -> anyhow::Result<Vec<waygate_storage::LlmModelUp
 pub async fn seed_models(
     pool: &sqlx::PgPool,
     rows: &[waygate_storage::LlmModelUpsert],
-) -> anyhow::Result<()> {
+) -> Result<(), sqlx::Error> {
     if rows.is_empty() {
         return Ok(());
     }
     let mut tx = pool.begin().await?;
+    // Bound one blocked write while allowing a large batch to finish in the
+    // background. The transaction also rolls back if its caller is cancelled.
+    sqlx::query("SET LOCAL statement_timeout = '30s'")
+        .execute(&mut *tx)
+        .await?;
     for row in rows {
         waygate_storage::upsert_llm_model(&mut *tx, row).await?;
     }
     tx.commit().await?;
     Ok(())
+}
+
+pub async fn publish_configured_catalog(
+    pool: sqlx::PgPool,
+    rows: Vec<waygate_storage::LlmModelUpsert>,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    use std::time::Duration;
+
+    if rows.is_empty() {
+        return;
+    }
+    // Give normal boots a chance to publish before serving, then retry without
+    // holding readiness or stopping configured routes and discovery.
+    match tokio::time::timeout(Duration::from_secs(5), seed_models(&pool, &rows)).await {
+        Ok(Ok(())) => {
+            tracing::info!(models = rows.len(), "published configured model catalog");
+            return;
+        }
+        Ok(Err(error)) => tracing::warn!(
+            sqlstate = ?error.as_database_error().and_then(|error| error.code()),
+            "configured model catalog publication failed; retrying while routes remain available"
+        ),
+        Err(_) => tracing::warn!(
+            "configured model catalog publication timed out; retrying while routes remain available"
+        ),
+    }
+    tokio::spawn(async move {
+        let mut delay = Duration::from_secs(1);
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(delay) => {}
+            }
+            let outcome = tokio::select! {
+                _ = shutdown.cancelled() => return,
+                outcome = seed_models(&pool, &rows) => outcome,
+            };
+            match outcome {
+                Ok(()) => {
+                    tracing::info!(models = rows.len(), "published configured model catalog");
+                    return;
+                }
+                Err(error) => tracing::warn!(
+                    sqlstate = ?error.as_database_error().and_then(|error| error.code()),
+                    "configured model catalog publication retry failed"
+                ),
+            }
+            delay = (delay * 2).min(Duration::from_secs(60));
+        }
+    });
 }
 
 pub(crate) fn parse_provider(s: &str) -> anyhow::Result<LlmProvider> {
@@ -992,25 +1169,14 @@ pub fn router(
         })
 }
 
-/// Project catalog rows into the OpenAI `GET /v1/models` list body
-/// (`{ "object": "list", "data": [...] }`). Each row becomes an OpenAI model
-/// object keyed by its client-facing `alias` (`id`), with the provider as
-/// `owned_by` and the catalog `created_at` as the unix `created` timestamp — the
-/// fields an OpenAI SDK reads off a models listing.
-fn models_list_json(rows: Vec<waygate_storage::LlmModelRow>) -> Value {
-    let data: Vec<Value> = rows
-        .into_iter()
-        .map(|m| {
-            json!({
-                "id": m.alias,
-                "object": "model",
-                "created": m.created_at.unix_timestamp(),
-                "owned_by": m.provider,
-                "modality": model_modality(&m.upstream_api),
-            })
-        })
-        .collect();
-    json!({ "object": "list", "data": data })
+fn model_list_entry(alias: &str, created: i64, provider: &str, upstream_api: &str) -> Value {
+    json!({
+        "id": alias,
+        "object": "model",
+        "created": created,
+        "owned_by": provider,
+        "modality": model_modality(upstream_api),
+    })
 }
 
 /// The `/v1/models` `modality` discriminator derived from a catalog row's
@@ -1072,7 +1238,7 @@ impl ModelKindFilter {
         })
     }
 
-    /// Whether a catalog row matches this filter, by its `upstream_api`.
+    /// Whether the local route's wire API matches this filter.
     fn matches(self, upstream_api: &str) -> bool {
         let is_emb = upstream_api.eq_ignore_ascii_case("embeddings");
         match self {
@@ -1093,8 +1259,8 @@ impl ModelKindFilter {
 }
 
 /// `GET /v1/models` — OpenAI-compatible model discovery. Lists the calling
-/// principal's tenant's **enabled** catalog models (the same store the admin
-/// `/llm_models` page reads), so an OpenAI SDK client can enumerate what it may
+/// principal's tenant's enabled catalog models and local default-tenant pins,
+/// so an OpenAI SDK client can enumerate what it may
 /// call — a combined listing of chat and embeddings models, each callable on its
 /// matching surface (chat/responses on `/v1/chat/completions` · `/v1/responses`,
 /// embeddings on `/v1/embeddings`). Each entry carries a `modality` field
@@ -1117,73 +1283,79 @@ async fn list_models(State(state): State<LlmRouterState>, req: Request) -> Respo
     .await
 }
 
-/// Build the `GET /v1/models` response for `tenant` from the catalog store:
-/// `None` (DB-less dev) ⇒ an empty list; a store read error ⇒ `503`; otherwise
-/// the tenant's enabled rows projected by [`models_list_json`]. Factored out of
-/// the handler so tenant-scoping, error mapping, and the OpenAI shape are
-/// unit-testable without constructing a full invocation service / HTTP request.
-///
-/// The rows are filtered to those `resolver` can currently resolve — i.e. models
-/// the inference plane can actually dispatch (each on its matching surface). The
-/// catalog is upsert-seeded from `GATEWAY_LLM_MODELS` and never auto-prunes a row
-/// dropped from the env config, so an enabled-but-orphaned alias can linger in
-/// the DB; without this filter the discovery endpoint would advertise a model the
-/// `/v1` routes would then reject as unknown. Once the catalog becomes the routing
-/// authority (the dynamic-resolver slice), every listed row resolves and the
-/// filter is a no-op.
+/// Use the tenant catalog for membership and timestamps. The local resolver
+/// decides whether an alias is callable and which API it currently serves.
+/// Default-tenant pins can appear before their catalog rows are published.
 async fn models_response(
     store: Option<&waygate_storage::SharedLlmModelCatalog>,
     tenant: &str,
     resolver: &dyn LlmModelResolver,
     type_filter: Option<ModelKindFilter>,
 ) -> Response {
+    let mut pins = if store.is_some() && tenant == waygate_core::TenantId::default().as_str() {
+        resolver.configured_aliases(LLM_SERVER)
+    } else {
+        Vec::new()
+    };
     let rows = match store {
         Some(store) => match store.list_models(tenant).await {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::error!(error = %e, tenant = %tenant, "GET /v1/models: list_models failed");
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "api_error",
-                    "the model catalog is temporarily unavailable",
-                );
+                if pins.is_empty() {
+                    return error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "api_error",
+                        "the model catalog is temporarily unavailable",
+                    );
+                }
+                Vec::new()
             }
         },
         None => Vec::new(),
     };
-    let rows: Vec<waygate_storage::LlmModelRow> = rows
+    let stored_aliases: HashSet<_> = rows.iter().map(|row| row.alias.clone()).collect();
+    pins.sort_unstable();
+    let entries = rows
         .into_iter()
-        .filter(|r| {
-            resolver
-                .resolve(LLM_SERVER, &r.alias)
-                .is_some_and(|model| !model.route.openai_chatgpt)
-        })
-        .filter(|r| match type_filter {
-            Some(f) => f.matches(&r.upstream_api),
-            None => true,
+        .map(|row| (row.alias, row.created_at.unix_timestamp()))
+        .chain(
+            pins.into_iter()
+                .filter(|alias| !stored_aliases.contains(alias))
+                .map(|alias| (alias, 0)),
+        );
+    let data: Vec<Value> = entries
+        .filter_map(|(alias, created)| {
+            let resolved = resolver.resolve(LLM_SERVER, &alias)?;
+            let upstream_api = resolved.upstream_api();
+            if resolved.route.openai_chatgpt
+                || type_filter.is_some_and(|f| !f.matches(upstream_api))
+            {
+                return None;
+            }
+            let mut model = model_list_entry(
+                &alias,
+                created,
+                resolved.route.provider.as_str(),
+                upstream_api,
+            );
+            let capabilities = match resolved.operation {
+                LlmOperation::Speech(caps) => Some(json!({"speech":caps})),
+                LlmOperation::Transcription(caps) => Some(json!({"transcription":caps})),
+                LlmOperation::Realtime(caps) => Some(json!({"realtime":caps})),
+                _ => None,
+            };
+            if let Some(capabilities) = capabilities {
+                model["capabilities"] = capabilities;
+            }
+            Some(model)
         })
         .collect();
-    let mut body = models_list_json(rows);
-    if let Some(models) = body.get_mut("data").and_then(Value::as_array_mut) {
-        for model in models {
-            if let Some(resolved) = model
-                .get("id")
-                .and_then(Value::as_str)
-                .and_then(|alias| resolver.resolve(LLM_SERVER, alias))
-            {
-                let capabilities = match resolved.operation {
-                    LlmOperation::Speech(caps) => Some(json!({"speech":caps})),
-                    LlmOperation::Transcription(caps) => Some(json!({"transcription":caps})),
-                    LlmOperation::Realtime(caps) => Some(json!({"realtime":caps})),
-                    _ => None,
-                };
-                if let Some(capabilities) = capabilities {
-                    model["capabilities"] = capabilities;
-                }
-            }
-        }
-    }
-    (StatusCode::OK, Json(body)).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "object": "list", "data": data })),
+    )
+        .into_response()
 }
 
 /// Chunk size for bounded response delivery.
@@ -1993,13 +2165,15 @@ mod tests {
             .await
             .expect("apply migrations");
 
-        let alias = format!("seed-test-{}", uuid::Uuid::now_v7());
+        let suffix = uuid::Uuid::now_v7();
+        let alias = format!("seed-test-a-{suffix}");
+        let served = format!("seed-test-model-{suffix}");
         let row = waygate_storage::LlmModelUpsert {
             tenant_id: "default".into(),
             alias: alias.clone(),
             provider: "openrouter".into(),
             credential_label: "MAIN".into(),
-            upstream_model: "openai/x".into(),
+            upstream_model: served.clone(),
             base_url: "https://x".into(),
             path: "chat/completions".into(),
             upstream_api: "chat_completions".into(),
@@ -2023,7 +2197,7 @@ mod tests {
             .expect("get")
             .expect("seeded row present");
         assert_eq!(got.provider, "openrouter");
-        assert_eq!(got.upstream_model, "openai/x");
+        assert_eq!(got.upstream_model, served);
 
         sqlx::query("DELETE FROM llm_models WHERE tenant_id = 'default' AND alias = $1")
             .bind(&alias)
@@ -2101,6 +2275,108 @@ mod tests {
             body["error"]["message"],
             "approved output schema for `example-messages.send` is invalid"
         );
+    }
+
+    #[test]
+    fn invalid_model_pins_preserve_valid_routes_and_catalog_rows() {
+        let raw = r#"[
+            {"alias":"","provider":"openai","base_url":"http://backend/v1","credential_label":"API"},
+            {"alias":"  ","provider":"openai","base_url":"http://backend/v1","credential_label":"API"},
+            {"alias":"invalid-schema","provider":"openai","base_url":42},
+            {"alias":"invalid-chat","provider":"openai","base_url":"http://backend/v1","authentication":"invalid"},
+            {"alias":"invalid-catalog","provider":"openai","base_url":"http://backend/v1","credential_label":"API","path":"chat/\u0000completions"},
+            {"alias":"valid-chat","model":"openai:old-route","base_url":"http://legacy/v1","credential_label":"API"},
+            {"alias":"valid-chat","model":"openai:chat-model","base_url":"http://backend ","credential_label":"API"},
+            {"alias":"valid-chat","model":"openai:alternate","base_url":"http://other/v1","authentication":"invalid"}
+        ]"#;
+        let (pins, rows, rejected) = compile_pins(raw, true);
+        assert!(rejected.contains(""));
+        assert!(rejected.contains("  "));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].alias, "valid-chat");
+        assert_eq!(rows[0].upstream_model, "chat-model");
+        assert_eq!(rows[0].base_url, "http://backend/");
+        let model = pins.resolve(LLM_SERVER, "valid-chat").expect("valid pin");
+        assert_eq!(model.route.base_url, rows[0].base_url);
+        let discovered =
+            HashMap::from([((LLM_SERVER.to_owned(), "invalid-chat".to_owned()), model)]);
+        let resolver =
+            DbModelResolver::new(pins, HashMap::new(), LLM_SERVER).with_rejected_pins(rejected);
+        resolver.reload(discovered);
+        assert!(resolver.resolve(LLM_SERVER, "invalid-schema").is_none());
+        assert!(resolver.resolve(LLM_SERVER, "invalid-chat").is_none());
+        assert!(resolver.resolve(LLM_SERVER, "invalid-catalog").is_none());
+        assert_eq!(
+            resolver
+                .resolve(LLM_SERVER, "valid-chat")
+                .unwrap()
+                .route
+                .upstream_model,
+            "chat-model"
+        );
+    }
+
+    #[test]
+    fn model_pin_decoding_retains_duplicates_and_isolates_deep_invalid_fields() {
+        let nested = format!("{}0{}", "[".repeat(160), "]".repeat(160));
+        let oversized = "a".repeat(MAX_MODEL_ALIAS_BYTES + 1);
+        let positional = r#"[null,null,null,"positional","openai","API","invalid",null,"http://backend/v1",null,null,null,null,null,null,[],null,null]"#;
+        assert!(serde_json::from_str::<ModelDef>(positional).is_ok());
+        let raw = format!(
+            r#"[
+                {positional},
+                [null,null,null,"positional-schema","openai",42,null,null,"http://backend/v1"],
+                {{"alias":"duplicate","provider":"openai","base_url":"http://first/v1","base_url":"http://second/v1","credential_label":"API"}},
+                {{"alias":"relative-url","provider":"openai","base_url":"/v1","credential_label":"API"}},
+                {{"alias":"query-url","provider":"openai","base_url":"http://backend/v1?param=test","credential_label":"API"}},
+                {{"alias":"fragment-url","provider":"openai","base_url":"http://backend/v1#fragment","credential_label":"API"}},
+                {{"alias":"first-alias","alias":"second-alias","provider":"openai","base_url":"http://backend/v1","credential_label":"API"}},
+                {{"alias":"deep","provider":"openai","base_url":{nested}}},
+                {{"alias":"{oversized}","provider":"openai","base_url":"http://backend/v1","credential_label":"API"}},
+                {{"alias":"valid-chat","provider":"openai","base_url":"http://backend/v1","credential_label":"API"}}
+            ]"#
+        );
+
+        let (pins, rows, rejected) = compile_pins(&raw, true);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].alias, "valid-chat");
+        assert!(pins.resolve(LLM_SERVER, "valid-chat").is_some());
+        assert_eq!(
+            rejected,
+            HashSet::from([
+                "positional".into(),
+                "positional-schema".into(),
+                "duplicate".into(),
+                "relative-url".into(),
+                "query-url".into(),
+                "fragment-url".into(),
+                "first-alias".into(),
+                "second-alias".into(),
+                "deep".into(),
+                oversized
+            ])
+        );
+    }
+
+    #[test]
+    fn long_aliases_are_usable_when_no_catalog_is_configured() {
+        let alias = "a".repeat(MAX_MODEL_ALIAS_BYTES + 1);
+        let raw = json!([{"alias":alias, "provider":"openai",
+            "base_url":"http://backend/v1", "credential_label":"API"}])
+        .to_string();
+        let (pins, _, rejected) = compile_pins(&raw, false);
+        assert!(rejected.is_empty());
+        assert!(pins.resolve(LLM_SERVER, &alias).is_some());
+    }
+
+    #[test]
+    fn unreadable_model_pins_produce_no_routes_or_catalog_rows() {
+        for raw in ["[", "{}", "null"] {
+            let (pins, rows, rejected) = compile_pins(raw, true);
+            assert!(pins.is_empty());
+            assert!(rows.is_empty());
+            assert!(rejected.is_empty());
+        }
     }
 
     #[test]
@@ -2221,11 +2497,11 @@ mod tests {
         // The /v1/models body is a translation contract: an OpenAI client reads
         // `object: "list"` and each entry's `id`/`object`/`owned_by`/`created`,
         // plus the `modality` extension that distinguishes embeddings from chat.
-        let body = models_list_json(vec![
-            catalog_row("gpt-x", "openrouter"),
-            catalog_row("claude", "anthropic"),
-            embeddings_row("embed-3", "openrouter"),
-        ]);
+        let body = json!({"object": "list", "data": [
+            model_list_entry("gpt-x", 1_700_000_000, "openrouter", "chat_completions"),
+            model_list_entry("claude", 1_700_000_000, "anthropic", "messages"),
+            model_list_entry("embed-3", 1_700_000_000, "openrouter", "embeddings"),
+        ]});
         assert_eq!(body["object"], "list");
         let data = body["data"].as_array().expect("data is an array");
         assert_eq!(data.len(), 3);
@@ -2285,6 +2561,9 @@ mod tests {
             seen_tenant: std::sync::Mutex::new(None),
         });
         let resolver = test_resolver(&["gpt-x", "embed-y"]);
+        let mut embedding = resolver.resolve(LLM_SERVER, "embed-y").unwrap();
+        embedding.operation = LlmOperation::Embeddings;
+        let resolver = resolver.with_model(LLM_SERVER, "embed-y", embedding);
         let ids = |resp: Response| async {
             let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
                 .await

@@ -132,3 +132,29 @@ pub const RESERVED_BUILTIN_NAMESPACES: &[&str] = &[
 /// `<ns>.`-prefixed built-in namespaces above) because the resolver intercepts
 /// only the exact `llm` server, not `llm.*`.
 pub const LLM_RESERVED_NAMESPACE: &str = "llm";
+
+/// The actual destination selected for inference. Kept in memory for pricing.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ModelBackend {
+    pub base_url: String,
+    pub path: String,
+    pub upstream_model: String,
+}
+
+impl std::fmt::Debug for ModelBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Addresses may contain private infrastructure or user information.
+        f.debug_struct("ModelBackend").finish_non_exhaustive()
+    }
+}
+
+/// Compare provider endpoints using the same slash handling as transport.
+pub fn model_endpoints_match(
+    base_url: &str,
+    path: &str,
+    other_base_url: &str,
+    other_path: &str,
+) -> bool {
+    base_url.trim_end_matches('/') == other_base_url.trim_end_matches('/')
+        && path.trim_start_matches('/') == other_path.trim_start_matches('/')
+}

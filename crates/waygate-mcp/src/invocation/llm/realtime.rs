@@ -86,13 +86,9 @@ impl DefaultInvocationService {
         };
         self.record_pre_call(&mut ctx).await?;
         let (tenant, _, principal) = cache_identity(&ctx);
-        let mut record = waygate_llm_translate::InferenceRecord::new(
-            model.route.provider,
-            &model.route.credential_label,
-            ctx.tool,
-            waygate_llm_translate::Surface::Realtime,
-            model.route.protocol,
-        );
+        let mut record = model
+            .route
+            .inference_record(ctx.tool, waygate_llm_translate::Surface::Realtime);
         record.usage = Default::default();
         let mut evidence = SessionEvidence {
             tasks: tasks.clone(),

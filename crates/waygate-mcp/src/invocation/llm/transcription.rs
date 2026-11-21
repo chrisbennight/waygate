@@ -54,13 +54,9 @@ impl DefaultInvocationService {
         let started = std::time::Instant::now();
         let mut base = llm_audit_base(&ctx);
         base.action = "AudioTranscription".into();
-        let mut record = waygate_llm_translate::InferenceRecord::new(
-            model.route.provider,
-            &model.route.credential_label,
-            ctx.tool,
-            waygate_llm_translate::Surface::AudioTranscription,
-            model.route.protocol,
-        );
+        let mut record = model
+            .route
+            .inference_record(ctx.tool, waygate_llm_translate::Surface::AudioTranscription);
         // Transcription consumes no metered tokens. Reported zeros price as zero
         // cost, rather than the unknown cost of absent counts.
         record.usage = waygate_llm_translate::TokenUsage {

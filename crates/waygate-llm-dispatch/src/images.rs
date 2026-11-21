@@ -38,16 +38,13 @@ impl LlmDispatcher {
             .api_key(route.provider, &route.credential_label)
             .await?;
         let auth = ProviderAuth::Bearer;
-        let record = InferenceRecord::new(
-            route.provider,
-            &route.credential_label,
+        let record = route.inference_record(
             &req.model_requested,
             if req.edit {
                 Surface::ImagesEdits
             } else {
                 Surface::ImagesGenerations
             },
-            route.protocol,
         );
         let started = std::time::Instant::now();
         let response = self

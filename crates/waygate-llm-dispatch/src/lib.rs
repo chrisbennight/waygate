@@ -89,6 +89,24 @@ pub struct ResolvedRoute {
     pub openai_chatgpt: bool,
 }
 
+impl ResolvedRoute {
+    pub fn inference_record(&self, model_requested: &str, surface: Surface) -> InferenceRecord {
+        let mut record = InferenceRecord::new(
+            self.provider,
+            &self.credential_label,
+            model_requested,
+            surface,
+            self.protocol,
+        );
+        record.backend = Some(waygate_core::ModelBackend {
+            base_url: self.base_url.clone(),
+            path: self.path.clone(),
+            upstream_model: self.upstream_model.clone(),
+        });
+        record
+    }
+}
+
 /// The result of a dispatch.
 pub enum DispatchOutcome {
     /// Non-streaming: the extracted record and the parsed response body.
@@ -519,13 +537,7 @@ impl LlmDispatcher {
         };
 
         let bearer = self.provider_key(route, auth).await?;
-        let record_base = InferenceRecord::new(
-            route.provider,
-            route.credential_label.as_str(),
-            req.model_requested.as_str(),
-            req.inbound_surface,
-            route.protocol,
-        );
+        let record_base = route.inference_record(&req.model_requested, req.inbound_surface);
         let started = std::time::Instant::now();
 
         let request = ProviderRequest {
@@ -648,13 +660,7 @@ impl LlmDispatcher {
             .bearer(route.provider, &route.credential_label)
             .await?;
 
-        let record_base = InferenceRecord::new(
-            route.provider,
-            route.credential_label.as_str(),
-            req.model_requested.as_str(),
-            Surface::AnthropicMessages,
-            UpstreamProtocol::AnthropicMessages,
-        );
+        let record_base = route.inference_record(&req.model_requested, Surface::AnthropicMessages);
         let started = std::time::Instant::now();
 
         let (response, metadata) = self
@@ -723,13 +729,7 @@ impl LlmDispatcher {
         // `Surface::Embeddings` marks the durable usage row; the chat
         // `upstream_protocol` is a benign placeholder (inert on this path — it
         // only selects the chat stream translator, which embeddings never use).
-        let record_base = InferenceRecord::new(
-            route.provider,
-            route.credential_label.as_str(),
-            req.model_requested.as_str(),
-            Surface::Embeddings,
-            UpstreamProtocol::OpenAiChat,
-        );
+        let record_base = route.inference_record(&req.model_requested, Surface::Embeddings);
         let response = self
             .providers
             .send_with_limit(

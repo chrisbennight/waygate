@@ -43,6 +43,7 @@ fn usage(tenant: &str, principal_sub: &str, alias: &str, input: u64, output: u64
         model_alias: alias.to_string(),
         provider: "openrouter".into(),
         provider_account_id: None,
+        backend: None,
         model_served: Some("served-x".into()),
         inbound_surface: "chat_completions".into(),
         input_tokens: Some(input),

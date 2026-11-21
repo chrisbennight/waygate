@@ -47,8 +47,9 @@ parity or account entitlement is inferred from a provider name or model listing.
 6. Validate the resulting configuration and qualify the candidate deployment
    against its backup and restore procedure before replacing the running release.
 
-Malformed credentials and retired configuration fail with migration guidance;
-they are not silently skipped, converted or sent to another provider. Invalid
+Malformed credentials prevent inference initialization with migration guidance.
+A retired model selector rejects the affected route. Waygate never converts
+retired credentials or silently reroutes a rejected alias. Invalid
 API-key reloads preserve the prior key. Locally loaded credential health does
 not prove provider access. Discovery preserves last-good rows on failed or
 incomplete listings. Historical usage, audit and account metadata remain intact;

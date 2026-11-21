@@ -33,6 +33,8 @@ pub struct LlmUsageRow {
     pub provider: String,
     /// Trusted account metadata for live metrics; not persisted in the usage ledger.
     pub provider_account_id: Option<String>,
+    /// In-memory destination used to select rates. The ledger omits it.
+    pub backend: Option<waygate_core::ModelBackend>,
     /// What the upstream actually ran; may differ from the alias.
     pub model_served: Option<String>,
     pub inbound_surface: String,

@@ -8,7 +8,7 @@
 //! catalog slot in behind the same [`LlmModelResolver`] trait, so the
 //! pipeline integration does not change when they land.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -83,6 +83,17 @@ pub struct ResolvedModel {
 }
 
 impl ResolvedModel {
+    pub fn upstream_api(&self) -> &'static str {
+        match self.operation {
+            LlmOperation::Chat => self.route.protocol.wire_name(),
+            LlmOperation::Embeddings => "embeddings",
+            LlmOperation::Images => "images",
+            LlmOperation::Speech(_) => "speech",
+            LlmOperation::Transcription(_) => "transcription",
+            LlmOperation::Realtime(_) => "realtime",
+        }
+    }
+
     /// Resource operations use the same configured provider and model gates.
     pub fn audio_resource_operations(&self) -> &[waygate_core::audio::AudioResourceOperation] {
         match &self.operation {
@@ -97,6 +108,11 @@ impl ResolvedModel {
 /// the pair is not an LLM model (so the caller falls back to the MCP path).
 pub trait LlmModelResolver: Send + Sync + 'static {
     fn resolve(&self, server: &str, model: &str) -> Option<ResolvedModel>;
+
+    /// Aliases supplied by the local configuration for a server.
+    fn configured_aliases(&self, _server: &str) -> Vec<String> {
+        Vec::new()
+    }
 
     /// The explicitly configured provider for standard audio resources, which
     /// have no client model selector. Absence and ambiguity both fail closed.
@@ -149,6 +165,14 @@ impl StaticModelResolver {
 }
 
 impl LlmModelResolver for StaticModelResolver {
+    fn configured_aliases(&self, server: &str) -> Vec<String> {
+        self.models
+            .keys()
+            .filter(|(configured_server, _)| configured_server == server)
+            .map(|(_, alias)| alias.clone())
+            .collect()
+    }
+
     fn realtime_call_model(&self, server: &str) -> Option<String> {
         let mut models = self.models.iter().filter(|((s, _), model)| {
             s == server && matches!(&model.operation,LlmOperation::Realtime(caps) if caps.webrtc)
@@ -198,6 +222,7 @@ type DiscoveredModels = HashMap<(String, String), ResolvedModel>;
 /// pin keeps its full routing and a stale discovered row can never shadow it.
 pub struct DbModelResolver {
     pins: StaticModelResolver,
+    rejected_pins: HashSet<String>,
     discovered: RwLock<Arc<DiscoveredModels>>,
     /// The LLM namespace this resolver reserves. It is **owned unconditionally**
     /// (see [`owns_server`](LlmModelResolver::owns_server)) — even with zero
@@ -222,9 +247,18 @@ impl DbModelResolver {
     ) -> Self {
         Self {
             pins,
+            rejected_pins: HashSet::new(),
             discovered: RwLock::new(Arc::new(discovered)),
             reserved_server: reserved_server.into(),
         }
+    }
+
+    /// Reserve aliases named by rejected pins so discovery cannot route them
+    /// to a different backend. A valid pin still wins for the same alias.
+    #[must_use]
+    pub fn with_rejected_pins(mut self, rejected_pins: HashSet<String>) -> Self {
+        self.rejected_pins = rejected_pins;
+        self
     }
 
     /// Replace the discovered layer with a fresh snapshot (the refresher calls
@@ -244,6 +278,13 @@ impl DbModelResolver {
             .len()
     }
 
+    /// Aliases owned by local configuration, including rejected pins.
+    pub fn reserved_config_aliases(&self) -> HashSet<String> {
+        let mut aliases = self.rejected_pins.clone();
+        aliases.extend(self.pins.configured_aliases(&self.reserved_server));
+        aliases
+    }
+
     /// A cheap `Arc` snapshot of the discovered layer, so a lookup never holds
     /// the lock while cloning a `ResolvedModel`.
     fn discovered_snapshot(&self) -> Arc<DiscoveredModels> {
@@ -255,6 +296,10 @@ impl DbModelResolver {
 }
 
 impl LlmModelResolver for DbModelResolver {
+    fn configured_aliases(&self, server: &str) -> Vec<String> {
+        self.pins.configured_aliases(server)
+    }
+
     fn realtime_call_model(&self, server: &str) -> Option<String> {
         self.pins.realtime_call_model(server)
     }
@@ -266,6 +311,9 @@ impl LlmModelResolver for DbModelResolver {
         // A pin wins; otherwise consult the discovered layer.
         if let Some(pinned) = self.pins.resolve(server, model) {
             return Some(pinned);
+        }
+        if server == self.reserved_server && self.rejected_pins.contains(model) {
+            return None;
         }
         self.discovered_snapshot()
             .iter()

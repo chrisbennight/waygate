@@ -41,6 +41,7 @@ async fn insert_llm_usage_roundtrip() {
         model_alias: "gpt-x".into(),
         provider: "openrouter".into(),
         provider_account_id: None,
+        backend: None,
         model_served: Some("served-x".into()),
         inbound_surface: "chat_completions".into(),
         input_tokens: Some(3),
@@ -168,6 +169,7 @@ async fn sink_prices_a_call_from_the_catalog() {
         model_alias: "gpt-x".into(),
         provider: "openrouter".into(),
         provider_account_id: None,
+        backend: None,
         model_served: Some("served-x".into()),
         inbound_surface: "chat_completions".into(),
         input_tokens: Some(1000),
@@ -313,6 +315,7 @@ async fn sink_records_unknown_cost_for_an_uncataloged_served_model() {
         model_alias: "gpt-x".into(),
         provider: "openrouter".into(),
         provider_account_id: None,
+        backend: None,
         // The provider auto-routed to a model not in the catalog.
         model_served: Some("vendor/auto-routed-elsewhere".into()),
         inbound_surface: "chat_completions".into(),
@@ -421,6 +424,7 @@ async fn sink_prices_by_the_calls_provider_when_upstream_name_collides() {
         model_alias: "a-oai".into(),
         provider: "openai".into(),
         provider_account_id: None,
+        backend: None,
         model_served: Some("shared-m".into()),
         inbound_surface: "chat_completions".into(),
         input_tokens: Some(1_000_000),
@@ -461,4 +465,103 @@ async fn sink_prices_by_the_calls_provider_when_upstream_name_collides() {
         .execute(&pool)
         .await
         .expect("cleanup models");
+}
+
+#[tokio::test]
+async fn sink_uses_the_serving_backend_and_callers_tenant_for_a_shared_model_name() {
+    let Ok(url) = env::var("AUDIT_DATABASE_URL") else {
+        eprintln!("skipping llm_usage endpoint pricing test: AUDIT_DATABASE_URL not set");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+    PgAuditSink::migrate(&pool).await.unwrap();
+    let tenant = format!("usage-backend-test-{}", Uuid::now_v7());
+    let other = "https://other.invalid/v1";
+    let selected = "https://serving.invalid/v1";
+    let mut configured = Vec::new();
+    for (alias, url, source, rate) in [
+        ("a-discovered", other, "discovered", 99),
+        ("b-other", other, "config", 80),
+        ("z-selected", selected, "config", 7),
+    ] {
+        let pin = LlmModelUpsert {
+            tenant_id: tenant.clone(),
+            alias: alias.into(),
+            provider: "openai".into(),
+            credential_label: "MAIN".into(),
+            upstream_model: "shared-model".into(),
+            base_url: url.into(),
+            path: "chat/completions".into(),
+            upstream_api: "chat_completions".into(),
+            openai_chatgpt: false,
+            risk: "low".into(),
+            requires_approval: false,
+            description: None,
+            enabled: true,
+        };
+        upsert_llm_model(&pool, &pin).await.unwrap();
+        sqlx::query(
+            "UPDATE llm_models SET input_cost_per_mtok = $1, source = $2
+                     WHERE tenant_id = $3 AND alias = $4",
+        )
+        .bind(rate)
+        .bind(source)
+        .bind(&tenant)
+        .bind(alias)
+        .execute(&pool)
+        .await
+        .unwrap();
+        if source == "config" {
+            configured.push(LlmModelUpsert {
+                tenant_id: "default".into(),
+                ..pin
+            });
+        }
+    }
+    let sink = PgLlmUsageSink::new(pool.clone()).with_local_catalog(configured, Vec::new());
+    sink.record_usage(LlmUsageRow {
+        tenant_id: tenant.clone(),
+        principal_sub: Some("alice".into()),
+        model_alias: "automatic-routing".into(),
+        provider: "openai".into(),
+        provider_account_id: None,
+        backend: Some(waygate_core::ModelBackend {
+            base_url: format!("{selected}/"),
+            path: "/chat/completions".into(),
+            upstream_model: "auto".into(),
+        }),
+        model_served: Some("shared-model".into()),
+        inbound_surface: "chat_completions".into(),
+        input_tokens: Some(1_000_000),
+        output_tokens: Some(0),
+        cached_read_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        finish_reason: None,
+        refusal: false,
+        latency_ms: None,
+        gateway_cache_hit: false,
+    })
+    .await;
+    let total: Option<Decimal> =
+        sqlx::query_scalar("SELECT total_cost FROM llm_usage WHERE tenant_id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(total, Some(Decimal::from(7)));
+    sqlx::query("DELETE FROM llm_usage WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM llm_models WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
