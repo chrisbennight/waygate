@@ -1,6 +1,14 @@
 //! Credential-free chat through a running gateway.
 
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{
+    path::Path,
+    process::Stdio,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use axum::{
     http::HeaderMap,
@@ -17,29 +25,46 @@ use waygate_oidc::identity_jwt::IdentityIssuer;
 async fn credential_free_chat_supports_streamed_and_non_streamed_requests() {
     let provider = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let provider_url = format!("http://{}/v1", provider.local_addr().unwrap());
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let calls = provider_calls.clone();
     let backend = Router::new().route(
         "/v1/chat/completions",
-        post(|headers: HeaderMap, Json(request): Json<Value>| async move {
-            let authorized = headers.contains_key("authorization");
-            match request["model"].as_str() {
-                Some("upstream-chat") if authorized => {}
-                Some("upstream-private") if !authorized => {}
-                Some("upstream-error") if !authorized => {
-                    return (StatusCode::TOO_MANY_REQUESTS, "fixture provider diagnostics").into_response();
+        post(move |headers: HeaderMap, Json(request): Json<Value>| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            async move {
+                let authorization = headers.get("authorization");
+                let model = request["model"].as_str();
+                match (model, authorization.and_then(|value| value.to_str().ok())) {
+                    (Some("upstream-chat"), Some("Bearer synthetic-test-fixture")) => {}
+                    (Some("upstream-private"), _) if authorization.is_none() => {}
+                    (Some("upstream-error"), _) if authorization.is_none() => {
+                        return (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "fixture provider diagnostics",
+                        )
+                            .into_response();
+                    }
+                    _ => return StatusCode::BAD_REQUEST.into_response(),
                 }
-                _ => return StatusCode::BAD_REQUEST.into_response(),
+                if request["stream"] == true {
+                    let events = concat!(
+                        "data: {\"id\":\"chatcmpl-local\",\"model\":\"upstream-private\",",
+                        "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"local completion\"},",
+                        "\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: [DONE]\n\n",
+                    );
+                    return ([("content-type", "text/event-stream")], events).into_response();
+                }
+                Json(json!({
+                    "id": "chatcmpl-local",
+                    "model": model,
+                    "choices": [{
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "local completion"}
+                    }]
+                }))
+                .into_response()
             }
-            if request["stream"] == true {
-                let events = concat!(
-                    "data: {\"id\":\"chatcmpl-local\",\"model\":\"upstream-private\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"local completion\"},\"finish_reason\":\"stop\"}]}\n\n",
-                    "data: [DONE]\n\n",
-                );
-                return ([("content-type", "text/event-stream")], events).into_response();
-            }
-            Json(json!({
-                "id":"chatcmpl-local", "model":request["model"],
-                "choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"local completion"}}]
-            })).into_response()
         }),
     );
     let backend_task = tokio::spawn(async move { axum::serve(provider, backend).await.unwrap() });
@@ -145,6 +170,7 @@ async fn credential_free_chat_supports_streamed_and_non_streamed_requests() {
     assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
     let restricted = chat(&client, &base, "restricted-chat", false, Some(&token)).await;
     assert_eq!(restricted.status(), StatusCode::FORBIDDEN);
+    assert_eq!(provider_calls.load(Ordering::Relaxed), 0);
     for alias in ["valid-chat", "private-chat"] {
         let good = chat(&client, &base, alias, false, Some(&token)).await;
         assert_eq!(good.status(), StatusCode::OK, "{alias}");
