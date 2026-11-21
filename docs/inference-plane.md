@@ -555,7 +555,7 @@ behavior per named stage is:
 
 | # | Stage | LLM behaviour |
 |---|---|---|
-| 1 | resolve | model alias → provider + credential pool (`waygate-llm-dispatch`); load the model's catalog entry (risk, costing, upstream_api). |
+| 1 | resolve | Resolve the model alias to its provider route and any configured credential pool (`waygate-llm-dispatch`). Load the model's catalog entry (risk, costing, upstream API). |
 | 2 | validate_input | translate the surface payload → `LlmRequest`; reject unsupported params with typed errors (before any cost). |
 | 3 | extract_facts | `Facts` gains provider, model, risk, pii=true, cost_class. |
 | 4 | authorize | Cedar gates the **model** resource (a `permit` on a group; models are **not** step-up-gated — see `authorization-model.md` §6). **Before first byte.** |
@@ -564,7 +564,7 @@ behavior per named stage is:
 | 7 | check_quota | Run shared request-rate quota, then the LLM-specific lagging token/cost budget gate (I3). Reject iff a configured ledger is already exhausted; make no reservation. |
 | 8 | check_approval | Called, but currently inactive for LLM requests: synthetic model facts set `requires_approval=false` and do not propagate `llm_models.requires_approval`. |
 | 9 | record_pre_call | in fail-closed audit mode, require a chained intent row before the billable provider call; otherwise no-op. |
-| 10 | dispatch | check the per-principal cache, then route to a healthy credential (§7); `waygate-llm-providers` issues the provider-native call with the injected bearer (§6) and `stream_options.include_usage` where applicable. Credential/transport failure → failover (I8). |
+| 10 | dispatch | Check the per-principal cache, then send the provider-native request with `stream_options.include_usage` where applicable. Authenticated routes use their configured credentials (§6) and try configured failovers on retryable failures (§7, I8). Credential-free chat calls its configured endpoint without an upstream credential or fallback. |
 | 11 | inspect_response | **Not wired for the LLM arm.** Provider translators normalize native content-filter/refusal signals, but configured MCP inspectors do not scan LLM responses. |
 | 12 | validate_output | **Not wired for the LLM arm.** Translation/shape errors fail inside dispatch; the catalog output-schema validator does not run on LLM responses. |
 | 13 | record_outcome | Unary calls attempt the LLM outcome and usage rows after dispatch; streaming calls do so at stream close. Both writes are best-effort, so the budget ledger advances only when the usage write succeeds. |
