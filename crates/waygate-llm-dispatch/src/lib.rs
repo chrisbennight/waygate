@@ -815,15 +815,6 @@ impl LlmDispatcher {
 
 fn credential_free_chat_error(error: ProviderError) -> ProviderError {
     match error {
-        ProviderError::Status {
-            status,
-            retry_after,
-            ..
-        } => ProviderError::Status {
-            status,
-            retry_after,
-            body: "response details omitted".into(),
-        },
         ProviderError::Transport(_) => {
             ProviderError::Transport("could not complete backend request".into())
         }

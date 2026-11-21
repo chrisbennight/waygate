@@ -161,6 +161,11 @@ pub struct ProviderClient {
     unary_timeout: Option<std::time::Duration>,
 }
 
+enum ErrorBody {
+    Capture,
+    Skip,
+}
+
 impl ProviderClient {
     /// Wrap a caller-provided `reqwest::Client` (so timeout/proxy/TLS policy is
     /// owned by the server, consistent with the rest of the gateway). No total
@@ -209,7 +214,7 @@ impl ProviderClient {
         req: ProviderRequest,
         max_bytes: usize,
     ) -> Result<ProviderResponse, ProviderError> {
-        self.send_inner(req, max_bytes, &self.http, None)
+        self.send_inner(req, max_bytes, &self.http, None, ErrorBody::Capture)
             .await
             .map(|(body, _)| body)
     }
@@ -226,8 +231,14 @@ impl ProviderClient {
                 "native Messages requires Anthropic authentication".into(),
             ));
         }
-        self.send_inner(req, MAX_CHAT_RESPONSE_BYTES, &self.http, Some(headers))
-            .await
+        self.send_inner(
+            req,
+            MAX_CHAT_RESPONSE_BYTES,
+            &self.http,
+            Some(headers),
+            ErrorBody::Capture,
+        )
+        .await
     }
 
     /// Send a unary request with a hard response byte limit. Reads stop at the
@@ -244,20 +255,31 @@ impl ProviderClient {
                 "bounded unary transport cannot stream".into(),
             ));
         }
-        self.send_once(req, max_bytes).await
+        self.send_once_inner(req, max_bytes, ErrorBody::Capture)
+            .await
     }
 
     /// Send a unary or streaming request without redirects or automatic
-    /// transport retries. Requires [`Self::with_single_attempt_http`].
+    /// transport retries. Return a failed status without reading its body.
+    /// Requires [`Self::with_single_attempt_http`].
     pub async fn send_once(
         &self,
         req: ProviderRequest,
         max_bytes: usize,
     ) -> Result<ProviderResponse, ProviderError> {
+        self.send_once_inner(req, max_bytes, ErrorBody::Skip).await
+    }
+
+    async fn send_once_inner(
+        &self,
+        req: ProviderRequest,
+        max_bytes: usize,
+        error_body: ErrorBody,
+    ) -> Result<ProviderResponse, ProviderError> {
         let http = self.single_attempt_http.as_ref().ok_or_else(|| {
             ProviderError::Protocol("single-attempt provider transport is not configured".into())
         })?;
-        self.send_inner(req, max_bytes, http, None)
+        self.send_inner(req, max_bytes, http, None, error_body)
             .await
             .map(|(body, _)| body)
     }
@@ -268,6 +290,7 @@ impl ProviderClient {
         max_bytes: usize,
         http: &reqwest::Client,
         native_headers: Option<&waygate_core::anthropic::RequestHeaders>,
+        error_body: ErrorBody,
     ) -> Result<(ProviderResponse, waygate_core::anthropic::ResponseMetadata), ProviderError> {
         let url = format!(
             "{}/{}",
@@ -331,7 +354,10 @@ impl ProviderClient {
             return Err(ProviderError::Status {
                 status: status.as_u16(),
                 retry_after,
-                body: read_bounded_body(resp).await,
+                body: match error_body {
+                    ErrorBody::Capture => read_bounded_body(resp).await,
+                    ErrorBody::Skip => "response details omitted".into(),
+                },
             });
         }
 

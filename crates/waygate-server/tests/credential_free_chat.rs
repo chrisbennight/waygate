@@ -1,6 +1,7 @@
 //! Credential-free chat through a running gateway.
 
 use std::{
+    convert::Infallible,
     path::Path,
     process::Stdio,
     sync::{
@@ -11,11 +12,13 @@ use std::{
 };
 
 use axum::{
+    body::Body,
     http::{header, HeaderMap},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
+use futures::StreamExt;
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
 use tokio::{net::TcpListener, process::Command, time::Instant};
@@ -42,10 +45,11 @@ async fn credential_free_chat_supports_streamed_and_non_streamed_requests() {
                         (Some("upstream-chat"), Some("Bearer synthetic-test-fixture")) => {}
                         (Some("upstream-private"), _) if authorization.is_none() => {}
                         (Some("upstream-error"), _) if authorization.is_none() => {
-                            return (
-                                StatusCode::TOO_MANY_REQUESTS,
+                            let body = futures::stream::iter([Ok::<_, Infallible>(
                                 "fixture provider diagnostics",
-                            )
+                            )])
+                            .chain(futures::stream::pending());
+                            return (StatusCode::TOO_MANY_REQUESTS, Body::from_stream(body))
                                 .into_response();
                         }
                         _ => return StatusCode::BAD_REQUEST.into_response(),
@@ -208,7 +212,7 @@ async fn credential_free_chat_supports_streamed_and_non_streamed_requests() {
     let events = stream.text().await.unwrap();
     assert!(events.contains("local completion"));
     assert!(events.contains("data: [DONE]"));
-    let failure = chat(&client, &base, "error-chat", false, Some(&token)).await;
+    let failure = chat(&client, &base, "error-chat", true, Some(&token)).await;
     assert_eq!(failure.status(), StatusCode::BAD_GATEWAY);
     let message = failure.text().await.unwrap();
     assert!(message.contains("provider returned HTTP 429"));
