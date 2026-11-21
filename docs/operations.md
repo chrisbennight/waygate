@@ -33,8 +33,6 @@ Before opening access to users, verify:
 - A durable audit query finds the synthetic acceptance call. Configure and
   verify trace/metric collection separately; a database alone does not install
   those backends.
-- An isolated backup restore succeeds before the deployment holds important
-  credentials, policies, or evidence.
 
 Record the source commit/image digest, PostgreSQL version, enabled features,
 configuration generation, and acceptance results. Record secret identifiers
@@ -64,36 +62,25 @@ and shared retained-file storage when that feature is enabled. Database
 notifications tell replicas to reload; they do not distribute local files.
 Do not substitute ephemeral replica storage when a shared mount fails.
 
-## Upgrade deliberately
+## Roll out an image
 
-1. Read the candidate's configuration, protocol, and migration changes. Record
-   the previous digest and configuration generation. Run your harmless permit
-   and refusal checks against the current deployment first.
-2. Take a coordinated backup. Stop or fence all gateway writers during a simple
-   logical backup; for online backup, use a PostgreSQL-consistent backup method
-   and coordinate the served file generation. Protect backup files as sensitive.
-3. Restore into an isolated environment with disposable identity/upstream
-   endpoints. Keep production traffic, outbound mutations, and webhook notifiers
-   disconnected. Test the candidate against the restored data and configuration.
-4. Let the candidate apply its shipped migrations to that isolated database.
-   Check login, policy decisions, configuration health, encrypted-credential
-   readability through the authorized runtime, and any enabled file/Code Mode
-   workflows. Do not expose the restored credential values in diagnostics.
-5. Select the candidate's immutable image digest through your deployment review
-   path. Start the intended replicas, inspect migration/readiness outcomes, and
-   repeat the acceptance checks before completing rollout.
+Waygate publishes a verified image digest and documents changes to configuration,
+protocols, and persistent state. The deployment repository owns image selection,
+rollout checks, and recovery policy. For an image-only patch, select the published
+digest through the deployment's existing review and CI, apply it through the
+existing deployment controller, and verify the running digest and readiness.
+Use the [release notes](release-notes.md) to identify migrations and other changes
+that affect the deployment's data or configuration.
 
 Shipped SQL migrations are immutable. Never edit a migration to bypass a
 checksum failure or delete migration bookkeeping to force startup. Preserve
 the failed state for diagnosis and compare the deployed image with the intended
-release. A fresh empty-database test cannot prove upgrade compatibility.
+release.
 
 The overview category-feed index migration builds an index over the audit log.
 The transactional migration runner holds a write-blocking table lock during
-that build; on a large audit history, do not assume startup will be brief or
-that other replicas can continue recording audit events. Measure the build on
-the isolated restore, allow enough disk space and startup time, and schedule a
-maintenance window that accounts for audit writers. After rollout, verify the
+that build. On a large audit history, allow for additional disk space, startup
+time, and interruption to audit writers when planning that migration. Verify the
 overview feed plan uses both tenant and category as index conditions and no
 longer scans unrelated history. This index does not eliminate the separate
 traffic-histogram query or guarantee a particular total page-load time.
@@ -141,14 +128,10 @@ identity keys before the first upstream connection remains necessary for
 upstreams that verify gateway-signed identity tokens. OAuth, dashboard, MCP,
 inference, file-transfer, SCIM, and metrics requests are all closed.
 
-Closing admission prevents **new** requests from entering the application. A
-request that already passed the check may still finish or mutate an upstream,
-and existing streams and background workers keep running. The deployment must
-separately drain or stop all writers before taking a coordinated backup. An
-admission file does not isolate outbound traffic or prove upgrade compatibility;
-restore qualification still needs isolated disposable upstreams and identity
-endpoints. Before opening admission, the worker must durably record release
-intent and verify the accepted process, image, configuration, keys, and health.
+Closing admission prevents **new** requests from entering the application.
+Requests that already passed the check, open streams, and background workers
+can continue making writes and outbound calls. Use the deployment's own
+procedure to drain writers when an operation requires it.
 
 ## Roll back the appropriate state
 

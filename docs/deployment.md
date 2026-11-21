@@ -104,8 +104,9 @@ issuer still exercises bearer validation and Cedar enforcement; dashboard
 login remains disabled and the listener is loopback-only. Production uses the
 release image and an actual identity provider.
 
-For installation, acceptance, backups, upgrades, and rollback, follow the
-[operator runbook](operations.md) and [authenticated Compose example](../examples/deployment/README.md).
+Use the [operator runbook](operations.md) and [authenticated Compose example](../examples/deployment/README.md)
+for Waygate's runtime and recovery behavior. Follow your deployment repository
+for rollout and backup procedures.
 
 ## Live configuration volumes
 
