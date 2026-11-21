@@ -379,21 +379,45 @@ fn default_path_for(provider: LlmProvider) -> String {
 /// `/v1` routes so the refresher can populate the catalog and the discovered
 /// models become routable. `Ok(None)` only when neither is configured (MCP-only).
 pub fn build_from_pins(
-    pins: StaticModelResolver,
+    pins: ConfiguredModels,
     call_timeout: Option<std::time::Duration>,
     discovery_configured: bool,
 ) -> anyhow::Result<Option<LlmDeps>> {
-    if pins.is_empty() && !discovery_configured {
+    if pins.0.is_empty() && !discovery_configured {
         return Ok(None);
     }
-    build_dispatcher(pins, call_timeout).map(Some)
+    build_dispatcher(pins.into_resolver(), call_timeout).map(Some)
+}
+
+/// Compiled pins in configuration order. The resolver and catalog seeder
+/// apply the same sequence. For repeated aliases, the last entry serves.
+#[derive(Default)]
+pub struct ConfiguredModels(Vec<(String, ResolvedModel)>);
+
+impl ConfiguredModels {
+    fn into_resolver(self) -> StaticModelResolver {
+        self.0
+            .into_iter()
+            .fold(StaticModelResolver::new(), |resolver, (alias, model)| {
+                resolver.with_model(LLM_SERVER, alias, model)
+            })
+    }
+
+    /// Keep the seeding order across upgrades. Repeated writes can change
+    /// discovery pricing when they reclaim an alias from a different route.
+    pub fn catalog_rows(&self) -> Vec<waygate_storage::LlmModelUpsert> {
+        self.0
+            .iter()
+            .map(|(alias, model)| configured_model_row(alias, model))
+            .collect()
+    }
 }
 
 /// Compile the route table once for dispatch and catalog publication.
-pub fn configured_models_from_env() -> anyhow::Result<StaticModelResolver> {
+pub fn configured_models_from_env() -> anyhow::Result<ConfiguredModels> {
     let raw = match std::env::var(MODELS_ENV) {
         Ok(v) if !v.trim().is_empty() => v,
-        _ => return Ok(StaticModelResolver::new()),
+        _ => return Ok(ConfiguredModels::default()),
     };
     let defs = serde_json::from_str(&raw)
         .map_err(|e| anyhow::anyhow!("{MODELS_ENV} is not a valid JSON array of models: {e}"))?;
@@ -460,9 +484,9 @@ fn normalize_model_defs(defs: &mut [ModelDef]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn compile_model_defs(mut defs: Vec<ModelDef>) -> anyhow::Result<StaticModelResolver> {
+fn compile_model_defs(mut defs: Vec<ModelDef>) -> anyhow::Result<ConfiguredModels> {
     normalize_model_defs(&mut defs)?;
-    let mut resolver = StaticModelResolver::new();
+    let mut pins = Vec::with_capacity(defs.len());
     anyhow::ensure!(
         defs.iter()
             .filter(|def| def
@@ -564,8 +588,7 @@ fn compile_model_defs(mut defs: Vec<ModelDef>) -> anyhow::Result<StaticModelReso
             .next()
             .expect("a target group yields at least its primary route");
         let fallbacks: Vec<ResolvedRoute> = routes.collect();
-        resolver = resolver.with_model(
-            LLM_SERVER,
+        pins.push((
             def.alias,
             ResolvedModel {
                 route,
@@ -595,9 +618,9 @@ fn compile_model_defs(mut defs: Vec<ModelDef>) -> anyhow::Result<StaticModelReso
                 ttfb: def.ttfb_ms.map(std::time::Duration::from_millis),
                 cache_ttl: def.cache_ttl_ms.map(std::time::Duration::from_millis),
             },
-        );
+        ));
     }
-    Ok(resolver)
+    Ok(ConfiguredModels(pins))
 }
 
 fn build_dispatcher(
@@ -783,21 +806,10 @@ fn model_risk_str(r: ModelRisk) -> &'static str {
     }
 }
 
-/// Project only the effective configured routes. Sort by alias so replicas
-/// write catalog rows in the same order.
-pub fn configured_model_rows(pins: &StaticModelResolver) -> Vec<waygate_storage::LlmModelUpsert> {
-    let mut rows: Vec<_> = pins
-        .models_for(LLM_SERVER)
-        .map(|(alias, model)| configured_model_row(alias, model))
-        .collect();
-    rows.sort_unstable_by(|left, right| left.alias.cmp(&right.alias));
-    rows
-}
-
 #[cfg(test)]
 fn model_def_to_upsert(def: &ModelDef) -> waygate_storage::LlmModelUpsert {
     let pins = compile_model_defs(vec![def.clone()]).unwrap();
-    configured_model_rows(&pins).pop().unwrap()
+    pins.catalog_rows().pop().unwrap()
 }
 
 /// Seed the configured models into `llm_models`. Idempotent: each
@@ -1846,27 +1858,29 @@ mod tests {
     }
 
     #[test]
-    fn configured_catalog_projects_the_effective_routes() {
+    fn configured_catalog_and_resolver_use_the_same_ordered_routes() {
         let defs = serde_json::from_value(json!([
             {"alias":"model", "provider":"openrouter", "credential_label":"OLD",
              "base_url":"https://old.example.invalid/v1", "surface":"responses"},
-            {"alias":"other", "model":"anthropic:messages-model", "credential_label":"API",
+            {"alias":"earlier", "model":"anthropic:messages-model", "credential_label":"API",
              "base_url":"https://messages.example.invalid/v1"},
             {"alias":"model", "model":"openai:local-model", "authentication":"none",
              "base_url":"http://local.example.invalid/v1", "path":"completions", "risk":"medium"}
         ]))
         .unwrap();
         let pins = compile_model_defs(defs).unwrap();
-        let rows = configured_model_rows(&pins);
+        let rows = pins.catalog_rows();
         assert_eq!(
             rows.iter()
                 .map(|row| row.alias.as_str())
                 .collect::<Vec<_>>(),
-            ["model", "other"]
+            ["model", "earlier", "model"]
         );
-        let resolved = pins.resolve(LLM_SERVER, "model").unwrap();
+        let resolved = pins.into_resolver().resolve(LLM_SERVER, "model").unwrap();
         assert!(resolved.route.upstream_no_auth);
-        let row = &rows[0];
+        assert_eq!(rows[0].upstream_api, "responses");
+        assert_eq!(rows[0].base_url, "https://old.example.invalid/v1");
+        let row = &rows[2];
         assert_eq!(row.provider, "openai");
         assert_eq!(row.upstream_model, "local-model");
         assert_eq!(row.base_url, "http://local.example.invalid/v1");
@@ -1994,6 +2008,37 @@ mod tests {
             .expect("seeded row present");
         assert_eq!(got.provider, "openrouter");
         assert_eq!(got.upstream_model, "openai/x");
+
+        sqlx::query(
+            "UPDATE llm_models SET source = 'discovered', input_cost_per_mtok = 7
+             WHERE tenant_id = 'default' AND alias = $1",
+        )
+        .bind(&alias)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let defs = serde_json::from_value(json!([
+            {"alias":alias, "model":"anthropic:replacement", "credential_label":"MAIN",
+             "base_url":"https://alternate.example.invalid/v1"},
+            {"alias":alias, "model":"openrouter:openai/x", "credential_label":"MAIN",
+             "base_url":"https://replacement.example.invalid/v1"}
+        ]))
+        .unwrap();
+        let configured = compile_model_defs(defs).unwrap();
+        seed_models(&pool, &configured.catalog_rows())
+            .await
+            .unwrap();
+        let published = waygate_storage::get_llm_model(&pool, "default", &alias)
+            .await
+            .unwrap()
+            .unwrap();
+        let resolved = configured
+            .into_resolver()
+            .resolve(LLM_SERVER, &alias)
+            .unwrap();
+        assert_eq!(published.base_url, resolved.route.base_url);
+        assert_eq!(published.upstream_model, resolved.route.upstream_model);
+        assert!(published.input_cost_per_mtok.is_none());
 
         sqlx::query("DELETE FROM llm_models WHERE tenant_id = 'default' AND alias = $1")
             .bind(&alias)

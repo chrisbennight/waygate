@@ -160,16 +160,6 @@ impl StaticModelResolver {
     pub fn is_empty(&self) -> bool {
         self.models.is_empty()
     }
-
-    /// Iterate over the effective models in one namespace.
-    pub fn models_for<'a>(
-        &'a self,
-        server: &'a str,
-    ) -> impl Iterator<Item = (&'a str, &'a ResolvedModel)> + 'a {
-        self.models.iter().filter_map(move |((key, alias), model)| {
-            (key == server).then_some((alias.as_str(), model))
-        })
-    }
 }
 
 impl LlmModelResolver for StaticModelResolver {

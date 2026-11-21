@@ -718,7 +718,7 @@ async fn gateway_main() -> anyhow::Result<()> {
     // Provider calls are bounded by the same upstream call timeout as MCP tool
     // calls.
     let pins = llm::configured_models_from_env()?;
-    let configured_rows = llm::configured_model_rows(&pins);
+    let configured_rows = pins.catalog_rows();
     let mut llm_deps = llm::build_from_pins(
         pins,
         cfg.upstream_call_timeout,
