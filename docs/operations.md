@@ -69,8 +69,10 @@ protocols, and persistent state. The deployment repository owns image selection,
 rollout checks, and recovery policy. For an image-only patch, select the published
 digest through the deployment's existing review and CI, apply it through the
 existing deployment controller, and verify the running digest and readiness.
-Use the [release notes](release-notes.md) to identify migrations and other changes
-that affect the deployment's data or configuration.
+To determine whether the schema changes, compare the shipped
+[`migrations/`](../migrations/) between the running and candidate image's source
+revisions. The [release notes](release-notes.md) summarize configuration and
+protocol changes for versioned releases.
 
 Shipped SQL migrations are immutable. Never edit a migration to bypass a
 checksum failure or delete migration bookkeeping to force startup. Preserve
