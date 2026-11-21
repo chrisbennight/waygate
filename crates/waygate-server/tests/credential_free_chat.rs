@@ -89,7 +89,6 @@ async fn credential_free_chat_supports_streamed_and_non_streamed_requests() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../waygate-authz/tests/fixtures/policies");
     let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = reservation.local_addr().unwrap();
-    drop(reservation);
     let base = format!("http://{addr}");
     let issuer_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let issuer_url = format!("http://{}", issuer_listener.local_addr().unwrap());
@@ -133,7 +132,8 @@ async fn credential_free_chat_supports_streamed_and_non_streamed_requests() {
         );
     let issuer_task =
         tokio::spawn(async move { axum::serve(issuer_listener, issuer_router).await.unwrap() });
-    let mut gateway = Command::new(env!("CARGO_BIN_EXE_gateway-server"))
+    let mut gateway = Command::new(env!("CARGO_BIN_EXE_gateway-server"));
+    gateway
         .env_clear()
         .env("GATEWAY_AUTH_MODE", "enforce")
         .env("AUTHENTIK_ISSUER", issuer_url)
@@ -149,9 +149,9 @@ async fn credential_free_chat_supports_streamed_and_non_streamed_requests() {
             r#"{"api_key":"synthetic-test-fixture"}"#,
         )
         .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("start the gateway");
+        .kill_on_drop(true);
+    drop(reservation);
+    let mut gateway = gateway.spawn().expect("start the gateway");
     let client = Client::builder()
         .timeout(Duration::from_secs(5))
         .build()

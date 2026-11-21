@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use serde_json::Value;
 
 use waygate_llm_credentials::{CredentialError, LlmCredentialStore, LlmProvider};
@@ -538,23 +538,12 @@ impl LlmDispatcher {
                 stream: req.stream,
             })
             .await
-            .map_err(|error| match (auth, error) {
-                (
-                    ProviderAuth::None,
-                    ProviderError::Status {
-                        status,
-                        retry_after,
-                        ..
-                    },
-                ) => ProviderError::Status {
-                    status,
-                    retry_after,
-                    body: "response details omitted".into(),
-                },
-                (ProviderAuth::None, ProviderError::Transport(_)) => {
-                    ProviderError::Transport("could not complete backend request".into())
+            .map_err(|error| {
+                if auth == ProviderAuth::None {
+                    credential_free_chat_error(error)
+                } else {
+                    error
                 }
-                (_, other) => other,
             })
             .inspect_err(|_| {
                 waygate_telemetry::metrics::record_llm_request_failure(
@@ -621,7 +610,11 @@ impl LlmDispatcher {
             }
             ProviderResponse::Stream(frames) => DispatchOutcome::Stream {
                 record_base,
-                frames,
+                frames: if auth == ProviderAuth::None {
+                    frames.map_err(credential_free_chat_error).boxed()
+                } else {
+                    frames
+                },
                 metadata: None,
             },
         })
@@ -807,7 +800,7 @@ impl LlmDispatcher {
                         provider = route.provider.as_str(),
                         credential_label = %route.credential_label,
                         status = ?e.provider_status(),
-                        "llm embeddings dispatch failed on a pool candidate; cooling it and failing over"
+                        "llm embeddings candidate failed with a retryable error"
                     );
                     last_err = Some(e);
                 }
@@ -818,6 +811,24 @@ impl LlmDispatcher {
         // `order` always has the primary, and only retryable failures fall
         // through, so `last_err` is set.
         Err(last_err.expect("the candidate order is non-empty"))
+    }
+}
+
+fn credential_free_chat_error(error: ProviderError) -> ProviderError {
+    match error {
+        ProviderError::Status {
+            status,
+            retry_after,
+            ..
+        } => ProviderError::Status {
+            status,
+            retry_after,
+            body: "response details omitted".into(),
+        },
+        ProviderError::Transport(_) => {
+            ProviderError::Transport("could not complete backend request".into())
+        }
+        other => other,
     }
 }
 
