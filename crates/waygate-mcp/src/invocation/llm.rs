@@ -259,6 +259,7 @@ pub(super) fn build_usage_row(
         model_alias,
         provider: record.provider.as_str().to_owned(),
         provider_account_id: record.provider_account_id.clone(),
+        backend: record.backend.clone(),
         model_served: record.model_served.clone(),
         inbound_surface: record.inbound_surface.as_str().to_owned(),
         input_tokens: u.input,

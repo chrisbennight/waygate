@@ -175,6 +175,7 @@ impl LlmUsageRecorder for PgLlmUsageSink {
             &row.provider,
             row.model_served.as_deref(),
             &row.model_alias,
+            row.backend.as_ref(),
             filter,
         )
         .await;

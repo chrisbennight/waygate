@@ -649,8 +649,9 @@ If the catalog is slow or unavailable, validated pins and discovery continue
 serving while Waygate retries catalog publication. The model listing uses the
 local route to determine the API and lists valid default-tenant pins before
 their catalog rows appear. A stored rate remains usable while the write waits
-if its route matches the local pin. Rejected pins and rows for a different
-backend cannot supply that pin's rates.
+if its route matches the local pin. Usage pricing stays scoped to the caller's
+tenant and the endpoint that served the request, including after failover.
+Rejected aliases and rates for a different backend are excluded.
 If the setting is unreadable, Waygate logs the error and loads no pins. MCP
 and any independently configured model discovery can still start. With a database,
 model aliases are limited to 1,024 UTF-8 bytes to fit the catalog's primary key. The model

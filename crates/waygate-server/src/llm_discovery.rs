@@ -15,7 +15,7 @@ use waygate_llm_discovery::{
     list_gemini, list_openai, list_openrouter, list_openrouter_embeddings, DiscoveredModel,
     DiscoverySurface,
 };
-use waygate_llm_dispatch::{DbModelResolver, LlmModelResolver};
+use waygate_llm_dispatch::DbModelResolver;
 use waygate_storage::LlmDiscoveredModelUpsert;
 
 /// Serializes the live-PG tests that operate on the fixed
@@ -342,10 +342,7 @@ async fn run_cycle(
     pool: &sqlx::PgPool,
     resolver: &DbModelResolver,
 ) {
-    let pinned_aliases = resolver
-        .configured_aliases(crate::llm::LLM_SERVER)
-        .into_iter()
-        .collect();
+    let pinned_aliases = resolver.reserved_config_aliases();
     for target in targets {
         if let Err(e) = refresh_target(target, http, credentials, pool, &pinned_aliases).await {
             tracing::warn!(
@@ -676,7 +673,13 @@ mod tests {
             .execute(&mut *lock)
             .await
             .unwrap();
-        let pinned = HashSet::from([alias.clone()]);
+        let resolver = DbModelResolver::new(
+            Default::default(),
+            Default::default(),
+            crate::llm::LLM_SERVER,
+        )
+        .with_rejected_pins(HashSet::from([alias.clone()]));
+        let pinned = resolver.reserved_config_aliases();
         assert_eq!(
             refresh_target(&target, &http, &credentials, &pool, &pinned)
                 .await

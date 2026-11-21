@@ -199,8 +199,12 @@ fn model_row(m: LlmModelRow, resolver: Option<&dyn LlmModelResolver>) -> ModelRo
                 && route.provider.as_str() == m.provider
                 && m.upstream_api.eq_ignore_ascii_case(upstream_api)
                 && route.upstream_model == m.upstream_model
-                && route.base_url == m.base_url
-                && route.path == m.path
+                && waygate_core::model_endpoints_match(
+                    &route.base_url,
+                    &route.path,
+                    &m.base_url,
+                    &m.path,
+                )
                 && route.credential_label == m.credential_label
         });
     let is_embeddings = m.upstream_api.eq_ignore_ascii_case("embeddings");
@@ -370,6 +374,10 @@ mod tests {
             },
         );
         assert!(model_row(row.clone(), Some(&resolver)).routable);
+        let mut same_endpoint = row.clone();
+        same_endpoint.base_url.push('/');
+        same_endpoint.path.insert(0, '/');
+        assert!(model_row(same_endpoint, Some(&resolver)).routable);
         let mut other_operation = row.clone();
         other_operation.upstream_api = "embeddings".into();
         assert!(!model_row(other_operation, Some(&resolver)).routable);

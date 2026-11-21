@@ -278,6 +278,13 @@ impl DbModelResolver {
             .len()
     }
 
+    /// Aliases owned by local configuration, including rejected pins.
+    pub fn reserved_config_aliases(&self) -> HashSet<String> {
+        let mut aliases = self.rejected_pins.clone();
+        aliases.extend(self.pins.configured_aliases(&self.reserved_server));
+        aliases
+    }
+
     /// A cheap `Arc` snapshot of the discovered layer, so a lookup never holds
     /// the lock while cloning a `ResolvedModel`.
     fn discovered_snapshot(&self) -> Arc<DiscoveredModels> {

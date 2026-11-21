@@ -214,7 +214,7 @@ pub async fn get_llm_model_by_served<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    get_model_for_usage(executor, tenant_id, provider, Some(served), "", None).await
+    get_model_for_usage(executor, tenant_id, provider, Some(served), "", None, None).await
 }
 
 pub(crate) struct CatalogPricingFilter<'a> {
@@ -228,6 +228,7 @@ pub(crate) async fn get_model_for_usage<'e, E>(
     provider: &str,
     served: Option<&str>,
     alias: &str,
+    backend: Option<&waygate_core::ModelBackend>,
     filter: Option<CatalogPricingFilter<'_>>,
 ) -> Result<Option<LlmModelRow>, sqlx::Error>
 where
@@ -236,6 +237,7 @@ where
     let rejected = filter
         .as_ref()
         .map_or(&[][..], |scope| scope.rejected_aliases);
+    let priced_model = served.or_else(|| backend.map(|route| route.upstream_model.as_str()));
     let mut candidates = sqlx::query(
         r#"
         SELECT tenant_id, alias, provider, credential_label, upstream_model,
@@ -248,34 +250,47 @@ where
            AND (($3::text IS NULL AND alias = $4 AND (NOT $6 OR provider = $2))
              OR (upstream_model = $3 AND provider = $2))
            AND alias <> ALL($5)
-         ORDER BY alias
+         ORDER BY (alias = $4) DESC, alias
         "#,
     )
     .bind(tenant_id)
     .bind(provider)
-    .bind(served)
+    .bind(priced_model)
     .bind(alias)
     .bind(rejected)
     .bind(filter.is_some())
     .fetch(executor);
     while let Some(row) = candidates.try_next().await? {
         let model = LlmModelRow::from_row(&row)?;
+        if backend.is_some_and(|route| {
+            !waygate_core::model_endpoints_match(
+                &route.base_url,
+                &route.path,
+                &model.base_url,
+                &model.path,
+            )
+        }) {
+            continue;
+        }
         if let Some(scope) = &filter {
             let discovered = row.try_get::<&str, _>("source")? == "discovered";
-            let matches_local_route = scope
-                .configured
-                .get(&model.alias)
-                .filter(|pin| pin.tenant_id == model.tenant_id)
-                .map_or(discovered, |pin| {
-                    model.provider == pin.provider
-                        && model.upstream_model == pin.upstream_model
-                        && model.base_url.trim_end_matches('/')
-                            == pin.base_url.trim_end_matches('/')
-                        && model.path == pin.path
-                        && model.upstream_api == pin.upstream_api
-                        && model.credential_label == pin.credential_label
-                        && model.openai_chatgpt == pin.openai_chatgpt
-                });
+            let matches_local_route =
+                scope
+                    .configured
+                    .get(&model.alias)
+                    .map_or(discovered, |pin| {
+                        model.provider == pin.provider
+                            && model.upstream_model == pin.upstream_model
+                            && waygate_core::model_endpoints_match(
+                                &model.base_url,
+                                &model.path,
+                                &pin.base_url,
+                                &pin.path,
+                            )
+                            && model.upstream_api == pin.upstream_api
+                            && model.credential_label == pin.credential_label
+                            && model.openai_chatgpt == pin.openai_chatgpt
+                    });
             if !matches_local_route {
                 continue;
             }

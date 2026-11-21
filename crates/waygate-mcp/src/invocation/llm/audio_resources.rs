@@ -53,13 +53,9 @@ impl DefaultInvocationService {
         let started = std::time::Instant::now();
         let mut base = llm_audit_base(&ctx);
         base.action = "AudioResource".into();
-        let mut record = waygate_llm_translate::InferenceRecord::new(
-            model.route.provider,
-            &model.route.credential_label,
-            ctx.tool,
-            waygate_llm_translate::Surface::AudioResource,
-            model.route.protocol,
-        );
+        let mut record = model
+            .route
+            .inference_record(ctx.tool, waygate_llm_translate::Surface::AudioResource);
         record.usage = Default::default();
         let (tenant, _, principal) = cache_identity(&ctx);
         let row = build_usage_row(&record, tenant, principal, ctx.tool.to_owned(), None);
