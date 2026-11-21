@@ -996,11 +996,71 @@ pub async fn seed_models(
         return Ok(());
     }
     let mut tx = pool.begin().await?;
+    // Bound one blocked write while allowing a large batch to finish in the
+    // background. The transaction also rolls back if its caller is cancelled.
+    sqlx::query("SET LOCAL statement_timeout = '30s'")
+        .execute(&mut *tx)
+        .await?;
     for row in rows {
         waygate_storage::upsert_llm_model(&mut *tx, row).await?;
     }
     tx.commit().await?;
     Ok(())
+}
+
+pub async fn publish_configured_catalog(
+    pool: sqlx::PgPool,
+    rows: Vec<waygate_storage::LlmModelUpsert>,
+    published: Arc<std::sync::atomic::AtomicBool>,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    if rows.is_empty() {
+        return;
+    }
+    // Give normal boots a chance to publish before serving, then retry without
+    // holding readiness or stopping configured routes and discovery.
+    match tokio::time::timeout(Duration::from_secs(5), seed_models(&pool, &rows)).await {
+        Ok(Ok(())) => {
+            published.store(true, Ordering::Release);
+            tracing::info!(models = rows.len(), "published configured model catalog");
+            return;
+        }
+        Ok(Err(error)) => tracing::warn!(
+            sqlstate = ?error.as_database_error().and_then(|error| error.code()),
+            "configured model catalog publication failed; retrying while routes remain available"
+        ),
+        Err(_) => tracing::warn!(
+            "configured model catalog publication timed out; retrying while routes remain available"
+        ),
+    }
+    tokio::spawn(async move {
+        let mut delay = Duration::from_secs(1);
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(delay) => {}
+            }
+            let outcome = tokio::select! {
+                _ = shutdown.cancelled() => return,
+                outcome = seed_models(&pool, &rows) => outcome,
+            };
+            match outcome {
+                Ok(()) => {
+                    published.store(true, Ordering::Release);
+                    tracing::info!(models = rows.len(), "published configured model catalog");
+                    return;
+                }
+                Err(error) => tracing::warn!(
+                    sqlstate = ?error.as_database_error().and_then(|error| error.code()),
+                    "configured model catalog publication retry failed"
+                ),
+            }
+            delay = (delay * 2).min(Duration::from_secs(60));
+        }
+    });
 }
 
 pub(crate) fn parse_provider(s: &str) -> anyhow::Result<LlmProvider> {
@@ -2116,7 +2176,6 @@ mod tests {
 
         let suffix = uuid::Uuid::now_v7();
         let alias = format!("seed-test-a-{suffix}");
-        let valid_alias = format!("seed-test-z-{suffix}");
         let served = format!("seed-test-model-{suffix}");
         let row = waygate_storage::LlmModelUpsert {
             tenant_id: "default".into(),
@@ -2149,35 +2208,8 @@ mod tests {
         assert_eq!(got.provider, "openrouter");
         assert_eq!(got.upstream_model, served);
 
-        let mut healthy_row = row.clone();
-        healthy_row.alias.clone_from(&valid_alias);
-        seed_models(&pool, &[healthy_row])
-            .await
-            .expect("publish healthy pin");
-        sqlx::query("UPDATE llm_models SET source = 'discovered' WHERE tenant_id = 'default' AND alias = $1")
+        sqlx::query("DELETE FROM llm_models WHERE tenant_id = 'default' AND alias = $1")
             .bind(&alias)
-            .execute(&pool)
-            .await
-            .expect("create a discovered alias that a rejected pin shadows");
-        let rejected = waygate_storage::get_llm_model(&pool, "default", &alias)
-            .await
-            .expect("get rejected catalog row")
-            .expect("rejected row is retained");
-        assert!(rejected.enabled);
-        let priced = waygate_storage::get_llm_model_by_served(
-            &pool,
-            "default",
-            "openrouter",
-            &served,
-            std::slice::from_ref(&alias),
-        )
-        .await
-        .expect("look up served model pricing")
-        .expect("served model remains priced");
-        assert_eq!(priced.alias, valid_alias);
-
-        sqlx::query("DELETE FROM llm_models WHERE tenant_id = 'default' AND alias = ANY($1)")
-            .bind(&[alias, valid_alias])
             .execute(&pool)
             .await
             .expect("cleanup");

@@ -12,6 +12,11 @@
 //! logged and dropped — a usage-ledger write must never fail a call the user
 //! already paid for.
 
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 use async_trait::async_trait;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -19,7 +24,7 @@ use uuid::Uuid;
 
 use waygate_evidence::usage::{LlmUsageRecorder, LlmUsageRow};
 
-use crate::llm_catalog::{get_llm_model, get_llm_model_by_served, LlmModelRow};
+use crate::llm_catalog::{get_model_for_usage, CatalogPricingFilter, LlmModelRow};
 
 /// Where a usage row's cost came from (design §4.2). Stored as the
 /// `llm_usage.cost_source` string.
@@ -116,20 +121,35 @@ pub fn compute_cost(
 #[derive(Clone)]
 pub struct PgLlmUsageSink {
     pool: sqlx::PgPool,
-    rejected_aliases: std::sync::Arc<[String]>,
+    local_catalog: Option<Arc<LocalCatalog>>,
+}
+
+struct LocalCatalog {
+    configured_aliases: Vec<String>,
+    rejected_aliases: Vec<String>,
+    published: Arc<AtomicBool>,
 }
 
 impl PgLlmUsageSink {
     pub fn new(pool: sqlx::PgPool) -> Self {
         Self {
             pool,
-            rejected_aliases: std::sync::Arc::from([]),
+            local_catalog: None,
         }
     }
 
     #[must_use]
-    pub fn with_rejected_aliases(mut self, aliases: Vec<String>) -> Self {
-        self.rejected_aliases = aliases.into();
+    pub fn with_local_catalog(
+        mut self,
+        configured_aliases: Vec<String>,
+        rejected_aliases: Vec<String>,
+        published: Arc<AtomicBool>,
+    ) -> Self {
+        self.local_catalog = Some(Arc::new(LocalCatalog {
+            configured_aliases,
+            rejected_aliases,
+            published,
+        }));
         self
     }
 }
@@ -145,19 +165,23 @@ impl LlmUsageRecorder for PgLlmUsageSink {
         // alias's configured route as the best available estimate. A lookup
         // error degrades to Unknown. Tokens are recorded regardless (cost is
         // best-effort metadata, not a gate).
-        let lookup = match row.model_served.as_deref() {
-            Some(served) => {
-                get_llm_model_by_served(
-                    &self.pool,
-                    &row.tenant_id,
-                    &row.provider,
-                    served,
-                    &self.rejected_aliases,
-                )
-                .await
-            }
-            None => get_llm_model(&self.pool, &row.tenant_id, &row.model_alias).await,
-        };
+        let filter = self
+            .local_catalog
+            .as_ref()
+            .map(|catalog| CatalogPricingFilter {
+                configured_aliases: &catalog.configured_aliases,
+                rejected_aliases: &catalog.rejected_aliases,
+                published: catalog.published.load(Ordering::Acquire),
+            });
+        let lookup = get_model_for_usage(
+            &self.pool,
+            &row.tenant_id,
+            &row.provider,
+            row.model_served.as_deref(),
+            &row.model_alias,
+            filter,
+        )
+        .await;
         // Currency is the priced model's catalog currency; default to USD when
         // there is no model row (cost is then Unknown / NULL anyway, so the
         // currency label is never actually attached to a cost increment).

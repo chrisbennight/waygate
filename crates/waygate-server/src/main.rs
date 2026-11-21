@@ -728,36 +728,22 @@ async fn gateway_main() -> anyhow::Result<()> {
             (None, llm::ConfiguredModelCatalog::default())
         }
     };
-    // Publish the catalog and routes together. An inference catalog failure
-    // leaves MCP serving and prevents requests against mismatched model rows.
+    // A replica can dispatch its validated routes before its catalog writes.
+    // Pricing uses configured rows only after this replica publishes them.
+    let configured_aliases = model_catalog
+        .rows
+        .iter()
+        .map(|row| row.alias.clone())
+        .collect();
+    let catalog_published = Arc::new(std::sync::atomic::AtomicBool::new(false));
     if let Some(pool) = db_pool.as_ref() {
-        if !model_catalog.rows.is_empty() {
-            let catalog_deadline = pool.options().get_acquire_timeout();
-            match tokio::time::timeout(
-                catalog_deadline,
-                llm::seed_models(pool, &model_catalog.rows),
-            )
-            .await
-            {
-                Ok(Ok(())) => tracing::info!(
-                    models = model_catalog.rows.len(),
-                    "seeded llm_models catalog from GATEWAY_LLM_MODELS"
-                ),
-                Ok(Err(error)) => {
-                    tracing::error!(
-                        sqlstate = ?error.as_database_error().and_then(|error| error.code()),
-                        "inference catalog publication failed; MCP remains available"
-                    );
-                    llm_deps = None;
-                }
-                Err(_) => {
-                    tracing::error!(
-                        "inference catalog publication timed out; MCP remains available"
-                    );
-                    llm_deps = None;
-                }
-            }
-        }
+        llm::publish_configured_catalog(
+            pool.clone(),
+            model_catalog.rows,
+            catalog_published.clone(),
+            ct.clone(),
+        )
+        .await;
     }
     // The SAME in-process credential store the dispatcher resolves
     // bearers from, handed to the admin credential-status panel so it reads live
@@ -857,8 +843,11 @@ async fn gateway_main() -> anyhow::Result<()> {
     // identically regardless of entry point.
     let llm_usage_store: Option<waygate_mcp::SharedLlmUsage> = match (&db_pool, &llm_deps) {
         (Some(pool), Some(_)) => Some(Arc::new(
-            waygate_storage::PgLlmUsageSink::new(pool.clone())
-                .with_rejected_aliases(model_catalog.rejected_aliases),
+            waygate_storage::PgLlmUsageSink::new(pool.clone()).with_local_catalog(
+                configured_aliases,
+                model_catalog.rejected_aliases,
+                catalog_published,
+            ),
         )),
         _ => None,
     };

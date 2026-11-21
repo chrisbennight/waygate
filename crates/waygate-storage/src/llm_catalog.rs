@@ -200,18 +200,44 @@ where
 /// string can exist under two providers with different rates (e.g. a model
 /// name served by both OpenAI directly and via OpenRouter), so the served
 /// lookup must match the call's resolved provider to avoid borrowing another
-/// provider's pricing. Exclude aliases rejected by the serving replica and use
-/// alias order as the tiebreaker for the remaining catalog rows.
+/// provider's pricing. Use alias order as the tiebreaker for matching rows.
 pub async fn get_llm_model_by_served<'e, E>(
     executor: E,
     tenant_id: &str,
     provider: &str,
     served: &str,
-    rejected_aliases: &[String],
 ) -> Result<Option<LlmModelRow>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    get_model_for_usage(executor, tenant_id, provider, Some(served), "", None).await
+}
+
+pub(crate) struct CatalogPricingFilter<'a> {
+    pub(crate) configured_aliases: &'a [String],
+    pub(crate) rejected_aliases: &'a [String],
+    pub(crate) published: bool,
+}
+
+pub(crate) async fn get_model_for_usage<'e, E>(
+    executor: E,
+    tenant_id: &str,
+    provider: &str,
+    served: Option<&str>,
+    alias: &str,
+    filter: Option<CatalogPricingFilter<'_>>,
+) -> Result<Option<LlmModelRow>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let (configured, rejected, published) = match filter {
+        Some(filter) => (
+            Some(filter.configured_aliases),
+            filter.rejected_aliases,
+            filter.published,
+        ),
+        None => (None, &[][..], false),
+    };
     sqlx::query_as::<_, LlmModelRow>(
         r#"
         SELECT tenant_id, alias, provider, credential_label, upstream_model,
@@ -220,8 +246,15 @@ where
                cached_read_cost_per_mtok, cache_write_cost_per_mtok, currency,
                enabled, created_at, updated_at
           FROM llm_models
-         WHERE tenant_id = $1 AND provider = $2 AND upstream_model = $3
-           AND alias <> ALL($4)
+         WHERE tenant_id = $1
+           AND (($3::text IS NULL AND alias = $4)
+             OR (provider = $2 AND upstream_model = $3))
+           AND alias <> ALL($5)
+           AND ($6::text[] IS NULL OR CASE WHEN $7 THEN
+               source <> 'config' OR alias = ANY($6)
+             ELSE
+               source <> 'config' AND alias <> ALL($6)
+             END)
          ORDER BY alias
          LIMIT 1
         "#,
@@ -229,7 +262,10 @@ where
     .bind(tenant_id)
     .bind(provider)
     .bind(served)
-    .bind(rejected_aliases)
+    .bind(alias)
+    .bind(rejected)
+    .bind(configured)
+    .bind(published)
     .fetch_optional(executor)
     .await
 }
