@@ -9,7 +9,7 @@ impl LlmDispatcher {
         request: AudioResourceRequest,
         route: &ResolvedRoute,
     ) -> Result<Value, DispatchError> {
-        if route.openai_chatgpt || route.embeddings_no_auth {
+        if route.openai_chatgpt || route.upstream_no_auth {
             return Err(ProviderError::Protocol(
                 "audio resources require a standard bearer provider".into(),
             )

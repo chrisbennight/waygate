@@ -18,7 +18,7 @@ impl DefaultInvocationService {
             .map_err(|e| InvocationError::InvalidArguments(e.to_string()))?;
         request.model_requested = ctx.tool.to_owned();
         if model.route.provider != waygate_llm_credentials::LlmProvider::OpenAi
-            || model.route.embeddings_no_auth
+            || model.route.upstream_no_auth
             || !model.fallbacks.is_empty()
         {
             return Err(InvocationError::InvalidArguments(

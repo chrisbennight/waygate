@@ -21,7 +21,12 @@ pub(super) fn no_auth(def: &ModelDef) -> anyhow::Result<bool> {
         {
             anyhow::bail!("credential-free backend URLs must use HTTP(S) without user information, queries, or fragments");
         }
-        if !is_embeddings(def)
+        let openai_chat = def
+            .kind
+            .as_deref()
+            .is_none_or(|kind| kind.eq_ignore_ascii_case("chat"))
+            && !wants_responses(def);
+        if (!is_embeddings(def) && !openai_chat)
             || !def.provider.eq_ignore_ascii_case("openai")
             || !def.credential_label.is_empty()
             || def
@@ -30,7 +35,7 @@ pub(super) fn no_auth(def: &ModelDef) -> anyhow::Result<bool> {
                 .is_some_and(|v| !v.is_empty())
             || !def.fallbacks.is_empty()
         {
-            anyhow::bail!("authentication none requires one OpenAI-compatible embedding route without credentials or fallbacks");
+            anyhow::bail!("authentication none requires one OpenAI-compatible chat or embedding route without credentials or fallbacks");
         }
     } else if def.credential_label.trim().is_empty() {
         anyhow::bail!("authenticated model routes require a credential_label");
@@ -53,7 +58,7 @@ mod tests {
         .unwrap();
         let (_, resolver) = build_from_defs(defs, None).unwrap().unwrap();
         let model = resolver.resolve(LLM_SERVER, "voyage-4-nano").unwrap();
-        assert!(model.route.embeddings_no_auth);
+        assert!(model.route.upstream_no_auth);
         assert_eq!(model.operation, LlmOperation::Embeddings);
         assert_eq!(model.route.upstream_model, "voyageai/voyage-4-nano");
         assert_eq!(model.route.path, "embeddings");
@@ -61,11 +66,29 @@ mod tests {
     }
 
     #[test]
+    fn explicit_credential_free_chat_route_resolves_without_a_label() {
+        let defs = serde_json::from_value(json!([{
+            "alias":"private-chat", "provider":"openai", "upstream_model":"upstream-chat",
+            "base_url":"http://backend/v1", "authentication":"none"
+        }]))
+        .unwrap();
+        let (_, resolver) = build_from_defs(defs, None).unwrap().unwrap();
+        let model = resolver.resolve(LLM_SERVER, "private-chat").unwrap();
+        assert_eq!(model.operation, LlmOperation::Chat);
+        assert_eq!(model.route.protocol, UpstreamProtocol::OpenAiChat);
+        assert_eq!(model.route.path, "chat/completions");
+        assert_eq!(model.route.upstream_model, "upstream-chat");
+        assert!(model.route.upstream_no_auth);
+        assert!(model.route.credential_label.is_empty());
+    }
+
+    #[test]
     fn invalid_auth_configuration_is_rejected_before_dispatch() {
         for extra in [
             json!({}),
             json!({"authentication":"typo"}),
-            json!({"authentication":"none","kind":"chat"}),
+            json!({"authentication":"none","kind":"chat","surface":"responses"}),
+            json!({"authentication":"none","kind":"images"}),
             json!({"authentication":"none","credential_label":"MAIN"}),
             json!({"authentication":"none","credential_labels":["BACKUP"]}),
             json!({"authentication":"none","provider":"anthropic"}),

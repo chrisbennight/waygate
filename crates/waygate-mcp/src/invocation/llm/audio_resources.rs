@@ -23,7 +23,7 @@ impl DefaultInvocationService {
             .audio_resource_operations()
             .contains(&request.operation)
             || model.route.openai_chatgpt
-            || model.route.embeddings_no_auth
+            || model.route.upstream_no_auth
             || !model.fallbacks.is_empty()
         {
             return Err(InvocationError::InvalidArguments(

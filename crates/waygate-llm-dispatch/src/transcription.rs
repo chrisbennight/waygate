@@ -9,7 +9,7 @@ impl LlmDispatcher {
         request: TranscriptionRequest,
         route: &ResolvedRoute,
     ) -> Result<TranscriptionBody, DispatchError> {
-        if route.openai_chatgpt || route.embeddings_no_auth {
+        if route.openai_chatgpt || route.upstream_no_auth {
             return Err(ProviderError::Protocol(
                 "transcription requires a standard bearer route".into(),
             )

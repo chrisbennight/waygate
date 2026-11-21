@@ -297,7 +297,7 @@ mod tests {
             path: "chat/completions".into(),
             upstream_model: "openrouter/x".into(),
             protocol: UpstreamProtocol::OpenAiChat,
-            embeddings_no_auth: false,
+            upstream_no_auth: false,
             openai_chatgpt: false,
         }
     }
