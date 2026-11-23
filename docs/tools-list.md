@@ -86,9 +86,10 @@ matched exactly, ignoring ASCII case. The default is empty. A selected client's
 `codemode.search` becomes `codemode_search`. Its `tools/call` accepts either
 form. The gateway maps an underscore name back to the real dotted name before
 authorization, audit, tasks, or routing see the call, so those always record
-the real name. An unknown underscore name, or one for a built-in the caller
-cannot use, gets the same unavailable-tool error as an unknown dotted name,
-naming only what the client sent.
+the real name. An unknown underscore name gets the same unavailable-tool error
+as an unknown dotted name, naming only what the client sent. A call by the
+underscore name of a built-in the caller cannot use gets the same refusal as
+its dotted name, such as a policy or scope denial.
 
 Only built-ins are renamed. Their namespaces are reserved and their tools are
 fixed in the gateway, so an underscore name always maps to the same tool. A

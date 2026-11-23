@@ -584,9 +584,6 @@ pub struct GatewayServer {
     /// behavior). Each handle owns a distinct `namespace()`; the load-time guard
     /// in `waygate_upstream` keeps an upstream from colliding with any of them.
     builtins: Vec<crate::builtin::SharedBuiltinTools>,
-    /// Real names of every tool in `builtins`, computed once on first use.
-    /// Adding a built-in replaces it, so it always matches `builtins`.
-    builtin_real_names: Arc<std::sync::OnceLock<Vec<String>>>,
     /// When true, `get_info` advertises the EMA capability:
     /// `io.modelcontextprotocol/enterprise-managed-authorization` extension in
     /// `ServerCapabilities.extensions` (SEP-1724) so EMA-aware clients discover
@@ -859,7 +856,6 @@ impl GatewayServer {
             invocation,
             audit,
             builtins: Vec::new(),
-            builtin_real_names: Arc::new(std::sync::OnceLock::new()),
             advertise_ema: false,
             client_ping_interval: None,
             ping_stats: Arc::new(crate::ping::PingStats::default()),
@@ -1073,33 +1069,40 @@ impl GatewayServer {
         )
     }
 
-    /// Every built-in tool's real name. Built-in namespaces are reserved
-    /// against upstream names and their catalogs are fixed in the gateway, so
-    /// this set does not change with configuration, connections or tenants.
-    /// It is built once per server, because building a catalog projects
-    /// every schema.
-    fn builtin_real_names(&self) -> &[String] {
-        self.builtin_real_names.get_or_init(|| {
-            self.builtins
-                .iter()
-                .flat_map(|builtin| {
-                    let namespace = builtin.namespace();
-                    builtin
-                        .catalog()
-                        .tools
-                        .iter()
-                        .map(|record| format!("{namespace}.{}", record.identity.name))
-                        .collect::<Vec<_>>()
+    /// Real names of built-in tools, limited to namespaces whose underscore
+    /// form begins `received` when one is given. Built-in namespaces are
+    /// reserved against upstream names and their catalogs are fixed in the
+    /// gateway, so this set does not change with configuration, connections
+    /// or tenants. Building a catalog projects every schema, so a lookup
+    /// builds only the catalogs whose tools could match.
+    fn builtin_real_names(&self, received: Option<&str>) -> Vec<String> {
+        use crate::client_tool_names::presented_name;
+        self.builtins
+            .iter()
+            .filter(|builtin| {
+                received.is_none_or(|received| {
+                    received
+                        .strip_prefix(presented_name(builtin.namespace()).as_str())
+                        .is_some_and(|rest| rest.starts_with('_'))
                 })
-                .collect()
-        })
+            })
+            .flat_map(|builtin| {
+                let namespace = builtin.namespace();
+                builtin
+                    .catalog()
+                    .tools
+                    .iter()
+                    .map(|record| format!("{namespace}.{}", record.identity.name))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// The real name of the one built-in tool whose underscore name is
     /// `received`, or `None`. Upstream tool names always contain a dot, so
     /// an underscore name can only ever address a built-in.
     fn builtin_real_name(&self, received: &str) -> Option<String> {
-        let names = self.builtin_real_names();
+        let names = self.builtin_real_names(Some(received));
         crate::client_tool_names::unique_match(received, names.iter().map(String::as_str))
             .map(str::to_owned)
     }
@@ -1109,7 +1112,7 @@ impl GatewayServer {
     /// shares keeps its dotted name, so every underscore name listed is one a
     /// call accepts.
     fn present_underscore_names(&self, visible: &mut [Tool]) {
-        let names = self.builtin_real_names();
+        let names = self.builtin_real_names(None);
         let builtin: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
         for tool in visible {
             if !builtin.contains(tool.name.as_ref()) {
@@ -1240,7 +1243,6 @@ impl GatewayServer {
     #[must_use]
     pub fn with_builtin_tools(mut self, builtin: crate::builtin::SharedBuiltinTools) -> Self {
         self.builtins.push(builtin);
-        self.builtin_real_names = Arc::new(std::sync::OnceLock::new());
         self
     }
 
