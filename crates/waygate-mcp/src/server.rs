@@ -3271,19 +3271,71 @@ pub(crate) fn tool_unavailable_error(tool: &str, trace_id: &str) -> McpError {
     )
 }
 
-/// Re-address an unavailable-tool error to the name the client sent, so a
-/// resolved underscore name for a withheld tool answers exactly as an
-/// unknown name does. Every other error is returned unchanged.
-fn unavailable_under_sent_name(error: McpError, sent: &str) -> McpError {
-    let unavailable_trace = error
+/// Re-address an unavailable-tool answer for the real tool `real` to the
+/// name the client sent, so a resolved underscore name for a withheld tool
+/// answers exactly as an unknown name does. That covers the structured
+/// unavailable-tool error and the built-in unknown-tool error, which a
+/// built-in returns alike for an absent tool and one the caller's profile
+/// withholds. Every other error is returned unchanged.
+fn unavailable_under_sent_name(error: McpError, real: &str, sent: &str) -> McpError {
+    if let Some(trace_id) = error
         .data
         .as_ref()
         .filter(|data| data["error"] == "tool_unavailable")
         .and_then(|data| data["trace_id"].as_str())
-        .map(str::to_owned);
-    match unavailable_trace {
-        Some(trace_id) => tool_unavailable_error(sent, &trace_id),
-        None => error,
+    {
+        return tool_unavailable_error(sent, trace_id);
+    }
+    if error.code == rmcp::model::ErrorCode::INVALID_PARAMS
+        && error.data.is_none()
+        && error.message == format!("unknown tool: {real}")
+    {
+        let trace_id = waygate_telemetry::correlation::current_trace_id()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+        return tool_unavailable_error(sent, &trace_id);
+    }
+    error
+}
+
+#[cfg(test)]
+mod unavailable_under_sent_name_tests {
+    use super::*;
+
+    fn unavailable_tool(error: &McpError) -> Option<&str> {
+        error
+            .data
+            .as_ref()
+            .filter(|data| data["error"] == "tool_unavailable")
+            .and_then(|data| data["tool"].as_str())
+    }
+
+    #[test]
+    fn withheld_answers_name_only_what_the_client_sent() {
+        let structured = tool_unavailable_error("files.archive_list", "trace-1");
+        let readdressed =
+            unavailable_under_sent_name(structured, "files.archive_list", "files_archive_list");
+        assert_eq!(unavailable_tool(&readdressed), Some("files_archive_list"));
+        assert_eq!(readdressed.data.as_ref().unwrap()["trace_id"], "trace-1");
+        assert!(!readdressed.message.contains("files.archive_list"));
+
+        let builtin = McpError::invalid_params("unknown tool: gateway-files.prepare_upload", None);
+        let readdressed = unavailable_under_sent_name(
+            builtin,
+            "gateway-files.prepare_upload",
+            "gateway-files_prepare_upload",
+        );
+        assert_eq!(
+            unavailable_tool(&readdressed),
+            Some("gateway-files_prepare_upload")
+        );
+    }
+
+    #[test]
+    fn other_errors_are_unchanged() {
+        let forbidden = McpError::invalid_request("forbidden: files.read — policy", None);
+        let unchanged = unavailable_under_sent_name(forbidden, "files.read", "files_read");
+        assert_eq!(unchanged.message, "forbidden: files.read — policy");
+        assert!(unavailable_tool(&unchanged).is_none());
     }
 }
 
@@ -4940,7 +4992,9 @@ impl ServerHandler for GatewayServer {
             }
         };
         let result = match (sent_alias, result) {
-            (Some(alias), Err(error)) => Err(unavailable_under_sent_name(error, &alias)),
+            (Some(alias), Err(error)) => {
+                Err(unavailable_under_sent_name(error, &tool_name, &alias))
+            }
             (_, result) => result,
         };
         // When a propose_change just queued a change and the client
