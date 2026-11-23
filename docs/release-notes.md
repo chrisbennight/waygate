@@ -1,5 +1,18 @@
 # Release notes
 
+## 3.1.5
+
+- MCP clients that reject dots in tool names, such as Google Antigravity, can
+  be shown gateway built-in tools with `_` in place of `.` (for example
+  `codemode_search`). List them in `GATEWAY_UNDERSCORE_TOOL_NAME_CLIENTS`; pair
+  it with `GATEWAY_CODEMODE_ONLY_CLIENTS` so the client lists only built-ins and
+  reaches upstream tools through Code Mode. Calls accept either form and get the
+  same response, and authorization, audit and routing always use the real
+  dotted name. Upstream tools keep their dotted names. Other clients are
+  unchanged, and the setting is empty by default. See
+  [clients that reject dots in tool names](tools-list.md#clients-that-reject-dots-in-tool-names).
+  This release requires no database migration.
+
 ## 3.1.4
 
 - OpenAI-compatible Chat Completions routes can use a backend that requires
