@@ -27,7 +27,9 @@ fn all_builtin_tools() -> Vec<Tool> {
 /// observed client tool-name rule accepts.
 #[test]
 fn every_builtin_tool_has_a_distinct_valid_underscore_name() {
-    let tools = all_builtin_tools();
+    // Every namespace production registers, including discovery.
+    let mut tools = all_builtin_tools();
+    tools.extend(crate::mcp_discovery::surface_catalog().definitions());
     let mut seen = std::collections::HashSet::new();
     for t in &tools {
         let presented = waygate_mcp::client_tool_names::presented_name(&t.name);

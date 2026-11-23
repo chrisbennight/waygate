@@ -2801,6 +2801,18 @@ impl GatewayServer {
         }
         if self.underscore_tool_names_active(client) {
             self.present_underscore_names(&mut visible);
+            // Renaming can change where a built-in sorts, so restore the
+            // name order the client receives.
+            if matches!(
+                projection,
+                ToolProjection::Full {
+                    canonical_order: true
+                } | ToolProjection::BuiltinsOnly {
+                    canonical_order: true
+                }
+            ) {
+                visible.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+            }
         }
         Ok(visible)
     }

@@ -5,32 +5,39 @@ use super::*;
 
 const SELECTED: &str = "underscore-client";
 
-/// A built-in namespace that lists and answers its tools without
+/// A built-in namespace with one tool that lists and answers without
 /// authentication, so the test exercises only naming.
-struct NamingBuiltin;
+struct NamingBuiltin {
+    namespace: &'static str,
+    tool: &'static str,
+}
 
 #[async_trait]
 impl waygate_mcp::BuiltinTools for NamingBuiltin {
     fn namespace(&self) -> &str {
-        "codemode"
+        self.namespace
     }
 
     fn catalog(&self) -> waygate_mcp::BuiltinCatalog {
         let schema = Arc::new(json!({"type": "object"}).as_object().unwrap().clone());
         waygate_mcp::BuiltinCatalog::from_descriptor(
             self.describe(),
-            vec![Tool::new("codemode.search", "search", schema)],
+            vec![Tool::new(
+                format!("{}.{}", self.namespace, self.tool),
+                "naming stub tool",
+                schema,
+            )],
         )
     }
 
     fn describe(&self) -> waygate_mcp::BuiltinSurfaceDescriptor {
         waygate_mcp::BuiltinSurfaceDescriptor {
-            namespace: "codemode".into(),
+            namespace: self.namespace.into(),
             required_scope: "mcp:invoke".into(),
             summary: "naming stub".into(),
             tools: vec![waygate_mcp::BuiltinToolDescriptor {
-                name: "search".into(),
-                description: "search".into(),
+                name: self.tool.into(),
+                description: "naming stub tool".into(),
                 risk: RiskTier::Low,
                 side_effects: false,
                 pii: false,
@@ -54,13 +61,11 @@ impl waygate_mcp::BuiltinTools for NamingBuiltin {
     }
 }
 
-fn sorted_names(tools: &[Value]) -> Vec<String> {
-    let mut names: Vec<String> = tools
+fn listed_names(tools: &[Value]) -> Vec<String> {
+    tools
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
-        .collect();
-    names.sort();
-    names
+        .collect()
 }
 
 fn result_text(result: &Value) -> Option<&str> {
@@ -74,7 +79,14 @@ async fn selected_clients_see_and_call_underscore_builtins_while_others_are_unch
         StreamableHttpServerConfig::default().with_allowed_hosts(vec![ALLOWED_HOST.to_owned()]),
         move || {
             GatewayServer::new(catalog.clone())
-                .with_builtin_tools(Arc::new(NamingBuiltin))
+                .with_builtin_tools(Arc::new(NamingBuiltin {
+                    namespace: "codemode",
+                    tool: "search",
+                }))
+                .with_builtin_tools(Arc::new(NamingBuiltin {
+                    namespace: "codemode0",
+                    tool: "ping",
+                }))
                 .with_underscore_tool_name_clients(vec![SELECTED.to_owned()])
         },
     )
@@ -83,14 +95,18 @@ async fn selected_clients_see_and_call_underscore_builtins_while_others_are_unch
     let http = reqwest::Client::new();
 
     for (client, selected) in [(SELECTED, true), ("standard-client", false)] {
-        let expected_names = if selected {
-            vec!["codemode_search".to_owned(), "demo.echo".to_owned()]
+        // Lists arrive sorted by the names the client receives: renaming
+        // moves `codemode0_ping` ahead of `codemode_search`.
+        let expected_names: Vec<String> = if selected {
+            ["codemode0_ping", "codemode_search", "demo.echo"]
         } else {
-            vec!["codemode.search".to_owned(), "demo.echo".to_owned()]
-        };
+            ["codemode.search", "codemode0.ping", "demo.echo"]
+        }
+        .map(str::to_owned)
+        .to_vec();
 
         let legacy = connect_named_client(server.addr, client).await;
-        let mut legacy_names: Vec<String> = legacy
+        let legacy_names: Vec<String> = legacy
             .list_tools(None)
             .await
             .unwrap()
@@ -98,14 +114,13 @@ async fn selected_clients_see_and_call_underscore_builtins_while_others_are_unch
             .iter()
             .map(|tool| tool.name.to_string())
             .collect();
-        legacy_names.sort();
         assert_eq!(legacy_names, expected_names, "{client} legacy list");
         let stateless = stateless_response_json(
             stateless_post(&http, &url, 1, "tools/list", json!({}), client).await,
         )
         .await;
         assert_eq!(
-            sorted_names(stateless["result"]["tools"].as_array().unwrap()),
+            listed_names(stateless["result"]["tools"].as_array().unwrap()),
             expected_names,
             "{client} stateless list"
         );
