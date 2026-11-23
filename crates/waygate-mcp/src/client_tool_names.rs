@@ -44,35 +44,20 @@ pub fn adapt_tools(tools: &mut Vec<Tool>) {
     });
 }
 
-/// How a name received from a client shown underscore names maps to a real
-/// tool name.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Resolution {
-    /// Exactly one real name presents as the received name.
-    Found(String),
-    /// No real name presents as the received name.
-    NotFound,
-    /// More than one real name presents as the received name.
-    Ambiguous,
-}
-
-/// Map `received` back to the one real name among `candidates` that
-/// presents as it. Candidates are fully qualified real names.
-pub fn resolve<I>(received: &str, candidates: I) -> Resolution
+/// The one real name among `names` that presents as `received`, or `None`
+/// when no name or more than one name does. A colliding name is also absent
+/// from the presented list, so refusing it matches what the client was shown.
+pub fn unique_match<'a, I>(received: &str, names: I) -> Option<&'a str>
 where
-    I: IntoIterator<Item = String>,
+    I: IntoIterator<Item = &'a str>,
 {
-    let mut found = None;
-    for candidate in candidates {
-        if presented_name(&candidate) != received {
-            continue;
-        }
-        if found.as_ref().is_some_and(|found| found != &candidate) {
-            return Resolution::Ambiguous;
-        }
-        found = Some(candidate);
+    let mut matches = names
+        .into_iter()
+        .filter(|name| presented_name(name) == received);
+    match (matches.next(), matches.next()) {
+        (Some(name), None) => Some(name),
+        _ => None,
     }
-    found.map_or(Resolution::NotFound, Resolution::Found)
 }
 
 /// Whether a source's tools could present as `received`: its presented name
@@ -117,43 +102,27 @@ mod tests {
     }
 
     #[test]
-    fn resolution_uses_real_names_rather_than_splitting() {
-        let candidates = || {
-            vec![
-                "files.read".to_owned(),
-                "files_archive.list".to_owned(),
-                "docs.drive.search".to_owned(),
-            ]
-        };
+    fn matching_uses_real_names_rather_than_splitting() {
+        let names = ["files.read", "files_archive.list", "docs.drive.search"];
         assert_eq!(
-            resolve("files_archive_list", candidates()),
-            Resolution::Found("files_archive.list".to_owned())
+            unique_match("files_archive_list", names),
+            Some("files_archive.list")
         );
         assert_eq!(
-            resolve("docs_drive_search", candidates()),
-            Resolution::Found("docs.drive.search".to_owned())
+            unique_match("docs_drive_search", names),
+            Some("docs.drive.search")
         );
-        assert_eq!(resolve("files_write", candidates()), Resolution::NotFound);
+        assert_eq!(unique_match("files_write", names), None);
     }
 
     #[test]
-    fn resolution_refuses_to_guess_between_colliding_names() {
+    fn matching_refuses_to_guess_between_colliding_names() {
         assert_eq!(
-            resolve(
+            unique_match(
                 "files_archive_list",
-                vec![
-                    "files.archive_list".to_owned(),
-                    "files_archive.list".to_owned(),
-                ],
+                ["files.archive_list", "files_archive.list"]
             ),
-            Resolution::Ambiguous
-        );
-        assert_eq!(
-            resolve(
-                "files_read",
-                vec!["files.read".to_owned(), "files.read".to_owned()],
-            ),
-            Resolution::Found("files.read".to_owned())
+            None
         );
     }
 

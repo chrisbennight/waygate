@@ -77,6 +77,18 @@ async fn selected_clients_see_and_call_underscore_names_while_others_are_unchang
             selected,
             "{client} instructions"
         );
+        let discovered = stateless_response_json(
+            stateless_post(&http, &url, 3, "server/discover", json!({}), client).await,
+        )
+        .await;
+        assert_eq!(
+            discovered["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains(waygate_mcp::client_tool_names::GUIDANCE),
+            selected,
+            "{client} stateless instructions"
+        );
 
         // Dotted names keep working for every client. Underscore names reach
         // the real tool only for a selected client.
