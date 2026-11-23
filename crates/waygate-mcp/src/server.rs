@@ -1070,39 +1070,71 @@ impl GatewayServer {
     }
 
     /// The real tool name for a name received from a client shown underscore
-    /// names: the one tool this caller's own `tools/list` presents under that
-    /// name. Resolving against the caller's list keeps tenant, visibility and
-    /// collision handling identical to what the client was shown, and only
-    /// sources whose name could prefix the received name are read. A dotted
-    /// name is already real. A name the list does not show is returned
-    /// unchanged so dispatch reports it like any other unknown tool.
+    /// names: the one existing tool whose presented name it is. Existence is
+    /// the caller tenant's governed catalog, as for a dotted call, and does
+    /// not depend on the caller's authorization, so an alias names the same
+    /// tool for every caller and dispatch still authorizes and audits the
+    /// call under its real name. Only sources whose presented name prefixes
+    /// the received name are read, and only matching tool names are
+    /// resolved. A dotted name is already real. No match, or more than one,
+    /// leaves the name unchanged so dispatch reports it like any other
+    /// unknown tool.
     async fn real_tool_name(
         &self,
-        client: &ClientContext,
         principal: Option<&Principal>,
         received: &str,
     ) -> Result<String, McpError> {
+        use crate::client_tool_names::{presented_name, source_may_match, unique_match};
         if received.contains('.') {
             return Ok(received.to_owned());
         }
-        let projection = if self.codemode_only_tools_list_active(Some(client)) {
-            ToolProjection::BuiltinsOnly {
-                canonical_order: false,
+        let mut candidates = Vec::new();
+        for builtin in &self.builtins {
+            let namespace = builtin.namespace();
+            if source_may_match(namespace, received) {
+                candidates.extend(
+                    builtin
+                        .catalog()
+                        .tools
+                        .iter()
+                        .map(|record| format!("{namespace}.{}", record.identity.name)),
+                );
             }
-        } else {
-            ToolProjection::Full {
-                canonical_order: false,
+        }
+        let tenant = principal
+            .map(|p| p.tenant.as_str())
+            .unwrap_or(waygate_core::TenantId::DEFAULT);
+        for server in self.catalog.list_servers().await {
+            if !source_may_match(&server, received) {
+                continue;
             }
-        };
-        let visible = self
-            .stable_list_visible_tools_with(principal, projection, Some(received))
-            .await?;
-        Ok(crate::client_tool_names::unique_match(
-            received,
-            visible.iter().map(|tool| tool.name.as_ref()),
+            let matching: Vec<String> = self
+                .catalog
+                .published_tool_names(&server)
+                .await?
+                .into_iter()
+                .filter(|tool| presented_name(&format!("{server}.{tool}")) == received)
+                .collect();
+            if matching.is_empty() {
+                continue;
+            }
+            let resolved = self
+                .catalog
+                .resolve_discovery_tools(tenant, &server, &matching)
+                .await?;
+            candidates.extend(
+                matching
+                    .iter()
+                    .zip(resolved)
+                    .filter(|(_, resolved)| matches!(resolved, ResolvedInvocationTool::Ready(_)))
+                    .map(|(tool, _)| format!("{server}.{tool}")),
+            );
+        }
+        Ok(
+            unique_match(received, candidates.iter().map(String::as_str))
+                .unwrap_or(received)
+                .to_owned(),
         )
-        .unwrap_or(received)
-        .to_owned())
     }
 
     fn client_name_matches(client_name: Option<&str>, allowed: &[String]) -> bool {
@@ -2764,7 +2796,6 @@ impl GatewayServer {
             ToolProjection::Full {
                 canonical_order: true,
             },
-            None,
         )
         .await
     }
@@ -2778,7 +2809,7 @@ impl GatewayServer {
         projection: ToolProjection,
     ) -> Result<Vec<Tool>, McpError> {
         let mut visible = self
-            .stable_list_visible_tools_with(principal, projection, None)
+            .stable_list_visible_tools_with(principal, projection)
             .await?;
         if self.root_composition_active(client) {
             crate::client_schema::adapt_tools(&mut visible);
@@ -2796,7 +2827,6 @@ impl GatewayServer {
         &self,
         principal: Option<&Principal>,
         projection: ToolProjection,
-        presented_as: Option<&str>,
     ) -> Result<Vec<Tool>, McpError> {
         for _ in 0..MAX_CATALOG_SNAPSHOT_RETRIES {
             let durable_before = self.catalog.discovery_generation().await?;
@@ -2811,9 +2841,7 @@ impl GatewayServer {
                 },
                 None => None,
             };
-            let visible = self
-                .list_visible_tools_with(principal, projection, presented_as)
-                .await;
+            let visible = self.list_visible_tools_with(principal, projection).await;
             let durable_after = self.catalog.discovery_generation().await?;
             let errors_after = self.catalog.discovery_error_generation();
             if catalog_projection_is_stable(
@@ -2835,18 +2863,12 @@ impl GatewayServer {
     }
 
     /// [`Self::list_visible_tools`] with the projection resolved by the
-    /// caller. `presented_as` limits the sources read to those whose tools
-    /// could present as that underscore name; it never widens visibility.
+    /// caller.
     async fn list_visible_tools_with(
         &self,
         principal: Option<&Principal>,
         projection: ToolProjection,
-        presented_as: Option<&str>,
     ) -> Vec<Tool> {
-        let source_may_present = |source: &str| {
-            presented_as
-                .is_none_or(|received| crate::client_tool_names::source_may_match(source, received))
-        };
         let canonical_order = match projection {
             ToolProjection::Full { canonical_order }
             | ToolProjection::BuiltinsOnly { canonical_order } => canonical_order,
@@ -2864,9 +2886,6 @@ impl GatewayServer {
             // visible and usable without adding its namespace to every
             // upstream profile.
             let ns = builtin.namespace();
-            if !source_may_present(ns) {
-                continue;
-            }
             if let Some(p) =
                 principal.filter(|_| builtin.profile_scope() == BuiltinProfileScope::Namespace)
             {
@@ -2944,9 +2963,6 @@ impl GatewayServer {
         // projecting the combined list would walk and copy every schema twice.
         retain_publishable_tools(&mut out);
         for server in self.catalog.list_servers().await {
-            if !source_may_present(&server) {
-                continue;
-            }
             if let Some(p) = principal {
                 if profile_blocks_server(p, &server) {
                     continue;
@@ -4851,10 +4867,7 @@ impl ServerHandler for GatewayServer {
         // ever see real names.
         let mut name_error = None;
         if self.underscore_tool_names_active(&client) {
-            match self
-                .real_tool_name(&client, principal.as_ref(), &request.name)
-                .await
-            {
+            match self.real_tool_name(principal.as_ref(), &request.name).await {
                 Ok(name) => {
                     tracing::Span::current()
                         .record("gen_ai.tool.name", tracing::field::display(&name));

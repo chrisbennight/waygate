@@ -84,12 +84,14 @@ matched exactly, ignoring ASCII case. The default is empty. A selected client's
 `tools/list` shows every tool with `_` in place of each `.`, so
 `codemode.search` becomes `codemode_search`. Its `tools/call` accepts either the
 underscore name or the dotted name. The gateway maps an underscore name back to
-the one real tool that presents as it before authorization, audit, tasks, or
-routing see the call, so those always record the real dotted name. If two tools
-would present the same underscore name, both are left out of that client's list
-and a warning names them; a call using that name is refused and must use the
-dotted name. Names inside Code Mode programs, and names returned by search and
-inspection tools, stay dotted.
+the one existing tool that presents as it before authorization, audit, tasks, or
+routing see the call, so those always record the real dotted name and a denied
+call is audited like a dotted one. Which tool a name maps to does not depend on
+the caller's permissions. If two tools in a client's list would present the
+same underscore name, both are left out of that list and a warning names them.
+A name that matches more than one existing tool gets the ordinary unknown-tool
+error; call that tool by its dotted name. Names inside Code Mode programs, and
+names returned by search and inspection tools, stay dotted.
 
 This setting changes only names, never authorization. It is independent of the
 compact Code Mode-only and root-composition settings and applies to both
