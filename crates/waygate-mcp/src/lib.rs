@@ -20,6 +20,7 @@ pub mod catalog;
 pub mod catalog_changes;
 pub mod client_observations;
 pub mod client_schema;
+pub mod client_tool_names;
 mod count_bounds;
 pub mod discovery;
 pub mod error;

@@ -69,6 +69,36 @@ call re-runs governed dispatch. To roll the setting back, remove the exact name
 and reconnect legacy clients; stateless clients apply either change on their
 next request.
 
+## Clients that reject dots in tool names
+
+Tool names are `<server>.<tool>`. MCP allows dots in tool names, but some
+clients accept only names matching `^[a-zA-Z0-9_-]{1,64}$` and drop every tool
+whose name contains a dot. For those clients, set:
+
+```sh
+GATEWAY_UNDERSCORE_TOOL_NAME_CLIENTS=antigravity-client
+```
+
+Use the client's actual MCP `clientInfo.name`. Names are comma-separated and
+matched exactly, ignoring ASCII case. The default is empty. A selected client's
+`tools/list` shows every tool with `_` in place of each `.`, so
+`codemode.search` becomes `codemode_search`. Its `tools/call` accepts either the
+underscore name or the dotted name. The gateway maps an underscore name back to
+the one real tool that presents as it before authorization, audit, tasks, or
+routing see the call, so those always record the real dotted name. If two tools
+would present the same underscore name, both are left out of that client's list
+and a warning names them; a call using that name is refused and must use the
+dotted name. Names inside Code Mode programs, and names returned by search and
+inspection tools, stay dotted.
+
+This setting changes only names, never authorization. It is independent of the
+compact Code Mode-only and root-composition settings and applies to both
+protocol generations. Reconnect a legacy client after changing it.
+
+Some clients add their own prefix before checking the 64-character limit; for
+example, Google Antigravity checks `mcp_<config key>_<tool>`. Use a short
+configuration key for the gateway in such a client so long tool names still fit.
+
 ## Observability
 
 The metric

@@ -39,6 +39,7 @@ const ALLOWED_HOST: &str = "127.0.0.1";
 mod call_tasks;
 mod client_observations;
 mod client_schema_compat;
+mod client_tool_names;
 
 #[derive(Default)]
 struct DemoCatalog {

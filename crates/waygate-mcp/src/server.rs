@@ -216,6 +216,7 @@ impl ToolProjection {
     fn presentation(
         self,
         schema_adapted: bool,
+        names_adapted: bool,
     ) -> crate::tool_list_pagination::ToolListPresentation {
         let (projection, canonical_order) = match self {
             Self::Full { canonical_order } => ("full", canonical_order),
@@ -225,6 +226,7 @@ impl ToolProjection {
             projection,
             canonical_order,
             schema_adapted,
+            names_adapted,
         }
     }
 }
@@ -556,6 +558,8 @@ pub struct GatewayServer {
     tools_list_cache_ttl: Option<std::time::Duration>,
     /// Exact client names selecting presentation-only root-composition adaptation.
     root_composition_clients: Vec<String>,
+    /// Exact client names shown tool names with `_` in place of `.`.
+    underscore_tool_name_clients: Vec<String>,
     client_observations: Option<Arc<crate::client_observations::ClientObservationStore>>,
     /// Set during legacy `initialize` when the session selected the compact
     /// Code Mode-only projection. Stateless requests match their inline client
@@ -846,6 +850,7 @@ impl GatewayServer {
             codemode_only_tools_clients: Vec::new(),
             tools_list_cache_ttl: None,
             root_composition_clients: Vec::new(),
+            underscore_tool_name_clients: Vec::new(),
             client_observations: None,
             client_codemode_only_tools_list: Arc::new(AtomicBool::new(false)),
             invocation,
@@ -1047,6 +1052,65 @@ impl GatewayServer {
             client.client_name.as_deref(),
             &self.root_composition_clients,
         )
+    }
+
+    /// Show selected clients tool names with `_` in place of `.`, and accept
+    /// those names on calls. Client names never affect authorization.
+    #[must_use]
+    pub fn with_underscore_tool_name_clients(mut self, clients: Vec<String>) -> Self {
+        self.underscore_tool_name_clients = clients;
+        self
+    }
+
+    fn underscore_tool_names_active(&self, client: &ClientContext) -> bool {
+        Self::client_name_matches(
+            client.client_name.as_deref(),
+            &self.underscore_tool_name_clients,
+        )
+    }
+
+    /// The real tool name for a name received from a client shown underscore
+    /// names. Dotted names are already real. Candidates come from every
+    /// registered source without authorization filtering: dispatch
+    /// authorizes the resolved name, and an unresolvable name is returned
+    /// unchanged so dispatch reports it the way it reports any unknown tool.
+    async fn real_tool_name(&self, received: &str) -> Result<String, McpError> {
+        use crate::client_tool_names::{resolve, source_may_match, Resolution};
+        if received.contains('.') {
+            return Ok(received.to_owned());
+        }
+        let mut candidates = Vec::new();
+        for builtin in &self.builtins {
+            let namespace = builtin.namespace();
+            if !source_may_match(namespace, received) {
+                continue;
+            }
+            candidates.extend(
+                builtin
+                    .catalog()
+                    .tools
+                    .iter()
+                    .map(|record| format!("{namespace}.{}", record.identity.name)),
+            );
+        }
+        for server in self.catalog.list_servers().await {
+            if !source_may_match(&server, received) {
+                continue;
+            }
+            if let Ok(tools) = self.catalog.list_tools(&server).await {
+                candidates.extend(tools.iter().map(|tool| format!("{server}.{}", tool.name)));
+            }
+        }
+        match resolve(received, candidates) {
+            Resolution::Found(name) => Ok(name),
+            Resolution::NotFound => Ok(received.to_owned()),
+            Resolution::Ambiguous => Err(McpError::invalid_params(
+                format!(
+                    "tool `{received}` matches more than one tool; call it by its dotted `<server>.<tool>` name"
+                ),
+                None,
+            )),
+        }
     }
 
     fn client_name_matches(client_name: Option<&str>, allowed: &[String]) -> bool {
@@ -2726,6 +2790,9 @@ impl GatewayServer {
         if self.root_composition_active(client) {
             crate::client_schema::adapt_tools(&mut visible);
         }
+        if self.underscore_tool_names_active(client) {
+            crate::client_tool_names::adapt_tools(&mut visible);
+        }
         Ok(visible)
     }
 
@@ -4183,6 +4250,13 @@ impl ServerHandler for GatewayServer {
                 crate::client_schema::GUIDANCE
             ));
         }
+        if self.underscore_tool_names_active(&client) {
+            info.instructions = Some(format!(
+                "{} {}",
+                info.instructions.unwrap_or_default(),
+                crate::client_tool_names::GUIDANCE
+            ));
+        }
         // `tools.listChanged` is advertised to the stateless generation
         // too: `subscriptions/listen` is its delivery channel (1.2
         // stripped the flag here while no such channel existed).
@@ -4235,6 +4309,8 @@ impl ServerHandler for GatewayServer {
         }
         let compatibility =
             Self::client_name_matches(Some(client_name), &self.root_composition_clients);
+        let underscore_names =
+            Self::client_name_matches(Some(client_name), &self.underscore_tool_name_clients);
         context.peer.set_peer_info(request);
         if let (Some(store), Some(principal)) =
             (&self.client_observations, principal_from_ctx(&context))
@@ -4255,6 +4331,13 @@ impl ServerHandler for GatewayServer {
                 "{} {}",
                 info.instructions.unwrap_or_default(),
                 crate::client_schema::GUIDANCE
+            ));
+        }
+        if underscore_names {
+            info.instructions = Some(format!(
+                "{} {}",
+                info.instructions.unwrap_or_default(),
+                crate::client_tool_names::GUIDANCE
             ));
         }
         let principal = principal_from_ctx(&context);
@@ -4469,7 +4552,10 @@ impl ServerHandler for GatewayServer {
         let mut result = match client.generation {
             ProtocolGeneration::Stateless2026 => {
                 let sealer = &self.tool_list_cursor_sealer;
-                let presentation = projection.presentation(self.root_composition_active(&client));
+                let presentation = projection.presentation(
+                    self.root_composition_active(&client),
+                    self.underscore_tool_names_active(&client),
+                );
                 // A continuation is served from the view its traversal
                 // captured for this presentation. Only a first page, or a
                 // continuation without such a view, builds and authorizes the
@@ -4739,7 +4825,7 @@ impl ServerHandler for GatewayServer {
     )]
     async fn call_tool(
         &self,
-        request: CallToolRequestParams,
+        mut request: CallToolRequestParams,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let started = std::time::Instant::now();
@@ -4751,10 +4837,20 @@ impl ServerHandler for GatewayServer {
         if let Some(p) = principal.as_ref() {
             tracing::Span::current().record("user.sub", tracing::field::display(&p.sub));
         }
+        let client = self.client_context(&ctx);
+        // A client shown underscore names may call with one. Map it to the
+        // real name first so tasks, authorization, audit and routing only
+        // ever see real names.
+        let mut name_error = None;
+        if self.underscore_tool_names_active(&client) {
+            match self.real_tool_name(&request.name).await {
+                Ok(name) => request.name = name.into(),
+                Err(error) => name_error = Some(error),
+            }
+        }
         // Capture the tool name before `request` is consumed by dispatch — the
         // elicitation accelerator keys on it.
         let tool_name = request.name.to_string();
-        let client = self.client_context(&ctx);
         // Task-eligible dispatch (SEP-2663): a call targeting a durable
         // built-in's task tool materializes a task instead of running
         // synchronously — but only when the client declared the tasks
@@ -4772,8 +4868,8 @@ impl ServerHandler for GatewayServer {
         // vanishes from tools/call outcome/duration metrics and the span's
         // `error.type`.
         let caller = MrtrCaller::from_client(&client);
-        let mut task_outcome: Option<Result<CallToolResponse, McpError>> = None;
-        if client_declares_tasks {
+        let mut task_outcome: Option<Result<CallToolResponse, McpError>> = name_error.map(Err);
+        if task_outcome.is_none() && client_declares_tasks {
             match self
                 .try_enqueue_task(&tool_name, &request, principal.as_ref())
                 .await
