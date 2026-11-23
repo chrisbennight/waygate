@@ -132,15 +132,15 @@ async fn selected_clients_see_and_call_underscore_names_while_others_are_unchang
             );
         }
         if selected {
-            // An unknown underscore name answers exactly as an unknown dotted
-            // name does, naming only what the client sent.
+            // A name no configured source begins answers exactly as an
+            // unknown dotted name does, naming only what the client sent.
             let missing = stateless_response_json(
                 stateless_post(
                     &http,
                     &url,
                     4,
                     "tools/call",
-                    json!({"name": "demo_missing", "arguments": {}}),
+                    json!({"name": "nosuch_missing", "arguments": {}}),
                     client,
                 )
                 .await,
@@ -151,7 +151,7 @@ async fn selected_clients_see_and_call_underscore_names_while_others_are_unchang
                 "{missing}"
             );
             assert_eq!(
-                missing["error"]["data"]["tool"], "demo_missing",
+                missing["error"]["data"]["tool"], "nosuch_missing",
                 "{missing}"
             );
         }

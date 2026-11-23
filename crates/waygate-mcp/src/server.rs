@@ -1069,53 +1069,86 @@ impl GatewayServer {
         )
     }
 
-    /// Every real tool name the gateway publishes from sources whose
-    /// presented name could prefix `received`, or from every source when
-    /// `received` is `None`: built-in catalog records and each upstream's
-    /// published inventory. Listing and resolution for underscore-name
-    /// clients both use this one set, so a listed name always resolves and a
-    /// name resolves independently of the caller's authorization or of a
-    /// tool's current governance state, which dispatch evaluates and audits.
-    async fn published_real_names(&self, received: Option<&str>) -> Result<Vec<String>, McpError> {
-        use crate::client_tool_names::source_may_match;
-        let may_match =
-            |source: &str| received.is_none_or(|received| source_may_match(source, received));
-        let mut names = Vec::new();
-        for builtin in &self.builtins {
-            let namespace = builtin.namespace();
-            if may_match(namespace) {
-                names.extend(
-                    builtin
-                        .catalog()
-                        .tools
-                        .iter()
-                        .map(|record| format!("{namespace}.{}", record.identity.name)),
-                );
-            }
+    /// Configured source names an underscore name may begin with: built-in
+    /// namespaces and every registered upstream, whether or not it is
+    /// currently connected.
+    async fn alias_sources(&self) -> Vec<String> {
+        let mut sources: Vec<String> = self
+            .builtins
+            .iter()
+            .map(|builtin| builtin.namespace().to_owned())
+            .collect();
+        sources.extend(self.catalog.list_servers().await);
+        sources
+    }
+
+    /// Bare tool names one source currently publishes. An upstream whose
+    /// inventory cannot be read contributes none, which only makes its
+    /// underscore names pass through unchanged within that same source.
+    async fn source_tool_names(&self, source: &str) -> Vec<String> {
+        if let Some(builtin) = self
+            .builtins
+            .iter()
+            .find(|builtin| builtin.namespace() == source)
+        {
+            return builtin
+                .catalog()
+                .tools
+                .iter()
+                .map(|record| record.identity.name.clone())
+                .collect();
         }
-        for server in self.catalog.list_servers().await {
-            if may_match(&server) {
-                names.extend(
-                    self.catalog
-                        .published_tool_names(&server)
-                        .await?
-                        .into_iter()
-                        .map(|tool| format!("{server}.{tool}")),
-                );
-            }
-        }
-        Ok(names)
+        self.catalog
+            .published_tool_names(source)
+            .await
+            .unwrap_or_default()
     }
 
     /// The real tool name for an underscore name received from a client
-    /// shown underscore names: the one published tool whose presented name
-    /// it is, or `None` when no published name, or more than one, matches.
-    async fn real_tool_name(&self, received: &str) -> Result<Option<String>, McpError> {
-        let published = self.published_real_names(Some(received)).await?;
-        Ok(
-            crate::client_tool_names::unique_match(received, published.iter().map(String::as_str))
-                .map(str::to_owned),
-        )
+    /// shown underscore names. Configured source names alone choose the
+    /// source, and only that source's inventory restores the tool name, so
+    /// a name never moves to another source when upstreams connect or
+    /// disconnect. `None` when the name cannot be attributed to one tool.
+    async fn real_tool_name(&self, received: &str) -> Option<String> {
+        let sources = self.alias_sources().await;
+        let source = crate::client_tool_names::alias_source(received, &sources)?;
+        let tools = self.source_tool_names(source).await;
+        crate::client_tool_names::resolve_in_source(received, source, &tools)
+    }
+
+    /// Rename visible tools for an underscore-name client, keeping only
+    /// those whose presented name resolves back to exactly that tool, so
+    /// every listed name is one a call accepts.
+    async fn present_underscore_names(&self, visible: Vec<Tool>) -> Vec<Tool> {
+        use crate::client_tool_names::{alias_source, presented_name, resolve_in_source};
+        let sources = self.alias_sources().await;
+        let mut inventories: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut presented = Vec::with_capacity(visible.len());
+        for mut tool in visible {
+            let alias = presented_name(&tool.name);
+            let resolved = match alias_source(&alias, &sources) {
+                Some(source) => {
+                    if !inventories.contains_key(source) {
+                        let tools = self.source_tool_names(source).await;
+                        inventories.insert(source.to_owned(), tools);
+                    }
+                    resolve_in_source(&alias, source, &inventories[source])
+                }
+                None => None,
+            };
+            if resolved.as_deref() == Some(tool.name.as_ref()) {
+                tool.name = alias.into();
+                presented.push(tool);
+            } else {
+                tracing::warn!(
+                    tool = %tool.name,
+                    presented_name = %alias,
+                    "tool omitted for an underscore-name client because its presented name is ambiguous"
+                );
+            }
+        }
+        presented
     }
 
     fn client_name_matches(client_name: Option<&str>, allowed: &[String]) -> bool {
@@ -2796,8 +2829,7 @@ impl GatewayServer {
             crate::client_schema::adapt_tools(&mut visible);
         }
         if self.underscore_tool_names_active(client) {
-            let published = self.published_real_names(None).await?;
-            crate::client_tool_names::adapt_tools(&mut visible, &published);
+            visible = self.present_underscore_names(visible).await;
         }
         Ok(visible)
     }
@@ -4923,18 +4955,17 @@ impl ServerHandler for GatewayServer {
         if self.underscore_tool_names_active(&client) && !request.name.contains('.') {
             let received = request.name.to_string();
             match self.real_tool_name(&received).await {
-                Ok(Some(name)) => {
+                Some(name) => {
                     tracing::Span::current()
                         .record("gen_ai.tool.name", tracing::field::display(&name));
                     request.name = name.into();
                     sent_alias = Some(received);
                 }
-                Ok(None) => {
+                None => {
                     let trace_id = waygate_telemetry::correlation::current_trace_id()
                         .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
                     name_error = Some(tool_unavailable_error(&received, &trace_id));
                 }
-                Err(error) => name_error = Some(error),
             }
         }
         // Capture the tool name before `request` is consumed by dispatch — the

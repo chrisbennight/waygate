@@ -6,10 +6,10 @@
 //! place of `.`, and `tools/call` maps such a name back to the real dotted
 //! name before anything else sees the request. Catalog identity,
 //! authorization, audit, tasks and routing keep using the real name.
-
-use std::collections::{HashMap, HashSet};
-
-use rmcp::model::Tool;
+//!
+//! The source a presented name belongs to is decided from configured source
+//! names alone, never from which tools are currently connected, so an
+//! upstream going up or down cannot move a name to another source.
 
 /// Initialize and discover instructions added for clients shown
 /// underscore names.
@@ -21,73 +21,45 @@ pub fn presented_name(name: &str) -> String {
     name.replace('.', "_")
 }
 
-/// Rename every tool to its presented name. `published` is every real tool
-/// name the gateway publishes, the same set a call resolves against. A tool
-/// whose presented name matches more than one published name, or more than
-/// one listed tool, is removed, because a call using that name could not be
-/// mapped back to one tool.
-pub fn adapt_tools(tools: &mut Vec<Tool>, published: &[String]) {
-    let published_names: HashSet<&str> = published.iter().map(String::as_str).collect();
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for name in &published_names {
-        *counts.entry(presented_name(name)).or_default() += 1;
-    }
-    for tool in tools.iter() {
-        if !published_names.contains(tool.name.as_ref()) {
-            *counts.entry(presented_name(&tool.name)).or_default() += 1;
-        }
-    }
-    tools.retain_mut(|tool| {
-        let presented = presented_name(&tool.name);
-        if counts.get(&presented).copied().unwrap_or_default() > 1 {
-            tracing::warn!(
-                tool = %tool.name,
-                presented_name = %presented,
-                "tool omitted for an underscore-name client because its presented name collides"
-            );
-            return false;
-        }
-        tool.name = presented.into();
-        true
+/// The one configured source whose presented name, followed by `_` and at
+/// least one more character, begins `received`. `None` when no source or
+/// more than one does, because the name could then belong to either.
+pub fn alias_source<'a>(received: &str, sources: &'a [String]) -> Option<&'a str> {
+    let mut matching = sources.iter().filter(|source| {
+        received
+            .strip_prefix(presented_name(source).as_str())
+            .is_some_and(|rest| rest.len() > 1 && rest.starts_with('_'))
     });
-}
-
-/// The one real name among `names` that presents as `received`, or `None`
-/// when no name or more than one name does. A colliding name is also absent
-/// from the presented list, so refusing it matches what the client was shown.
-pub fn unique_match<'a, I>(received: &str, names: I) -> Option<&'a str>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let mut matches = names
-        .into_iter()
-        .filter(|name| presented_name(name) == received);
-    match (matches.next(), matches.next()) {
-        (Some(name), None) => Some(name),
+    match (matching.next(), matching.next()) {
+        (Some(source), None) => Some(source.as_str()),
         _ => None,
     }
 }
 
-/// Whether a source's tools could present as `received`: its presented name
-/// followed by `_` must prefix the received name.
-pub fn source_may_match(source: &str, received: &str) -> bool {
-    received
-        .strip_prefix(presented_name(source).as_str())
-        .is_some_and(|rest| rest.starts_with('_') && rest.len() > 1)
+/// The real name `received` addresses within `source`, whose current bare
+/// tool names are `tools`. The one tool whose presented name matches wins;
+/// with none, the remainder is used as written, so an unavailable source
+/// still reaches dispatch for its ordinary refusal; with several distinct
+/// matches the name is refused.
+pub fn resolve_in_source(received: &str, source: &str, tools: &[String]) -> Option<String> {
+    let rest = received
+        .strip_prefix(presented_name(source).as_str())?
+        .strip_prefix('_')?;
+    let mut matches = tools.iter().filter(|tool| presented_name(tool) == rest);
+    let tool = match matches.next() {
+        None => rest,
+        Some(first) if matches.all(|other| other == first) => first.as_str(),
+        Some(_) => return None,
+    };
+    Some(format!("{source}.{tool}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmcp::model::JsonObject;
-    use std::sync::Arc;
 
-    fn tool(name: &str) -> Tool {
-        Tool::new(name.to_owned(), "test tool", Arc::new(JsonObject::new()))
-    }
-
-    fn names(tools: &[Tool]) -> Vec<&str> {
-        tools.iter().map(|tool| tool.name.as_ref()).collect()
+    fn owned(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
     }
 
     #[test]
@@ -98,57 +70,43 @@ mod tests {
     }
 
     #[test]
-    fn adapting_renames_tools_and_drops_collisions() {
-        let mut tools = vec![
-            tool("codemode.search"),
-            tool("files.archive_list"),
-            tool("files_archive.list"),
-            tool("files.read"),
-        ];
-        adapt_tools(&mut tools, &[]);
-        assert_eq!(names(&tools), vec!["codemode_search", "files_read"]);
+    fn a_source_is_chosen_only_when_configured_names_leave_one_choice() {
+        let sources = owned(&["files", "codemode", "files_archive"]);
+        assert_eq!(alias_source("codemode_search", &sources), Some("codemode"));
+        assert_eq!(alias_source("files_read", &sources), Some("files"));
+        // `files_archive_delete` could be `files.archive_delete` or
+        // `files_archive.delete`; refusing it means no change in which
+        // upstreams are connected can redirect it.
+        assert_eq!(alias_source("files_archive_delete", &sources), None);
+        assert_eq!(alias_source("files_", &sources), None);
+        assert_eq!(alias_source("filesystem_read", &sources), None);
     }
 
     #[test]
-    fn adapting_drops_a_listed_tool_that_collides_with_an_unlisted_one() {
-        let published =
-            ["files.archive_list", "files_archive.list", "files.read"].map(str::to_owned);
-        let mut tools = vec![tool("files.archive_list"), tool("files.read")];
-        adapt_tools(&mut tools, &published);
-        assert_eq!(names(&tools), vec!["files_read"]);
-    }
-
-    #[test]
-    fn matching_uses_real_names_rather_than_splitting() {
-        let names = ["files.read", "files_archive.list", "docs.drive.search"];
+    fn a_tool_is_restored_from_its_own_source() {
+        let tools = owned(&["docs.create", "read", "read"]);
         assert_eq!(
-            unique_match("files_archive_list", names),
-            Some("files_archive.list")
+            resolve_in_source("files_docs_create", "files", &tools),
+            Some("files.docs.create".to_owned())
         );
         assert_eq!(
-            unique_match("docs_drive_search", names),
-            Some("docs.drive.search")
+            resolve_in_source("files_read", "files", &tools),
+            Some("files.read".to_owned())
         );
-        assert_eq!(unique_match("files_write", names), None);
+        // An empty inventory, as for a disconnected upstream, passes the
+        // remainder through so dispatch gives its ordinary answer.
+        assert_eq!(
+            resolve_in_source("files_read", "files", &[]),
+            Some("files.read".to_owned())
+        );
     }
 
     #[test]
-    fn matching_refuses_to_guess_between_colliding_names() {
+    fn distinct_tools_with_one_presented_name_are_refused() {
+        let tools = owned(&["docs.create", "docs_create"]);
         assert_eq!(
-            unique_match(
-                "files_archive_list",
-                ["files.archive_list", "files_archive.list"]
-            ),
+            resolve_in_source("files_docs_create", "files", &tools),
             None
         );
-    }
-
-    #[test]
-    fn only_sources_whose_presented_prefix_matches_are_searched() {
-        assert!(source_may_match("files", "files_archive_list"));
-        assert!(source_may_match("files_archive", "files_archive_list"));
-        assert!(!source_may_match("files_archive", "files_read"));
-        assert!(!source_may_match("files", "files_"));
-        assert!(!source_may_match("files", "filesystem_read"));
     }
 }

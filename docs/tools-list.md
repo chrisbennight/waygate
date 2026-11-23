@@ -84,14 +84,24 @@ matched exactly, ignoring ASCII case. The default is empty. A selected client's
 `tools/list` shows every tool with `_` in place of each `.`, so
 `codemode.search` becomes `codemode_search`. Its `tools/call` accepts either the
 underscore name or the dotted name. The gateway maps an underscore name back to
-the one tool the gateway publishes under that presented name before
-authorization, audit, tasks, or routing see the call, so those always record
-the real dotted name, and a denied, quarantined, or unavailable tool gets the
-same response and audit as its dotted name. Which tool a name maps to does not
-depend on the caller's permissions. If two published tools would present the
-same underscore name, that name is left out of the client's list with a warning
-and gets the ordinary unknown-tool error on a call; use the dotted name for
-those tools. Names inside Code Mode programs, and
+its real dotted name before authorization, audit, tasks, or routing see the
+call, so those always record the real dotted name.
+
+The server or built-in namespace is chosen from configured names alone: exactly
+one of them, followed by `_`, must begin the underscore name. Which upstreams
+are connected never changes that choice, so a name cannot move to another
+server. When two configured names could both begin it, for example servers
+`files` and `files_archive` for `files_archive_delete`, the name is refused.
+Within the chosen server, its tool list restores any dots in the tool's own
+name; while the server is unavailable the rest of the name is used as written,
+so the call gets the same unavailable, quarantine, or denial answer and audit as
+its dotted name. Which tool a name maps to never depends on the caller's
+permissions, and an unknown or withheld tool answers with the same
+unavailable-tool error, naming only what the client sent.
+
+A tool is listed under its underscore name only when that name resolves back to
+exactly that tool; otherwise it is left out of the client's list with a warning,
+and it remains callable by its dotted name. Names inside Code Mode programs, and
 names returned by search and inspection tools, stay dotted.
 
 This setting changes only names, never authorization. It is independent of the
