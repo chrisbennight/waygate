@@ -1107,6 +1107,23 @@ impl GatewayServer {
             .map(str::to_owned)
     }
 
+    /// Final instructions for a client shown underscore names: every
+    /// built-in tool the text names is written in its underscore form, so
+    /// the instructions match the names the client registers, followed by
+    /// the underscore-name guidance.
+    fn underscore_instructions(&self, instructions: Option<String>) -> String {
+        let mut text = instructions.unwrap_or_default();
+        let mut names = self.builtin_real_names(None);
+        names.sort_unstable_by_key(|name| std::cmp::Reverse(name.len()));
+        for name in &names {
+            text = text.replace(
+                name.as_str(),
+                &crate::client_tool_names::presented_name(name),
+            );
+        }
+        format!("{text} {}", crate::client_tool_names::GUIDANCE)
+    }
+
     /// Show built-in tools under their underscore names; upstream tools keep
     /// their dotted names. A built-in whose underscore name another built-in
     /// shares keeps its dotted name, so every underscore name listed is one a
@@ -3297,74 +3314,6 @@ pub(crate) fn tool_unavailable_error(tool: &str, trace_id: &str) -> McpError {
     )
 }
 
-/// Re-address an unavailable-tool answer for the real tool `real` to the
-/// name the client sent, so a resolved underscore name for a withheld tool
-/// answers exactly as an unknown name does. That covers the structured
-/// unavailable-tool error and the built-in unknown-tool error, which a
-/// built-in returns alike for an absent tool and one the caller's profile
-/// withholds. Every other error is returned unchanged.
-fn unavailable_under_sent_name(error: McpError, real: &str, sent: &str) -> McpError {
-    if let Some(trace_id) = error
-        .data
-        .as_ref()
-        .filter(|data| data["error"] == "tool_unavailable")
-        .and_then(|data| data["trace_id"].as_str())
-    {
-        return tool_unavailable_error(sent, trace_id);
-    }
-    if error.code == rmcp::model::ErrorCode::INVALID_PARAMS
-        && error.data.is_none()
-        && error.message == format!("unknown tool: {real}")
-    {
-        let trace_id = waygate_telemetry::correlation::current_trace_id()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
-        return tool_unavailable_error(sent, &trace_id);
-    }
-    error
-}
-
-#[cfg(test)]
-mod unavailable_under_sent_name_tests {
-    use super::*;
-
-    fn unavailable_tool(error: &McpError) -> Option<&str> {
-        error
-            .data
-            .as_ref()
-            .filter(|data| data["error"] == "tool_unavailable")
-            .and_then(|data| data["tool"].as_str())
-    }
-
-    #[test]
-    fn withheld_answers_name_only_what_the_client_sent() {
-        let structured = tool_unavailable_error("files.archive_list", "trace-1");
-        let readdressed =
-            unavailable_under_sent_name(structured, "files.archive_list", "files_archive_list");
-        assert_eq!(unavailable_tool(&readdressed), Some("files_archive_list"));
-        assert_eq!(readdressed.data.as_ref().unwrap()["trace_id"], "trace-1");
-        assert!(!readdressed.message.contains("files.archive_list"));
-
-        let builtin = McpError::invalid_params("unknown tool: gateway-files.prepare_upload", None);
-        let readdressed = unavailable_under_sent_name(
-            builtin,
-            "gateway-files.prepare_upload",
-            "gateway-files_prepare_upload",
-        );
-        assert_eq!(
-            unavailable_tool(&readdressed),
-            Some("gateway-files_prepare_upload")
-        );
-    }
-
-    #[test]
-    fn other_errors_are_unchanged() {
-        let forbidden = McpError::invalid_request("forbidden: files.read — policy", None);
-        let unchanged = unavailable_under_sent_name(forbidden, "files.read", "files_read");
-        assert_eq!(unchanged.message, "forbidden: files.read — policy");
-        assert!(unavailable_tool(&unchanged).is_none());
-    }
-}
-
 /// The MCP error a direct `tools/call` returns for `error` on
 /// `server.tool_name`, without the approval `input_required` projection that
 /// only a connected caller can answer. Background executors use it to record
@@ -4351,11 +4300,7 @@ impl ServerHandler for GatewayServer {
             ));
         }
         if self.underscore_tool_names_active(&client) {
-            info.instructions = Some(format!(
-                "{} {}",
-                info.instructions.unwrap_or_default(),
-                crate::client_tool_names::GUIDANCE
-            ));
+            info.instructions = Some(self.underscore_instructions(info.instructions));
         }
         // `tools.listChanged` is advertised to the stateless generation
         // too: `subscriptions/listen` is its delivery channel (1.2
@@ -4433,18 +4378,15 @@ impl ServerHandler for GatewayServer {
                 crate::client_schema::GUIDANCE
             ));
         }
-        if underscore_names {
-            info.instructions = Some(format!(
-                "{} {}",
-                info.instructions.unwrap_or_default(),
-                crate::client_tool_names::GUIDANCE
-            ));
-        }
         let principal = principal_from_ctx(&context);
         async move {
-            Ok(skill_tools::SkillTools::new(self.clone())
+            let mut info = skill_tools::SkillTools::new(self.clone())
                 .project_info(info, principal.as_ref())
-                .await)
+                .await;
+            if underscore_names {
+                info.instructions = Some(self.underscore_instructions(info.instructions));
+            }
+            Ok(info)
         }
     }
 
@@ -4938,14 +4880,12 @@ impl ServerHandler for GatewayServer {
             tracing::Span::current().record("user.sub", tracing::field::display(&p.sub));
         }
         let client = self.client_context(&ctx);
-        // A client shown underscore names may call with one. Map it to the
-        // real name first so tasks, authorization, audit and routing only
-        // ever see real names.
-        // A tool the gateway withholds must stay indistinguishable from an
-        // absent one, so an unavailable answer for an underscore name names
-        // only what the client sent, whether or not the name resolved.
+        // A client shown underscore names may call a built-in with one. Map
+        // it to the real name first so tasks, authorization, audit, routing
+        // and every refusal see exactly what the dotted call would. A name no
+        // built-in matches has no dotted equivalent and gets the standard
+        // unavailable-tool answer, naming only what the client sent.
         let mut name_error = None;
-        let mut sent_alias = None;
         if self.underscore_tool_names_active(&client) && !request.name.contains('.') {
             let received = request.name.to_string();
             match self.builtin_real_name(&received) {
@@ -4953,7 +4893,6 @@ impl ServerHandler for GatewayServer {
                     tracing::Span::current()
                         .record("gen_ai.tool.name", tracing::field::display(&name));
                     request.name = name.into();
-                    sent_alias = Some(received);
                 }
                 None => {
                     let trace_id = waygate_telemetry::correlation::current_trace_id()
@@ -5015,12 +4954,6 @@ impl ServerHandler for GatewayServer {
                 self.dispatch_tool_call_with(request, principal.as_ref(), &caller, ctx.ct.clone())
                     .await
             }
-        };
-        let result = match (sent_alias, result) {
-            (Some(alias), Err(error)) => {
-                Err(unavailable_under_sent_name(error, &tool_name, &alias))
-            }
-            (_, result) => result,
         };
         // When a propose_change just queued a change and the client
         // negotiated elicitation, send the present operator straight to the

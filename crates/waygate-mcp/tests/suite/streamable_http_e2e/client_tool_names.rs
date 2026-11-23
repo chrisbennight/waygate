@@ -209,3 +209,60 @@ async fn selected_clients_see_and_call_underscore_builtins_while_others_are_unch
     }
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn instructions_name_builtins_as_selected_clients_register_them() {
+    let catalog: SharedCatalog = Arc::new(DemoCatalog::default());
+    let server = spawn_gateway_custom(
+        StreamableHttpServerConfig::default().with_allowed_hosts(vec![ALLOWED_HOST.to_owned()]),
+        move || {
+            GatewayServer::new(catalog.clone())
+                .with_builtin_tools(Arc::new(NamingBuiltin {
+                    namespace: "codemode",
+                    tool: "search",
+                }))
+                .with_codemode_only_tools_clients(vec![SELECTED.to_owned()])
+                .with_underscore_tool_name_clients(vec![SELECTED.to_owned()])
+        },
+    )
+    .await;
+    let url = format!("http://{}/mcp", server.addr);
+    let http = reqwest::Client::new();
+
+    let legacy = connect_named_client(server.addr, SELECTED).await;
+    let legacy_instructions = legacy
+        .peer_info()
+        .unwrap()
+        .instructions
+        .clone()
+        .unwrap_or_default();
+    let discovered = stateless_response_json(
+        stateless_post(&http, &url, 1, "server/discover", json!({}), SELECTED).await,
+    )
+    .await;
+    let stateless_instructions = discovered["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for instructions in [legacy_instructions, stateless_instructions] {
+        // The Code Mode-only instructions name `codemode.search`; a selected
+        // client registers it as `codemode_search`.
+        assert!(instructions.contains("codemode_search"), "{instructions}");
+        assert!(!instructions.contains("codemode.search"), "{instructions}");
+        assert!(
+            instructions.contains(waygate_mcp::client_tool_names::GUIDANCE),
+            "{instructions}"
+        );
+    }
+    let listed: Vec<String> = legacy
+        .list_tools(None)
+        .await
+        .unwrap()
+        .tools
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert_eq!(listed, vec!["codemode_search".to_owned()]);
+    let _ = legacy.cancel().await;
+    server.shutdown().await;
+}
