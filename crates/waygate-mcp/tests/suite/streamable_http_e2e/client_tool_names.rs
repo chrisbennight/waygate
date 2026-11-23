@@ -1,10 +1,60 @@
-//! Clients selected for underscore tool names see `_` in place of `.` and
-//! may call with either form; every other client is unchanged.
+//! Clients selected for underscore tool names see gateway built-ins with `_`
+//! in place of `.` and may call them by either form. Upstream tools keep
+//! their dotted names, and every other client is unchanged.
 use super::*;
 
 const SELECTED: &str = "underscore-client";
 
-fn tool_names(tools: &[Value]) -> Vec<String> {
+/// A built-in namespace that lists and answers its tools without
+/// authentication, so the test exercises only naming.
+struct NamingBuiltin;
+
+#[async_trait]
+impl waygate_mcp::BuiltinTools for NamingBuiltin {
+    fn namespace(&self) -> &str {
+        "codemode"
+    }
+
+    fn catalog(&self) -> waygate_mcp::BuiltinCatalog {
+        let schema = Arc::new(json!({"type": "object"}).as_object().unwrap().clone());
+        waygate_mcp::BuiltinCatalog::from_descriptor(
+            self.describe(),
+            vec![Tool::new("codemode.search", "search", schema)],
+        )
+    }
+
+    fn describe(&self) -> waygate_mcp::BuiltinSurfaceDescriptor {
+        waygate_mcp::BuiltinSurfaceDescriptor {
+            namespace: "codemode".into(),
+            required_scope: "mcp:invoke".into(),
+            summary: "naming stub".into(),
+            tools: vec![waygate_mcp::BuiltinToolDescriptor {
+                name: "search".into(),
+                description: "search".into(),
+                risk: RiskTier::Low,
+                side_effects: false,
+                pii: false,
+            }],
+        }
+    }
+
+    async fn list_tools(&self, _principal: Option<&waygate_oidc::Principal>) -> Vec<Tool> {
+        self.catalog().definitions()
+    }
+
+    async fn call(
+        &self,
+        tool: &str,
+        _arguments: Option<rmcp::model::JsonObject>,
+        _principal: Option<&waygate_oidc::Principal>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "builtin {tool}"
+        ))]))
+    }
+}
+
+fn sorted_names(tools: &[Value]) -> Vec<String> {
     let mut names: Vec<String> = tools
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
@@ -13,21 +63,18 @@ fn tool_names(tools: &[Value]) -> Vec<String> {
     names
 }
 
+fn result_text(result: &Value) -> Option<&str> {
+    result["result"]["content"][0]["text"].as_str()
+}
+
 #[tokio::test]
-async fn selected_clients_see_and_call_underscore_names_while_others_are_unchanged() {
-    let dispatches = Arc::new(AtomicUsize::new(0));
-    let catalog: SharedCatalog = Arc::new(DemoCatalog {
-        dispatches: Some(dispatches.clone()),
-        tool_names: Some(Arc::new(tokio::sync::RwLock::new(vec![
-            "echo".to_owned(),
-            "files.read".to_owned(),
-        ]))),
-        ..DemoCatalog::default()
-    });
+async fn selected_clients_see_and_call_underscore_builtins_while_others_are_unchanged() {
+    let catalog: SharedCatalog = Arc::new(DemoCatalog::default());
     let server = spawn_gateway_custom(
         StreamableHttpServerConfig::default().with_allowed_hosts(vec![ALLOWED_HOST.to_owned()]),
         move || {
             GatewayServer::new(catalog.clone())
+                .with_builtin_tools(Arc::new(NamingBuiltin))
                 .with_underscore_tool_name_clients(vec![SELECTED.to_owned()])
         },
     )
@@ -36,36 +83,33 @@ async fn selected_clients_see_and_call_underscore_names_while_others_are_unchang
     let http = reqwest::Client::new();
 
     for (client, selected) in [(SELECTED, true), ("standard-client", false)] {
+        let expected_names = if selected {
+            vec!["codemode_search".to_owned(), "demo.echo".to_owned()]
+        } else {
+            vec!["codemode.search".to_owned(), "demo.echo".to_owned()]
+        };
+
         let legacy = connect_named_client(server.addr, client).await;
-        let listed = legacy.list_tools(None).await.unwrap();
-        let legacy_names: Vec<String> = listed.tools.iter().map(|t| t.name.to_string()).collect();
+        let mut legacy_names: Vec<String> = legacy
+            .list_tools(None)
+            .await
+            .unwrap()
+            .tools
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        legacy_names.sort();
+        assert_eq!(legacy_names, expected_names, "{client} legacy list");
         let stateless = stateless_response_json(
             stateless_post(&http, &url, 1, "tools/list", json!({}), client).await,
         )
         .await;
-        let stateless_names = tool_names(stateless["result"]["tools"].as_array().unwrap());
-        for names in [&legacy_names, &stateless_names] {
-            assert_eq!(
-                names.iter().any(|name| name == "demo_echo"),
-                selected,
-                "{client}: {names:?}"
-            );
-            assert_eq!(
-                names.iter().any(|name| name == "demo_files_read"),
-                selected,
-                "{client}: {names:?}"
-            );
-            assert_eq!(
-                names.iter().any(|name| name == "demo.echo"),
-                !selected,
-                "{client}: {names:?}"
-            );
-            assert_eq!(
-                names.iter().any(|name| name.contains('.')),
-                !selected,
-                "{client}: {names:?}"
-            );
-        }
+        assert_eq!(
+            sorted_names(stateless["result"]["tools"].as_array().unwrap()),
+            expected_names,
+            "{client} stateless list"
+        );
+
         assert_eq!(
             legacy
                 .peer_info()
@@ -75,10 +119,10 @@ async fn selected_clients_see_and_call_underscore_names_while_others_are_unchang
                 .unwrap()
                 .contains(waygate_mcp::client_tool_names::GUIDANCE),
             selected,
-            "{client} instructions"
+            "{client} legacy instructions"
         );
         let discovered = stateless_response_json(
-            stateless_post(&http, &url, 3, "server/discover", json!({}), client).await,
+            stateless_post(&http, &url, 2, "server/discover", json!({}), client).await,
         )
         .await;
         assert_eq!(
@@ -90,31 +134,24 @@ async fn selected_clients_see_and_call_underscore_names_while_others_are_unchang
             "{client} stateless instructions"
         );
 
-        // Dotted names keep working for every client. Underscore names reach
-        // the real tool only for a selected client.
-        for (name, real, accepted) in [
-            ("demo.echo", "demo.echo", true),
-            ("demo_echo", "demo.echo", selected),
-            ("demo_files_read", "demo.files.read", selected),
+        // Dotted names keep working for every client; the underscore form of
+        // a built-in works only for a selected client.
+        for (name, answer, accepted) in [
+            ("codemode.search", "builtin search", true),
+            ("codemode_search", "builtin search", selected),
+            ("demo.echo", "called demo.echo", true),
         ] {
-            let before = dispatches.load(Ordering::SeqCst);
             let called = legacy.call_tool(CallToolRequestParams::new(name)).await;
             let called_ok = called.as_ref().is_ok_and(|result| {
-                result.is_error != Some(true)
-                    && result.content[0].as_text().unwrap().text == format!("called {real}")
+                result.is_error != Some(true) && result.content[0].as_text().unwrap().text == answer
             });
             assert_eq!(called_ok, accepted, "{client} legacy {name}: {called:?}");
-            assert_eq!(
-                dispatches.load(Ordering::SeqCst) - before,
-                usize::from(accepted)
-            );
 
-            let before = dispatches.load(Ordering::SeqCst);
             let called = stateless_response_json(
                 stateless_post(
                     &http,
                     &url,
-                    2,
+                    3,
                     "tools/call",
                     json!({"name": name, "arguments": {}}),
                     client,
@@ -122,38 +159,36 @@ async fn selected_clients_see_and_call_underscore_names_while_others_are_unchang
                 .await,
             )
             .await;
-            let called_ok = called.get("error").is_none()
-                && called["result"]["isError"] != true
-                && called["result"]["content"][0]["text"] == format!("called {real}");
-            assert_eq!(called_ok, accepted, "{client} stateless {name}: {called}");
             assert_eq!(
-                dispatches.load(Ordering::SeqCst) - before,
-                usize::from(accepted)
+                result_text(&called) == Some(answer),
+                accepted,
+                "{client} stateless {name}: {called}"
             );
         }
+
         if selected {
-            // A name no configured source begins answers exactly as an
-            // unknown dotted name does, naming only what the client sent.
-            let missing = stateless_response_json(
-                stateless_post(
-                    &http,
-                    &url,
-                    4,
-                    "tools/call",
-                    json!({"name": "nosuch_missing", "arguments": {}}),
-                    client,
+            // Upstream tools have no underscore form, and an unknown
+            // underscore name answers like an unknown dotted name, naming
+            // only what the client sent.
+            for name in ["demo_echo", "codemode_missing"] {
+                let missing = stateless_response_json(
+                    stateless_post(
+                        &http,
+                        &url,
+                        4,
+                        "tools/call",
+                        json!({"name": name, "arguments": {}}),
+                        client,
+                    )
+                    .await,
                 )
-                .await,
-            )
-            .await;
-            assert_eq!(
-                missing["error"]["data"]["error"], "tool_unavailable",
-                "{missing}"
-            );
-            assert_eq!(
-                missing["error"]["data"]["tool"], "nosuch_missing",
-                "{missing}"
-            );
+                .await;
+                assert_eq!(
+                    missing["error"]["data"]["error"], "tool_unavailable",
+                    "{name}: {missing}"
+                );
+                assert_eq!(missing["error"]["data"]["tool"], name, "{missing}");
+            }
         }
         let _ = legacy.cancel().await;
     }

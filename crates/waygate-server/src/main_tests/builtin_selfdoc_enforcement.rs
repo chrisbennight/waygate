@@ -21,6 +21,33 @@ fn all_builtin_tools() -> Vec<Tool> {
     tools
 }
 
+/// Clients selected for underscore tool names call built-ins by their
+/// underscore form, which the gateway maps back by exact match. Every
+/// built-in must therefore have a distinct underscore name that the strictest
+/// observed client tool-name rule accepts.
+#[test]
+fn every_builtin_tool_has_a_distinct_valid_underscore_name() {
+    let tools = all_builtin_tools();
+    let mut seen = std::collections::HashSet::new();
+    for t in &tools {
+        let presented = waygate_mcp::client_tool_names::presented_name(&t.name);
+        assert!(
+            !presented.is_empty()
+                && presented.len() <= 64
+                && presented
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+            "{} has underscore name {presented} outside ^[a-zA-Z0-9_-]{{1,64}}$",
+            t.name,
+        );
+        assert!(
+            seen.insert(presented.clone()),
+            "{} shares underscore name {presented} with another built-in",
+            t.name,
+        );
+    }
+}
+
 #[test]
 fn every_builtin_tool_is_self_documenting() {
     let tools = all_builtin_tools();

@@ -1302,22 +1302,18 @@ impl UpstreamCatalog for UpstreamPool {
             .await
     }
 
-    async fn published_tool_names(&self, server: &str) -> Result<Vec<String>, McpError> {
-        let entry = self.entry(server)?;
-        Ok(entry
-            .published_tools(self.tool_reviews.is_none())
-            .await
-            .into_iter()
-            .map(|tool| tool.name.to_string())
-            .collect())
-    }
-
     async fn list_discovery_tools(
         &self,
         tenant: &str,
         server: &str,
     ) -> Result<Vec<ResolvedInvocationTool>, McpError> {
-        let names = self.published_tool_names(server).await?;
+        let entry = self.entry(server)?;
+        let names = entry
+            .published_tools(self.tool_reviews.is_none())
+            .await
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
         self.resolve_discovery_batch(tenant, server, &names).await
     }
 

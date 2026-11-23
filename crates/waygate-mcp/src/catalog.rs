@@ -236,17 +236,6 @@ pub trait UpstreamCatalog: Send + Sync + 'static {
     /// Full `tools/list` result for a single upstream, as most-recently cached.
     async fn list_tools(&self, server: &str) -> Result<Vec<Tool>, McpError>;
 
-    /// Bare names of the tools one upstream publishes, before any tenant's
-    /// governed review. Callers resolve the names they need for a tenant.
-    async fn published_tool_names(&self, server: &str) -> Result<Vec<String>, McpError> {
-        Ok(self
-            .list_tools(server)
-            .await?
-            .into_iter()
-            .map(|tool| tool.name.to_string())
-            .collect())
-    }
-
     /// Durable generation for governed-catalog changes that can alter discovery.
     /// Static catalogs and deployments without a durable governed catalog have
     /// no cross-process generation and retain the default `None`.

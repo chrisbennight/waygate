@@ -77,40 +77,36 @@ whose name contains a dot. For those clients, set:
 
 ```sh
 GATEWAY_UNDERSCORE_TOOL_NAME_CLIENTS=antigravity-client
+GATEWAY_CODEMODE_ONLY_CLIENTS=antigravity-client
 ```
 
 Use the client's actual MCP `clientInfo.name`. Names are comma-separated and
 matched exactly, ignoring ASCII case. The default is empty. A selected client's
-`tools/list` shows every tool with `_` in place of each `.`, so
-`codemode.search` becomes `codemode_search`. Its `tools/call` accepts either the
-underscore name or the dotted name. The gateway maps an underscore name back to
-its real dotted name before authorization, audit, tasks, or routing see the
-call, so those always record the real dotted name.
+`tools/list` shows each gateway built-in tool with `_` in place of each `.`, so
+`codemode.search` becomes `codemode_search`. Its `tools/call` accepts either
+form. The gateway maps an underscore name back to the real dotted name before
+authorization, audit, tasks, or routing see the call, so those always record
+the real name. An unknown underscore name, or one for a built-in the caller
+cannot use, gets the same unavailable-tool error as an unknown dotted name,
+naming only what the client sent.
 
-The server or built-in namespace is chosen from configured names alone: exactly
-one of them, followed by `_`, must begin the underscore name. Which upstreams
-are connected never changes that choice, so a name cannot move to another
-server. When two configured names could both begin it, for example servers
-`files` and `files_archive` for `files_archive_delete`, the name is refused.
-Within the chosen server, its tool list restores any dots in the tool's own
-name; while the server is unavailable the rest of the name is used as written,
-so the call gets the same unavailable, quarantine, or denial answer and audit as
-its dotted name. Which tool a name maps to never depends on the caller's
-permissions, and an unknown or withheld tool answers with the same
-unavailable-tool error, naming only what the client sent.
+Only built-ins are renamed. Their namespaces are reserved and their tools are
+fixed in the gateway, so an underscore name always maps to the same tool. A
+test checks that every built-in has a distinct valid underscore name. Upstream
+server names are unrestricted apart from excluding `.`, so an underscore form
+of an upstream tool could not always be traced back to one server without
+depending on configuration or connection state. Upstream tools therefore keep
+their dotted names; selected clients reach them through Code Mode.
+`GATEWAY_CODEMODE_ONLY_CLIENTS` keeps those dotted names out of the client's
+list entirely, which is why the example sets both. Names inside Code Mode
+programs, and names returned by search and inspection tools, stay dotted.
 
-A tool is listed under its underscore name only when that name resolves back to
-exactly that tool; otherwise it is left out of the client's list with a warning,
-and it remains callable by its dotted name. Names inside Code Mode programs, and
-names returned by search and inspection tools, stay dotted.
-
-This setting changes only names, never authorization. It is independent of the
-compact Code Mode-only and root-composition settings and applies to both
+This setting changes only names, never authorization. It applies to both
 protocol generations. Reconnect a legacy client after changing it.
 
 Some clients add their own prefix before checking the 64-character limit; for
 example, Google Antigravity checks `mcp_<config key>_<tool>`. Use a short
-configuration key for the gateway in such a client so long tool names still fit.
+configuration key for the gateway in such a client.
 
 ## Observability
 
