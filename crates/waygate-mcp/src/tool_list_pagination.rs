@@ -115,7 +115,8 @@ impl ToolListCursorSealer {
 }
 
 /// What a client is shown of its authorized catalog: the projection, its
-/// ordering, and whether presentation-only schema adaptation applies. A
+/// ordering, and whether presentation-only schema or tool-name adaptation
+/// applies. A
 /// captured view serves only continuations requesting the same presentation,
 /// so pages from different presentations are never combined.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,6 +124,7 @@ pub(crate) struct ToolListPresentation {
     pub(crate) projection: &'static str,
     pub(crate) canonical_order: bool,
     pub(crate) schema_adapted: bool,
+    pub(crate) names_adapted: bool,
 }
 
 /// First-page tool lists still serving their traversals, oldest first.
@@ -440,6 +442,7 @@ const TEST_PRESENTATION: ToolListPresentation = ToolListPresentation {
     projection: "full",
     canonical_order: true,
     schema_adapted: false,
+    names_adapted: false,
 };
 
 fn paginate_bound_at<T: Serialize>(
@@ -1083,11 +1086,15 @@ mod tests {
             schema_adapted: true,
             ..TEST_PRESENTATION
         };
+        let renamed = ToolListPresentation {
+            names_adapted: true,
+            ..TEST_PRESENTATION
+        };
         let builtins_only = ToolListPresentation {
             projection: "builtins_only",
             ..TEST_PRESENTATION
         };
-        for other in [adapted, builtins_only] {
+        for other in [adapted, renamed, builtins_only] {
             assert!(
                 resume_captured_at(&cursor, "p", other, now, 2, &sealer)
                     .expect("another presentation is sent to the live check")

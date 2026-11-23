@@ -400,6 +400,7 @@ mod tests {
             codemode_limits: crate::codemode_limits::CodeModeLimits::default(),
             codemode_only_tools_clients: Vec::new(),
             root_composition_clients: Vec::new(),
+            underscore_tool_name_clients: Vec::new(),
             upstream_reconnect_base: std::time::Duration::from_secs(60),
             upstream_reconnect_ceiling: std::time::Duration::from_secs(900),
             drain_timeout: std::time::Duration::from_secs(20),

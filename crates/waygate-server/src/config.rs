@@ -142,6 +142,9 @@ pub struct Config {
     pub codemode_only_tools_clients: Vec<String>,
     /// Opt-in client names for root-composition schema presentation.
     pub root_composition_clients: Vec<String>,
+    /// Opt-in client names shown tool names with `_` in place of `.`. Set
+    /// `GATEWAY_UNDERSCORE_TOOL_NAME_CLIENTS` to a comma-separated list.
+    pub underscore_tool_name_clients: Vec<String>,
     /// Initial full-jitter reconnect window for an unhealthy upstream.
     pub upstream_reconnect_base: Duration,
     /// Maximum full-jitter reconnect window after exponential escalation.
@@ -730,6 +733,9 @@ impl Config {
         let root_composition_clients = client_tool_projection::normalize_client_names(
             waygate_core::env::csv_default("GATEWAY_ROOT_COMPOSITION_CLIENTS", &[]),
         );
+        let underscore_tool_name_clients = client_tool_projection::normalize_client_names(
+            waygate_core::env::csv_default("GATEWAY_UNDERSCORE_TOOL_NAME_CLIENTS", &[]),
+        );
 
         let (upstream_reconnect_base, upstream_reconnect_ceiling) = reconnect::policy_from_env()?;
 
@@ -978,6 +984,7 @@ impl Config {
             codemode_limits,
             codemode_only_tools_clients,
             root_composition_clients,
+            underscore_tool_name_clients,
             upstream_reconnect_base,
             upstream_reconnect_ceiling,
             drain_timeout,
@@ -1679,6 +1686,7 @@ mod tests {
             codemode_limits: crate::codemode_limits::CodeModeLimits::default(),
             codemode_only_tools_clients: Vec::new(),
             root_composition_clients: Vec::new(),
+            underscore_tool_name_clients: Vec::new(),
             upstream_reconnect_base: Duration::from_secs(60),
             upstream_reconnect_ceiling: Duration::from_secs(900),
             drain_timeout: Duration::from_secs(20),

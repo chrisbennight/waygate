@@ -1091,6 +1091,7 @@ async fn gateway_main() -> anyhow::Result<()> {
         codemode_only_tools_clients: codemode_only_tools_clients.clone(),
         tools_list_cache_ttl: cfg.tools_list_cache_ttl,
         root_composition_clients: cfg.root_composition_clients.clone(),
+        underscore_tool_name_clients: cfg.underscore_tool_name_clients.clone(),
         idjag_advertise_ema,
         mcp_ping_interval,
     });

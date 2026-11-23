@@ -69,6 +69,46 @@ call re-runs governed dispatch. To roll the setting back, remove the exact name
 and reconnect legacy clients; stateless clients apply either change on their
 next request.
 
+## Clients that reject dots in tool names
+
+Tool names are `<server>.<tool>`. MCP allows dots in tool names, but some
+clients accept only names matching `^[a-zA-Z0-9_-]{1,64}$` and drop every tool
+whose name contains a dot. For those clients, set:
+
+```sh
+GATEWAY_UNDERSCORE_TOOL_NAME_CLIENTS=antigravity-client
+GATEWAY_CODEMODE_ONLY_CLIENTS=antigravity-client
+```
+
+Use the client's actual MCP `clientInfo.name`. Names are comma-separated and
+matched exactly, ignoring ASCII case. The default is empty. A selected client's
+`tools/list` shows each gateway built-in tool with `_` in place of each `.`, so
+`codemode.search` becomes `codemode_search`. Its `tools/call` accepts either
+form. The gateway maps an underscore name back to the real dotted name before
+authorization, audit, tasks, or routing see the call, so those always record
+the real name. A call by a built-in's underscore name gets exactly the response
+its dotted name gets, including any refusal. An underscore name that matches no
+built-in gets the unavailable-tool error, naming only what the client sent. The
+connection instructions write built-in tool names in their underscore form.
+
+Only built-ins are renamed. Their namespaces are reserved and their tools are
+fixed in the gateway, so an underscore name always maps to the same tool. A
+test checks that every built-in has a distinct valid underscore name. Upstream
+server names are unrestricted apart from excluding `.`, so an underscore form
+of an upstream tool could not always be traced back to one server without
+depending on configuration or connection state. Upstream tools therefore keep
+their dotted names; selected clients reach them through Code Mode.
+`GATEWAY_CODEMODE_ONLY_CLIENTS` keeps those dotted names out of the client's
+list entirely, which is why the example sets both. Names inside Code Mode
+programs, and names returned by search and inspection tools, stay dotted.
+
+This setting changes only names, never authorization. It applies to both
+protocol generations. Reconnect a legacy client after changing it.
+
+Some clients add their own prefix before checking the 64-character limit; for
+example, Google Antigravity checks `mcp_<config key>_<tool>`. Use a short
+configuration key for the gateway in such a client.
+
 ## Observability
 
 The metric
