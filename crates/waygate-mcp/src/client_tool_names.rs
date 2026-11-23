@@ -21,13 +21,20 @@ pub fn presented_name(name: &str) -> String {
     name.replace('.', "_")
 }
 
-/// Rename every tool to its presented name. Tools whose presented names
-/// collide are all removed, because a call using that name could not be
+/// Rename every tool to its presented name. `published` is every real tool
+/// name the gateway publishes, the same set a call resolves against. A tool
+/// whose presented name matches more than one published name, or more than
+/// one listed tool, is removed, because a call using that name could not be
 /// mapped back to one tool.
-pub fn adapt_tools(tools: &mut Vec<Tool>) {
+pub fn adapt_tools(tools: &mut Vec<Tool>, published: &[String]) {
     let mut counts: HashMap<String, usize> = HashMap::new();
+    for name in published {
+        *counts.entry(presented_name(name)).or_default() += 1;
+    }
     for tool in tools.iter() {
-        *counts.entry(presented_name(&tool.name)).or_default() += 1;
+        if !published.iter().any(|name| name == tool.name.as_ref()) {
+            *counts.entry(presented_name(&tool.name)).or_default() += 1;
+        }
     }
     tools.retain_mut(|tool| {
         let presented = presented_name(&tool.name);
@@ -97,8 +104,17 @@ mod tests {
             tool("files_archive.list"),
             tool("files.read"),
         ];
-        adapt_tools(&mut tools);
+        adapt_tools(&mut tools, &[]);
         assert_eq!(names(&tools), vec!["codemode_search", "files_read"]);
+    }
+
+    #[test]
+    fn adapting_drops_a_listed_tool_that_collides_with_an_unlisted_one() {
+        let published =
+            ["files.archive_list", "files_archive.list", "files.read"].map(str::to_owned);
+        let mut tools = vec![tool("files.archive_list"), tool("files.read")];
+        adapt_tools(&mut tools, &published);
+        assert_eq!(names(&tools), vec!["files_read"]);
     }
 
     #[test]

@@ -1069,30 +1069,22 @@ impl GatewayServer {
         )
     }
 
-    /// The real tool name for a name received from a client shown underscore
-    /// names: the one existing tool whose presented name it is. Existence is
-    /// the caller tenant's governed catalog, as for a dotted call, and does
-    /// not depend on the caller's authorization, so an alias names the same
-    /// tool for every caller and dispatch still authorizes and audits the
-    /// call under its real name. Only sources whose presented name prefixes
-    /// the received name are read, and only matching tool names are
-    /// resolved. A dotted name is already real. No match, or more than one,
-    /// leaves the name unchanged so dispatch reports it like any other
-    /// unknown tool.
-    async fn real_tool_name(
-        &self,
-        principal: Option<&Principal>,
-        received: &str,
-    ) -> Result<String, McpError> {
-        use crate::client_tool_names::{presented_name, source_may_match, unique_match};
-        if received.contains('.') {
-            return Ok(received.to_owned());
-        }
-        let mut candidates = Vec::new();
+    /// Every real tool name the gateway publishes from sources whose
+    /// presented name could prefix `received`, or from every source when
+    /// `received` is `None`: built-in catalog records and each upstream's
+    /// published inventory. Listing and resolution for underscore-name
+    /// clients both use this one set, so a listed name always resolves and a
+    /// name resolves independently of the caller's authorization or of a
+    /// tool's current governance state, which dispatch evaluates and audits.
+    async fn published_real_names(&self, received: Option<&str>) -> Result<Vec<String>, McpError> {
+        use crate::client_tool_names::source_may_match;
+        let may_match =
+            |source: &str| received.is_none_or(|received| source_may_match(source, received));
+        let mut names = Vec::new();
         for builtin in &self.builtins {
             let namespace = builtin.namespace();
-            if source_may_match(namespace, received) {
-                candidates.extend(
+            if may_match(namespace) {
+                names.extend(
                     builtin
                         .catalog()
                         .tools
@@ -1101,37 +1093,31 @@ impl GatewayServer {
                 );
             }
         }
-        let tenant = principal
-            .map(|p| p.tenant.as_str())
-            .unwrap_or(waygate_core::TenantId::DEFAULT);
         for server in self.catalog.list_servers().await {
-            if !source_may_match(&server, received) {
-                continue;
+            if may_match(&server) {
+                names.extend(
+                    self.catalog
+                        .published_tool_names(&server)
+                        .await?
+                        .into_iter()
+                        .map(|tool| format!("{server}.{tool}")),
+                );
             }
-            let matching: Vec<String> = self
-                .catalog
-                .published_tool_names(&server)
-                .await?
-                .into_iter()
-                .filter(|tool| presented_name(&format!("{server}.{tool}")) == received)
-                .collect();
-            if matching.is_empty() {
-                continue;
-            }
-            let resolved = self
-                .catalog
-                .resolve_discovery_tools(tenant, &server, &matching)
-                .await?;
-            candidates.extend(
-                matching
-                    .iter()
-                    .zip(resolved)
-                    .filter(|(_, resolved)| matches!(resolved, ResolvedInvocationTool::Ready(_)))
-                    .map(|(tool, _)| format!("{server}.{tool}")),
-            );
         }
+        Ok(names)
+    }
+
+    /// The real tool name for a name received from a client shown underscore
+    /// names: the one published tool whose presented name it is. A dotted
+    /// name is already real. No match, or more than one, leaves the name
+    /// unchanged so dispatch reports it like any other unknown tool.
+    async fn real_tool_name(&self, received: &str) -> Result<String, McpError> {
+        if received.contains('.') {
+            return Ok(received.to_owned());
+        }
+        let published = self.published_real_names(Some(received)).await?;
         Ok(
-            unique_match(received, candidates.iter().map(String::as_str))
+            crate::client_tool_names::unique_match(received, published.iter().map(String::as_str))
                 .unwrap_or(received)
                 .to_owned(),
         )
@@ -2815,7 +2801,8 @@ impl GatewayServer {
             crate::client_schema::adapt_tools(&mut visible);
         }
         if self.underscore_tool_names_active(client) {
-            crate::client_tool_names::adapt_tools(&mut visible);
+            let published = self.published_real_names(None).await?;
+            crate::client_tool_names::adapt_tools(&mut visible, &published);
         }
         Ok(visible)
     }
@@ -4867,7 +4854,7 @@ impl ServerHandler for GatewayServer {
         // ever see real names.
         let mut name_error = None;
         if self.underscore_tool_names_active(&client) {
-            match self.real_tool_name(principal.as_ref(), &request.name).await {
+            match self.real_tool_name(&request.name).await {
                 Ok(name) => {
                     tracing::Span::current()
                         .record("gen_ai.tool.name", tracing::field::display(&name));
