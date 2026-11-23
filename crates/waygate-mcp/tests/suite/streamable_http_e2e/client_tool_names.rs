@@ -131,6 +131,30 @@ async fn selected_clients_see_and_call_underscore_names_while_others_are_unchang
                 usize::from(accepted)
             );
         }
+        if selected {
+            // An unknown underscore name answers exactly as an unknown dotted
+            // name does, naming only what the client sent.
+            let missing = stateless_response_json(
+                stateless_post(
+                    &http,
+                    &url,
+                    4,
+                    "tools/call",
+                    json!({"name": "demo_missing", "arguments": {}}),
+                    client,
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(
+                missing["error"]["data"]["error"], "tool_unavailable",
+                "{missing}"
+            );
+            assert_eq!(
+                missing["error"]["data"]["tool"], "demo_missing",
+                "{missing}"
+            );
+        }
         let _ = legacy.cancel().await;
     }
     server.shutdown().await;

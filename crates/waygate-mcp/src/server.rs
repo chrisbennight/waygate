@@ -1107,19 +1107,14 @@ impl GatewayServer {
         Ok(names)
     }
 
-    /// The real tool name for a name received from a client shown underscore
-    /// names: the one published tool whose presented name it is. A dotted
-    /// name is already real. No match, or more than one, leaves the name
-    /// unchanged so dispatch reports it like any other unknown tool.
-    async fn real_tool_name(&self, received: &str) -> Result<String, McpError> {
-        if received.contains('.') {
-            return Ok(received.to_owned());
-        }
+    /// The real tool name for an underscore name received from a client
+    /// shown underscore names: the one published tool whose presented name
+    /// it is, or `None` when no published name, or more than one, matches.
+    async fn real_tool_name(&self, received: &str) -> Result<Option<String>, McpError> {
         let published = self.published_real_names(Some(received)).await?;
         Ok(
             crate::client_tool_names::unique_match(received, published.iter().map(String::as_str))
-                .unwrap_or(received)
-                .to_owned(),
+                .map(str::to_owned),
         )
     }
 
@@ -3276,6 +3271,22 @@ pub(crate) fn tool_unavailable_error(tool: &str, trace_id: &str) -> McpError {
     )
 }
 
+/// Re-address an unavailable-tool error to the name the client sent, so a
+/// resolved underscore name for a withheld tool answers exactly as an
+/// unknown name does. Every other error is returned unchanged.
+fn unavailable_under_sent_name(error: McpError, sent: &str) -> McpError {
+    let unavailable_trace = error
+        .data
+        .as_ref()
+        .filter(|data| data["error"] == "tool_unavailable")
+        .and_then(|data| data["trace_id"].as_str())
+        .map(str::to_owned);
+    match unavailable_trace {
+        Some(trace_id) => tool_unavailable_error(sent, &trace_id),
+        None => error,
+    }
+}
+
 /// The MCP error a direct `tools/call` returns for `error` on
 /// `server.tool_name`, without the approval `input_required` projection that
 /// only a connected caller can answer. Background executors use it to record
@@ -4852,13 +4863,24 @@ impl ServerHandler for GatewayServer {
         // A client shown underscore names may call with one. Map it to the
         // real name first so tasks, authorization, audit and routing only
         // ever see real names.
+        // A tool the gateway withholds must stay indistinguishable from an
+        // absent one, so an unavailable answer for an underscore name names
+        // only what the client sent, whether or not the name resolved.
         let mut name_error = None;
-        if self.underscore_tool_names_active(&client) {
-            match self.real_tool_name(&request.name).await {
-                Ok(name) => {
+        let mut sent_alias = None;
+        if self.underscore_tool_names_active(&client) && !request.name.contains('.') {
+            let received = request.name.to_string();
+            match self.real_tool_name(&received).await {
+                Ok(Some(name)) => {
                     tracing::Span::current()
                         .record("gen_ai.tool.name", tracing::field::display(&name));
                     request.name = name.into();
+                    sent_alias = Some(received);
+                }
+                Ok(None) => {
+                    let trace_id = waygate_telemetry::correlation::current_trace_id()
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+                    name_error = Some(tool_unavailable_error(&received, &trace_id));
                 }
                 Err(error) => name_error = Some(error),
             }
@@ -4916,6 +4938,10 @@ impl ServerHandler for GatewayServer {
                 self.dispatch_tool_call_with(request, principal.as_ref(), &caller, ctx.ct.clone())
                     .await
             }
+        };
+        let result = match (sent_alias, result) {
+            (Some(alias), Err(error)) => Err(unavailable_under_sent_name(error, &alias)),
+            (_, result) => result,
         };
         // When a propose_change just queued a change and the client
         // negotiated elicitation, send the present operator straight to the

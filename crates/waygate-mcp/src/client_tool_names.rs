@@ -7,7 +7,7 @@
 //! name before anything else sees the request. Catalog identity,
 //! authorization, audit, tasks and routing keep using the real name.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rmcp::model::Tool;
 
@@ -27,12 +27,13 @@ pub fn presented_name(name: &str) -> String {
 /// one listed tool, is removed, because a call using that name could not be
 /// mapped back to one tool.
 pub fn adapt_tools(tools: &mut Vec<Tool>, published: &[String]) {
+    let published_names: HashSet<&str> = published.iter().map(String::as_str).collect();
     let mut counts: HashMap<String, usize> = HashMap::new();
-    for name in published {
+    for name in &published_names {
         *counts.entry(presented_name(name)).or_default() += 1;
     }
     for tool in tools.iter() {
-        if !published.iter().any(|name| name == tool.name.as_ref()) {
+        if !published_names.contains(tool.name.as_ref()) {
             *counts.entry(presented_name(&tool.name)).or_default() += 1;
         }
     }
